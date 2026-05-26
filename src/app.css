@@ -1,0 +1,305 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Outfit", ui-serif, Georgia, serif;
+
+  --color-bg-base: var(--bg-base);
+  --color-bg-panel: var(--bg-panel);
+  --color-bg-card: var(--bg-card);
+  --color-bg-card-hover: var(--bg-card-hover);
+  
+  --color-border-flat: var(--border-flat);
+  --color-border-focus: var(--border-focus);
+  
+  --color-text-main: var(--text-main);
+  --color-text-muted: var(--text-muted);
+  --color-text-inverse: var(--text-inverse);
+  --color-text-dark: var(--text-dark);
+
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-primary-hover: var(--accent-primary-hover);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+:root {
+  /* Midnight Theme (Default) */
+  --bg-base: #080f1e;
+  --bg-panel: #101b33;
+  --bg-card: #1a2a4b;
+  --bg-card-hover: #21355e;
+  --border-flat: #263b69;
+  --border-focus: #3b82f6;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dark: #0f172a;
+  --text-inverse: #ffffff;
+  --accent-primary: #3b82f6;
+  --accent-primary-hover: #2563eb;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --overlay: rgba(0, 0, 0, 0.75);
+  --shadow: rgba(0, 0, 0, 0.5);
+  --card-shadow: none;
+
+  /* Component Specific */
+  --tile-bg: var(--bg-card);
+  --tile-text: var(--text-main);
+  --price-bg: rgba(0, 0, 0, 0.7);
+  --price-text: #ffffff;
+  --sidebar-hover: var(--bg-card-hover);
+  --sidebar-active: var(--accent-primary);
+
+  /* Layout Constants */
+  --cart-width: 480px;
+  --header-height: 70px;
+}
+
+/* Forest Theme (Green) */
+.theme-forest {
+  --bg-base: #0a1a12;
+  --bg-panel: #12281d;
+  --bg-card: #1a3a2a;
+  --bg-card-hover: #234c38;
+  --border-flat: #2a5a44;
+  --border-focus: #10b981;
+  --text-main: #f0fdf4;
+  --text-muted: #a7f3d0;
+  --text-dark: #052e16;
+  --text-inverse: #ffffff;
+  --accent-primary: #10b981;
+  --accent-primary-hover: #059669;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --overlay: rgba(0, 0, 0, 0.8);
+  --shadow: rgba(0, 0, 0, 0.6);
+  --card-shadow: none;
+  --tile-bg: var(--bg-card);
+  --tile-text: var(--text-main);
+  --price-bg: rgba(0, 0, 0, 0.7);
+  --price-text: #ffffff;
+  --sidebar-hover: var(--bg-card-hover);
+  --sidebar-active: var(--accent-primary);
+}
+
+/* Snow Theme (Light) — restructured for proper visual hierarchy.
+   bg-base (page) is grey, bg-panel (sidebar) is off-white, bg-card
+   (cards/buttons) is pure white with a subtle shadow so they "pop". */
+.theme-snow {
+  --bg-base: #e2e8f0;
+  --bg-panel: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1f5f9;
+  --border-flat: #cbd5e1;
+  --border-focus: #2563eb;
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --text-dark: #0f172a;
+  --text-inverse: #ffffff;
+  --accent-primary: #2563eb;
+  --accent-primary-hover: #1d4ed8;
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --overlay: rgba(15, 23, 42, 0.55);
+  --shadow: rgba(15, 23, 42, 0.18);
+  --card-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.05), 0 1px 3px -1px rgba(15, 23, 42, 0.08);
+  --tile-bg: #ffffff;
+  --tile-text: #0f172a;
+  --price-bg: #1e293b;
+  --price-text: #ffffff;
+  --sidebar-hover: #f1f5f9;
+  --sidebar-active: var(--accent-primary);
+}
+
+/* Coffee Theme (Brown) */
+.theme-coffee {
+  --bg-base: #1c1917;
+  --bg-panel: #292524;
+  --bg-card: #44403c;
+  --bg-card-hover: #57534e;
+  --border-flat: #78716c;
+  --border-focus: #d97706;
+  --text-main: #fafaf9;
+  --text-muted: #d6d3d1;
+  --text-dark: #1c1917;
+  --text-inverse: #ffffff;
+  --accent-primary: #d97706;
+  --accent-primary-hover: #b45309;
+  --success: #84cc16;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --overlay: rgba(0, 0, 0, 0.7);
+  --shadow: rgba(0, 0, 0, 0.5);
+  --card-shadow: none;
+  --tile-bg: var(--bg-card);
+  --tile-text: var(--text-main);
+  --price-bg: rgba(0, 0, 0, 0.7);
+  --price-text: #ffffff;
+  --sidebar-hover: var(--bg-card-hover);
+  --sidebar-active: var(--accent-primary);
+}
+
+/* Sunset Theme (Warm dark, plum + rose) */
+.theme-sunset {
+  --bg-base: #1a0b1e;
+  --bg-panel: #2d1334;
+  --bg-card: #4a1d52;
+  --bg-card-hover: #5d2466;
+  --border-flat: #7e3a8c;
+  --border-focus: #f59e0b;
+  --text-main: #fff1f2;
+  --text-muted: #fda4af;
+  --text-dark: #1a0b1e;
+  --text-inverse: #ffffff;
+  --accent-primary: #f43f5e;
+  --accent-primary-hover: #e11d48;
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --overlay: rgba(26, 11, 30, 0.8);
+  --shadow: rgba(26, 11, 30, 0.6);
+  --card-shadow: none;
+  --tile-bg: var(--bg-card);
+  --tile-text: var(--text-main);
+  --price-bg: rgba(0, 0, 0, 0.7);
+  --price-text: #ffffff;
+  --sidebar-hover: var(--bg-card-hover);
+  --sidebar-active: var(--accent-primary);
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * Base elements — single source of truth, themed via tokens.
+ * Edit padding/sizing once here and every page picks it up.
+ * ───────────────────────────────────────────────────────────── */
+@layer base {
+  body {
+    @apply font-sans bg-bg-base text-text-main h-screen w-screen overflow-hidden select-none;
+  }
+  input, textarea, select { @apply font-sans text-text-main; }
+  h1, h2, h3, h4, h5, h6 { @apply font-serif font-semibold; }
+  button { @apply font-sans cursor-pointer border-0 outline-none text-text-main transition-colors; }
+  a { @apply no-underline text-inherit; }
+
+  ::-webkit-scrollbar { @apply w-1.5 h-1.5; }
+  ::-webkit-scrollbar-track { @apply bg-transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-border-flat rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-accent-primary; }
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * Component classes — change ONCE, applies everywhere.
+ * Buttons, forms, tables, cards, tabs, tags, action rows.
+ * ───────────────────────────────────────────────────────────── */
+@layer components {
+  /* Surfaces */
+  .flat-panel { @apply bg-bg-panel border-x border-border-flat; }
+  .flat-card  {
+    @apply bg-bg-card border border-border-flat rounded-md transition-colors hover:bg-bg-card-hover;
+    box-shadow: var(--card-shadow);
+  }
+
+  /* Buttons */
+  .btn          { @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-sm font-semibold text-base; }
+  .btn-primary  { @apply bg-accent-primary text-white hover:bg-accent-primary-hover; }
+  .btn-secondary{ @apply bg-bg-card text-text-main border border-border-flat hover:bg-bg-card-hover; }
+  .btn-ghost    { @apply bg-transparent text-text-muted hover:text-text-main hover:bg-bg-card; }
+  .btn-success  { @apply bg-success text-white hover:brightness-110; }
+  .btn-danger   { @apply bg-bg-card text-danger border border-border-flat hover:bg-danger hover:text-white hover:border-danger; }
+  .btn-icon     { @apply flex items-center justify-center w-11 h-11 bg-bg-card border border-border-flat text-text-main rounded-sm hover:bg-bg-card-hover; }
+
+  /* Tables */
+  .tbl { @apply w-full border-collapse text-left; }
+  .tbl th { @apply px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]; }
+  .tbl td { @apply px-3 py-3 border-b border-border-flat text-[0.9rem]; }
+  .tbl tbody tr:hover td { @apply bg-bg-card-hover; }
+  .tbl .empty-row td { @apply text-center py-10 text-text-muted; }
+
+  /* Form fields */
+  .field { @apply flex flex-col gap-1.5; }
+  .field label { @apply text-[0.85rem] text-text-muted font-medium; }
+  .field input, .field select, .field textarea {
+    @apply bg-bg-panel border border-border-flat text-text-main px-3 py-2.5 rounded-sm text-[0.95rem] outline-none font-sans;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus { @apply border-accent-primary; }
+  .field textarea { @apply resize-y min-h-[60px]; }
+  .field input[type="color"] { @apply h-10 cursor-pointer p-0.5; }
+  .field-row { @apply flex items-center gap-2 cursor-pointer text-[0.9rem] text-text-main; }
+  .field-row input[type="checkbox"] { @apply w-[18px] h-[18px] accent-accent-primary; }
+  .form-grid { @apply grid grid-cols-2 gap-4; }
+  .span-2 { @apply col-span-2; }
+
+  /* Tags / swatches */
+  .tag { @apply inline-block bg-bg-base px-2.5 py-1 rounded-full text-[0.8rem] border border-border-flat; }
+  .swatch { @apply w-6 h-6 rounded border border-white/10; }
+
+  /* Action button row */
+  .act-row { @apply flex gap-2; }
+  .act-btn { @apply w-9 h-9; }
+  .act-btn.danger:hover { @apply bg-danger text-white border-danger; }
+
+  /* Misc */
+  .mono  { @apply font-mono text-[0.85rem] text-text-muted; }
+  .money { @apply font-bold text-success; }
+
+  /* Tabbed nav (used by /discounts and any future tabbed page) */
+  .tabs { @apply flex bg-bg-panel border border-border-flat rounded-sm overflow-hidden; }
+  .tab-btn { @apply bg-transparent border-0 text-text-muted px-4 py-2 cursor-pointer text-[0.9rem] font-medium hover:text-text-main; }
+  .tab-btn.active { @apply bg-accent-primary text-white; }
+
+  /* Header actions container + empty-state placeholder */
+  .hdr-actions { @apply flex gap-3 items-center; }
+  .placeholder { @apply p-12 text-center text-text-muted text-base; }
+
+  /* Settings-style cards (used by /settings and any future config page) */
+  .settings-section       { @apply bg-bg-card border border-border-flat rounded-md p-6; }
+  .settings-section-title { @apply mb-4 text-[1.1rem] text-accent-primary; }
+
+  /* Modal primitives — used by /tiles, /items, etc.
+     Overlay uses the theme's --overlay variable so light themes get a
+     softer translucent layer instead of jarring black. */
+  .modal-overlay  {
+    @apply fixed inset-0 flex items-center justify-center z-[100];
+    background: var(--overlay);
+  }
+  .modal-box      {
+    @apply w-[400px] p-6 rounded-md flex flex-col gap-5 bg-bg-panel border border-border-flat;
+    box-shadow: 0 20px 50px var(--shadow);
+  }
+  .modal-box.large{ @apply w-[600px]; }
+  .modal-header   { @apply flex justify-between items-center; }
+  .modal-header h3{ @apply m-0 text-[1.2rem]; }
+  .modal-close    { @apply bg-transparent text-text-muted text-[1.2rem]; }
+  .modal-body     { @apply flex flex-col gap-4; }
+  .modal-footer   { @apply flex justify-end gap-3 mt-2.5; }
+
+  /* Standalone flat input (outside .field grids) */
+  .flat-input { @apply bg-bg-panel border border-border-flat text-text-main px-4 py-3 rounded-sm text-base outline-none focus:border-accent-primary; }
+  .input-group       { @apply flex flex-col gap-2; }
+  .input-group label { @apply text-[0.9rem] font-semibold text-text-muted; }
+
+  /* Header dropdown menu links (POS main page nav) */
+  .menu-link { @apply flex items-center w-full gap-3 px-5 py-3 text-text-main bg-transparent border-0 text-left font-medium text-[0.95rem] hover:bg-bg-card-hover hover:text-accent-primary transition-colors; }
+  .menu-link-disabled { @apply opacity-50 cursor-not-allowed grayscale hover:!bg-transparent hover:!text-text-main; }
+
+  /* Numpad pattern — used in qty/price/payment/goods/quick-add modals */
+  .np-grid    { @apply grid grid-cols-3 gap-3; }
+  .np-btn     { @apply flex items-center justify-center h-[60px] text-[1.5rem] font-semibold cursor-pointer text-text-main bg-bg-panel border border-border-flat rounded-sm hover:bg-bg-card-hover transition-colors; }
+  .np-display { @apply h-[60px] flex items-center justify-end px-4 text-[2rem] font-bold font-serif bg-bg-panel border border-border-flat rounded-sm; }
+  .np-clear   { @apply !text-danger hover:!bg-danger hover:!text-white; }
+  .np-enter   { @apply !bg-success !text-white col-span-2 hover:brightness-110; }
+
+  /* Receipt (thermal) — used in recent transactions */
+  .receipt-paper   { @apply bg-white text-black font-mono p-6 text-[0.9rem] flex-1 overflow-y-auto shadow-inner; }
+  .receipt-divider { @apply text-center my-2 tracking-[2px]; }
+  .receipt-row     { @apply flex justify-between; }
+}

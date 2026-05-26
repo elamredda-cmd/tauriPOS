@@ -1,0 +1,50 @@
+name: "Release and Build Installer"
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Allows manually triggering the build from the GitHub Actions tab
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "windows-latest" # Builds the Windows .exe/.msi
+            args: ""
+          - platform: "macos-latest" # Builds the macOS .dmg
+            args: "--target aarch64-apple-darwin"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: 'npm'
+
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Build Tauri Application
+        uses: tauri-apps/tauri-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: app-v__VERSION__ # Auto-replaced with package.json version
+          releaseName: "Release v__VERSION__"
+          releaseBody: "Download the executable for your platform below."
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
