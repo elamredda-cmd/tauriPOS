@@ -17,7 +17,7 @@
         deletePosPage,
         addTile,
         deleteTile,
-    } from "$lib/stores/sqlite";
+    } from "$lib/stores/database";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import TouchColorPicker from "$lib/components/TouchColorPicker.svelte";
 

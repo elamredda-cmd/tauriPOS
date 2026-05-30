@@ -1,5 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import { goto } from '$app/navigation';
+    import { loadSavedMode } from '$lib/stores/connection';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
     import { initDb, migrateFromLocalStorage, getAll, getActiveProducts, rehydrateBooleans } from '$lib/stores/sqlite';
@@ -100,6 +102,14 @@
 
             console.log("POS initialized with SQLite data and LocalStorage cleared.");
             dbReady = true;
+
+            // Check if initial setup (single vs multi POS) has been completed.
+            // If not, redirect to the setup wizard — but only if we're not
+            // already on the /setup page (avoids an infinite redirect loop).
+            const savedMode = await loadSavedMode();
+            if (!savedMode && window.location.pathname !== '/setup') {
+                goto('/setup');
+            }
         } catch (err) {
             console.error("Failed to initialize SQLite:", err);
             dbError = String(err);

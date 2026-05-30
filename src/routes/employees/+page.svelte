@@ -5,7 +5,7 @@
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import { employeesDB, type Employee, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert } from '$lib/stores/sqlite';
+    import { upsert } from '$lib/stores/database';
 
     let show = false; 
     let editing = false;

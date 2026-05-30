@@ -2,7 +2,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { settingsDB, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert } from '$lib/stores/sqlite';
+    import { upsert } from '$lib/stores/database';
 
     const CART_BUTTONS: Record<string, string> = {
         goods: 'Goods',

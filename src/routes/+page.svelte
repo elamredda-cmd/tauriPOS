@@ -35,7 +35,7 @@
         remove as removeSql,
         getOrCreateTillId,
         getTillName,
-    } from "$lib/stores/sqlite";
+    } from "$lib/stores/database";
     import { evaluateCart } from "$lib/utils/discountEngine";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
@@ -852,9 +852,9 @@
     on:click={() => (showMenu = false)}
 >
     <!-- Main Content (Products) -->
-    <main class="flex-1 flex flex-col p-5 overflow-y-auto">
+    <main class="flex-1 flex flex-col p-2 md:p-3 lg:p-5 overflow-hidden">
         <header
-            class="flex justify-between items-center h-[var(--header-height)] mb-5 shrink-0"
+            class="flex justify-between items-center h-12 md:h-14 lg:h-16 mb-2 md:mb-3 lg:mb-5 shrink-0"
         >
             <div class="flex items-center gap-4">
                 <div class="relative">
@@ -999,7 +999,7 @@
                 </div>
             </div>
 
-            <h1 class="absolute left-1/2 -translate-x-1/2 text-3xl font-black text-text-main tracking-tight">{$storeDB.name}</h1>
+            <h1 class="absolute left-1/2 -translate-x-1/2 text-xl md:text-2xl lg:text-3xl font-black text-text-main tracking-tight">{$storeDB.name}</h1>
         </header>
 
         <!-- POS Pages -->
@@ -1021,8 +1021,8 @@
         </div>
 
         <!-- Product Grid (Fixed 4x3) -->
-        <div class="flex flex-col gap-5 flex-1 min-h-0">
-            <div class="grid grid-cols-4 grid-rows-3 gap-3 flex-1">
+        <div class="flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
+            <div class="grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1">
                 {#each displayTiles as slot}
                     {#if slot && slot.product}
                         <div
@@ -1046,12 +1046,12 @@
                                 >
                                     <div class="flex items-end justify-between gap-2">
                                         <h3
-                                            class="m-0 text-sm font-semibold text-white line-clamp-2 leading-tight"
+                                            class="m-0 text-[11px] md:text-sm lg:text-base font-semibold text-white line-clamp-2 leading-tight"
                                         >
                                             {slot.product.name}
                                         </h3>
                                         <span
-                                            class="bg-[var(--price-bg)] px-2 py-1 rounded-sm text-[var(--price-text)] font-bold text-sm shrink-0"
+                                            class="bg-[var(--price-bg)] px-2 py-1 rounded-sm text-[var(--price-text)] font-bold text-[10px] md:text-xs lg:text-sm shrink-0"
                                         >
                                             {formatMoney(slot.product.price)}
                                         </span>
@@ -1066,40 +1066,40 @@
                     {/if}
                 {/each}
             </div>
-            <div class="flex items-center gap-2 shrink-0">
+            <div class="flex items-center gap-1.5 md:gap-2 h-11 md:h-14 shrink-0">
                 {#if totalPages > 1}
                     <button
-                        class="w-14 h-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
+                        class="w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
                         disabled={currentPageIndex === 0}
                         on:click={() => currentPageIndex--}>&larr;</button
                     >
-                    <span class="text-sm font-semibold text-text-muted w-14 h-14 flex items-center justify-center leading-none"
+                    <span class="text-xs md:text-sm font-semibold text-text-muted w-11 h-full md:w-14 flex items-center justify-center leading-none"
                         >{currentPageIndex + 1}<span class="text-text-muted/50">/</span>{totalPages}</span
                     >
                     <button
-                        class="w-14 h-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
+                        class="w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
                         disabled={currentPageIndex >= totalPages - 1}
                         on:click={() => currentPageIndex++}>&rarr;</button
                     >
                 {:else}
-                    <div class="w-14 h-14"></div>
-                    <div class="w-14 h-14"></div>
-                    <div class="w-14 h-14"></div>
+                    <div class="w-11 h-full md:w-14"></div>
+                    <div class="w-11 h-full md:w-14"></div>
+                    <div class="w-11 h-full md:w-14"></div>
                 {/if}
                 <div class="flex-1"></div>
                 {#each toolbarLayout as btn}
                     {#if btn === 'scale'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">SCALE</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">SCALE</button>
                     {:else if btn === 'drawer'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">DRAWER</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">DRAWER</button>
                     {:else if btn === 'discount'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">DISCOUNT</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center">DISCOUNT</button>
                     {:else if btn === 'goods'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={openGoodsModal}>GOODS</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={openGoodsModal}>GOODS</button>
                     {:else if btn === 'recent_trans'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors flex items-center justify-center text-center" on:click={openRecentTransactions}>RECENT<br/>TRANS</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[8px] md:text-[8px] md:text-[10px] lg:text-xs font-bold leading-tight hover:bg-bg-card-hover transition-colors flex items-center justify-center text-center" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
                     {:else if btn === 'change_price'}
-                        <button class="h-14 flex-1 bg-bg-card border border-border-flat rounded-md font-bold text-xs hover:bg-bg-card-hover transition-colors leading-tight flex items-center justify-center text-center" on:click={openChangePrice}>CHANGE<br/>PRICE</button>
+                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[8px] md:text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors flex items-center justify-center text-center" on:click={openChangePrice}>CHANGE<br class="hidden md:inline"/>PRICE</button>
                     {/if}
                 {/each}
             </div>
@@ -1108,20 +1108,20 @@
 
     <!-- Cart / Trolly -->
     <aside
-        class="flex flex-col w-[var(--cart-width)] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
+        class="flex flex-col w-64 md:w-72 lg:w-80 xl:w-96 2xl:w-[420px] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
     >
         <!-- Compact Trolly Header (Order info + Search + Clear) -->
         <div
-            class="flex items-center gap-3 p-4 border-b border-border-flat bg-bg-panel shrink-0"
+            class="flex items-center gap-2 md:gap-3 p-3 md:p-4 border-b border-border-flat bg-bg-panel shrink-0"
         >
             <div class="flex flex-col gap-0.5 min-w-[80px]">
                 <span
-                    class="text-xs font-bold text-text-muted uppercase tracking-wider leading-none"
+                    class="text-[10px] md:text-xs font-bold text-text-muted uppercase tracking-wider leading-none"
                     >Receipt</span
                 >
                 <div class="flex items-center gap-2">
                     <span
-                        class="text-lg font-bold text-accent-primary leading-none"
+                        class="text-sm md:text-base lg:text-lg font-bold text-accent-primary leading-none"
                         >#{nextOrderNum}</span
                     >
                     {#if $heldOrders.length > 0}
@@ -1185,7 +1185,7 @@
         </div>
 
         <!-- Cart Items List -->
-        <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-1.5 relative">
+        <div class="flex-1 overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 relative">
             {#if trolleyMessage}
                 <div
                     class="absolute top-2 left-3 right-3 z-10 p-3 rounded-md text-sm font-semibold shadow-lg text-center transition-all {trolleyMessageType ===
@@ -1201,20 +1201,20 @@
             {#each cart as item, i}
                 <div
                     bind:this={cartItemEls[i]}
-                    class="flex items-start gap-2.5 p-2.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex ===
+                    class="flex items-start gap-2.5 p-1.5 md:p-2.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex ===
                     i
                         ? 'border-accent-primary bg-accent-primary/5 shadow-sm'
                         : 'border-border-flat bg-bg-card hover:bg-bg-card-hover'}"
                     on:click={() => (selectedCartIndex = i)}
                 >
                     <div
-                        class="text-sm font-bold text-accent-primary min-w-[26px] pt-0.5"
+                        class="text-xs md:text-sm font-bold text-accent-primary min-w-[20px] md:min-w-[26px] pt-0.5"
                     >
                         {item.quantity}x
                     </div>
                     <div class="flex-1 min-w-0">
                         <h4
-                            class="m-0 text-[0.82rem] font-bold text-text-main truncate leading-tight"
+                            class="m-0 text-[11px] md:text-sm font-bold text-text-main truncate leading-tight"
                         >
                             {item.name}
                         </h4>
@@ -1283,10 +1283,10 @@
                         {/if}
                     </div>
                     <div class="text-right shrink-0 pt-0.5">
-                        <div class="text-[11px] text-text-muted font-medium leading-tight">
+                        <div class="text-[9px] md:text-xs text-text-muted font-medium leading-tight">
                             {formatMoney(item.price)}
                         </div>
-                        <div class="text-xs font-bold text-text-main leading-tight mt-0.5">
+                        <div class="text-[10px] md:text-sm font-bold text-text-main leading-tight mt-0.5">
                             {formatMoney(item.price * item.quantity)}
                         </div>
                     </div>
@@ -1315,17 +1315,17 @@
         </div>
 
         <!-- Selection Controls & Quantity -->
-        <div class="flex gap-2 p-4 pb-0 shrink-0">
+        <div class="flex gap-1 md:gap-2 p-2 md:p-4 pb-0 shrink-0">
             <button
-                class="flex-1 h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-xl font-bold hover:bg-bg-card-hover transition-colors"
+                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors"
                 on:click={increaseQty}>+</button
             >
             <button
-                class="flex-1 h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-xl font-bold hover:bg-bg-card-hover transition-colors"
+                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors"
                 on:click={decreaseQty}>-</button
             >
             <button
-                class="flex-1 h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors"
+                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main"
                 on:click={moveSelectionUp}
             >
                 <svg
@@ -1335,12 +1335,12 @@
                     stroke-width="2"
                     stroke-linecap="round"
                     stroke-linejoin="round"
-                    width="20"
+                    class="w-4 h-4 md:w-5 md:h-5"
                     ><polyline points="18 15 12 9 6 15"></polyline></svg
                 >
             </button>
             <button
-                class="flex-1 h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors"
+                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main"
                 on:click={moveSelectionDown}
             >
                 <svg
@@ -1350,12 +1350,12 @@
                     stroke-width="2"
                     stroke-linecap="round"
                     stroke-linejoin="round"
-                    width="20"
+                    class="w-4 h-4 md:w-5 md:h-5"
                     ><polyline points="6 9 12 15 18 9"></polyline></svg
                 >
             </button>
             <button
-                class="flex-1 h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-danger hover:bg-danger hover:text-white transition-colors"
+                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-danger hover:bg-danger hover:text-white transition-colors"
                 on:click={deleteSelected}
                 title="Delete selected"
             >
@@ -1366,14 +1366,14 @@
                     stroke-width="2"
                     stroke-linecap="round"
                     stroke-linejoin="round"
-                    width="18"
+                    class="w-4 h-4 md:w-[18px] md:h-[18px]"
                     ><polyline points="3 6 5 6 21 6"></polyline><path
                         d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
                     ></path></svg
                 >
             </button>
             <button
-                class="flex-[2] h-12 flex items-center justify-center gap-2 bg-bg-card border border-border-flat rounded-md font-bold text-sm hover:bg-bg-card-hover transition-colors"
+                class="flex-[2] h-8 md:h-10 lg:h-12 flex items-center justify-center gap-1 md:gap-2 bg-bg-card border border-border-flat rounded-md font-bold text-[10px] md:text-sm hover:bg-bg-card-hover transition-colors"
                 on:click={() => (showNumpad = true)}
             >
                 <svg
@@ -1383,7 +1383,7 @@
                     stroke-width="2"
                     stroke-linecap="round"
                     stroke-linejoin="round"
-                    width="18"
+                    class="w-3.5 h-3.5 md:w-[18px] md:h-[18px]"
                     ><rect x="3" y="3" width="18" height="18" rx="2" ry="2"
                     ></rect><line x1="3" y1="9" x2="21" y2="9"></line><line
                         x1="9"
@@ -1392,12 +1392,12 @@
                         y2="9"
                     ></line></svg
                 >
-                Qty
+                <span>Qty</span>
             </button>
         </div>
 
         <!-- Total Section -->
-        <div class="px-4 py-2 shrink-0">
+        <div class="px-2 md:px-4 py-1 md:py-2 shrink-0">
             {#if promoSavings > 0}
                 <div
                     class="flex justify-between items-center text-sm font-bold text-success mb-1"
@@ -1410,15 +1410,15 @@
                 class="flex justify-between items-center py-3 border-y border-border-flat my-1"
             >
                 <span
-                    class="text-xl font-bold text-text-muted uppercase tracking-wider"
+                    class="text-lg md:text-xl font-bold text-text-muted uppercase tracking-wider"
                     >Total</span
                 >
                 <div class="flex flex-col items-end">
                     <span
-                        class="text-4xl font-black text-accent-primary tracking-tight"
+                        class="text-2xl md:text-3xl lg:text-4xl font-black text-accent-primary tracking-tight"
                         >{formatMoney(total)}</span
                     >
-                    <span class="mt-1 text-sm text-text-muted"
+                    <span class="mt-1 text-xs md:text-sm text-text-muted"
                         >Total Items: {totalItems}</span
                     >
                 </div>
@@ -1426,41 +1426,41 @@
         </div>
 
         <!-- Cart Action Buttons Grid -->
-        <div class="grid grid-cols-3 gap-2 px-4 pb-4 shrink-0 auto-rows-[3.5rem]">
+        <div class="grid grid-cols-3 gap-1 md:gap-2 px-2 md:px-4 pb-2 md:pb-4 shrink-0 auto-rows-[2.5rem] md:auto-rows-[3.5rem]">
             {#each [...cartLayout.slice(0, 2), 'payment', ...cartLayout.slice(2)] as btn}
                 {#if btn === 'payment'}
                     <button
-                        class="row-span-2 h-full bg-success text-white text-lg font-black rounded-md shadow-lg hover:brightness-110 active:scale-[0.98] transition-all tracking-wider flex items-center justify-center"
+                        class="row-span-2 h-full bg-success text-white text-base md:text-lg font-black rounded-md shadow-lg hover:brightness-110 active:scale-[0.98] transition-all tracking-wider flex items-center justify-center"
                         on:click={openPayment}>PAYMENT</button
                     >
                 {:else if btn === 'goods'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors"
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         on:click={openGoodsModal}>GOODS</button
                     >
                 {:else if btn === 'recent_trans'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors"
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors"
                         on:click={openRecentTransactions}>RECENT<br/>TRANS</button
                     >
                 {:else if btn === 'change_price'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md font-bold text-xs hover:bg-bg-card-hover transition-colors leading-tight"
+                        class="h-full bg-bg-card border border-border-flat rounded-md font-bold text-xs hover:bg-bg-card-hover transition-colors leading-tight"
                         on:click={openChangePrice}>CHANGE<br/>PRICE</button
                     >
                 {:else if btn === 'drawer'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors"
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         >DRAWER</button
                     >
                 {:else if btn === 'scale'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors"
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         >SCALE</button
                     >
                 {:else if btn === 'discount'}
                     <button
-                        class="h-14 bg-bg-card border border-border-flat rounded-md text-xs font-bold hover:bg-bg-card-hover transition-colors"
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         >DISCOUNT</button
                     >
                 {/if}
@@ -1476,7 +1476,7 @@
         on:click={() => (showNumpad = false)}
     >
         <div
-            class="w-80 p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            class="w-80 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             on:click|stopPropagation
         >
             <div class="flex justify-between items-center">
@@ -1487,14 +1487,14 @@
                 >
             </div>
             <div
-                class="h-16 flex items-center justify-end px-4 text-3xl font-bold bg-bg-panel border border-border-flat rounded-md font-serif"
+                class="h-12 md:h-16 flex items-center justify-end px-4 text-2xl md:text-3xl font-bold bg-bg-panel border border-border-flat rounded-md font-serif"
             >
                 {numpadValue || "0"}
             </div>
             <div class="grid grid-cols-3 gap-3">
                 {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "ENTER"] as key}
                     <button
-                        class="h-14 flex items-center justify-center text-xl font-bold rounded-md transition-colors border border-border-flat {key ===
+                        class="h-10 md:h-12 lg:h-14 flex items-center justify-center text-base md:text-xl font-bold rounded-md transition-colors border border-border-flat {key ===
                         'ENTER'
                             ? 'col-span-2 bg-success text-white hover:brightness-110'
                             : key === 'C'
@@ -1517,7 +1517,7 @@
         on:click={() => (showChangePricePad = false)}
     >
         <div
-            class="w-96 p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            class="w-96 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             on:click|stopPropagation
         >
             <div class="flex justify-between items-center">
@@ -1564,7 +1564,7 @@
 {#if showGoodsModal}
     <div class="modal-overlay" on:click={() => (showGoodsModal = false)}>
         <div
-            class="w-[700px] flex p-0 overflow-hidden bg-bg-card border border-border-flat rounded-md"
+            class="w-[700px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] flex flex-col md:flex-row p-0 overflow-y-auto md:overflow-hidden bg-bg-card border border-border-flat rounded-md"
             on:click|stopPropagation
         >
             <!-- Left Side: Open Departments -->
@@ -1643,35 +1643,35 @@
 {#if showPaymentModal}
     <div class="modal-overlay" on:click={() => (showPaymentModal = false)}>
         <div
-            class="w-[800px] p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
+            class="w-[800px] max-w-[95vw] max-h-[85vh] md:max-h-[95vh] overflow-y-auto p-3 md:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             on:click|stopPropagation
         >
             <div
                 class="flex justify-between items-center border-b border-border-flat pb-4"
             >
-                <h2 class="m-0 text-text-main text-[1.5rem]">Payment</h2>
+                <h2 class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
                 <button
                     class="modal-close"
                     on:click={() => (showPaymentModal = false)}>✕</button
                 >
             </div>
 
-            <div class="flex gap-6">
+            <div class="flex flex-col md:flex-row gap-4 md:gap-6">
                 <div class="flex-1 flex flex-col gap-5">
                     <div
                         class="flex justify-between items-center p-5 bg-bg-panel rounded-sm border border-border-flat"
                     >
-                        <span class="text-[1.2rem] text-text-muted"
+                        <span class="text-base md:text-[1.2rem] text-text-muted"
                             >Total to Pay</span
                         >
-                        <span class="text-[2.2rem] font-bold text-success"
+                        <span class="text-3xl md:text-[2.2rem] font-bold text-success"
                             >{formatMoney(total)}</span
                         >
                     </div>
 
                     <div class="flex gap-3">
                         <button
-                            class="flat-card flex-1 p-5 text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-3 md:p-5 text-base md:text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'cash'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -1679,7 +1679,7 @@
                             >💵 Cash</button
                         >
                         <button
-                            class="flat-card flex-1 p-5 text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-3 md:p-5 text-base md:text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'card'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -1694,7 +1694,7 @@
                         {#if paymentMethod === "cash"}
                             {#if parseInt(amountTenderedString) >= total}
                                 <div
-                                    class="text-center text-[1.5rem] font-bold text-warning p-3 bg-bg-panel rounded-sm"
+                                    class="text-center text-xl md:text-[1.5rem] font-bold text-warning p-2 md:p-3 bg-bg-panel rounded-sm"
                                 >
                                     Change: {formatMoney(
                                         parseInt(amountTenderedString) - total,
@@ -1702,7 +1702,7 @@
                                 </div>
                             {:else if parseInt(amountTenderedString) > 0}
                                 <div
-                                    class="text-center text-[1.5rem] font-bold text-danger p-3 bg-bg-panel rounded-sm"
+                                    class="text-center text-xl md:text-[1.5rem] font-bold text-danger p-2 md:p-3 bg-bg-panel rounded-sm"
                                 >
                                     Remaining: {formatMoney(
                                         total - parseInt(amountTenderedString),
@@ -1731,7 +1731,7 @@
                             </div>
                         {/if}
                         <button
-                            class="btn btn-success w-full p-5 text-[1.4rem] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
+                            class="btn btn-success w-full p-3 md:p-5 text-lg md:text-[1.4rem] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
                             disabled={paymentMethod === 'cash' && (parseInt(amountTenderedString) || 0) < total}
                             on:click={completeSale}
                         >
@@ -1741,24 +1741,24 @@
                 </div>
 
                 <div
-                    class="w-[340px] flex flex-col bg-bg-panel p-4 rounded-md {paymentMethod ===
+                    class="w-full md:w-[340px] flex flex-col bg-bg-panel p-3 md:p-4 rounded-md {paymentMethod ===
                         'card' && parseInt(amountTenderedString) === 0
                         ? 'opacity-50 pointer-events-none'
                         : ''}"
                 >
                     <div class="flex gap-3 mb-3">
-                        <div class="np-display flex-1">
+                        <div class="np-display flex-1 !h-12 md:!h-[60px] !text-2xl md:!text-[2rem]">
                             {formatMoney(parseInt(amountTenderedString || "0"))}
                         </div>
                         <button
-                            class="np-btn np-clear w-[60px]"
+                            class="np-btn np-clear w-[50px] md:w-[60px] !h-12 md:!h-[60px]"
                             on:click={() => handlePaymentPadKey("C")}>C</button
                         >
                     </div>
                     <div class="np-grid">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                             <button
-                                class="np-btn {key === '⌫'
+                                class="np-btn !h-10 md:!h-[60px] !text-lg md:!text-[1.5rem] {key === '⌫'
                                     ? '!text-warning'
                                     : ''}"
                                 on:click={() => handlePaymentPadKey(key)}
@@ -1815,7 +1815,7 @@
 {#if showHeldOrders}
     <div class="modal-overlay" on:click={() => (showHeldOrders = false)}>
         <div
-            class="w-[420px] p-6 rounded-md bg-bg-card border border-border-flat max-h-[80vh] flex flex-col gap-4"
+            class="w-[420px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
             on:click|stopPropagation
         >
             <div class="modal-header">
@@ -1878,7 +1878,7 @@
         on:click={() => (showRecentTransactions = false)}
     >
         <div
-            class="w-[900px] p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
+            class="w-[900px] max-w-[95vw] max-h-[85vh] md:max-h-[95vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             on:click|stopPropagation
         >
             <div
@@ -1893,9 +1893,9 @@
                 >
             </div>
 
-            <div class="flex gap-6 h-[65vh]">
+            <div class="flex flex-col md:flex-row gap-4 md:gap-6 h-auto md:h-[65vh] min-h-0">
                 <div
-                    class="flex-1 overflow-y-auto flex flex-col gap-2 border-r border-border-flat pr-4"
+                    class="flex-1 md:overflow-y-auto flex flex-col gap-2 md:border-r border-border-flat md:pr-4 max-h-[30vh] md:max-h-none"
                 >
                     {#each recentOrders as ro}
                         <button
@@ -1934,7 +1934,7 @@
                     {/if}
                 </div>
 
-                <div class="flex-1 flex flex-col gap-3">
+                <div class="flex-1 flex flex-col gap-3 min-h-[350px] md:min-h-0">
                     {#if selectedRecentOrderId}
                         {@const selectedOrder = recentOrders.find(
                             (o) => o.id === selectedRecentOrderId,
@@ -2089,7 +2089,7 @@
 {#if showNotFoundModal}
     <div class="modal-overlay" on:click={() => (showNotFoundModal = false)}>
         <div
-            class="w-[320px] p-6 rounded-md bg-bg-card border-2 border-danger flex flex-col gap-4"
+            class="w-[320px] max-w-[95vw] max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card border-2 border-danger flex flex-col gap-4"
             on:click|stopPropagation
         >
             <div class="modal-header">
@@ -2145,7 +2145,7 @@
 {#if showQuickAddModal}
     <div class="modal-overlay" on:click={() => (showQuickAddModal = false)}>
         <div
-            class="w-[400px] p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
+            class="w-[400px] max-w-[95vw] max-h-[90vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
             on:click|stopPropagation
         >
             <div class="modal-header">

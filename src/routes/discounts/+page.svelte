@@ -7,7 +7,7 @@
         uuid, now, formatMoney
     } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/sqlite';
+    import { upsert, remove as removeSql } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
 

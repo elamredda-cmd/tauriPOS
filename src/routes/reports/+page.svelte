@@ -16,7 +16,7 @@
         type SalesOverview,
         type PaymentBreakdown,
         type TopProduct,
-    } from '$lib/stores/sqlite';
+    } from '$lib/stores/database';
 
     // Date range defaults to current month
     const today = new Date();

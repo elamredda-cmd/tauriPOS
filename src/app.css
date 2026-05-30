@@ -57,10 +57,6 @@
   --price-text: #ffffff;
   --sidebar-hover: var(--bg-card-hover);
   --sidebar-active: var(--accent-primary);
-
-  /* Layout Constants */
-  --cart-width: 480px;
-  --header-height: 70px;
 }
 
 /* Forest Theme (Green) */
@@ -268,14 +264,14 @@
      Overlay uses the theme's --overlay variable so light themes get a
      softer translucent layer instead of jarring black. */
   .modal-overlay  {
-    @apply fixed inset-0 flex items-center justify-center z-[100];
+    @apply fixed inset-0 flex items-center justify-center z-[100] p-4;
     background: var(--overlay);
   }
   .modal-box      {
-    @apply w-[400px] p-6 rounded-md flex flex-col gap-5 bg-bg-panel border border-border-flat;
+    @apply w-[400px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-4 md:p-6 rounded-md flex flex-col gap-4 md:gap-5 bg-bg-panel border border-border-flat;
     box-shadow: 0 20px 50px var(--shadow);
   }
-  .modal-box.large{ @apply w-[600px]; }
+  .modal-box.large{ @apply w-[600px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto; }
   .modal-header   { @apply flex justify-between items-center; }
   .modal-header h3{ @apply m-0 text-[1.2rem]; }
   .modal-close    { @apply bg-transparent text-text-muted text-[1.2rem]; }

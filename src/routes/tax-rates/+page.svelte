@@ -5,7 +5,7 @@
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import { taxRatesDB, type TaxRate, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/sqlite';
+    import { upsert, remove as removeSql } from '$lib/stores/database';
 
     let show = false; 
     let editing = false;

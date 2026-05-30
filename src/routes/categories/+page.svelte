@@ -6,7 +6,7 @@
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
     import { categoriesDB, type Category, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/sqlite';
+    import { upsert, remove as removeSql } from '$lib/stores/database';
 
     let show = false; 
     let editing = false;

@@ -16,7 +16,7 @@
         updateProduct,
         deleteProduct,
         batchUpdateGoodsMenu,
-    } from "$lib/stores/sqlite";
+    } from "$lib/stores/database";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import TouchToggle from "$lib/components/TouchToggle.svelte";

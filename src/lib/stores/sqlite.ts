@@ -449,7 +449,7 @@ async function runDataMigrations() {
     const d = await getDb();
 
     // 1. Limit showInGoods to max 10 items and assign sort order.
-    const alreadyDone = await d.select(`SELECT 1 FROM settings WHERE key = 'migration_show_in_goods_limited'`);
+    const alreadyDone = (await d.select(`SELECT 1 FROM settings WHERE key = 'migration_show_in_goods_limited'`)) as any[];
     if (alreadyDone.length === 0) {
         await limitGoodsMenuItems();
         await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`,
@@ -460,7 +460,7 @@ async function runDataMigrations() {
     // 2. Initialise default POS button layouts if missing.
     const layoutKeys = ['pos_cart_layout', 'pos_toolbar_layout'];
     for (const key of layoutKeys) {
-        const exists = await d.select(`SELECT 1 FROM settings WHERE key = ?`, [key]);
+        const exists = (await d.select(`SELECT 1 FROM settings WHERE key = ?`, [key])) as any[];
         if (exists.length === 0) {
             const defaults: Record<string, string> = {
                 pos_cart_layout: JSON.stringify(['goods', 'recent_trans', 'change_price', 'drawer']),

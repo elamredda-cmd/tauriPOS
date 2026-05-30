@@ -3,7 +3,7 @@
     import Modal from '$lib/components/Modal.svelte';
     import { suppliersDB, type Supplier, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/sqlite';
+    import { upsert, remove as removeSql } from '$lib/stores/database';
     let show = false; let editing = false;
     let cur: Partial<Supplier> = {};
     function add() { cur = { id:uuid(), name:'', contactName:'', phone:'', email:'', address:'', notes:'', createdAt:now() }; editing=false; show=true; }

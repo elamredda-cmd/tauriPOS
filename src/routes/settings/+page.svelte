@@ -2,7 +2,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/sqlite';
+    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
 
     let store = { ...$storeDB };
 
