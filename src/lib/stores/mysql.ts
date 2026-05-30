@@ -158,6 +158,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             notes TEXT,
             tillNumber TEXT DEFAULT '',
             paymentMethod TEXT DEFAULT '',
+            amountTendered INT DEFAULT 0,
+            updatedAt TEXT,
             createdAt TEXT,
             completedAt TEXT
         )
@@ -181,6 +183,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             isPriceOverride INT DEFAULT 0,
             originalPrice INT DEFAULT 0,
             notes TEXT,
+            updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
         )
     `);
@@ -344,6 +347,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             reference TEXT,
             changeGiven INT DEFAULT 0,
             createdAt TEXT,
+            updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
         )
     `);
@@ -400,6 +404,21 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             createdAt TEXT
         )
     `);
+
+    // ─── Migrations for existing databases ─────────────────────────────────
+    const migrations = [
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS amountTendered INT DEFAULT 0`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+    ];
+    for (const sql of migrations) {
+        try { await d.execute(sql); } catch { /* column may already exist */ }
+    }
+    // Bust column cache after migrations
+    delete tableColumnsCache['orders'];
+    delete tableColumnsCache['order_lines'];
+    delete tableColumnsCache['payments'];
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
     // MariaDB supports CREATE INDEX IF NOT EXISTS from 10.5+.  We wrap each

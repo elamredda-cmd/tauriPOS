@@ -377,6 +377,34 @@ export async function getAllTillNumbers(): Promise<string[]> {
     return sqlite.getAllTillNumbers();
 }
 
+/**
+ * Get the maximum order number across ALL tills.
+ * In multi-mode, queries MariaDB directly for the real-time global maximum.
+ * Falls back to local SQLite if MariaDB is unreachable.
+ */
+export async function getGlobalMaxOrderNumber(): Promise<number> {
+    if (isMultiMode()) {
+        try {
+            const mysqlDb = await getMysqlDb();
+            if (mysqlDb) {
+                const rows: any[] = await mysqlDb.select(
+                    `SELECT MAX(orderNumber) as maxNum FROM orders WHERE orderNumber > 0`
+                );
+                return rows[0]?.maxNum || 0;
+            }
+        } catch (e) {
+            console.warn('database: MySQL getGlobalMaxOrderNumber failed, using local:', e);
+        }
+    }
+
+    // Fallback: query local SQLite
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT MAX(orderNumber) as maxNum FROM orders WHERE orderNumber > 0`
+    );
+    return rows[0]?.maxNum || 0;
+}
+
 export async function getTillPeriodReport(
     tillNumber: string, startTime: string, endTime: string
 ) {

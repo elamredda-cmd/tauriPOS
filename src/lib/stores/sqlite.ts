@@ -454,6 +454,16 @@ async function runMigrations() {
 
     // Track payment method on orders for fallback when payment records are missing.
     await addColumnIfMissing('orders', 'paymentMethod', "TEXT DEFAULT ''");
+
+    // Orders: amountTendered + updatedAt for delta sync
+    await addColumnIfMissing('orders', 'amountTendered', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('orders', 'updatedAt', 'TEXT');
+
+    // Order lines: updatedAt for delta sync
+    await addColumnIfMissing('order_lines', 'updatedAt', 'TEXT');
+
+    // Payments: updatedAt for delta sync
+    await addColumnIfMissing('payments', 'updatedAt', 'TEXT');
 }
 
 /** One-shot data migrations (tracked via settings table). */

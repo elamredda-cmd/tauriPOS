@@ -36,6 +36,7 @@
         getOrCreateTillId,
         getTillName,
         triggerSync,
+        getGlobalMaxOrderNumber,
     } from "$lib/stores/database";
     import { evaluateCart } from "$lib/utils/discountEngine";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -184,18 +185,15 @@
         minute: "2-digit",
     });
 
-    function getNextOrderNumber(): number {
-        const orders = get(ordersDB);
-        // Only count completed orders (not held ones which have orderNumber 0)
-        const myCompletedOrders = orders.filter(o => o.tillNumber === tillId && o.orderNumber > 0);
-        const nums = myCompletedOrders.map((o) => o.orderNumber);
+    async function getNextOrderNumber(): Promise<number> {
+        // Query MariaDB (or local SQLite) for the global max order number across ALL tills
+        const globalMax = await getGlobalMaxOrderNumber();
         
         const settings = get(settingsDB);
         const startSetting = settings.find((s: any) => s.key === 'starting_receipt_number');
         const startNum = startSetting ? parseInt(startSetting.value, 10) || 1 : 1;
         
-        const nextFromOrders = nums.length > 0 ? Math.max(...nums) + 1 : 1;
-        return Math.max(nextFromOrders, startNum);
+        return Math.max(globalMax + 1, startNum);
     }
 
     onMount(() => {
@@ -391,6 +389,7 @@
             return;
         }
         const orderId = uuid();
+        const timestamp = now();
         const firstPromoId =
             cartEval.lines
                 .flatMap((l) => l.applied)
@@ -411,8 +410,9 @@
             total,
             tillNumber: tillId,
             notes: "",
-            createdAt: now(),
+            createdAt: timestamp,
             completedAt: "",
+            updatedAt: timestamp,
         };
         ordersDB.update((orders) => [...orders, newOrder]);
         upsert("orders", newOrder);
@@ -437,6 +437,7 @@
                 isPriceOverride: false,
                 originalPrice: item.price,
                 notes: item.note,
+                updatedAt: timestamp,
             };
         });
         orderLinesDB.update((l) => [...l, ...lines]);
@@ -713,10 +714,10 @@
         }
     }
 
-    function setAmountAndComplete(amount: number) {
+    async function setAmountAndComplete(amount: number) {
         amountTenderedString = amount.toString();
         hasTypedPayment = true;
-        completeSale();
+        await completeSale();
     }
 
     function addQuickAmount(amount: number) {
@@ -729,7 +730,7 @@
         ).toString();
     }
 
-    function completeSale() {
+    async function completeSale() {
         const tendered =
             paymentMethod === "cash"
                 ? parseInt(amountTenderedString) || 0
@@ -766,6 +767,10 @@
             }
         }
 
+        // Get the next receipt number from MariaDB (global across all tills)
+        const receiptNumber = await getNextOrderNumber();
+        const timestamp = now();
+
         const orderId = uuid();
         const firstPromoId =
             cartEval.lines
@@ -776,7 +781,7 @@
             shiftId: "",
             customerId: "",
             employeeId: "emp-admin",
-            orderNumber: getNextOrderNumber(),
+            orderNumber: receiptNumber,
             type: "sale" as const,
             status: "completed" as const,
             originalOrderId: "",
@@ -789,8 +794,9 @@
             notes: "",
             paymentMethod: method,
             amountTendered: tendered,
-            createdAt: now(),
-            completedAt: now(),
+            createdAt: timestamp,
+            completedAt: timestamp,
+            updatedAt: timestamp,
         };
 
         ordersDB.update((orders) => [...orders, newOrder]);
@@ -816,6 +822,7 @@
                 isPriceOverride: false,
                 originalPrice: item.price,
                 notes: item.note,
+                updatedAt: timestamp,
             };
         });
 
@@ -832,7 +839,8 @@
             cardAmount,
             reference: "",
             changeGiven: paymentMethod === "cash" ? Math.max(0, change) : 0,
-            createdAt: now(),
+            createdAt: timestamp,
+            updatedAt: timestamp,
         };
         paymentsDB.update((ps) => [...ps, payment as any]);
         upsert("payments", payment);
