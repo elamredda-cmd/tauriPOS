@@ -2,7 +2,8 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
+    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId, runSyncCycle } from '$lib/stores/database';
+    import { connectionState } from '$lib/stores/connection';
 
     let store = { ...$storeDB };
 
@@ -45,6 +46,20 @@
     function confirmReset() {
         localStorage.clear();
         window.location.href = '/'; // Using href to ensure it triggers a full reload in Tauri
+    }
+
+    let isSyncing = false;
+    async function handleForceSync() {
+        if (isSyncing) return;
+        isSyncing = true;
+        try {
+            await runSyncCycle();
+            toast('Sync completed successfully!', 'success');
+        } catch (e) {
+            toast('Sync failed.', 'error');
+        } finally {
+            isSyncing = false;
+        }
     }
 </script>
 
@@ -127,9 +142,48 @@
                     </div>
                 </div>
                 <div class="field">
+                    <label>Starting Receipt Number</label>
+                    <input type="number" value={getSettingValue('starting_receipt_number')} on:change={(e) => updateSetting('starting_receipt_number', e.currentTarget.value)} placeholder="e.g. 10000" />
+                </div>
+                <div class="field">
                     <label>Till ID (auto-generated)</label>
                     <input value={tillId} disabled class="!opacity-60" />
                 </div>
+            </div>
+        </section>
+
+        <!-- Database Connection -->
+        <section class="settings-section">
+            <h3 class="settings-section-title">Database Connection</h3>
+            <p class="text-text-muted text-[0.9rem] mb-4">Monitor and manage the connection to the central MariaDB server.</p>
+            <div class="p-4 bg-bg-root rounded-md border border-border-flat flex items-center justify-between mb-4">
+                <div class="flex items-center gap-3">
+                    <div class="w-3 h-3 rounded-full {$connectionState.mysqlOnline ? 'bg-success' : 'bg-danger'} shadow-[0_0_8px_currentColor]"></div>
+                    <div>
+                        <div class="font-bold text-[1.1rem]">{$connectionState.mysqlOnline ? 'Connected to MariaDB' : 'Offline / Single Mode'}</div>
+                        {#if $connectionState.mode === 'multi'}
+                            <div class="text-[0.9rem] text-text-muted mt-1">Host: {$connectionState.mysqlConfig?.host || 'Unknown'}</div>
+                            {#if $connectionState.syncError}
+                                <div class="text-[0.8rem] text-danger mt-1 p-2 bg-danger/10 rounded font-mono">{$connectionState.syncError}</div>
+                            {/if}
+                        {:else}
+                            <div class="text-[0.9rem] text-text-muted mt-1">Operating entirely on local SQLite database.</div>
+                        {/if}
+                    </div>
+                </div>
+                {#if $connectionState.mode === 'multi'}
+                    <button class="btn btn-secondary flex gap-2 items-center" on:click={handleForceSync} disabled={isSyncing}>
+                        {#if isSyncing}
+                            <div class="w-4 h-4 border-2 border-text-muted border-t-text-main rounded-full animate-spin"></div>
+                            Syncing...
+                        {:else}
+                            Force Sync Now
+                        {/if}
+                    </button>
+                {/if}
+            </div>
+            <div class="flex justify-end mt-2">
+                <a href="/setup" class="btn btn-secondary">Change Setup / Database Mode</a>
             </div>
         </section>
 

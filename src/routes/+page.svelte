@@ -185,8 +185,16 @@
 
     function getNextOrderNumber(): number {
         const orders = get(ordersDB);
-        const nums = orders.map((o) => o.orderNumber || 0);
-        return nums.length > 0 ? Math.max(...nums) + 1 : 1;
+        // Scoping by tillId mathematically eliminates conflicts across multiple disconnected tills
+        const myOrders = orders.filter(o => o.tillNumber === tillId);
+        const nums = myOrders.map((o) => o.orderNumber || 0);
+        
+        const settings = get(settingsDB);
+        const startSetting = settings.find((s: any) => s.key === 'starting_receipt_number');
+        const startNum = startSetting ? parseInt(startSetting.value, 10) || 1 : 1;
+        
+        const nextFromOrders = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+        return Math.max(nextFromOrders, startNum);
     }
 
     $: nextOrderNum = getNextOrderNumber();

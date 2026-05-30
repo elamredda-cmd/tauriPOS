@@ -425,9 +425,9 @@ export async function hydrateSvelteStores(): Promise<void> {
         getAll('payments'),
         getAll('suppliers'),
         getAll('product_suppliers'),
-        getAll('inventory_log'),
-        getAll('loyalty_log'),
-        getAll('audit_log'),
+        getAll('inventory_logs'),
+        getAll('loyalty_logs'),
+        getAll('audit_logs'),
         getAll('shifts'),
         getAll('cash_movements'),
     ]);
@@ -471,12 +471,15 @@ export async function hydrateSvelteStores(): Promise<void> {
 
 let syncInterval: any = null;
 
+let isSyncRunning = false;
+
 /**
  * Run one full sync cycle: flush offline queue → pull MySQL → update
  * local SQLite cache → rehydrate Svelte stores.
  */
-async function runSyncCycle(): Promise<void> {
-    if (!isMultiMode()) return;
+export async function runSyncCycle(): Promise<void> {
+    if (!isMultiMode() || isSyncRunning) return;
+    isSyncRunning = true;
     try {
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) return;
@@ -491,9 +494,9 @@ async function runSyncCycle(): Promise<void> {
                     'categories', 'products', 'pos_pages', 'pos_tiles',
                     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
                     'employees', 'settings', 'customers', 'registers',
-                    'suppliers', 'product_suppliers', 'inventory_log',
+                    'suppliers', 'product_suppliers', 'inventory_logs',
                     'orders', 'order_lines', 'payments',
-                    'loyalty_log', 'audit_log', 'shifts', 'cash_movements'
+                    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
                 ];
                 for (const table of tablesToPush) {
                     const rows: any[] = await localDb.select(`SELECT * FROM ${table}`);
@@ -527,31 +530,53 @@ async function runSyncCycle(): Promise<void> {
             'products', 'categories', 'pos_pages', 'pos_tiles',
             'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
             'employees', 'settings', 'customers', 'registers',
-            'suppliers', 'product_suppliers', 'inventory_log',
+            'suppliers', 'product_suppliers', 'inventory_logs',
             'orders', 'order_lines', 'payments',
-            'loyalty_log', 'audit_log', 'shifts', 'cash_movements'
+            'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
         ];
+
+        // Get last sync time to do Delta Syncing
+        const localDb = await sqlite.getDb();
+        const lastSyncRows: any[] = await localDb.select(`SELECT value FROM settings WHERE key = 'last_sync_time'`);
+        const lastSyncTime = lastSyncRows.length > 0 ? lastSyncRows[0].value : null;
+        const newSyncTime = new Date().toISOString();
 
         for (const table of tables) {
             try {
-                const rows = await mysql.mysqlGetAll(table);
-                const idKey = table === 'settings' ? 'key' : 'id';
-                for (const row of rows) {
-                    await sqlite.upsert(table, row, idKey);
+                // Only delta-sync tables that have an updatedAt column
+                let rows: any[] = [];
+                if (lastSyncTime) {
+                    rows = await mysql.mysqlGetUpdatedSince(table, lastSyncTime);
+                } else {
+                    rows = await mysql.mysqlGetAll(table);
                 }
+
+                if (rows.length === 0) continue;
+                
+                const idKey = table === 'settings' ? 'key' : 'id';
+                
+                // Use fast bulkUpsert instead of slow manual loop
+                await sqlite.bulkUpsert(table, rows, idKey);
+                
+                console.log(`database: synced ${rows.length} rows to local cache for ${table}`);
             } catch (e) {
                 // Silently skip failed tables (table may not exist yet)
             }
         }
 
+        // Save the new sync time
+        await sqlite.upsert('settings', { key: 'last_sync_time', value: newSyncTime, updatedAt: newSyncTime }, 'key');
+
         // Rehydrate Svelte stores so the UI reflects latest data
         await hydrateSvelteStores();
 
-        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
         console.log('database: background sync complete ✅');
-    } catch (e) {
+    } catch (e: any) {
         console.warn('database: background sync failed:', e);
-        connectionState.update(s => ({ ...s, mysqlOnline: false }));
+        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
+    } finally {
+        isSyncRunning = false;
     }
 }
 

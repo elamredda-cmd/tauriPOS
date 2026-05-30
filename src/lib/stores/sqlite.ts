@@ -63,6 +63,18 @@ export async function initDb() {
         )
     `);
 
+    // 1. Core tables
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS _offline_queue (
+            id TEXT PRIMARY KEY,
+            table_name TEXT,
+            operation TEXT,
+            data TEXT,
+            id_key TEXT,
+            created_at TEXT
+        )
+    `);
+
     // 4. Tiles Table
     await d.execute(`
         CREATE TABLE IF NOT EXISTS pos_tiles (
@@ -521,6 +533,36 @@ export async function upsert(table: string, obj: any, idKey: string = 'id') {
         : `INSERT INTO ${table} (${columns}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO NOTHING`;
 
     await d.execute(sql, values);
+}
+
+export async function bulkUpsert(table: string, rows: any[], idKey: string = 'id') {
+    if (rows.length === 0) return;
+    const d = await getDb();
+    const validCols = await getTableColumns(table);
+
+    // Filter properties to only those that exist as columns
+    const columns = Object.keys(rows[0]).filter(k => validCols.includes(k));
+    if (columns.length === 0) throw new Error(`bulkUpsert: no valid columns for table ${table}`);
+
+    const placeholders = columns.map(() => '?').join(', ');
+    const updates = columns.filter(k => k !== idKey).map(k => `${k}=excluded.${k}`).join(', ');
+    
+    const sql = updates
+        ? `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO UPDATE SET ${updates}`
+        : `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO NOTHING`;
+
+    // Wrapping all inserts in a single transaction makes SQLite extremely fast
+    await d.execute('BEGIN TRANSACTION');
+    try {
+        for (const row of rows) {
+            const values = columns.map(k => normalizeValue(row[k]));
+            await d.execute(sql, values);
+        }
+        await d.execute('COMMIT');
+    } catch (e) {
+        await d.execute('ROLLBACK');
+        throw e;
+    }
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id') {

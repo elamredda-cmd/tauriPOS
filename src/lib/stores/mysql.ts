@@ -12,7 +12,8 @@
  */
 
 import Database from '@tauri-apps/plugin-sql';
-import type { MysqlConfig } from './connection';
+import { connectionState, type MysqlConfig } from './connection';
+import { get } from 'svelte/store';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -24,11 +25,18 @@ function buildMysqlUri(config: MysqlConfig): string {
     return `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
 }
 
-async function getDb(config?: MysqlConfig): Promise<Database> {
-    if (db) return db;
-    if (!config) throw new Error('mysql: no config provided and no cached connection');
-    db = await Database.load(buildMysqlUri(config));
-    currentDatabase = config.database;
+export async function getDb(config?: MysqlConfig): Promise<Database> {
+    const cfg = config || get(connectionState).mysqlConfig;
+    
+    if (db && cfg && cfg.database === currentDatabase) return db;
+    
+    if (!cfg) {
+        if (!db) throw new Error('MySQL no config provided and no cached connection');
+        return db;
+    }
+
+    db = await Database.load(buildMysqlUri(cfg));
+    currentDatabase = cfg.database;
     return db;
 }
 
@@ -495,6 +503,19 @@ export async function mysqlRemove(table: string, id: string, idKey: string = 'id
 export async function mysqlGetAll(table: string): Promise<any[]> {
     const d = await getDb();
     return await d.select(`SELECT * FROM ${table}`);
+}
+
+/**
+ * Fetch rows updated since a specific date (Delta Sync).
+ */
+export async function mysqlGetUpdatedSince(table: string, sinceDate: string): Promise<any[]> {
+    const d = await getDb();
+    const validCols = await getTableColumns(table);
+    if (validCols.includes('updatedAt')) {
+        return await d.select(`SELECT * FROM ${table} WHERE updatedAt > ?`, [sinceDate]);
+    } else {
+        return await d.select(`SELECT * FROM ${table}`);
+    }
 }
 
 /**

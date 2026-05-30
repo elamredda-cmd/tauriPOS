@@ -25,18 +25,20 @@ export interface MysqlConfig {
     database: string;
 }
 
-export interface ConnectionState {
-    mode: PosMode;
+export interface PosConnectionState {
+    mode: PosMode | null; // null = not selected yet
     mysqlConfig: MysqlConfig | null;
     mysqlOnline: boolean;
+    syncError: string | null;
 }
 
 // ─── Reactive Store ──────────────────────────────────────────────────────────
 
-export const connectionState: Writable<ConnectionState> = writable({
-    mode: 'single',
+export const connectionState = writable<PosConnectionState>({
+    mode: null,
     mysqlConfig: null,
     mysqlOnline: false,
+    syncError: null
 });
 
 // ─── Internal State ──────────────────────────────────────────────────────────
@@ -82,7 +84,7 @@ export async function loadSavedMode(): Promise<PosMode | null> {
                 } catch { /* ignore corrupt JSON */ }
             }
 
-            connectionState.set({ mode, mysqlConfig, mysqlOnline: false });
+            connectionState.set({ mode, mysqlConfig, mysqlOnline: false, syncError: null });
             return mode;
         }
     } catch (e) {
@@ -122,6 +124,7 @@ export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<voi
         mode,
         mysqlConfig: config ?? get(connectionState).mysqlConfig,
         mysqlOnline: false,
+        syncError: null,
     });
 }
 
