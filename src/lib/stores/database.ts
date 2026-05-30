@@ -481,6 +481,44 @@ async function runSyncCycle(): Promise<void> {
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) return;
 
+        // Check if MySQL is empty. If it is, perform an initial upload of local data!
+        try {
+            const countRes: any[] = await mysqlDb.select('SELECT COUNT(*) as count FROM products');
+            if (countRes[0].count === 0) {
+                console.log('database: MariaDB is empty! Starting initial upload of local data...');
+                const localDb = await sqlite.getDb();
+                const tablesToPush = [
+                    'categories', 'products', 'pos_pages', 'pos_tiles',
+                    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+                    'employees', 'settings', 'customers', 'registers',
+                    'suppliers', 'product_suppliers', 'inventory_log',
+                    'orders', 'order_lines', 'payments',
+                    'loyalty_log', 'audit_log', 'shifts', 'cash_movements'
+                ];
+                for (const table of tablesToPush) {
+                    const rows: any[] = await localDb.select(`SELECT * FROM ${table}`);
+                    if (rows.length === 0) continue;
+                    
+                    console.log(`database: Uploading ${rows.length} rows to MariaDB ${table}...`);
+                    if (table === 'products') {
+                        // Bulk insert products to handle the 79k+ records fast
+                        const chunkSize = 500;
+                        for (let i = 0; i < rows.length; i += chunkSize) {
+                            await mysql.mysqlBulkAddProducts(rows.slice(i, i + chunkSize));
+                        }
+                    } else {
+                        const idKey = table === 'settings' ? 'key' : 'id';
+                        for (const row of rows) {
+                            await mysql.mysqlUpsert(table, row, idKey);
+                        }
+                    }
+                }
+                console.log('database: Initial upload complete!');
+            }
+        } catch (e) {
+            console.warn('database: failed to run initial upload:', e);
+        }
+
         // Flush any queued offline operations first
         await flushOfflineQueue();
 
