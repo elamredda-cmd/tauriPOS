@@ -299,3 +299,27 @@
   .receipt-divider { @apply text-center my-2 tracking-[2px]; }
   .receipt-row     { @apply flex justify-between; }
 }
+
+/* Touch-friendly thick scrollbars */
+::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+}
+::-webkit-scrollbar-track {
+    background: var(--bg-card);
+    border-left: 1px solid var(--border-flat);
+    border-top: 1px solid var(--border-flat);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--text-muted);
+    border: 3px solid var(--bg-card);
+    border-radius: 8px;
+    opacity: 0.8;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-main);
+}
+/* Ensure the corner where scrollbars meet is styled */
+::-webkit-scrollbar-corner {
+    background: var(--bg-card);
+}

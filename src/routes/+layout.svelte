@@ -47,7 +47,7 @@
                 // Multi mode: start background sync which immediately
                 // pulls from MySQL → writes to SQLite cache → hydrates stores.
                 console.log("POS: Multi mode — starting background sync…");
-                await startBackgroundSync(30000);
+                await startBackgroundSync();
             } else {
                 // Single mode (or first launch): hydrate from local SQLite.
                 console.log("POS: Hydrating stores from SQLite…");

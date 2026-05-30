@@ -47,7 +47,7 @@
             await initMysqlDb(cfg);
             await saveMode('multi', cfg);
             // Immediately sync from MySQL and hydrate stores
-            await startBackgroundSync(30000);
+            await startBackgroundSync();
             goto('/');
         } catch (err) {
             testResult = 'fail';

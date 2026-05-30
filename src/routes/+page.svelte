@@ -35,6 +35,7 @@
         remove as removeSql,
         getOrCreateTillId,
         getTillName,
+        triggerSync,
     } from "$lib/stores/database";
     import { evaluateCart } from "$lib/utils/discountEngine";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -852,6 +853,9 @@
         } else {
             toast("Sale completed successfully", "success", true);
         }
+
+        // Immediately trigger sync so other tills see this transaction
+        triggerSync();
     }
 </script>
 
@@ -1011,7 +1015,7 @@
         </header>
 
         <!-- POS Pages -->
-        <div class="flex gap-3 overflow-x-auto pb-3 mb-5 scrollbar-hide">
+        <div class="flex gap-3 overflow-x-auto pb-3 mb-5">
             {#each $activePosPages as page}
                 <button
                     class="whitespace-nowrap px-6 py-3 rounded-sm font-semibold text-sm transition-colors {activePageId ===

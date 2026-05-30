@@ -470,8 +470,81 @@ export async function hydrateSvelteStores(): Promise<void> {
 // ─── Background Sync (Multi Mode) ──────────────────────────────────────────
 
 let syncInterval: any = null;
+let fastSyncInterval: any = null;
 
 let isSyncRunning = false;
+let isFastSyncRunning = false;
+
+/** Tables that change during transactions — synced frequently (every 5s). */
+const FAST_SYNC_TABLES = [
+    'orders', 'order_lines', 'payments', 'shifts', 'cash_movements'
+];
+
+/** All tables — synced less frequently (every 60s). */
+const ALL_SYNC_TABLES = [
+    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+    'employees', 'settings', 'customers', 'registers',
+    'suppliers', 'product_suppliers', 'inventory_logs',
+    'orders', 'order_lines', 'payments',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
+];
+
+/**
+ * Run a fast sync cycle that only pulls transaction-related tables
+ * (orders, order_lines, payments, shifts, cash_movements) and rehydrates
+ * the Svelte stores. This runs every 5 seconds for near-real-time updates.
+ */
+export async function runFastSyncCycle(): Promise<void> {
+    if (!isMultiMode() || isFastSyncRunning || isSyncRunning) return;
+    isFastSyncRunning = true;
+    try {
+        const mysqlDb = await getMysqlDb();
+        if (!mysqlDb) return;
+
+        const localDb = await sqlite.getDb();
+        const lastSyncRows: any[] = await localDb.select(`SELECT value FROM settings WHERE key = 'last_fast_sync_time'`);
+        const lastFastSyncTime = lastSyncRows.length > 0 ? lastSyncRows[0].value : null;
+        const newSyncTime = new Date().toISOString();
+
+        let totalChanges = 0;
+
+        for (const table of FAST_SYNC_TABLES) {
+            try {
+                let rows: any[] = [];
+                if (lastFastSyncTime) {
+                    rows = await mysql.mysqlGetUpdatedSince(table, lastFastSyncTime);
+                } else {
+                    rows = await mysql.mysqlGetAll(table);
+                }
+
+                if (rows.length === 0) continue;
+
+                const idKey = table === 'settings' ? 'key' : 'id';
+                await sqlite.bulkUpsert(table, rows, idKey);
+                totalChanges += rows.length;
+            } catch (e) {
+                // Silently skip
+            }
+        }
+
+        // Save fast sync time
+        await sqlite.upsert('settings', { key: 'last_fast_sync_time', value: newSyncTime, updatedAt: newSyncTime }, 'key');
+
+        // Only rehydrate stores if there were actual changes (avoids unnecessary re-renders)
+        if (totalChanges > 0) {
+            console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
+            await hydrateSvelteStores();
+        }
+
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+    } catch (e: any) {
+        // Don't mark offline for fast-sync failures — the full sync will handle that
+        console.warn('database: fast sync failed:', e);
+    } finally {
+        isFastSyncRunning = false;
+    }
+}
 
 /**
  * Run one full sync cycle: flush offline queue → pull MySQL → update
@@ -504,7 +577,6 @@ export async function runSyncCycle(): Promise<void> {
                     
                     console.log(`database: Uploading ${rows.length} rows to MariaDB ${table}...`);
                     if (table === 'products') {
-                        // Bulk insert products to handle the 79k+ records fast
                         const chunkSize = 500;
                         for (let i = 0; i < rows.length; i += chunkSize) {
                             await mysql.mysqlBulkAddProducts(rows.slice(i, i + chunkSize));
@@ -526,24 +598,14 @@ export async function runSyncCycle(): Promise<void> {
         await flushOfflineQueue();
 
         // Pull fresh data from MySQL → update local SQLite cache
-        const tables = [
-            'products', 'categories', 'pos_pages', 'pos_tiles',
-            'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-            'employees', 'settings', 'customers', 'registers',
-            'suppliers', 'product_suppliers', 'inventory_logs',
-            'orders', 'order_lines', 'payments',
-            'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
-        ];
-
         // Get last sync time to do Delta Syncing
         const localDb = await sqlite.getDb();
         const lastSyncRows: any[] = await localDb.select(`SELECT value FROM settings WHERE key = 'last_sync_time'`);
         const lastSyncTime = lastSyncRows.length > 0 ? lastSyncRows[0].value : null;
         const newSyncTime = new Date().toISOString();
 
-        for (const table of tables) {
+        for (const table of ALL_SYNC_TABLES) {
             try {
-                // Only delta-sync tables that have an updatedAt column
                 let rows: any[] = [];
                 if (lastSyncTime) {
                     rows = await mysql.mysqlGetUpdatedSince(table, lastSyncTime);
@@ -554,8 +616,6 @@ export async function runSyncCycle(): Promise<void> {
                 if (rows.length === 0) continue;
                 
                 const idKey = table === 'settings' ? 'key' : 'id';
-                
-                // Use fast bulkUpsert instead of slow manual loop
                 await sqlite.bulkUpsert(table, rows, idKey);
                 
                 console.log(`database: synced ${rows.length} rows to local cache for ${table}`);
@@ -571,7 +631,7 @@ export async function runSyncCycle(): Promise<void> {
         await hydrateSvelteStores();
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
-        console.log('database: background sync complete ✅');
+        console.log('database: full sync complete ✅');
     } catch (e: any) {
         console.warn('database: background sync failed:', e);
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
@@ -581,17 +641,33 @@ export async function runSyncCycle(): Promise<void> {
 }
 
 /**
- * Start periodic background sync from MySQL → SQLite cache → Svelte stores.
- * Runs an immediate sync first, then repeats every intervalMs.
+ * Force an immediate sync cycle. Call this after completing a transaction
+ * so that other tills see the change quickly without waiting for the timer.
  */
-export async function startBackgroundSync(intervalMs: number = 30000): Promise<void> {
-    if (syncInterval) clearInterval(syncInterval);
+export async function triggerSync(): Promise<void> {
+    if (!isMultiMode()) return;
+    // Run a fast sync immediately to push/pull transaction data
+    await runFastSyncCycle();
+}
 
-    // Run immediately so the UI is populated on first load
+/**
+ * Start periodic background sync from MySQL → SQLite cache → Svelte stores.
+ * Runs an immediate full sync first, then:
+ *  - Fast sync (transaction tables only) every 5 seconds
+ *  - Full sync (all tables) every 60 seconds
+ */
+export async function startBackgroundSync(intervalMs: number = 5000): Promise<void> {
+    if (syncInterval) clearInterval(syncInterval);
+    if (fastSyncInterval) clearInterval(fastSyncInterval);
+
+    // Run an immediate full sync so the UI is populated on first load
     await runSyncCycle();
 
-    // Then repeat on an interval
-    syncInterval = setInterval(() => runSyncCycle(), intervalMs);
+    // Fast sync: pull transaction-related tables every 5 seconds
+    fastSyncInterval = setInterval(() => runFastSyncCycle(), intervalMs);
+
+    // Full sync: pull ALL tables every 60 seconds (products, categories, settings, etc.)
+    syncInterval = setInterval(() => runSyncCycle(), 60000);
 }
 
 /** Stop background sync. */
@@ -599,5 +675,9 @@ export function stopBackgroundSync(): void {
     if (syncInterval) {
         clearInterval(syncInterval);
         syncInterval = null;
+    }
+    if (fastSyncInterval) {
+        clearInterval(fastSyncInterval);
+        fastSyncInterval = null;
     }
 }
