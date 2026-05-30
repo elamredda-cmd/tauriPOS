@@ -186,9 +186,9 @@
 
     function getNextOrderNumber(): number {
         const orders = get(ordersDB);
-        // Scoping by tillId mathematically eliminates conflicts across multiple disconnected tills
-        const myOrders = orders.filter(o => o.tillNumber === tillId);
-        const nums = myOrders.map((o) => o.orderNumber || 0);
+        // Only count completed orders (not held ones which have orderNumber 0)
+        const myCompletedOrders = orders.filter(o => o.tillNumber === tillId && o.orderNumber > 0);
+        const nums = myCompletedOrders.map((o) => o.orderNumber);
         
         const settings = get(settingsDB);
         const startSetting = settings.find((s: any) => s.key === 'starting_receipt_number');
@@ -197,8 +197,6 @@
         const nextFromOrders = nums.length > 0 ? Math.max(...nums) + 1 : 1;
         return Math.max(nextFromOrders, startNum);
     }
-
-    $: nextOrderNum = getNextOrderNumber();
 
     onMount(() => {
         const timer = setInterval(() => {
@@ -402,7 +400,7 @@
             shiftId: "",
             customerId: "",
             employeeId: "emp-admin",
-            orderNumber: getNextOrderNumber(),
+            orderNumber: 0,
             type: "sale" as const,
             status: "hold" as const,
             originalOrderId: "",
@@ -1129,12 +1127,12 @@
             <div class="flex flex-col gap-0.5 min-w-[80px]">
                 <span
                     class="text-[10px] md:text-xs font-bold text-text-muted uppercase tracking-wider leading-none"
-                    >Receipt</span
+                    >Till</span
                 >
                 <div class="flex items-center gap-2">
                     <span
                         class="text-sm md:text-base lg:text-lg font-bold text-accent-primary leading-none"
-                        >#{nextOrderNum}</span
+                        >{tillName || tillId}</span
                     >
                     {#if $heldOrders.length > 0}
                         <button
@@ -1850,7 +1848,7 @@
                         on:click={() => retrieveOrder(ho.id)}
                     >
                         <div class="flex justify-between items-center">
-                            <strong>Receipt #{ho.orderNumber}</strong>
+                            <strong>Held Order</strong>
                             <span class="text-text-muted text-[0.8rem]"
                                 >{new Date(ho.createdAt).toLocaleTimeString(
                                     "en-GB",
@@ -1962,7 +1960,7 @@
                                     --------------------------------
                                 </div>
                                 <p class="m-0 text-left">
-                                    Receipt: #{selectedOrder?.orderNumber}
+                                    Receipt: #{selectedOrder?.orderNumber || '—'}
                                 </p>
                                 <p class="m-0 text-left">
                                     Date: {new Date(
