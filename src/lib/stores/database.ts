@@ -383,53 +383,152 @@ export async function getTillPeriodReport(
     return sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
 }
 
+// ─── Svelte Store Hydration ─────────────────────────────────────────────────
+
+import {
+    productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
+    settingsDB, customersDB, storeDB, registersDB, discountsDB,
+    ordersDB, orderLinesDB, paymentsDB, suppliersDB, productSuppliersDB,
+    inventoryLogDB, loyaltyLogDB, auditLogDB, shiftsDB, cashMovementsDB,
+    promoGroupsDB, promoGroupItemsDB
+} from './db';
+import { hydrateTheme } from './theme';
+
+/**
+ * Read all tables from the current data source (MySQL in multi mode,
+ * SQLite in single mode) and push the results into the Svelte stores
+ * that drive the UI. Call this at startup and after every background sync.
+ */
+export async function hydrateSvelteStores(): Promise<void> {
+    console.log('database: hydrating Svelte stores…');
+
+    const [
+        cats, pages, tiles, prods, taxRates, emps, settings, customers,
+        registers, discounts, promoGroups, promoGroupItems,
+        orders, orderLines, payments, suppliers, productSuppliers,
+        inventoryLog, loyaltyLog, auditLog, shifts, cashMovements
+    ] = await Promise.all([
+        getAll('categories'),
+        getAll('pos_pages'),
+        getAll('pos_tiles'),
+        getActiveProducts(),
+        getAll('tax_rates'),
+        getAll('employees'),
+        getAll('settings'),
+        getAll('customers'),
+        getAll('registers'),
+        getAll('discounts'),
+        getAll('promo_groups'),
+        getAll('promo_group_items'),
+        getAll('orders'),
+        getAll('order_lines'),
+        getAll('payments'),
+        getAll('suppliers'),
+        getAll('product_suppliers'),
+        getAll('inventory_log'),
+        getAll('loyalty_log'),
+        getAll('audit_log'),
+        getAll('shifts'),
+        getAll('cash_movements'),
+    ]);
+
+    categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
+    posPagesDB.set(pages);
+    tilesDB.set(tiles);
+    productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
+        'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
+    ])));
+    taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
+    employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
+    settingsDB.set(settings);
+    hydrateTheme(settings);
+    customersDB.set(customers);
+    registersDB.set(registers.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
+    discountsDB.set(discounts.map(d => sqlite.rehydrateBooleans(d, ['isActive', 'autoApply'])));
+    promoGroupsDB.set(promoGroups.map(g => sqlite.rehydrateBooleans(g, ['isActive'])));
+    promoGroupItemsDB.set(promoGroupItems);
+    ordersDB.set(orders);
+    orderLinesDB.set(orderLines);
+    paymentsDB.set(payments);
+    suppliersDB.set(suppliers);
+    productSuppliersDB.set(productSuppliers);
+    inventoryLogDB.set(inventoryLog);
+    loyaltyLogDB.set(loyaltyLog);
+    auditLogDB.set(auditLog);
+    shiftsDB.set(shifts);
+    cashMovementsDB.set(cashMovements);
+
+    // Restore store info from settings
+    const storeInfo = settings.find((s: any) => s.key === 'store_info');
+    if (storeInfo) {
+        try { storeDB.set(JSON.parse(storeInfo.value)); } catch (e) { /* ignore */ }
+    }
+
+    console.log('database: Svelte stores hydrated ✅');
+}
+
 // ─── Background Sync (Multi Mode) ──────────────────────────────────────────
 
 let syncInterval: any = null;
 
 /**
- * Start periodic background sync from MySQL → SQLite cache.
- * Call this after the app initialises in multi mode.
+ * Run one full sync cycle: flush offline queue → pull MySQL → update
+ * local SQLite cache → rehydrate Svelte stores.
  */
-export function startBackgroundSync(intervalMs: number = 30000): void {
+async function runSyncCycle(): Promise<void> {
+    if (!isMultiMode()) return;
+    try {
+        const mysqlDb = await getMysqlDb();
+        if (!mysqlDb) return;
+
+        // Flush any queued offline operations first
+        await flushOfflineQueue();
+
+        // Pull fresh data from MySQL → update local SQLite cache
+        const tables = [
+            'products', 'categories', 'pos_pages', 'pos_tiles',
+            'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+            'employees', 'settings', 'customers', 'registers',
+            'suppliers', 'product_suppliers', 'inventory_log',
+            'orders', 'order_lines', 'payments',
+            'loyalty_log', 'audit_log', 'shifts', 'cash_movements'
+        ];
+
+        for (const table of tables) {
+            try {
+                const rows = await mysql.mysqlGetAll(table);
+                const idKey = table === 'settings' ? 'key' : 'id';
+                for (const row of rows) {
+                    await sqlite.upsert(table, row, idKey);
+                }
+            } catch (e) {
+                // Silently skip failed tables (table may not exist yet)
+            }
+        }
+
+        // Rehydrate Svelte stores so the UI reflects latest data
+        await hydrateSvelteStores();
+
+        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        console.log('database: background sync complete ✅');
+    } catch (e) {
+        console.warn('database: background sync failed:', e);
+        connectionState.update(s => ({ ...s, mysqlOnline: false }));
+    }
+}
+
+/**
+ * Start periodic background sync from MySQL → SQLite cache → Svelte stores.
+ * Runs an immediate sync first, then repeats every intervalMs.
+ */
+export async function startBackgroundSync(intervalMs: number = 30000): Promise<void> {
     if (syncInterval) clearInterval(syncInterval);
 
-    syncInterval = setInterval(async () => {
-        if (!isMultiMode()) return;
-        try {
-            const mysqlDb = await getMysqlDb();
-            if (!mysqlDb) return;
+    // Run immediately so the UI is populated on first load
+    await runSyncCycle();
 
-            // Flush any queued offline operations first
-            await flushOfflineQueue();
-
-            // Pull fresh data from MySQL → update local SQLite cache
-            const tables = [
-                'products', 'categories', 'pos_pages', 'pos_tiles',
-                'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-                'employees', 'settings'
-            ];
-
-            for (const table of tables) {
-                try {
-                    const rows = await mysql.mysqlGetAll(table);
-                    const d = await sqlite.getDb();
-                    // Use a simple strategy: clear and re-insert
-                    // (Only for catalog data, not orders)
-                    const idKey = table === 'settings' ? 'key' : 'id';
-                    for (const row of rows) {
-                        await sqlite.upsert(table, row, idKey);
-                    }
-                } catch (e) {
-                    // Silently skip failed tables
-                }
-            }
-
-            connectionState.update(s => ({ ...s, mysqlOnline: true }));
-        } catch (e) {
-            connectionState.update(s => ({ ...s, mysqlOnline: false }));
-        }
-    }, intervalMs);
+    // Then repeat on an interval
+    syncInterval = setInterval(() => runSyncCycle(), intervalMs);
 }
 
 /** Stop background sync. */

@@ -3,6 +3,7 @@
     import { goto } from '$app/navigation';
     import { saveMode, testMysqlConnection, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
+    import { startBackgroundSync, hydrateSvelteStores } from '$lib/stores/database';
 
     // ── Mode selection ──────────────────────────────────────────
     let selectedMode: 'single' | 'multi' | null = null;
@@ -45,6 +46,8 @@
             const cfg = buildConfig();
             await initMysqlDb(cfg);
             await saveMode('multi', cfg);
+            // Immediately sync from MySQL and hydrate stores
+            await startBackgroundSync(30000);
             goto('/');
         } catch (err) {
             testResult = 'fail';
@@ -57,6 +60,8 @@
         connecting = true;
         try {
             await saveMode('single');
+            // Hydrate stores from local SQLite
+            await hydrateSvelteStores();
             goto('/');
         } catch (err) {
             testMessage = `Error: ${err}`;

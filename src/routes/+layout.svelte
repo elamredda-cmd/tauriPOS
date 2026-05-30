@@ -4,12 +4,12 @@
     import { loadSavedMode } from '$lib/stores/connection';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
-    import { initDb, migrateFromLocalStorage, getAll, getActiveProducts, rehydrateBooleans } from '$lib/stores/sqlite';
+    import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
+    import { hydrateSvelteStores, startBackgroundSync } from '$lib/stores/database';
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
         settingsDB, customersDB, storeDB, registersDB, discountsDB,
-        ordersDB, orderLinesDB, paymentsDB, shiftsDB, cashMovementsDB,
-        suppliersDB, productSuppliersDB, inventoryLogDB, loyaltyLogDB, auditLogDB,
+        ordersDB, orderLinesDB, paymentsDB,
         promoGroupsDB, promoGroupItemsDB
     } from '$lib/stores/db';
     import { get } from 'svelte/store';
@@ -39,94 +39,41 @@
             });
             console.log("POS: Migration done.");
 
-            // 2. Hydrate every store from SQLite.
-            console.log("POS: Hydrating stores...");
-            const [
-                cats, pages, tiles, prods, taxRates, emps, settings, customers,
-                registers, discounts, promoGroups, promoGroupItems,
-                orders, orderLines, payments
-            ] = await Promise.all([
-                getAll('categories'),
-                getAll('pos_pages'),
-                getAll('pos_tiles'),
-                getActiveProducts(),
-                getAll('tax_rates'),
-                getAll('employees'),
-                getAll('settings'),
-                getAll('customers'),
-                getAll('registers'),
-                getAll('discounts'),
-                getAll('promo_groups'),
-                getAll('promo_group_items'),
-                getAll('orders'),
-                getAll('order_lines'),
-                getAll('payments')
-            ]);
-            console.log("POS: Hydration data fetched.");
+            // 2. Check saved POS mode (single / multi).
+            const savedMode = await loadSavedMode();
 
-            // Rehydrate integer flags back into booleans so UI bindings keep working.
-            categoriesDB.set(cats.map(c => rehydrateBooleans(c, ['isActive', 'showOnPos'])));
-            posPagesDB.set(pages);
-            tilesDB.set(tiles);
-            productsDB.set(prods.map(p => rehydrateBooleans(p, [
-                'isActive', 'isWeighable', 'showInGoods', 'showInPos',
-                'trackStock'
-            ])));
-            taxRatesDB.set(taxRates.map(t => rehydrateBooleans(t, ['isDefault'])));
-            employeesDB.set(emps.map(e => rehydrateBooleans(e, ['isActive'])));
-            settingsDB.set(settings);
-            // Restore the user's saved theme preference (if any) before
-            // the rest of the UI mounts, so there's no flash of midnight.
-            hydrateTheme(settings);
-            customersDB.set(customers);
-            registersDB.set(registers.map(r => rehydrateBooleans(r, ['isActive'])));
-            discountsDB.set(discounts.map(d => rehydrateBooleans(d, ['isActive', 'autoApply'])));
-            promoGroupsDB.set(promoGroups.map(g => rehydrateBooleans(g, ['isActive'])));
-            promoGroupItemsDB.set(promoGroupItems);
-            ordersDB.set(orders);
-            orderLinesDB.set(orderLines);
-            paymentsDB.set(payments);
-
-            // Store info lives inside the settings table.
-            const storeInfo = settings.find((s: any) => s.key === 'store_info');
-            if (storeInfo) {
-                try {
-                    storeDB.set(JSON.parse(storeInfo.value));
-                } catch (e) {
-                    console.error("Failed to parse store_info:", e);
-                }
+            // 3. Hydrate stores from the correct data source.
+            if (savedMode === 'multi') {
+                // Multi mode: start background sync which immediately
+                // pulls from MySQL → writes to SQLite cache → hydrates stores.
+                console.log("POS: Multi mode — starting background sync…");
+                await startBackgroundSync(30000);
+            } else {
+                // Single mode (or first launch): hydrate from local SQLite.
+                console.log("POS: Hydrating stores from SQLite…");
+                await hydrateSvelteStores();
             }
 
             // Wipe any legacy LocalStorage data so nothing falls back to it.
             localStorage.clear();
 
-            console.log("POS initialized with SQLite data and LocalStorage cleared.");
+            console.log("POS initialized ✅");
             dbReady = true;
 
-            // Check if initial setup (single vs multi POS) has been completed.
-            // If not, redirect to the setup wizard — but only if we're not
-            // already on the /setup page (avoids an infinite redirect loop).
-            const savedMode = await loadSavedMode();
+            // If no mode has been chosen yet, redirect to setup wizard.
             if (!savedMode && window.location.pathname !== '/setup') {
                 goto('/setup');
             }
         } catch (err) {
-            console.error("Failed to initialize SQLite:", err);
+            console.error("Failed to initialize:", err);
             dbError = String(err);
         }
     });
 
     // Reactive theme application via store subscription.
-    // Avoid $effect here — using a rune flips the file into runes mode,
-    // which makes plain `let dbReady` non-reactive and freezes the loading screen.
-    // Apply to BOTH <html> and <body> so the CSS variable cascade is rooted
-    // at the document element (matches `:root` specificity exactly) and
-    // descendant components can't possibly miss it.
     $: if (typeof document !== 'undefined' && $activeTheme) {
         const targets = [document.documentElement, document.body];
         for (const el of targets) {
-            // Snapshot to a static array first — DOMTokenList is live and
-            // mutating during forEach skips items.
             for (const c of [...el.classList]) {
                 if (c.startsWith('theme-')) el.classList.remove(c);
             }
