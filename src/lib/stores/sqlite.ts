@@ -464,6 +464,21 @@ async function runMigrations() {
 
     // Payments: updatedAt for delta sync
     await addColumnIfMissing('payments', 'updatedAt', 'TEXT');
+
+    // Products: Add all potentially missing fields for older SQLite DBs
+    await addColumnIfMissing('products', 'barcode', 'TEXT');
+    await addColumnIfMissing('products', 'sku', 'TEXT');
+    await addColumnIfMissing('products', 'color', 'TEXT');
+    await addColumnIfMissing('products', 'image', 'TEXT');
+    await addColumnIfMissing('products', 'isWeighable', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'showInPos', 'INTEGER DEFAULT 1');
+    await addColumnIfMissing('products', 'showInGoods', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'goodsSortOrder', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'costPrice', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'stockLevel', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'trackStock', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'allowPriceOverride', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('products', 'updatedAt', 'TEXT');
 }
 
 /** One-shot data migrations (tracked via settings table). */

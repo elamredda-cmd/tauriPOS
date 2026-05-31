@@ -410,6 +410,8 @@
             total,
             tillNumber: tillId,
             notes: "",
+            paymentMethod: "",
+            amountTendered: 0,
             createdAt: timestamp,
             completedAt: "",
             updatedAt: timestamp,
@@ -597,17 +599,17 @@
 
     let showRecentTransactions = false;
     let selectedRecentOrderId: string | null = null;
-    let recentOrders: any[] = [];
+    
+    $: recentOrders = $ordersDB
+        .filter((o) => o.status !== "hold")
+        .sort(
+            (a, b) =>
+                new Date(b.completedAt).getTime() -
+                new Date(a.completedAt).getTime(),
+        )
+        .slice(0, 10);
 
     function openRecentTransactions() {
-        recentOrders = $ordersDB
-            .filter((o) => o.status !== "hold")
-            .sort(
-                (a, b) =>
-                    new Date(b.completedAt).getTime() -
-                    new Date(a.completedAt).getTime(),
-            )
-            .slice(0, 10);
         selectedRecentOrderId =
             recentOrders.length > 0 ? recentOrders[0].id : null;
         showRecentTransactions = true;
@@ -1972,7 +1974,7 @@
                                 </p>
                                 <p class="m-0 text-left">
                                     Date: {new Date(
-                                        selectedOrder?.completedAt,
+                                        selectedOrder?.completedAt || Date.now(),
                                     ).toLocaleString("en-GB")}
                                 </p>
                                 <p class="m-0 text-left">

@@ -238,8 +238,11 @@ export interface Order {
     total: number;           // pence
     tillNumber: string;      // identifies which till processed this order
     notes: string;
+    paymentMethod: string;
+    amountTendered: number;
     createdAt: string;
     completedAt: string;
+    updatedAt: string;
 }
 
 // 15. OrderLine
@@ -259,6 +262,7 @@ export interface OrderLine {
     isPriceOverride: boolean;
     originalPrice: number;   // pence
     notes: string;
+    updatedAt: string;
 }
 
 // 16. Payment
@@ -272,6 +276,7 @@ export interface Payment {
     reference: string;
     changeGiven: number;     // pence
     createdAt: string;
+    updatedAt: string;
 }
 
 // 17. LoyaltyLog
