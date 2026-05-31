@@ -2,7 +2,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId, runSyncCycle } from '$lib/stores/database';
+    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId, runSyncCycle, forceFullSync } from '$lib/stores/database';
     import { connectionState } from '$lib/stores/connection';
 
     let store = { ...$storeDB };
@@ -53,7 +53,7 @@
         if (isSyncing) return;
         isSyncing = true;
         try {
-            await runSyncCycle();
+            await forceFullSync();
             toast('Sync completed successfully!', 'success');
         } catch (e) {
             toast('Sync failed.', 'error');

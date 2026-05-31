@@ -533,7 +533,7 @@ export async function runFastSyncCycle(): Promise<void> {
         const localDb = await sqlite.getDb();
         const lastSyncRows: any[] = await localDb.select(`SELECT value FROM settings WHERE key = 'last_fast_sync_time'`);
         const lastFastSyncTime = lastSyncRows.length > 0 ? lastSyncRows[0].value : null;
-        const newSyncTime = new Date().toISOString();
+        const newSyncTime = await mysql.mysqlGetServerTime();
 
         let totalChanges = 0;
 
@@ -630,7 +630,7 @@ export async function runSyncCycle(): Promise<void> {
         const localDb = await sqlite.getDb();
         const lastSyncRows: any[] = await localDb.select(`SELECT value FROM settings WHERE key = 'last_sync_time'`);
         const lastSyncTime = lastSyncRows.length > 0 ? lastSyncRows[0].value : null;
-        const newSyncTime = new Date().toISOString();
+        const newSyncTime = await mysql.mysqlGetServerTime();
 
         for (const table of ALL_SYNC_TABLES) {
             try {
@@ -707,5 +707,30 @@ export function stopBackgroundSync(): void {
     if (fastSyncInterval) {
         clearInterval(fastSyncInterval);
         fastSyncInterval = null;
+    }
+}
+
+/** 
+ * Wipe local sync memory and force a full 100% download from MariaDB
+ * to repair corrupted or outdated local schemas/data.
+ */
+export async function forceFullSync(): Promise<void> {
+    if (!isMultiMode()) return;
+    console.log('database: forcing FULL sync/repair...');
+    stopBackgroundSync(); // Pause intervals during repair
+    try {
+        const localDb = await sqlite.getDb();
+        await localDb.execute(`DELETE FROM settings WHERE key IN ('last_sync_time', 'last_fast_sync_time')`);
+        
+        // This will now download everything from scratch since there's no last_sync_time
+        await runSyncCycle();
+        
+        console.log('database: full sync repair complete, rehydrating stores...');
+        await hydrateSvelteStores();
+    } catch (e) {
+        console.error('database: full sync repair failed:', e);
+        throw e;
+    } finally {
+        startBackgroundSync(); // Resume normal operations
     }
 }

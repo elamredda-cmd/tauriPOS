@@ -487,25 +487,44 @@ export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id')
     const validCols = await getTableColumns(table);
 
     // Settings table uses `key` as the column name which is a reserved word
-    const keys = Object.keys(obj).filter(k => validCols.includes(k));
-    if (keys.length === 0) {
+    const keys = Object.keys(obj).filter(k => validCols.includes(k) && k !== 'updatedAt');
+    if (keys.length === 0 && !validCols.includes('updatedAt')) {
         throw new Error(`mysqlUpsert: no valid columns for table ${table}`);
     }
     const values = keys.map(k => normalizeValue(obj[k]));
 
-    // Quote column names to handle reserved words like `key`
-    const columns = keys.map(k => `\`${k}\``).join(', ');
-    const placeholders = keys.map(() => '?').join(', ');
+    const columns = keys.map(k => `\`${k}\``);
+    const placeholders = keys.map(() => '?');
     const updates = keys
         .filter(k => k !== idKey)
-        .map(k => `\`${k}\` = VALUES(\`${k}\`)`)
-        .join(', ');
+        .map(k => `\`${k}\` = VALUES(\`${k}\`)`);
 
-    const sql = updates
-        ? `INSERT INTO ${table} (${columns}) VALUES (${placeholders}) ON DUPLICATE KEY UPDATE ${updates}`
-        : `INSERT IGNORE INTO ${table} (${columns}) VALUES (${placeholders})`;
+    // Let MariaDB assign the absolute source of truth timestamp
+    if (validCols.includes('updatedAt')) {
+        const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+        columns.push('`updatedAt`');
+        placeholders.push(timeExpr);
+        updates.push(`\`updatedAt\` = ${timeExpr}`);
+    }
+
+    const columnsStr = columns.join(', ');
+    const placeholdersStr = placeholders.join(', ');
+    const updatesStr = updates.join(', ');
+
+    const sql = updatesStr
+        ? `INSERT INTO ${table} (${columnsStr}) VALUES (${placeholdersStr}) ON DUPLICATE KEY UPDATE ${updatesStr}`
+        : `INSERT IGNORE INTO ${table} (${columnsStr}) VALUES (${placeholdersStr})`;
 
     await d.execute(sql, values);
+}
+
+/**
+ * Get the exact current time from MariaDB to use as the sync baseline
+ */
+export async function mysqlGetServerTime(): Promise<string> {
+    const d = await getDb();
+    const res: any[] = await d.select(`SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ') as t`);
+    return res[0].t;
 }
 
 /**
