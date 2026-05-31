@@ -127,8 +127,12 @@ export async function initDb() {
             discountAmount INTEGER DEFAULT 0,
             taxTotal INTEGER DEFAULT 0,
             total INTEGER DEFAULT 0,
+            tillNumber TEXT DEFAULT '',
+            paymentMethod TEXT DEFAULT '',
+            amountTendered INTEGER DEFAULT 0,
             notes TEXT,
             createdAt TEXT,
+            updatedAt TEXT,
             completedAt TEXT
         )
     `);
@@ -151,6 +155,7 @@ export async function initDb() {
             isPriceOverride INTEGER DEFAULT 0,
             originalPrice INTEGER DEFAULT 0,
             notes TEXT,
+            updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
         )
     `);
