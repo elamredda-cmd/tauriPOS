@@ -171,7 +171,7 @@ fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
 async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error> {
     MySqlPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_secs(2))
+        .acquire_timeout(Duration::from_millis(650))
         .connect(mysql_uri)
         .await
 }

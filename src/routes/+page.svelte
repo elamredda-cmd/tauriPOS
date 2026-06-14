@@ -342,6 +342,9 @@
     $: activePageTiles = $tilesDB
         .filter((t) => t.pageId === activePageId)
         .sort((a, b) => a.position - b.position);
+    $: activeProductById = new Map($activeProducts.map((product) => [product.id, product]));
+    $: productById = new Map($productsDB.map((product) => [product.id, product]));
+    $: activeProductIds = new Set($activeProducts.map((product) => product.id));
 
     $: totalPages = Math.max(
         1,
@@ -361,7 +364,7 @@
         if (!tile) return null;
         return {
             tile,
-            product: $activeProducts.find((p) => p.id === tile.productId),
+            product: activeProductById.get(tile.productId),
         };
     });
 
@@ -374,7 +377,7 @@
         (d) => d.id === selectedManualDiscountId && d.kind === "manual_percent" && d.isActive,
     );
     $: eligiblePromoGroupItems = $promoGroupItemsDB.filter((membership) =>
-        $activeProducts.some((product) => product.id === membership.productId),
+        activeProductIds.has(membership.productId),
     );
     $: cartEval = applyManualPercentageDiscount(
         evaluateCart(
@@ -397,7 +400,7 @@
     let taxTotal = 0;
     let total = 0;
     $: calculatedTaxLines = cart.map((item, i) => {
-        const product = $productsDB.find((p) => p.id === item.id);
+        const product = productById.get(item.id);
         const taxRate = $taxRatesDB.find((t) => t.id === product?.taxRateId)?.rate || 0;
         return calculateTaxLine({
             quantity: item.quantity,

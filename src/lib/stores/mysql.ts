@@ -1051,6 +1051,10 @@ export async function mysqlDeletePosPage(id: string): Promise<void> {
 export async function mysqlAddTile(t: any): Promise<void> {
     const d = await getDb();
     await d.execute(
+        'DELETE FROM pos_tiles WHERE pageId = ? AND position = ? AND id <> ?',
+        [t.pageId, t.position, t.id],
+    );
+    await d.execute(
         `INSERT INTO pos_tiles (id, pageId, productId, position, updatedAt)
          VALUES (?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE

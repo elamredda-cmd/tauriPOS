@@ -1,6 +1,8 @@
 <script lang="ts">
     import { goBack } from '$lib/navigation';
     import { activeTheme, setTheme, type Theme } from '$lib/stores/theme';
+    import { upsert } from '$lib/stores/database';
+    import { now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
 
     const themes: { id: Theme; name: string; color1: string; color2: string; desc: string }[] = [
@@ -13,6 +15,7 @@
 
     async function selectTheme(id: Theme) {
         await setTheme(id);
+        await upsert('settings', { key: 'active_theme', value: id, updatedAt: now() }, 'key');
         toast(`Applied ${id.charAt(0).toUpperCase() + id.slice(1)} theme`);
     }
 </script>

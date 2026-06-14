@@ -799,14 +799,20 @@ export async function commitSale(bundle: SaleBundle): Promise<void> {
             await queueOffline('sale_bundle', 'saleBundle', bundle);
             return;
         }
-        try {
-            if (!config) throw new Error('MariaDB configuration is unavailable');
-            await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle });
-        } catch (e) {
-            console.warn('database: MariaDB sale transaction failed, queuing bundle:', e);
+        if (!config) {
             await queueOffline('sale_bundle', 'saleBundle', bundle);
             connectionState.update(s => ({ ...s, mysqlOnline: false }));
+            return;
         }
+
+        // Keep the cashier flow instant: SQLite already committed the sale,
+        // so the MariaDB write can finish in the background or queue itself.
+        void invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle })
+            .catch(async (e) => {
+                console.warn('database: MariaDB sale transaction failed, queuing bundle:', e);
+                await queueOffline('sale_bundle', 'saleBundle', bundle);
+                connectionState.update(s => ({ ...s, mysqlOnline: false }));
+            });
     }
 }
 

@@ -38,6 +38,7 @@
     $: activePageTiles = $tilesDB
         .filter((t) => t.pageId === activePageId)
         .sort((a, b) => a.position - b.position);
+    $: activeProductById = new Map($activeProducts.map((product) => [product.id, product]));
 
     $: totalPages = Math.max(
         1,
@@ -54,7 +55,7 @@
         if (!tile) return null;
         return {
             tile,
-            product: $activeProducts.find((p) => p.id === tile.productId),
+            product: activeProductById.get(tile.productId),
             absolutePos,
         };
     });

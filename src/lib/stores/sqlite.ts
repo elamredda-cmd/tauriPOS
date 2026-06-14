@@ -1020,6 +1020,10 @@ export async function deletePosPage(id: string) {
 export async function addTile(t: any) {
     const d = await getDb();
     await d.execute(
+        'DELETE FROM pos_tiles WHERE pageId = ? AND position = ? AND id <> ?',
+        [t.pageId, t.position, t.id],
+    );
+    await d.execute(
         `INSERT INTO pos_tiles (id, pageId, productId, position, updatedAt)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
