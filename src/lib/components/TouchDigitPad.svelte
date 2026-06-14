@@ -45,8 +45,8 @@
 
 <style>
     .digit-pad { display: flex; flex-direction: column; gap: .55rem; }
-    .digit-display { min-height: 58px; padding: .7rem 1rem; display: flex; align-items: center; justify-content: center; color: var(--text-main); font-size: 1.65rem; font-weight: 900; letter-spacing: .35em; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); }
-    .digit-display span { color: var(--text-muted); font-size: .85rem; font-weight: 700; letter-spacing: normal; }
+    .digit-display { height: 58px; min-height: 58px; padding: .7rem 1rem; display: flex; align-items: center; justify-content: center; overflow: hidden; color: var(--text-main); font-size: 1.65rem; font-weight: 900; line-height: 1; letter-spacing: .35em; white-space: nowrap; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); }
+    .digit-display span { display: flex; align-items: center; height: 100%; color: var(--text-muted); font-size: .85rem; font-weight: 700; line-height: 1; letter-spacing: normal; }
     .digit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .45rem; }
     .digit-grid.decimal-grid { grid-template-columns: repeat(4, 1fr); }
     .digit-grid button { min-height: 62px; color: var(--text-main); font-size: 1.35rem; font-weight: 900; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); box-shadow: 0 2px 0 color-mix(in srgb, var(--border-flat) 75%, transparent); }
@@ -56,7 +56,7 @@
     .submit:disabled { opacity: .35; }
     @media (max-height: 700px) {
         .digit-grid button { min-height: 48px; }
-        .digit-display { min-height: 46px; font-size: 1.3rem; }
+        .digit-display { height: 46px; min-height: 46px; font-size: 1.3rem; }
         .submit { min-height: 46px; }
     }
 </style>

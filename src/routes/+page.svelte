@@ -387,6 +387,8 @@
     $: activeProductById = new Map($activeProducts.map((product) => [product.id, product]));
     $: productById = new Map($productsDB.map((product) => [product.id, product]));
     $: activeProductIds = new Set($activeProducts.map((product) => product.id));
+    $: employeeById = new Map($employeesDB.map((employee) => [employee.id, employee]));
+    $: registerById = new Map($registersDB.map((register) => [register.id, register]));
 
     $: totalPages = Math.max(
         1,
@@ -1357,20 +1359,15 @@
     }
 
     async function openRecentTransactions() {
-        try {
-            if ($connectionState.mode === "multi" && $connectionState.mysqlOnline) {
-                await triggerSync();
-            }
-            await hydrateSvelteStores();
-            await tick();
-        } catch (e) {
-            console.error("Failed to refresh recent transactions:", e);
-            toast("Could not refresh recent transactions", "error");
-        }
         recentTransactionsPage = 0;
         selectedRecentOrderId =
             allRecentOrders.length > 0 ? allRecentOrders[0].id : null;
         showRecentTransactions = true;
+        if ($connectionState.mode === "multi" && $connectionState.mysqlOnline) {
+            void triggerSync().catch((e) => {
+                console.warn("Failed to refresh recent transactions in background:", e);
+            });
+        }
     }
 
     function printReceipt() {
@@ -2005,7 +2002,7 @@
 
 {#if !$currentEmployee && $employeesDB.length > 0}
     <div class="fixed inset-0 z-[1000] bg-bg-base flex items-center justify-center p-3 md:p-5">
-        <form class="w-full max-w-[780px] max-h-[96vh] overflow-hidden bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]" on:submit|preventDefault={login}>
+        <form class="login-form w-full max-w-[780px] max-h-[96vh] overflow-hidden bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]" on:submit|preventDefault={login}>
             <div>
                 <h1 class="text-2xl font-bold">Staff Sign In</h1>
                 <p class="text-text-muted mt-1">{selectedLoginEmployee ? `Enter the PIN for ${selectedLoginEmployee.name}.` : "Choose your user to open this till."}</p>
@@ -2038,7 +2035,7 @@
                         <strong>{selectedLoginEmployee.name}</strong>
                         <small class="capitalize">{selectedLoginEmployee.role}</small>
                         <p>Use the touch digit pad to enter your secure PIN.</p>
-                        {#if loginError}<p class="text-danger font-semibold">{loginError}</p>{/if}
+                        <p class="login-error text-danger font-semibold" aria-live="polite">{loginError || "\u00A0"}</p>
                         <button type="button" class="btn btn-secondary mt-auto" on:click={() => chooseLoginEmployee("")}>Change user</button>
                     </section>
                     <TouchDigitPad
@@ -3387,8 +3384,8 @@
                                     })}</span
                                 >
                                 <span class="text-[0.75rem] text-text-muted">
-                                    {$registersDB.find((register) => register.id === ro.tillNumber)?.name || ro.tillNumber || "Unknown till"}
-                                    · {$employeesDB.find((employee) => employee.id === ro.employeeId)?.name || "Unknown cashier"}
+                                    {registerById.get(ro.tillNumber)?.name || ro.tillNumber || "Unknown till"}
+                                    · {employeeById.get(ro.employeeId)?.name || "Unknown cashier"}
                                 </span>
                             </div>
                             <div
@@ -3455,10 +3452,10 @@
                                             .filter((line) => line.orderId === selectedRecentOrderId)
                                             .map((line) => ({
                                                 ...line,
-                                                sku: $productsDB.find((product) => product.id === line.productId)?.sku || '',
+                                                sku: productById.get(line.productId)?.sku || '',
                                             }))}
-                                        cashierName={$employeesDB.find((employee) => employee.id === selectedOrder.employeeId)?.name || ''}
-                                        tillName={$registersDB.find((register) => register.id === selectedOrder.tillNumber)?.name || ''}
+                                        cashierName={employeeById.get(selectedOrder.employeeId)?.name || ''}
+                                        tillName={registerById.get(selectedOrder.tillNumber)?.name || ''}
                                         design={receiptDesign}
                                     />
                                 </div>
@@ -3714,12 +3711,20 @@
 />
 
 <style>
-    .login-pin-layout { min-height: 0; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr); gap: 1rem; }
-    .login-person { padding: 1.25rem; display: flex; flex-direction: column; gap: .35rem; border: 1px solid var(--border-flat); border-radius: .8rem; background: var(--bg-panel); }
+    .login-form { min-height: 560px; }
+    .login-pin-layout { min-height: 430px; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr); align-items: stretch; gap: 1rem; }
+    .login-person { min-height: 430px; padding: 1.25rem; display: flex; flex-direction: column; gap: .35rem; border: 1px solid var(--border-flat); border-radius: .8rem; background: var(--bg-panel); }
     .login-person > span { color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
     .login-person > strong { font-size: 1.6rem; }
     .login-person > small, .login-person > p { color: var(--text-muted); }
-    @media (max-width: 650px) { .login-pin-layout { grid-template-columns: 1fr; } .login-person p { display: none; } }
+    .login-error { min-height: 2.75rem; color: var(--danger) !important; }
+    .login-pin-layout :global(.digit-pad) { min-height: 430px; }
+    @media (max-width: 650px) {
+        .login-form { min-height: auto; }
+        .login-pin-layout { min-height: 0; grid-template-columns: 1fr; }
+        .login-person { min-height: 0; }
+        .login-person p:not(.login-error) { display: none; }
+    }
     .scale-workspace { width: min(1180px, 98vw); height: min(760px, 96vh); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
     .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: color-mix(in srgb, var(--bg-card) 94%, transparent); }
     .scale-header h2 { margin: .1rem 0; font-size: 1.55rem; }
