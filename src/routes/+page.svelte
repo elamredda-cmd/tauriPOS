@@ -73,6 +73,9 @@
     let searchQuery = "";
     let scanInput: HTMLInputElement;
     let scannerFocusTimer: ReturnType<typeof setTimeout> | undefined;
+    let scannerBuffer = "";
+    let scannerLastKeyAt = 0;
+    let scannerBufferTimer: ReturnType<typeof setTimeout> | undefined;
     let hasStartedTypingPrice = false;
 
     // Cart
@@ -317,6 +320,42 @@
         }, 0);
     }
 
+    function clearScannerBuffer() {
+        scannerBuffer = "";
+        scannerLastKeyAt = 0;
+        if (scannerBufferTimer) clearTimeout(scannerBufferTimer);
+        scannerBufferTimer = undefined;
+    }
+
+    function handleGlobalScannerKeydown(event: KeyboardEvent) {
+        if (scannerFocusBlocked()) return;
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+
+        const active = document.activeElement as HTMLElement | null;
+        if (active === scanInput) return;
+        if (active?.matches("input, textarea, select, [contenteditable='true']")) return;
+
+        if (event.key === "Enter") {
+            const scanned = scannerBuffer.trim();
+            clearScannerBuffer();
+            if (scanned.length < 4) return;
+            event.preventDefault();
+            searchQuery = scanned;
+            void handleSearch().finally(() => focusScannerSoon(true));
+            return;
+        }
+
+        if (event.key.length !== 1 || !/^[A-Za-z0-9._-]$/.test(event.key)) return;
+
+        const nowMs = Date.now();
+        if (scannerLastKeyAt && nowMs - scannerLastKeyAt > 120) scannerBuffer = "";
+        scannerLastKeyAt = nowMs;
+        scannerBuffer += event.key;
+        if (scannerBuffer.length > 64) scannerBuffer = scannerBuffer.slice(-64);
+        if (scannerBufferTimer) clearTimeout(scannerBufferTimer);
+        scannerBufferTimer = setTimeout(clearScannerBuffer, 350);
+    }
+
     function handlePosPointerUp(event: PointerEvent) {
         const element = event.target as Element | null;
         if (!element || element.closest(".modal-overlay, .touch-input-backdrop, [role='dialog']")) return;
@@ -518,12 +557,15 @@
         });
         getTillName().then(name => { tillName = name; });
         document.addEventListener("pointerup", handlePosPointerUp);
+        document.addEventListener("keydown", handleGlobalScannerKeydown, true);
         focusScannerSoon();
 
         return () => {
             clearInterval(timer);
             if (scannerFocusTimer) clearTimeout(scannerFocusTimer);
+            clearScannerBuffer();
             document.removeEventListener("pointerup", handlePosPointerUp);
+            document.removeEventListener("keydown", handleGlobalScannerKeydown, true);
         };
     });
 

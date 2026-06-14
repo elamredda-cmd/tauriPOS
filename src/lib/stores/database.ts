@@ -1756,6 +1756,11 @@ const FAST_SYNC_TABLES = [
     'pos_pages', 'pos_tiles', 'customers', 'loyalty_logs',
     'discounts', 'promo_groups', 'promo_group_items'
 ];
+const TRANSACTION_SYNC_TABLES = new Set([
+    'orders', 'order_lines', 'payments', 'inventory_logs',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+]);
+const TRANSACTION_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
 
 /** All tables — synced every 10s so product and pricing changes appear quickly. */
 const ALL_SYNC_TABLES = [
@@ -1766,6 +1771,35 @@ const ALL_SYNC_TABLES = [
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
 ];
+
+function overlapWatermark(table: string, since: string | null): string | null {
+    if (!since || !TRANSACTION_SYNC_TABLES.has(table)) return since;
+    const time = new Date(since).getTime();
+    if (!Number.isFinite(time)) return since;
+    return new Date(Math.max(0, time - TRANSACTION_SYNC_OVERLAP_MS)).toISOString();
+}
+
+async function filterRowsNeedingLocalUpsert(table: string, rows: any[], idKey = 'id'): Promise<any[]> {
+    if (rows.length === 0) return rows;
+    if (!TRANSACTION_SYNC_TABLES.has(table)) return rows;
+    const d = await sqlite.getDb();
+    const changed: any[] = [];
+    for (const row of rows) {
+        const rowId = row?.[idKey];
+        if (!rowId) {
+            changed.push(row);
+            continue;
+        }
+        const localRows: any[] = await d.select(
+            `SELECT updatedAt FROM ${table} WHERE ${idKey} = ? LIMIT 1`,
+            [rowId],
+        );
+        if (localRows.length === 0 || String(localRows[0]?.updatedAt || '') !== String(row.updatedAt || '')) {
+            changed.push(row);
+        }
+    }
+    return changed;
+}
 
 /**
  * Run a fast sync cycle that only pulls transaction-related tables
@@ -1787,11 +1821,12 @@ export async function runFastSyncCycle(): Promise<void> {
         for (const table of FAST_SYNC_TABLES) {
             // Per-table watermark: only advances when THIS table's pull succeeds,
             // so a transient error on one table never permanently skips its rows.
-            const since = await getTableWatermark(table);
+            const since = overlapWatermark(table, await getTableWatermark(table));
             try {
-                const rows: any[] = since
+                const pulledRows: any[] = since
                     ? await mysql.mysqlGetUpdatedSince(table, since)
                     : await mysql.mysqlGetAll(table);
+                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows);
 
                 if (rows.length > 0) {
                     await sqlite.bulkUpsert(table, rows, 'id');
@@ -1841,17 +1876,18 @@ export async function runSyncCycle(): Promise<void> {
         let totalChanges = 0;
         for (const table of ALL_SYNC_TABLES) {
             // Per-table watermark: only advances when THIS table's pull succeeds.
-            const since = await getTableWatermark(table);
+            const since = overlapWatermark(table, await getTableWatermark(table));
             try {
-                let rows: any[] = since
+                let pulledRows: any[] = since
                     ? await mysql.mysqlGetUpdatedSince(table, since)
                     : await mysql.mysqlGetAll(table);
 
                 // Never let server settings overwrite device-local config (till_id, creds…).
-                if (table === 'settings') rows = rows.filter((r: any) => isSyncableSetting(r.key));
+                if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
+                const idKey = table === 'settings' ? 'key' : 'id';
+                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows, idKey);
 
                 if (rows.length > 0) {
-                    const idKey = table === 'settings' ? 'key' : 'id';
                     await sqlite.bulkUpsert(table, rows, idKey);
                     totalChanges += rows.length;
                     console.log(`database: synced ${rows.length} rows to local cache for ${table}`);
