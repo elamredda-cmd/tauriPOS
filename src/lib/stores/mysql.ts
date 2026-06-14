@@ -1095,14 +1095,17 @@ export async function mysqlBatchUpdateGoodsMenu(
     const ids = changes.map(() => '?').join(', ');
     const boolCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
     const orderCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    const stampCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
     await d.execute(
         `UPDATE products SET
             showInGoods = CASE id ${boolCases} ELSE showInGoods END,
-            goodsSortOrder = CASE id ${orderCases} ELSE goodsSortOrder END
+            goodsSortOrder = CASE id ${orderCases} ELSE goodsSortOrder END,
+            updatedAt = CASE id ${stampCases} ELSE updatedAt END
          WHERE id IN (${ids})`,
         [
             ...changes.flatMap(c => [c.id, c.showInGoods ? 1 : 0]),
             ...changes.flatMap(c => [c.id, c.goodsSortOrder]),
+            ...changes.flatMap(c => [c.id, c.updatedAt]),
             ...changes.map(c => c.id),
         ]
     );
