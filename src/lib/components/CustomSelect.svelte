@@ -20,9 +20,11 @@
 </script>
 
 <div class="relative w-full flex flex-col gap-1.5" use:clickOutside={() => isOpen = false}>
-    {#if label}<label class="text-sm text-text-muted font-medium">{label}</label>{/if}
+    {#if label}<span class="text-sm text-text-muted font-medium">{label}</span>{/if}
     <button 
         class="w-full h-12 px-4 flex items-center justify-between bg-bg-panel border rounded-sm text-text-main text-base cursor-pointer text-left transition-colors {isOpen ? 'border-accent-primary' : 'border-border-flat hover:border-accent-primary'}" 
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
         on:click={() => isOpen = !isOpen}
     >
         <span>{selectedLabel}</span>
@@ -30,9 +32,11 @@
     </button>
 
     {#if isOpen}
-        <div class="absolute top-[calc(100%+4px)] left-0 right-0 z-[1000] max-h-60 overflow-y-auto border border-border-flat shadow-[var(--shadow)] rounded-sm bg-bg-panel">
+        <div role="listbox" class="absolute top-[calc(100%+4px)] left-0 right-0 z-[1000] max-h-60 overflow-y-auto border border-border-flat shadow-[var(--shadow)] rounded-sm bg-bg-panel">
             {#each options as opt}
                 <button 
+                    role="option"
+                    aria-selected={value === opt.value}
                     class="w-full p-3.5 flex items-center justify-between bg-bg-card text-text-main text-base cursor-pointer text-left border-b border-border-flat last:border-b-0 hover:bg-bg-card-hover transition-colors {value === opt.value ? 'bg-accent-primary/10 text-accent-primary font-semibold' : ''}" 
                     on:click={() => select(opt.value)}
                 >

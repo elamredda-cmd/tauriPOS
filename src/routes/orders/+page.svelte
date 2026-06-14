@@ -1,6 +1,7 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { ordersDB, orderLinesDB, paymentsDB, formatMoney, getEmployeeName } from '$lib/stores/db';
+    import { getScaleSaleDisplay } from '$lib/scaleSale';
 
     let expandedId = '';
     function toggle(id: string) { expandedId = expandedId === id ? '' : id; }
@@ -37,10 +38,11 @@
                             <thead><tr><th class="!bg-bg-panel">Product</th><th class="!bg-bg-panel">Qty</th><th class="!bg-bg-panel">Unit</th><th class="!bg-bg-panel">Discount</th><th class="!bg-bg-panel">Tax</th><th class="!bg-bg-panel">Line Total</th></tr></thead>
                             <tbody>
                                 {#each getLines(o.id) as line}
+                                {@const scaleDisplay = getScaleSaleDisplay(line.notes, line.quantity, line.unitPrice, line.originalPrice)}
                                 <tr>
                                     <td>{line.productName}{line.isPriceOverride?' ⚡':''}</td>
-                                    <td>{line.quantity}</td>
-                                    <td>{formatMoney(line.unitPrice)}</td>
+                                    <td>{scaleDisplay.label}</td>
+                                    <td>{scaleDisplay.kind === 'weight' ? `${formatMoney(line.originalPrice)}/kg` : formatMoney(line.unitPrice)}</td>
                                     <td>{line.discountAmount>0?formatMoney(line.discountAmount):'-'}</td>
                                     <td>{formatMoney(line.taxAmount)}</td>
                                     <td class="money">{formatMoney(line.lineTotal)}</td>
@@ -65,5 +67,3 @@
         </tbody>
     </table>
 </MgmtPage>
-
-

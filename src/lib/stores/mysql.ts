@@ -27,9 +27,9 @@ function buildMysqlUri(config: MysqlConfig): string {
 
 export async function getDb(config?: MysqlConfig): Promise<Database> {
     const cfg = config || get(connectionState).mysqlConfig;
-    
+
     if (db && cfg && cfg.database === currentDatabase) return db;
-    
+
     if (!cfg) {
         if (!db) throw new Error('MySQL no config provided and no cached connection');
         return db;
@@ -64,10 +64,12 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             name TEXT NOT NULL,
             sku TEXT,
             barcode TEXT,
+            scalePlu TEXT,
             price INT NOT NULL,
             costPrice INT DEFAULT 0,
             stockLevel INT DEFAULT 0,
             trackStock INT DEFAULT 0,
+            allowPriceOverride INT DEFAULT 0,
             isWeighable INT DEFAULT 0,
             showInGoods INT DEFAULT 0,
             goodsSortOrder INT DEFAULT 0,
@@ -133,9 +135,12 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             name TEXT NOT NULL,
             phone TEXT,
             email TEXT,
+            postcode TEXT,
+            loyaltyCode VARCHAR(32),
             loyaltyPoints INT DEFAULT 0,
             notes TEXT,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -147,6 +152,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             customerId VARCHAR(36),
             employeeId VARCHAR(36),
             orderNumber INT,
+            receiptKey VARCHAR(100) UNIQUE,
             type TEXT,
             status TEXT,
             originalOrderId VARCHAR(36),
@@ -203,6 +209,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             id VARCHAR(36) PRIMARY KEY,
             name TEXT NOT NULL,
             pin TEXT,
+            pinHash TEXT,
             role TEXT,
             isActive INT DEFAULT 1,
             createdAt TEXT
@@ -253,7 +260,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             maxApplications INT,
             startAt TEXT,
             endAt TEXT,
-            priority INT DEFAULT 0
+            priority INT DEFAULT 0,
+            updatedAt TEXT
         )
     `);
 
@@ -265,7 +273,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             startAt TEXT,
             endAt TEXT,
             isActive INT DEFAULT 1,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -275,6 +284,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             id VARCHAR(36) PRIMARY KEY,
             groupId VARCHAR(36) NOT NULL,
             productId VARCHAR(36) NOT NULL,
+            updatedAt TEXT,
             FOREIGN KEY(groupId) REFERENCES promo_groups(id) ON DELETE CASCADE,
             FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
         )
@@ -286,14 +296,19 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             id VARCHAR(36) PRIMARY KEY,
             registerId VARCHAR(36),
             employeeId VARCHAR(36),
+            closedByEmployeeId VARCHAR(36),
             openedAt TEXT,
             closedAt TEXT,
             openingFloat INT,
             expectedCash INT,
             actualCash INT,
             cashDifference INT,
+            expectedCard INT,
+            actualCard INT,
+            cardDifference INT,
             status TEXT,
-            notes TEXT
+            notes TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -317,7 +332,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             orderId VARCHAR(36),
             pointsChange INT,
             reason TEXT,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -405,20 +421,124 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
+    // 25. Tombstones — records deleted rows so deletions propagate to other tills
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS tombstones (
+            id VARCHAR(150) PRIMARY KEY,
+            table_name VARCHAR(64) NOT NULL,
+            row_id VARCHAR(64) NOT NULL,
+            deletedAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
     // ─── Migrations for existing databases ─────────────────────────────────
     const migrations = [
+        // Orders
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS amountTendered INT DEFAULT 0`,
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS tillNumber TEXT DEFAULT ''`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS paymentMethod TEXT DEFAULT ''`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS receiptKey VARCHAR(100)`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS originalOrderId VARCHAR(36)`,
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS discountId VARCHAR(36)`,
+
+        // Order Lines
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS costPrice INT DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS discountId VARCHAR(36)`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS discountAmount INT DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS taxRate DOUBLE DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS taxAmount INT DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS isPriceOverride INT DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS originalPrice INT DEFAULT 0`,
+        `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS notes TEXT`,
         `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+
+        // Payments
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cashAmount INT DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cardAmount INT DEFAULT 0`,
+
+        // Products
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS sku TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS scalePlu TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS color TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS image TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS isWeighable INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInPos INT DEFAULT 1`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInGoods INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS goodsSortOrder INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS costPrice INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS stockLevel INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS trackStock INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS allowPriceOverride INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE products MODIFY COLUMN barcode VARCHAR(255) NULL`,
+        `ALTER TABLE products MODIFY COLUMN scalePlu VARCHAR(255) NULL`,
+        `ALTER TABLE products MODIFY COLUMN sku VARCHAR(255) NULL`,
+
+        // Discounts
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'manual_percent'`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS autoApply INT DEFAULT 0`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS groupId VARCHAR(36)`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS minQuantity INT DEFAULT 1`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS secondPrice INT DEFAULT 0`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS bundleQuantity INT DEFAULT 0`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS bundlePrice INT DEFAULT 0`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS maxApplications INT`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS startAt TEXT`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS endAt TEXT`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS priority INT DEFAULT 0`,
+        `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+
+        // updatedAt on every remaining synced table so delta sync works for all
+        `ALTER TABLE categories ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE pos_pages ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE pos_tiles ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE tax_rates ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE customers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE customers ADD COLUMN IF NOT EXISTS postcode TEXT`,
+        `ALTER TABLE customers ADD COLUMN IF NOT EXISTS loyaltyCode VARCHAR(32)`,
+        `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE employees ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE employees ADD COLUMN IF NOT EXISTS pinHash TEXT`,
+        `ALTER TABLE registers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE product_suppliers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE inventory_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE promo_groups ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE promo_group_items ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS closedByEmployeeId VARCHAR(36) DEFAULT ''`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS expectedCard INT DEFAULT 0`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS actualCard INT DEFAULT 0`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS cardDifference INT DEFAULT 0`,
+        `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS openRegisterId VARCHAR(36)
+            AS (CASE WHEN status = 'open' THEN registerId ELSE NULL END) PERSISTENT`,
+        `ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`
     ];
+    const migrationFailures: string[] = [];
     for (const sql of migrations) {
-        try { await d.execute(sql); } catch { /* column may already exist */ }
+        try {
+            await d.execute(sql);
+        } catch (e) {
+            migrationFailures.push(`${sql}: ${e}`);
+        }
     }
-    // Bust column cache after migrations
-    delete tableColumnsCache['orders'];
-    delete tableColumnsCache['order_lines'];
-    delete tableColumnsCache['payments'];
+    if (migrationFailures.length > 0) {
+        throw new Error(`MariaDB schema migration failed:\n${migrationFailures.join('\n')}`);
+    }
+    // Bust the entire column cache after migrations so new columns are seen
+    for (const k of Object.keys(tableColumnsCache)) delete tableColumnsCache[k];
+
+    await ensureSyncTimestampTriggers(d);
+    await cleanupDuplicateProductIdentifiers(d);
+    await cleanupDuplicatePromotionMemberships(d);
+    await cleanupDuplicateOpenShifts(d);
+    await ensureDeleteTombstoneTriggers(d);
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
     // MariaDB supports CREATE INDEX IF NOT EXISTS from 10.5+.  We wrap each
@@ -426,6 +546,10 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     const indexes = [
         `CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode(255))`,
         `CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu(255))`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_barcode ON products(barcode)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_scale_plu ON products(scalePlu)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_sku ON products(sku)`,
         `CREATE INDEX IF NOT EXISTS idx_products_category ON products(categoryId)`,
         `CREATE INDEX IF NOT EXISTS idx_products_active ON products(isActive)`,
         `CREATE INDEX IF NOT EXISTS idx_tiles_page ON pos_tiles(pageId)`,
@@ -434,12 +558,15 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_inv_logs_product ON inventory_logs(productId)`,
         `CREATE INDEX IF NOT EXISTS idx_promo_group_items_group ON promo_group_items(groupId)`,
         `CREATE INDEX IF NOT EXISTS idx_promo_group_items_product ON promo_group_items(productId)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_group_product ON promo_group_items(groupId, productId)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_completed ON orders(completedAt(255))`,
         `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status(255))`,
         `CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method(255))`,
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
         `CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber(255))`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(openRegisterId)`,
     ];
 
     for (const sql of indexes) {
@@ -447,6 +574,111 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     }
 
     console.log('MySQL/MariaDB database initialized successfully!');
+}
+
+const TIMESTAMP_SYNC_TABLES = [
+    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+    'employees', 'settings', 'customers', 'registers',
+    'suppliers', 'product_suppliers', 'inventory_logs',
+    'orders', 'order_lines', 'payments',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'tombstones',
+];
+
+/**
+ * MariaDB is shared by the tills and external apps. Stamp writes at the
+ * database boundary so every client participates in delta sync consistently.
+ */
+async function ensureSyncTimestampTriggers(d: Database): Promise<void> {
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    for (const table of TIMESTAMP_SYNC_TABLES) {
+        await d.execute(
+            `UPDATE ${table} SET updatedAt = ${stamp} WHERE updatedAt IS NULL OR updatedAt = ''`
+        );
+        await d.execute(
+            `CREATE TRIGGER IF NOT EXISTS pos_stamp_${table}_insert
+             BEFORE INSERT ON ${table} FOR EACH ROW SET NEW.updatedAt = ${stamp}`
+        );
+        await d.execute(
+            `CREATE TRIGGER IF NOT EXISTS pos_stamp_${table}_update
+             BEFORE UPDATE ON ${table} FOR EACH ROW SET NEW.updatedAt = ${stamp}`
+        );
+    }
+}
+
+const DELETE_SYNC_TABLES = [
+    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+    'employees', 'customers', 'registers', 'suppliers', 'product_suppliers',
+    'inventory_logs', 'orders', 'order_lines', 'payments',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+];
+
+/** Make deletes performed by Android or another MariaDB client visible to tills. */
+async function ensureDeleteTombstoneTriggers(d: Database): Promise<void> {
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    for (const table of DELETE_SYNC_TABLES) {
+        await d.execute(
+            `CREATE TRIGGER IF NOT EXISTS pos_delete_${table}
+             AFTER DELETE ON ${table} FOR EACH ROW
+             INSERT INTO tombstones (id, table_name, row_id, deletedAt, updatedAt)
+             VALUES (CONCAT('${table}:', OLD.id), '${table}', OLD.id, ${stamp}, ${stamp})
+             ON DUPLICATE KEY UPDATE deletedAt = ${stamp}, updatedAt = ${stamp}`
+        );
+    }
+}
+
+async function cleanupDuplicatePromotionMemberships(d: Database): Promise<void> {
+    await d.execute(`
+        DELETE duplicate FROM promo_group_items duplicate
+        INNER JOIN promo_group_items keeper
+            ON duplicate.groupId = keeper.groupId
+            AND duplicate.productId = keeper.productId
+            AND duplicate.id < keeper.id
+    `);
+}
+
+async function cleanupDuplicateOpenShifts(d: Database): Promise<void> {
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    await d.execute(`
+        UPDATE shifts duplicate
+        INNER JOIN shifts keeper
+            ON duplicate.registerId = keeper.registerId
+            AND duplicate.status = 'open'
+            AND keeper.status = 'open'
+            AND duplicate.id < keeper.id
+        SET duplicate.status = 'closed',
+            duplicate.closedAt = COALESCE(NULLIF(duplicate.closedAt, ''), ${stamp}),
+            duplicate.notes = CASE
+                WHEN COALESCE(duplicate.notes, '') = '' THEN 'Automatically closed duplicate open till shift'
+                ELSE duplicate.notes
+            END,
+            duplicate.updatedAt = ${stamp}
+    `);
+}
+
+async function cleanupDuplicateProductIdentifiers(d: Database): Promise<void> {
+    await d.execute(`UPDATE products SET barcode = NULL WHERE barcode IS NOT NULL AND TRIM(barcode) = ''`);
+    await d.execute(`UPDATE products SET scalePlu = NULL WHERE scalePlu IS NOT NULL AND TRIM(scalePlu) = ''`);
+    await d.execute(`UPDATE products SET sku = NULL WHERE sku IS NOT NULL AND TRIM(sku) = ''`);
+    for (const column of ['barcode', 'scalePlu', 'sku']) {
+        const duplicates: any[] = await d.select(
+            `SELECT \`${column}\` AS value FROM products
+             WHERE \`${column}\` IS NOT NULL AND \`${column}\` <> ''
+             GROUP BY \`${column}\` HAVING COUNT(*) > 1`,
+        );
+        for (const duplicate of duplicates) {
+            const rows: any[] = await d.select(
+                `SELECT id FROM products WHERE \`${column}\` = ?
+                 ORDER BY COALESCE(updatedAt, createdAt, '') DESC, id DESC`,
+                [duplicate.value],
+            );
+            for (const row of rows.slice(1)) {
+                await d.execute(`UPDATE products SET \`${column}\` = NULL WHERE id = ?`, [row.id]);
+            }
+        }
+    }
 }
 
 // ─── Column Introspection ────────────────────────────────────────────────────
@@ -484,6 +716,7 @@ function normalizeValue(v: any): any {
  */
 export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
     const d = await getDb();
+    if (table === 'products') obj = normalizeProductIdentifiers(obj);
     const validCols = await getTableColumns(table);
 
     // Settings table uses `key` as the column name which is a reserved word
@@ -516,6 +749,55 @@ export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id')
         : `INSERT IGNORE INTO ${table} (${columnsStr}) VALUES (${placeholdersStr})`;
 
     await d.execute(sql, values);
+}
+
+/** Refuse to replay an offline row over a newer server edit. */
+export async function mysqlSafeOfflineUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    const d = await getDb();
+    const validCols = await getTableColumns(table);
+    if (obj.updatedAt && validCols.includes('updatedAt')) {
+        const rows: any[] = await d.select(
+            `SELECT updatedAt FROM ${table} WHERE \`${idKey}\` = ? LIMIT 1`,
+            [obj[idKey]]
+        );
+        const serverStamp = rows[0]?.updatedAt;
+        if (serverStamp && String(serverStamp) > String(obj.updatedAt)) {
+            throw new Error(`SYNC_CONFLICT: server ${table}/${obj[idKey]} is newer`);
+        }
+    }
+    if (table === 'products') {
+        try {
+            await mysqlSaveProductStrict(obj);
+        } catch (error) {
+            if (isProductIdentifierConflict(error)) {
+                throw new Error(`SYNC_CONFLICT: ${String(error)}`);
+            }
+            throw error;
+        }
+    } else {
+        try {
+            await mysqlUpsert(table, obj, idKey);
+        } catch (error) {
+            const message = String(error).toLowerCase();
+            if (table === 'promo_group_items' && message.includes('duplicate entry')) {
+                // Another till already saved the same group/product membership.
+                // Delta sync will replace this till's stale random row ID.
+                return;
+            }
+            if (message.includes('duplicate entry')) {
+                throw new Error(`SYNC_CONFLICT: ${String(error)}`);
+            }
+            throw error;
+        }
+    }
+}
+
+function isProductIdentifierConflict(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return message.includes('duplicate entry')
+        || message.includes('uq_products_barcode')
+        || message.includes('uq_products_scale_plu')
+        || message.includes('uq_products_sku');
 }
 
 /**
@@ -564,19 +846,12 @@ export async function mysqlSearchProduct(query: string): Promise<any | null> {
     const q = query.trim();
     if (!q) return null;
 
-    // 1. Exact barcode
-    let rows: any[] = await d.select('SELECT * FROM products WHERE barcode = ? LIMIT 1', [q]);
-    if (rows.length > 0) return rows[0];
-
-    // 2. Exact SKU
-    rows = await d.select('SELECT * FROM products WHERE sku = ? LIMIT 1', [q]);
-    if (rows.length > 0) return rows[0];
-
-    // 3. Partial name
-    rows = await d.select('SELECT * FROM products WHERE name LIKE ? LIMIT 1', [`%${q}%`]);
-    if (rows.length > 0) return rows[0];
-
-    return null;
+    // Main POS scanner lookup: only a 100% barcode match should add an item.
+    const rows: any[] = await d.select(
+        'SELECT * FROM products WHERE isActive = 1 AND showInPos = 1 AND barcode = ? LIMIT 1',
+        [q],
+    );
+    return rows[0] || null;
 }
 
 /**
@@ -602,16 +877,131 @@ export async function mysqlGetTileProducts(): Promise<any[]> {
 // ─── Product helpers ─────────────────────────────────────────────────────────
 
 export async function mysqlAddProduct(p: any): Promise<void> {
-    await mysqlUpsert('products', p);
+    await mysqlSaveProductStrict(p);
 }
 
 export async function mysqlUpdateProduct(p: any): Promise<void> {
-    await mysqlUpsert('products', p);
+    await mysqlSaveProductStrict(p);
+}
+
+/** Update selected fields without overwriting fields changed by another device. */
+export async function mysqlUpdateProductFields(
+    patch: Record<string, any>,
+    expected?: Record<string, any>,
+): Promise<void> {
+    const d = await getDb();
+    const p = normalizeProductIdentifiers(patch);
+    const validCols = await getTableColumns('products');
+    const keys = Object.keys(p).filter((key) => key !== 'id' && key !== 'updatedAt' && validCols.includes(key));
+    if (!p.id || keys.length === 0) throw new Error('mysqlUpdateProductFields: product id and fields are required');
+    const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    const assignments = keys.map((key) => `\`${key}\` = ?`);
+    if (validCols.includes('updatedAt')) assignments.push(`\`updatedAt\` = ${timeExpr}`);
+    const expectedProduct = expected ? normalizeProductIdentifiers(expected) : null;
+    const expectedKeys = expectedProduct
+        ? keys.filter((key) => Object.prototype.hasOwnProperty.call(expectedProduct, key))
+        : [];
+    const expectedClause = expectedKeys.map((key) => `\`${key}\` <=> ?`).join(' AND ');
+    const result = await d.execute(
+        `UPDATE products SET ${assignments.join(', ')} WHERE id = ?${expectedClause ? ` AND ${expectedClause}` : ''}`,
+        [
+            ...keys.map((key) => normalizeValue(p[key])),
+            p.id,
+            ...expectedKeys.map((key) => normalizeValue(expectedProduct![key])),
+        ],
+    );
+    if (expectedClause && result.rowsAffected === 0) {
+        throw new Error('PRODUCT_EDIT_CONFLICT: This item was changed on another device. Refresh the items list and try again.');
+    }
+}
+
+async function mysqlSaveProductStrict(product: any): Promise<void> {
+    const d = await getDb();
+    const p = normalizeProductIdentifiers(product);
+    const validCols = await getTableColumns('products');
+    const keys = Object.keys(p).filter((key) => validCols.includes(key) && key !== 'updatedAt');
+    const exists: any[] = await d.select('SELECT id FROM products WHERE id = ? LIMIT 1', [p.id]);
+    const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+
+    if (exists.length > 0) {
+        const updateKeys = keys.filter((key) => key !== 'id');
+        const assignments = updateKeys.map((key) => `\`${key}\` = ?`);
+        if (validCols.includes('updatedAt')) assignments.push(`\`updatedAt\` = ${timeExpr}`);
+        await d.execute(
+            `UPDATE products SET ${assignments.join(', ')} WHERE id = ?`,
+            [...updateKeys.map((key) => normalizeValue(p[key])), p.id],
+        );
+        return;
+    }
+
+    const columns = keys.map((key) => `\`${key}\``);
+    const placeholders = keys.map(() => '?');
+    if (validCols.includes('updatedAt')) {
+        columns.push('`updatedAt`');
+        placeholders.push(timeExpr);
+    }
+    await d.execute(
+        `INSERT INTO products (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`,
+        keys.map((key) => normalizeValue(p[key])),
+    );
+}
+
+function normalizeProductIdentifiers<T extends Record<string, any>>(product: T): T {
+    return {
+        ...product,
+        ...(Object.prototype.hasOwnProperty.call(product, 'barcode')
+            ? { barcode: String(product.barcode || '').trim() || null }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(product, 'scalePlu')
+            ? { scalePlu: String(product.scalePlu || '').trim() || null }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(product, 'sku')
+            ? { sku: String(product.sku || '').trim() || null }
+            : {}),
+    };
+}
+
+/**
+ * Atomically change a product's stock level by `delta` (negative to decrement)
+ * on the server. Deltas commute, so concurrent sales across tills accumulate
+ * correctly. Bumps updatedAt (server clock) so the change propagates via delta sync.
+ */
+export async function mysqlAdjustStock(productId: string, delta: number): Promise<void> {
+    if (!delta) return;
+    const d = await getDb();
+    await d.execute(
+        `UPDATE products SET stockLevel = stockLevel + ?,
+         updatedAt = DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?`,
+        [delta, productId]
+    );
+}
+
+/** Set an item's counted stock only if no till changed it after counting began. */
+export async function mysqlSetStockLevel(
+    productId: string,
+    stockLevel: number,
+    expectedStockLevel: number,
+): Promise<void> {
+    const d = await getDb();
+    const result = await d.execute(
+        `UPDATE products SET stockLevel = ?,
+         updatedAt = DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+         WHERE id = ? AND stockLevel = ?`,
+        [stockLevel, productId, expectedStockLevel]
+    );
+    if (result.rowsAffected === 0) {
+        throw new Error('STOCK_COUNT_CONFLICT: Stock changed on another till while this item was open.');
+    }
 }
 
 export async function mysqlDeleteProduct(id: string): Promise<void> {
     const d = await getDb();
-    await d.execute('UPDATE products SET isActive = 0 WHERE id = ?', [id]);
+    // Bump updatedAt (server clock) so the soft-delete propagates via delta sync.
+    await d.execute(
+        `UPDATE products SET isActive = 0, showInGoods = 0, goodsSortOrder = 0,
+         updatedAt = DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?`,
+        [id]
+    );
 }
 
 export async function mysqlBulkAddProducts(products: any[]): Promise<void> {
@@ -641,10 +1031,14 @@ export async function mysqlBulkAddProducts(products: any[]): Promise<void> {
 export async function mysqlSavePosPage(p: any): Promise<void> {
     const d = await getDb();
     await d.execute(
-        `INSERT INTO pos_pages (id, name, position, color)
-         VALUES (?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE name = VALUES(name), position = VALUES(position), color = VALUES(color)`,
-        [p.id, p.name, p.position, p.color]
+        `INSERT INTO pos_pages (id, name, position, color, updatedAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+            name = VALUES(name),
+            position = VALUES(position),
+            color = VALUES(color),
+            updatedAt = VALUES(updatedAt)`,
+        [p.id, p.name, p.position, p.color, p.updatedAt]
     );
 }
 
@@ -657,8 +1051,14 @@ export async function mysqlDeletePosPage(id: string): Promise<void> {
 export async function mysqlAddTile(t: any): Promise<void> {
     const d = await getDb();
     await d.execute(
-        'INSERT INTO pos_tiles (id, pageId, productId, position) VALUES (?, ?, ?, ?)',
-        [t.id, t.pageId, t.productId, t.position]
+        `INSERT INTO pos_tiles (id, pageId, productId, position, updatedAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+            pageId = VALUES(pageId),
+            productId = VALUES(productId),
+            position = VALUES(position),
+            updatedAt = VALUES(updatedAt)`,
+        [t.id, t.pageId, t.productId, t.position, t.updatedAt]
     );
 }
 
@@ -688,49 +1088,69 @@ export async function mysqlBatchUpdateGoodsMenu(
 ): Promise<void> {
     if (changes.length === 0) return;
     const d = await getDb();
-    await d.execute('START TRANSACTION');
-    try {
-        for (const c of changes) {
-            await d.execute(
-                `UPDATE products SET showInGoods = ?, goodsSortOrder = ?, updatedAt = ? WHERE id = ?`,
-                [c.showInGoods ? 1 : 0, c.goodsSortOrder, c.updatedAt, c.id]
-            );
-        }
-        await d.execute('COMMIT');
-    } catch (e) {
-        await d.execute('ROLLBACK');
-        throw e;
-    }
+    const ids = changes.map(() => '?').join(', ');
+    const boolCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    const orderCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    await d.execute(
+        `UPDATE products SET
+            showInGoods = CASE id ${boolCases} ELSE showInGoods END,
+            goodsSortOrder = CASE id ${orderCases} ELSE goodsSortOrder END
+         WHERE id IN (${ids})`,
+        [
+            ...changes.flatMap(c => [c.id, c.showInGoods ? 1 : 0]),
+            ...changes.flatMap(c => [c.id, c.goodsSortOrder]),
+            ...changes.map(c => c.id),
+        ]
+    );
 }
 
 // ─── Report Queries ──────────────────────────────────────────────────────────
 // These are identical SQL to sqlite.ts — MariaDB supports the same date()
 // function and COALESCE/CASE expressions.
 
-import type { SalesOverview, PaymentBreakdown, TopProduct } from './sqlite';
+import type {
+    SalesOverview, PaymentBreakdown, TopProduct, TillReportOption,
+    TillSalesSummary, DailySalesPoint, BusinessSummary, EmployeeSalesSummary
+} from './sqlite';
+
+function reportDateBounds(startDate: string, endDate: string): [string, string] {
+    const start = new Date(`${startDate}T00:00:00`);
+    const end = new Date(`${endDate}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    return [start.toISOString(), end.toISOString()];
+}
 
 export async function mysqlGetSalesOverview(
     startDate: string, endDate: string, tillNumber?: string
 ): Promise<SalesOverview> {
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
 
     const revRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue, COUNT(*) as totalTransactions
+        `SELECT CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as totalTransactions,
+            CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as refundTransactions
          FROM orders o
-         WHERE o.status = 'completed' AND DATE(o.completedAt) >= ? AND DATE(o.completedAt) <= ?${tillFilter}`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         params
     );
 
-    const itemParams: any[] = [startDate, endDate];
+    const itemParams: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) itemParams.push(tillNumber);
     const itemRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(ol.quantity), 0) as totalItems
+        `SELECT CAST(COALESCE(SUM(ol.quantity), 0) AS SIGNED) as totalItems
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
-         WHERE o.status = 'completed' AND DATE(o.completedAt) >= ? AND DATE(o.completedAt) <= ?${tillFilter}`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         itemParams
     );
 
@@ -739,8 +1159,9 @@ export async function mysqlGetSalesOverview(
     return {
         totalRevenue: rev.totalRevenue || 0,
         totalTransactions: rev.totalTransactions || 0,
+        refundTransactions: rev.refundTransactions || 0,
         avgTransactionValue: rev.totalTransactions > 0
-            ? Math.round(rev.totalRevenue / rev.totalTransactions) : 0,
+            ? Math.round((rev.saleRevenue || 0) / rev.totalTransactions) : 0,
         totalItemsSold: items.totalItems || 0,
     };
 }
@@ -750,24 +1171,42 @@ export async function mysqlGetPaymentBreakdown(
 ): Promise<PaymentBreakdown> {
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
 
     const rows: any[] = await d.select(
         `SELECT
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as totalCash,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as totalCard,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
-            COALESCE(SUM(o.total), 0) as totalAmount,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN 1 ELSE 0 END), 0) as cashTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN 1 ELSE 0 END), 0) as cardTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN 1 ELSE 0 END), 0) as splitTxCount,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
+            CAST(COALESCE(SUM(p.totalCash), 0) AS SIGNED) as totalCash,
+            CAST(COALESCE(SUM(p.totalCard), 0) AS SIGNED) as totalCard,
+            CAST(COALESCE(SUM(p.totalLoyalty), 0) AS SIGNED) as totalLoyalty,
+            CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) AS SIGNED) as unrecordedAmount,
+            CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalAmount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cashTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cardTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as splitTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as loyaltyTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) AS SIGNED) as unrecordedTxCount
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed' AND DATE(o.completedAt) >= ? AND DATE(o.completedAt) <= ?${tillFilter}`,
+         LEFT JOIN (
+            SELECT orderId,
+                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
+                SUM(amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                ) as totalLoyalty,
+                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+            FROM payments GROUP BY orderId
+         ) p ON o.id = p.orderId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         params
     );
 
@@ -775,9 +1214,11 @@ export async function mysqlGetPaymentBreakdown(
     return {
         totalCash: r.totalCash || 0,
         totalCard: r.totalCard || 0,
+        totalLoyalty: r.totalLoyalty || 0,
         cashTxCount: r.cashTxCount || 0,
         cardTxCount: r.cardTxCount || 0,
         splitTxCount: r.splitTxCount || 0,
+        loyaltyTxCount: r.loyaltyTxCount || 0,
         totalAmount: r.totalAmount || 0,
         unrecordedAmount: r.unrecordedAmount || 0,
         unrecordedTxCount: r.unrecordedTxCount || 0,
@@ -794,22 +1235,26 @@ export async function mysqlGetTopProducts(
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const orderClause = sortBy === 'revenue' ? 'totalRevenue DESC' : 'qtySold DESC';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
     params.push(limit);
 
     const rows: any[] = await d.select(
         `SELECT
-            ol.productName as name,
-            COALESCE(p.sku, '') as sku,
-            SUM(ol.quantity) as qtySold,
-            SUM(ol.lineTotal) as totalRevenue,
-            ROUND(AVG(ol.unitPrice)) as avgPrice
+            CAST(ol.productName AS CHAR) as name,
+            CAST(COALESCE(p.sku, '') AS CHAR) as sku,
+            CAST(SUM(ol.quantity) AS SIGNED) as qtySold,
+            CAST(SUM(ol.lineTotal) AS SIGNED) as totalRevenue,
+            CAST(ROUND(SUM(ol.lineTotal) / NULLIF(SUM(ol.quantity), 0)) AS SIGNED) as avgPrice
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
          LEFT JOIN products p ON ol.productId = p.id
-         WHERE o.status = 'completed' AND DATE(o.completedAt) >= ? AND DATE(o.completedAt) <= ?${tillFilter}
-         GROUP BY ol.productId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}
+         GROUP BY ol.productId, ol.productName, p.sku
+         HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY ${orderClause}
          LIMIT ?`,
         params
@@ -827,27 +1272,39 @@ export async function mysqlGetTopProducts(
 export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
     const d = await getDb();
     const nowStr = new Date().toISOString();
-    const dateFilter = date ? ` AND DATE(o.completedAt) = ?` : '';
-    const params: any[] = date ? [date] : [];
-
     const rows: any[] = await d.select(
-        `SELECT
-            DATE(o.completedAt) as day,
-            COALESCE(o.tillNumber, '') as till,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as cashTotal,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as cardTotal,
-            COALESCE(SUM(o.total), 0) as totalSales,
-            COUNT(DISTINCT o.id) as txCount
+        `SELECT o.completedAt, COALESCE(o.tillNumber, '') as till, CAST(o.type AS CHAR) as type,
+            CAST(COALESCE(SUM((SELECT SUM(CASE
+                WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount)
+                WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END)
+                FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cashTotal,
+            CAST(COALESCE(SUM((SELECT SUM(CASE
+                WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount)
+                WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END)
+                FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cardTotal,
+            CAST(o.total AS SIGNED) as totalSales
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed'${dateFilter}
-         GROUP BY day, till`,
-        params
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+         GROUP BY o.id, o.completedAt, o.tillNumber, o.total`
     );
 
-    for (const r of rows) {
+    const grouped = new Map<string, { day: string; till: string; cashTotal: number; cardTotal: number; totalSales: number; txCount: number }>();
+    for (const row of rows) {
+        const completed = new Date(row.completedAt);
+        const day = `${completed.getFullYear()}-${String(completed.getMonth() + 1).padStart(2, '0')}-${String(completed.getDate()).padStart(2, '0')}`;
+        if (date && day !== date) continue;
+        const key = `${day}\u0000${row.till || ''}`;
+        const summary = grouped.get(key) || { day, till: row.till || '', cashTotal: 0, cardTotal: 0, totalSales: 0, txCount: 0 };
+        summary.cashTotal += Number(row.cashTotal || 0);
+        summary.cardTotal += Number(row.cardTotal || 0);
+        summary.totalSales += Number(row.totalSales || 0);
+        if (row.type !== 'return') summary.txCount++;
+        grouped.set(key, summary);
+    }
+
+    for (const r of grouped.values()) {
         await d.execute(
             `INSERT INTO daily_sales_summary (date, tillNumber, cashTotal, cardTotal, totalSales, transactionCount, updatedAt)
              VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -878,11 +1335,10 @@ export async function mysqlSaveReportMarker(
 ): Promise<void> {
     const d = await getDb();
     const id = crypto.randomUUID();
-    const nowStr = new Date().toISOString();
     await d.execute(
         `INSERT INTO till_report_markers (id, tillNumber, type, markerTime, periodStart, periodEnd, createdAt)
          VALUES (?, ?, 'period', ?, ?, ?, ?)`,
-        [id, tillNumber, nowStr, periodStart, periodEnd, nowStr]
+        [id, tillNumber, periodEnd, periodStart, periodEnd, new Date().toISOString()]
     );
 }
 
@@ -922,6 +1378,150 @@ export async function mysqlGetAllTillNumbers(): Promise<string[]> {
     return rows.map(r => r.tillNumber);
 }
 
+export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT CAST(o.tillNumber AS CHAR) as id, CAST(MAX(r.name) AS CHAR) as name, MIN(o.orderNumber) as minOrderNumber
+         FROM orders o LEFT JOIN registers r ON r.id = o.tillNumber
+         WHERE o.tillNumber IS NOT NULL AND o.tillNumber != ''
+         GROUP BY o.tillNumber ORDER BY MIN(o.orderNumber), o.tillNumber`
+    );
+    const usedNames = new Map<string, number>();
+    return rows.map((row, index) => {
+        const sequence = Math.floor((row.minOrderNumber || 0) / 1_000_000);
+        const baseName = row.name?.trim() || (sequence > 0 ? `Till ${sequence}` : `Till ${index + 1}`);
+        const occurrence = (usedNames.get(baseName) || 0) + 1;
+        usedNames.set(baseName, occurrence);
+        return { id: row.id, name: occurrence === 1 ? baseName : `${baseName} (${occurrence})` };
+    });
+}
+
+export async function mysqlGetTillSalesSummaries(startDate: string, endDate: string): Promise<TillSalesSummary[]> {
+    const d = await getDb();
+    const options = await mysqlGetTillReportOptions();
+    const bounds = reportDateBounds(startDate, endDate);
+    const rows: any[] = await d.select(
+        `SELECT CAST(o.tillNumber AS CHAR) as id,
+            CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as netSales,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) AS SIGNED) as grossSales,
+            CAST(ABS(COALESCE(SUM(CASE WHEN o.total < 0 THEN o.total ELSE 0 END), 0)) AS SIGNED) as refunds,
+            CAST(COALESCE(SUM(o.taxTotal), 0) AS SIGNED) as taxTotal,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as transactions,
+            CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as refundTransactions,
+            CAST(COALESCE(SUM((SELECT SUM(ol.quantity) FROM order_lines ol WHERE ol.orderId = o.id)), 0) AS SIGNED) as itemsSold,
+            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cashTotal,
+            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cardTotal,
+            CAST(COALESCE(SUM((SELECT SUM(p.amount
+                - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END
+                - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END
+            ) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as loyaltyTotal
+         FROM orders o
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?
+         GROUP BY o.tillNumber ORDER BY netSales DESC`,
+        bounds
+    );
+    return rows.map((row, index) => ({
+        id: row.id || '',
+        name: options.find(option => option.id === row.id)?.name || `Till ${index + 1}`,
+        netSales: row.netSales || 0, grossSales: row.grossSales || 0, refunds: row.refunds || 0,
+        taxTotal: row.taxTotal || 0, transactions: row.transactions || 0,
+        refundTransactions: row.refundTransactions || 0, itemsSold: row.itemsSold || 0,
+        cashTotal: row.cashTotal || 0, cardTotal: row.cardTotal || 0, loyaltyTotal: row.loyaltyTotal || 0,
+    }));
+}
+
+export async function mysqlGetDailySalesTrend(startDate: string, endDate: string, tillNumber?: string): Promise<DailySalesPoint[]> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT completedAt, CAST(total AS SIGNED) as total, CAST(type AS CHAR) as type
+         FROM orders WHERE status IN ('completed','refunded','partially_refunded','voided')
+           AND status != 'voided'
+           AND NOT (type = 'return' AND COALESCE(notes, '') LIKE 'Void of receipt %')
+           AND completedAt >= ? AND completedAt < ?${tillFilter}
+         ORDER BY completedAt`,
+        params
+    );
+    const grouped = new Map<string, DailySalesPoint>();
+    for (const row of rows) {
+        const completed = new Date(row.completedAt);
+        const date = `${completed.getFullYear()}-${String(completed.getMonth() + 1).padStart(2, '0')}-${String(completed.getDate()).padStart(2, '0')}`;
+        const point = grouped.get(date) || { date, netSales: 0, transactions: 0 };
+        point.netSales += Number(row.total || 0);
+        if (row.type !== 'return') point.transactions++;
+        grouped.set(date, point);
+    }
+    return [...grouped.values()];
+}
+
+export async function mysqlGetBusinessSummary(startDate: string, endDate: string, tillNumber?: string): Promise<BusinessSummary> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' AND o.status != 'voided' THEN o.total + o.discountAmount ELSE 0 END), 0) AS SIGNED) as grossSales,
+            CAST(ABS(COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') NOT LIKE 'Void of receipt %' THEN o.total ELSE 0 END), 0)) AS SIGNED) as refunds,
+            CAST(ABS(COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %' THEN o.total ELSE 0 END), 0)) AS SIGNED) as voids,
+            CAST(COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %' THEN 1 ELSE 0 END), 0) AS SIGNED) as voidTransactions,
+            CAST(COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %') THEN o.total ELSE 0 END), 0) AS SIGNED) as netSales,
+            CAST(COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %') THEN o.taxTotal ELSE 0 END), 0) AS SIGNED) as taxTotal,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' AND o.status != 'voided' THEN o.discountAmount ELSE 0 END), 0) AS SIGNED) as discountTotal,
+            CAST(COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+                THEN (SELECT SUM(ol.quantity * ol.costPrice) FROM order_lines ol WHERE ol.orderId = o.id) ELSE 0 END), 0) AS SIGNED) as costTotal
+         FROM orders o
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
+        params
+    );
+    const row = rows[0] || {};
+    const netSales = row.netSales || 0;
+    const costTotal = row.costTotal || 0;
+    return {
+        grossSales: row.grossSales || 0, refunds: row.refunds || 0,
+        voids: row.voids || 0, voidTransactions: row.voidTransactions || 0, netSales,
+        taxTotal: row.taxTotal || 0, discountTotal: row.discountTotal || 0,
+        costTotal, grossProfit: netSales - (row.taxTotal || 0) - costTotal,
+    };
+}
+
+export async function mysqlGetEmployeeSalesSummaries(startDate: string, endDate: string, tillNumber?: string): Promise<EmployeeSalesSummary[]> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT o.employeeId, CAST(COALESCE(MAX(e.name), 'Unknown employee') AS CHAR) as employeeName,
+            CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as netSales,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) AS SIGNED) as grossSales,
+            CAST(ABS(COALESCE(SUM(CASE WHEN o.total < 0 THEN o.total ELSE 0 END), 0)) AS SIGNED) as refunds,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as transactions,
+            CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as refundTransactions
+         FROM orders o LEFT JOIN employees e ON e.id = o.employeeId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}
+         GROUP BY o.employeeId ORDER BY netSales DESC`,
+        params
+    );
+    return rows.map(row => ({
+        employeeId: row.employeeId || '', employeeName: row.employeeName || 'Unknown employee',
+        netSales: row.netSales || 0, grossSales: row.grossSales || 0, refunds: row.refunds || 0,
+        transactions: row.transactions || 0,
+        refundTransactions: row.refundTransactions || 0,
+        avgTransaction: row.transactions > 0 ? Math.round((row.saleRevenue || 0) / row.transactions) : 0,
+    }));
+}
+
 export async function mysqlGetTillPeriodReport(
     tillNumber: string,
     startTime: string,
@@ -931,15 +1531,24 @@ export async function mysqlGetTillPeriodReport(
 
     // Overview
     const revRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue, COUNT(*) as totalTransactions
+        `SELECT CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
+            CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as totalTransactions,
+            CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as refundTransactions
          FROM orders o
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const itemRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(ol.quantity), 0) as totalItems
+        `SELECT CAST(COALESCE(SUM(ol.quantity), 0) AS SIGNED) as totalItems
          FROM order_lines ol JOIN orders o ON ol.orderId = o.id
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const rev = revRows[0] || {};
@@ -947,36 +1556,57 @@ export async function mysqlGetTillPeriodReport(
     const overview: SalesOverview = {
         totalRevenue: rev.totalRevenue || 0,
         totalTransactions: rev.totalTransactions || 0,
+        refundTransactions: rev.refundTransactions || 0,
         avgTransactionValue: (rev.totalTransactions || 0) > 0
-            ? Math.round((rev.totalRevenue || 0) / rev.totalTransactions) : 0,
+            ? Math.round((rev.saleRevenue || 0) / rev.totalTransactions) : 0,
         totalItemsSold: items.totalItems || 0,
     };
 
     // Payment breakdown
     const bRows: any[] = await d.select(
         `SELECT
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as totalCash,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as totalCard,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
-            COALESCE(SUM(o.total), 0) as totalAmount,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN 1 ELSE 0 END), 0) as cashTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN 1 ELSE 0 END), 0) as cardTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN 1 ELSE 0 END), 0) as splitTxCount,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
+            CAST(COALESCE(SUM(p.totalCash), 0) AS SIGNED) as totalCash,
+            CAST(COALESCE(SUM(p.totalCard), 0) AS SIGNED) as totalCard,
+            CAST(COALESCE(SUM(p.totalLoyalty), 0) AS SIGNED) as totalLoyalty,
+            CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) AS SIGNED) as unrecordedAmount,
+            CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalAmount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cashTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cardTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as splitTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as loyaltyTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) AS SIGNED) as unrecordedTxCount
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         LEFT JOIN (
+            SELECT orderId,
+                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
+                SUM(amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                ) as totalLoyalty,
+                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+            FROM payments GROUP BY orderId
+         ) p ON o.id = p.orderId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
         totalCash: b.totalCash || 0,
         totalCard: b.totalCard || 0,
+        totalLoyalty: b.totalLoyalty || 0,
         cashTxCount: b.cashTxCount || 0,
         cardTxCount: b.cardTxCount || 0,
         splitTxCount: b.splitTxCount || 0,
+        loyaltyTxCount: b.loyaltyTxCount || 0,
         totalAmount: b.totalAmount || 0,
         unrecordedAmount: b.unrecordedAmount || 0,
         unrecordedTxCount: b.unrecordedTxCount || 0,
@@ -985,16 +1615,20 @@ export async function mysqlGetTillPeriodReport(
     // Top products
     const tpRows: any[] = await d.select(
         `SELECT
-            ol.productName as name,
-            COALESCE(pr.sku, '') as sku,
-            SUM(ol.quantity) as qtySold,
-            SUM(ol.lineTotal) as totalRevenue,
-            ROUND(AVG(ol.unitPrice)) as avgPrice
+            CAST(ol.productName AS CHAR) as name,
+            CAST(COALESCE(pr.sku, '') AS CHAR) as sku,
+            CAST(SUM(ol.quantity) AS SIGNED) as qtySold,
+            CAST(SUM(ol.lineTotal) AS SIGNED) as totalRevenue,
+            CAST(ROUND(SUM(ol.lineTotal) / NULLIF(SUM(ol.quantity), 0)) AS SIGNED) as avgPrice
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
          LEFT JOIN products pr ON ol.productId = pr.id
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?
-         GROUP BY ol.productId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?
+         GROUP BY ol.productId, ol.productName, pr.sku
+         HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY qtySold DESC
          LIMIT 10`,
         [tillNumber, startTime, endTime]

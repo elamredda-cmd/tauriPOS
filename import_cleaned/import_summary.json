@@ -1,0 +1,44 @@
+{
+  "categories": 67,
+  "products": 10410,
+  "customers": 841,
+  "duplicate_barcodes_blanked": 4,
+  "products_skipped": 3,
+  "uncategorised_products": 6798,
+  "sample_duplicate_barcodes": [
+    [
+      "2",
+      "079581184065",
+      "34927"
+    ],
+    [
+      "37190",
+      "5900397745827",
+      "37123"
+    ],
+    [
+      "21890",
+      "5941466006111",
+      "41061"
+    ],
+    [
+      "43377",
+      "5901588401263",
+      "43378"
+    ]
+  ],
+  "sample_skipped_products": [
+    [
+      "41532",
+      "blank name"
+    ],
+    [
+      "3221",
+      "blank name"
+    ],
+    [
+      "43470",
+      "blank name"
+    ]
+  ]
+}

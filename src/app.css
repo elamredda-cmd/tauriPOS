@@ -178,12 +178,21 @@
  * Edit padding/sizing once here and every page picks it up.
  * ───────────────────────────────────────────────────────────── */
 @layer base {
+  *, *::before, *::after { box-sizing: border-box; }
   body {
     @apply font-sans bg-bg-base text-text-main h-screen w-screen overflow-hidden select-none;
+    font-variant-numeric: tabular-nums;
   }
-  input, textarea, select { @apply font-sans text-text-main; }
+  input, textarea, select {
+    @apply font-sans text-text-main;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+  }
   h1, h2, h3, h4, h5, h6 { @apply font-serif font-semibold; }
-  button { @apply font-sans cursor-pointer border-0 outline-none text-text-main transition-colors; }
+  button {
+    @apply font-sans cursor-pointer border-0 outline-none text-text-main transition-colors;
+    font-variant-numeric: tabular-nums;
+  }
   a { @apply no-underline text-inherit; }
 
   ::-webkit-scrollbar { @apply w-1.5 h-1.5; }
@@ -202,10 +211,11 @@
   .flat-card  {
     @apply bg-bg-card border border-border-flat rounded-md transition-colors hover:bg-bg-card-hover;
     box-shadow: var(--card-shadow);
+    min-width: 0;
   }
 
   /* Buttons */
-  .btn          { @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-sm font-semibold text-base; }
+  .btn          { @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-sm font-semibold text-base whitespace-nowrap; min-height: 48px; }
   .btn-primary  { @apply bg-accent-primary text-white hover:bg-accent-primary-hover; }
   .btn-secondary{ @apply bg-bg-card text-text-main border border-border-flat hover:bg-bg-card-hover; }
   .btn-ghost    { @apply bg-transparent text-text-muted hover:text-text-main hover:bg-bg-card; }
@@ -214,28 +224,30 @@
   .btn-icon     { @apply flex items-center justify-center w-11 h-11 bg-bg-card border border-border-flat text-text-main rounded-sm hover:bg-bg-card-hover; }
 
   /* Tables */
-  .tbl { @apply w-full border-collapse text-left; }
-  .tbl th { @apply px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]; }
-  .tbl td { @apply px-3 py-3 border-b border-border-flat text-[0.9rem]; }
+  .tbl { @apply w-full border-collapse text-left; min-width: max-content; }
+  .tbl th { @apply px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5] whitespace-nowrap; height: 48px; }
+  .tbl td { @apply px-3 py-3 border-b border-border-flat text-[0.9rem]; height: 58px; font-variant-numeric: tabular-nums; }
   .tbl tbody tr:hover td { @apply bg-bg-card-hover; }
   .tbl .empty-row td { @apply text-center py-10 text-text-muted; }
 
   /* Form fields */
-  .field { @apply flex flex-col gap-1.5; }
-  .field label { @apply text-[0.85rem] text-text-muted font-medium; }
+  .field { @apply flex flex-col gap-1.5; min-width: 0; }
+  .field label { @apply text-[0.85rem] text-text-muted font-medium; min-height: 20px; }
   .field input, .field select, .field textarea {
-    @apply bg-bg-panel border border-border-flat text-text-main px-3 py-2.5 rounded-sm text-[0.95rem] outline-none font-sans;
+    @apply bg-bg-panel border border-border-flat text-text-main px-3 py-2.5 rounded-sm text-[0.95rem] outline-none font-sans w-full;
   }
+  .field input, .field select { height: 44px; }
   .field input:focus, .field select:focus, .field textarea:focus { @apply border-accent-primary; }
   .field textarea { @apply resize-y min-h-[60px]; }
   .field input[type="color"] { @apply h-10 cursor-pointer p-0.5; }
   .field-row { @apply flex items-center gap-2 cursor-pointer text-[0.9rem] text-text-main; }
   .field-row input[type="checkbox"] { @apply w-[18px] h-[18px] accent-accent-primary; }
-  .form-grid { @apply grid grid-cols-2 gap-4; }
+  .form-grid { @apply grid grid-cols-2 gap-4; align-content: start; }
+  .form-grid > * { min-width: 0; }
   .span-2 { @apply col-span-2; }
 
   /* Tags / swatches */
-  .tag { @apply inline-block bg-bg-base px-2.5 py-1 rounded-full text-[0.8rem] border border-border-flat; }
+  .tag { @apply inline-block bg-bg-base px-2.5 py-1 rounded-full text-[0.8rem] border border-border-flat whitespace-nowrap; min-width: 76px; text-align: center; }
   .swatch { @apply w-6 h-6 rounded border border-white/10; }
 
   /* Action button row */
@@ -245,15 +257,16 @@
 
   /* Misc */
   .mono  { @apply font-mono text-[0.85rem] text-text-muted; }
-  .money { @apply font-bold text-success; }
+  .money { @apply font-bold text-success whitespace-nowrap; font-variant-numeric: tabular-nums; }
 
   /* Tabbed nav (used by /discounts and any future tabbed page) */
-  .tabs { @apply flex bg-bg-panel border border-border-flat rounded-sm overflow-hidden; }
-  .tab-btn { @apply bg-transparent border-0 text-text-muted px-4 py-2 cursor-pointer text-[0.9rem] font-medium hover:text-text-main; }
+  .tabs { @apply flex bg-bg-panel border border-border-flat rounded-sm overflow-hidden; min-height: 44px; }
+  .tab-btn { @apply bg-transparent border-0 text-text-muted px-4 py-2 cursor-pointer text-[0.9rem] font-medium hover:text-text-main whitespace-nowrap; min-width: 112px; }
   .tab-btn.active { @apply bg-accent-primary text-white; }
 
   /* Header actions container + empty-state placeholder */
-  .hdr-actions { @apply flex gap-3 items-center; }
+  .hdr-actions { @apply flex gap-3 items-center justify-end; min-height: 48px; }
+  .hdr-actions > .btn { min-width: 180px; }
   .placeholder { @apply p-12 text-center text-text-muted text-base; }
 
   /* Settings-style cards (used by /settings and any future config page) */
@@ -277,6 +290,32 @@
   .modal-close    { @apply bg-transparent text-text-muted text-[1.2rem]; }
   .modal-body     { @apply flex flex-col gap-4; }
   .modal-footer   { @apply flex justify-end gap-3 mt-2.5; }
+
+  /* Stable application layout: headers and content keep their positions while data changes. */
+  .management-header {
+    @apply grid items-center gap-5;
+    grid-template-columns: minmax(260px, 1fr) minmax(0, auto);
+    min-height: 52px;
+  }
+  .management-title, .management-actions { min-width: 0; }
+  .management-title h1 {
+    @apply truncate;
+    line-height: 1.2;
+  }
+  .management-actions { @apply justify-self-end items-center; }
+  .management-content {
+    min-height: 0;
+    overflow: auto;
+    scrollbar-gutter: stable both-edges;
+  }
+  .app-modal-panel { min-height: 260px; }
+  .app-modal-header { min-height: 65px; flex: 0 0 auto; }
+  .app-modal-header h2 { @apply truncate; }
+  .app-modal-content {
+    min-height: 0;
+    scrollbar-gutter: stable;
+  }
+  .app-modal-footer { min-height: 81px; flex: 0 0 auto; }
 
   /* Standalone flat input (outside .field grids) */
   .flat-input { @apply bg-bg-panel border border-border-flat text-text-main px-4 py-3 rounded-sm text-base outline-none focus:border-accent-primary; }
@@ -322,4 +361,46 @@
 /* Ensure the corner where scrollbars meet is styled */
 ::-webkit-scrollbar-corner {
     background: var(--bg-card);
+}
+
+/* Checkout responsiveness for older/smaller Windows touchscreens. */
+.payment-action {
+    min-width: 0;
+    padding-inline: .25rem;
+    font-size: clamp(.68rem, 1.45vw, 1.15rem);
+    letter-spacing: clamp(.02em, .15vw, .09em);
+    white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+    .pos-cart { width: clamp(238px, 32vw, 270px) !important; }
+    .pos-products { padding: .45rem !important; }
+    .pos-checkout-shell .payment-action { font-size: .72rem; letter-spacing: .02em; }
+    .management-page { padding: .75rem !important; }
+    .management-header {
+        grid-template-columns: minmax(0, 1fr);
+        gap: .65rem;
+        margin-bottom: .75rem !important;
+    }
+    .management-actions { justify-self: stretch; overflow-x: auto; }
+    .management-actions > * { flex: 0 0 auto; }
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+    .form-grid > .span-2 { grid-column: span 1; }
+    .items-management-page { padding: .75rem !important; }
+    .items-management-header { align-items: stretch !important; flex-direction: column; gap: .65rem !important; margin-bottom: .75rem !important; }
+    .items-management-header > div:last-child { max-width: none !important; flex-wrap: wrap; justify-content: flex-start !important; }
+    .items-management-header > div:last-child > div { min-width: min(100%, 260px); }
+    .tiles-management-page > header { padding: .75rem !important; gap: .65rem; flex-wrap: wrap; }
+}
+
+@media (max-height: 680px) {
+    .pos-products { padding-block: .35rem !important; }
+    .pos-checkout-shell header { margin-bottom: .35rem !important; }
+    .pos-checkout-shell .payment-action { font-size: .7rem; }
+    .app-modal-content { padding-block: .75rem !important; }
+    .app-modal-header, .app-modal-footer { min-height: 56px; padding-block: .65rem !important; }
+}
+
+@media (min-width: 1800px) {
+    .pos-cart { width: min(28vw, 520px) !important; }
 }

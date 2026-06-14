@@ -4,7 +4,7 @@
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
-    import { categoriesDB, type Category, uuid, now } from '$lib/stores/db';
+    import { categoriesDB, productsDB, type Category, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import { upsert, remove as removeSql } from '$lib/stores/database';
 
@@ -12,7 +12,7 @@
     let editing = false;
     let showDelConfirm = false;
     let idToDelete = "";
-    let cur: Partial<Category> = {};
+    let cur: Partial<Category> & { updatedAt?: string } = {};
 
     function add() { 
         cur = { id: uuid(), name:'', color:'#3b82f6', sortOrder: $categoriesDB.length + 1, isActive:true, showOnPos:true, createdAt: now() }; 
@@ -24,9 +24,33 @@
         editing=true; 
         show=true; 
     }
+
+    function categoryUsage(categoryId: string) {
+        const assigned = $productsDB.filter(product => product.categoryId === categoryId);
+        const active = assigned.filter(product => product.isActive);
+        return {
+            total: assigned.length,
+            active: active.length,
+            deactivated: assigned.length - active.length,
+        };
+    }
+
     async function save() {
-        if (!cur.name) { toast('Name is required', 'error'); return; }
-        const record = cur as Category;
+        if (!cur.name?.trim()) { toast('Name is required', 'error'); return; }
+        const sortOrder = Number(cur.sortOrder || 0);
+        if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+            toast('Sort order must be 0 or higher', 'error');
+            return;
+        }
+        const record = {
+            ...cur,
+            name: cur.name.trim(),
+            color: cur.color || '#3b82f6',
+            sortOrder,
+            isActive: cur.isActive !== false,
+            showOnPos: cur.showOnPos !== false,
+            updatedAt: now(),
+        } as Category & { updatedAt: string };
         try {
             await upsert('categories', record);
         } catch (e) {
@@ -40,6 +64,11 @@
     }
 
     function confirmDel(id: string) {
+        const usage = categoryUsage(id);
+        if (usage.total > 0) {
+            toast(`This category is used by ${usage.total} item${usage.total === 1 ? '' : 's'} (${usage.active} active, ${usage.deactivated} deactivated). Move those items first.`, 'error');
+            return;
+        }
         idToDelete = id;
         showDelConfirm = true;
     }
@@ -60,13 +89,18 @@
 <MgmtPage title="Categories">
     <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Category</button>
     <table class="tbl">
-        <thead><tr><th>Color</th><th>Name</th><th>Sort Order</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Color</th><th>Name</th><th>Sort Order</th><th>Items</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
             {#each $categoriesDB as cat}
+            {@const usage = categoryUsage(cat.id)}
             <tr>
                 <td><div class="swatch" style="background:{cat.color}"></div></td>
                 <td class="font-semibold">{cat.name}</td>
                 <td>{cat.sortOrder}</td>
+                <td>
+                    <span class="font-semibold">{usage.total}</span>
+                    <span class="text-text-muted text-xs">({usage.active} active, {usage.deactivated} deactivated)</span>
+                </td>
                 <td>
                     <span class="tag">{cat.isActive ? 'Active' : 'Inactive'}</span>
                     {#if cat.showOnPos}<span class="tag !bg-accent-primary !text-white !border-0 ml-1">POS</span>{/if}
@@ -77,7 +111,7 @@
                 </div></td>
             </tr>
             {/each}
-            {#if $categoriesDB.length === 0}<tr class="empty-row"><td colspan="5">No categories yet.</td></tr>{/if}
+            {#if $categoriesDB.length === 0}<tr class="empty-row"><td colspan="6">No categories yet.</td></tr>{/if}
         </tbody>
     </table>
 </MgmtPage>
@@ -101,9 +135,7 @@
 <ConfirmDialog 
     bind:show={showDelConfirm} 
     title="Delete Category" 
-    message="Are you sure you want to delete this category? This will not delete the products in it, but they will become uncategorized."
+    message="Delete this category? This is only allowed when no items are using it."
     variant="danger"
     on:confirm={handleDel}
 />
-
-

@@ -1,0 +1,49 @@
+import type { Setting } from '$lib/stores/db';
+
+export type LabelTemplate = 'compact' | 'standard' | 'barcode' | 'shelf';
+
+export interface LabelDesign {
+    widthMm: number;
+    heightMm: number;
+    template: LabelTemplate;
+    showStore: boolean;
+    showName: boolean;
+    showPrice: boolean;
+    showBarcodeText: boolean;
+    showSku: boolean;
+    showPlu: boolean;
+}
+
+export const labelSizePresets = [
+    { label: '25 × 25 mm', width: 25, height: 25 },
+    { label: '32 × 25 mm', width: 32, height: 25 },
+    { label: '40 × 30 mm', width: 40, height: 30 },
+    { label: '50 × 25 mm', width: 50, height: 25 },
+    { label: '50 × 30 mm', width: 50, height: 30 },
+    { label: '57 × 32 mm', width: 57, height: 32 },
+    { label: '62 × 29 mm', width: 62, height: 29 },
+    { label: '100 × 50 mm', width: 100, height: 50 },
+    { label: '100 × 150 mm', width: 100, height: 150 },
+];
+
+export const defaultLabelDesign: LabelDesign = {
+    widthMm: 50,
+    heightMm: 30,
+    template: 'standard',
+    showStore: false,
+    showName: true,
+    showPrice: true,
+    showBarcodeText: true,
+    showSku: false,
+    showPlu: false,
+};
+
+export function getLabelDesign(settings: Setting[]): LabelDesign {
+    const raw = settings.find((setting) => setting.key === 'label_design')?.value;
+    if (!raw) return { ...defaultLabelDesign };
+    try {
+        return { ...defaultLabelDesign, ...JSON.parse(raw) };
+    } catch {
+        return { ...defaultLabelDesign };
+    }
+}

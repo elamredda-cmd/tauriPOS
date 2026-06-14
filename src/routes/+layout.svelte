@@ -1,7 +1,8 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
-    import { loadSavedMode } from '$lib/stores/connection';
+    import { connectionState, loadSavedMode } from '$lib/stores/connection';
+    import { initMysqlDb } from '$lib/stores/mysql';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
@@ -14,9 +15,21 @@
     } from '$lib/stores/db';
     import { get } from 'svelte/store';
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
+    import { page } from '$app/stores';
+    import { canManage, currentEmployee } from '$lib/stores/session';
+    import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
+    import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
 
     let dbReady = false;
     let dbError = '';
+
+    primeSoundEngine();
+
+    function handleGlobalButtonFeedback(event: PointerEvent) {
+        const control = (event.target as HTMLElement | null)?.closest('button, a[href], [role="button"]') as HTMLElement | null;
+        if (!control || control.matches(':disabled, [aria-disabled="true"], .menu-link-disabled')) return;
+        playCartButtonFeedback();
+    }
 
     onMount(async () => {
         try {
@@ -43,25 +56,39 @@
             const savedMode = await loadSavedMode();
 
             // 3. Hydrate stores from the correct data source.
+            // Always hydrate from local SQLite instantly first
+            console.log("POS: Hydrating stores from SQLite…");
+            await hydrateSvelteStores();
+
             if (savedMode === 'multi') {
-                // Multi mode: start background sync which immediately
-                // pulls from MySQL → writes to SQLite cache → hydrates stores.
-                console.log("POS: Multi mode — starting background sync…");
-                await startBackgroundSync();
-            } else {
-                // Single mode (or first launch): hydrate from local SQLite.
-                console.log("POS: Hydrating stores from SQLite…");
-                await hydrateSvelteStores();
+                // Run server schema migrations on every startup. Keep startup
+                // responsive when the server is offline, then start sync.
+                const config = get(connectionState).mysqlConfig;
+                if (config) {
+                    initMysqlDb(config)
+                        .catch((error) => console.warn('POS: MariaDB migration deferred:', error))
+                        .finally(() => startBackgroundSync());
+                } else {
+                    startBackgroundSync();
+                }
             }
 
-            // Wipe any legacy LocalStorage data so nothing falls back to it.
+            // Remove legacy app data while preserving device-only preferences.
+            const customerDisplayMonitor = localStorage.getItem('customer_display_monitor');
             localStorage.clear();
+            if (customerDisplayMonitor !== null) {
+                localStorage.setItem('customer_display_monitor', customerDisplayMonitor);
+            }
 
             console.log("POS initialized ✅");
             dbReady = true;
 
-            // If no mode has been chosen yet, redirect to setup wizard.
-            if (!savedMode && window.location.pathname !== '/setup') {
+            // A shop without an active administrator cannot be managed yet. Always send it
+            // to setup so the first administrator can choose their own PIN.
+            const hasActiveAdmin = get(employeesDB).some((employee) =>
+                employee.isActive && employee.role === 'admin'
+            );
+            if ((!savedMode || !hasActiveAdmin) && window.location.pathname !== '/setup') {
                 goto('/setup');
             }
         } catch (err) {
@@ -81,7 +108,22 @@
             el.dataset.theme = $activeTheme;
         }
     }
+
+    $: if (dbReady && typeof window !== 'undefined') {
+        const allowedForCashier = ['/', '/orders', '/shifts', '/customer-display', '/label-print'];
+        const hasActiveAdmin = get(employeesDB).some((employee) =>
+            employee.isActive && employee.role === 'admin'
+        );
+        const setupAllowed = $page.url.pathname === '/setup' && !hasActiveAdmin;
+        if (!hasActiveAdmin && $page.url.pathname !== '/setup') {
+            goto('/setup');
+        } else if (!allowedForCashier.includes($page.url.pathname) && !setupAllowed && !canManage($currentEmployee)) {
+            goto('/');
+        }
+    }
 </script>
+
+<svelte:window on:pointerdown|capture={handleGlobalButtonFeedback} />
 
 {#if dbReady}
     <slot />
@@ -100,7 +142,10 @@
         </div>
     </div>
 {/if}
+{#if $page.url.pathname !== '/customer-display'}
 <Toast />
+<GlobalTouchInput />
+{/if}
 
 <style>
     .db-loading {

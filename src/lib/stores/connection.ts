@@ -45,6 +45,19 @@ export const connectionState = writable<PosConnectionState>({
 
 /** Cached MySQL Database instance — reused across calls. */
 let mysqlDbInstance: Database | null = null;
+const HEARTBEAT_TIMEOUT_MS = 3000;
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('MariaDB connection timed out')), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation, timeout]);
+    } finally {
+        clearTimeout(timeoutId!);
+    }
+}
 
 // ─── Helpers (access local SQLite via the existing getDb) ────────────────────
 
@@ -80,7 +93,7 @@ export async function loadSavedMode(): Promise<PosMode | null> {
             );
             if (cfgRows.length > 0 && cfgRows[0].value) {
                 try {
-                    mysqlConfig = JSON.parse(cfgRows[0].value);
+                    mysqlConfig = JSON.parse(cfgRows[0].value) as MysqlConfig;
                 } catch { /* ignore corrupt JSON */ }
             }
 
@@ -115,10 +128,9 @@ export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<voi
         );
     }
 
-    // Drop any cached MySQL connection when switching away from multi mode
-    if (mode === 'single') {
-        mysqlDbInstance = null;
-    }
+    // Always reconnect after saving setup choices so a changed host, database,
+    // or credential set can never reuse the previous cached connection.
+    mysqlDbInstance = null;
 
     connectionState.set({
         mode,
@@ -131,7 +143,7 @@ export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<voi
 /**
  * Build a `mysql://` connection string from a MysqlConfig object.
  */
-function buildMysqlUri(config: MysqlConfig): string {
+export function buildMysqlUri(config: MysqlConfig): string {
     const { user, password, host, port, database } = config;
     return `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
 }
@@ -175,6 +187,36 @@ export async function getMysqlDb(): Promise<Database | null> {
         mysqlDbInstance = null;
         connectionState.update(s => ({ ...s, mysqlOnline: false }));
         return null;
+    }
+}
+
+/**
+ * Drop the cached MySQL connection so the next getMysqlDb() reconnects.
+ * Called by the heartbeat when a liveness check fails, so a dropped link
+ * (server restart, Wi-Fi blip, IP change) can recover automatically.
+ */
+export function resetMysqlConnection(): void {
+    mysqlDbInstance = null;
+}
+
+/**
+ * Active liveness check against the cached connection. Returns true if the
+ * server answered, false otherwise. On failure the cached connection is
+ * dropped so the next call can reconnect.
+ */
+export async function pingMysql(): Promise<boolean> {
+    if (!isMultiMode()) return false;
+    try {
+        const db = await withTimeout(getMysqlDb(), HEARTBEAT_TIMEOUT_MS);
+        if (!db) return false;
+        await withTimeout(db.select('SELECT 1'), HEARTBEAT_TIMEOUT_MS);
+        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        return true;
+    } catch (e) {
+        console.warn('connection: heartbeat ping failed:', e);
+        mysqlDbInstance = null;
+        connectionState.update(s => ({ ...s, mysqlOnline: false }));
+        return false;
     }
 }
 

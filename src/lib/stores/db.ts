@@ -60,6 +60,7 @@ export interface Employee {
     storeId: string;
     name: string;
     pin: string;
+    pinHash?: string;
     role: 'admin' | 'manager' | 'cashier';
     email: string;
     isActive: boolean;
@@ -72,9 +73,12 @@ export interface Customer {
     name: string;
     phone: string;
     email: string;
+    postcode: string;
+    loyaltyCode: string;
     loyaltyPoints: number;
     notes: string;
     createdAt: string;
+    updatedAt: string;
 }
 
 // 5. Category
@@ -105,13 +109,16 @@ export interface Product {
     name: string;
     sku: string;
     barcode: string;
+    scalePlu?: string;
     price: number;           // pence
     costPrice: number;       // pence
     stockLevel: number;
     trackStock: boolean;
+    allowPriceOverride?: boolean;
     isWeighable: boolean;
     showInGoods: boolean;
     goodsSortOrder: number;
+    showInPos?: boolean;
     color: string;
     image: string;
     isActive: boolean;
@@ -158,14 +165,19 @@ export interface Shift {
     id: string;
     registerId: string;
     employeeId: string;
+    closedByEmployeeId: string;
     openedAt: string;
     closedAt: string;
     openingFloat: number;    // pence
     expectedCash: number;    // pence
     actualCash: number;      // pence
     cashDifference: number;  // pence
+    expectedCard: number;    // pence
+    actualCard: number;      // pence
+    cardDifference: number;  // pence
     status: 'open' | 'closed';
     notes: string;
+    updatedAt: string;
 }
 
 // 12. CashMovement
@@ -183,7 +195,8 @@ export type DiscountKind =
     | 'manual_percent'      // cashier picks; % off a line / ticket
     | 'manual_amount'       // cashier picks; pence off a ticket
     | 'bogo_fixed_price'    // auto: every (minQuantity+1)th unit in the group is sold at secondPrice
-    | 'bundle_fixed_price'; // auto: any `bundleQuantity` units from the group total `bundlePrice`
+    | 'bundle_fixed_price'  // auto: any `bundleQuantity` units from the group total `bundlePrice`
+    | 'temporary_item';     // auto: temporary percentage off or sale price for one item
 
 export interface Discount {
     id: string;
@@ -203,6 +216,7 @@ export interface Discount {
     startAt: string;                // ISO datetime; '' = always
     endAt: string;                  // ISO datetime; '' = always
     priority: number;               // higher wins ties when 'best for customer' is equal
+    updatedAt?: string;
 }
 
 // 13b. Promo Group — a named pool of products that BOGO/bundle promos reference
@@ -213,12 +227,14 @@ export interface PromoGroup {
     endAt: string;         // ISO datetime; '' = always
     isActive: boolean;
     createdAt: string;
+    updatedAt?: string;
 }
 
 export interface PromoGroupItem {
     id: string;
     groupId: string;
     productId: string;
+    updatedAt?: string;
 }
 
 // 14. Order
@@ -228,6 +244,7 @@ export interface Order {
     customerId: string;
     employeeId: string;
     orderNumber: number;
+    receiptKey?: string;
     type: 'sale' | 'return' | 'exchange';
     status: 'hold' | 'open' | 'completed' | 'voided' | 'returned' | 'refunded' | 'partially_refunded';
     originalOrderId: string;
@@ -285,8 +302,9 @@ export interface LoyaltyLog {
     customerId: string;
     orderId: string;
     pointsChange: number;
-    reason: 'earned' | 'redeemed' | 'manual_adjustment';
+    reason: 'earned' | 'redeemed' | 'manual_adjustment' | 'refund_adjustment';
     createdAt: string;
+    updatedAt: string;
 }
 
 // 18. AuditLog
@@ -328,13 +346,13 @@ const ZERO_TAX_ID = 'tax-zero';
 
 const seedStore: Store = {
     id: STORE_ID,
-    name: 'Luton Pool Club',
+    name: 'My Shop',
     address: '',
     phone: '',
     email: '',
     currency: 'GBP',
     taxIncludedInPrice: true,
-    receiptHeader: 'Luton Pool Club',
+    receiptHeader: 'My Shop',
     receiptFooter: 'Thank you for visiting!',
     createdAt: now()
 };
@@ -397,9 +415,14 @@ const seedSettings: Setting[] = [
     { key: 'store_info', value: JSON.stringify(seedStore), updatedAt: now() },
     { key: 'loyalty_points_per_pound', value: '1', updatedAt: now() },
     { key: 'loyalty_points_to_redeem', value: '100', updatedAt: now() },
-    { key: 'loyalty_redemption_value', value: '500', updatedAt: now() },
+    { key: 'loyalty_redemption_value', value: '100', updatedAt: now() },
+    { key: 'loyalty_enabled', value: 'true', updatedAt: now() },
     { key: 'receipt_show_logo', value: 'true', updatedAt: now() },
     { key: 'default_order_type', value: 'sale', updatedAt: now() },
+    { key: 'stock_tracking_enabled', value: 'true', updatedAt: now() },
+    { key: 'cash_up_enabled', value: 'false', updatedAt: now() },
+    { key: 'cash_up_require_opening_float', value: 'true', updatedAt: now() },
+    { key: 'cash_up_reconcile_card', value: 'true', updatedAt: now() },
 ];
 
 
@@ -474,7 +497,7 @@ export const posPagesDB = writable<PosPage[]>(seedPosPages);
 
 /** Active products only */
 export const activeProducts = derived(productsDB, ($p) =>
-    $p.filter(p => p.isActive)
+    $p.filter(p => p.isActive && p.showInPos !== false)
 );
 
 /** Active categories sorted by sortOrder */

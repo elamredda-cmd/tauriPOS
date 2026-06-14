@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { goBack } from '$lib/navigation';
     import { activeTheme, setTheme, type Theme } from '$lib/stores/theme';
     import { toast } from '$lib/stores/toast';
 
@@ -19,12 +20,12 @@
 <div class="page-container">
     <header class="page-header">
         <div class="header-left">
-            <a href="/settings" class="btn-icon">
+            <button type="button" class="btn-icon" aria-label="Go back" on:click={() => goBack('/settings')}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20">
                     <line x1="19" y1="12" x2="5" y2="12"></line>
                     <polyline points="12 19 5 12 12 5"></polyline>
                 </svg>
-            </a>
+            </button>
             <h1>App Appearance</h1>
         </div>
     </header>

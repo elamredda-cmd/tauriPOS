@@ -1,10 +1,11 @@
 import Database from '@tauri-apps/plugin-sql';
+import { localDatabaseName } from './profile';
 
 let db: Database | null = null;
 
 export async function getDb(): Promise<Database> {
     if (!db) {
-        db = await Database.load('sqlite:pos.db');
+        db = await Database.load(`sqlite:${localDatabaseName}`);
     }
     return db;
 }
@@ -13,6 +14,11 @@ export async function initDb() {
     const d = await getDb();
 
     console.log("Initializing SQLite Database...");
+    // Tauri SQL uses a connection pool, so give concurrent readers/writers
+    // time to finish instead of immediately returning SQLITE_BUSY.
+    await d.execute('PRAGMA journal_mode = WAL');
+    await d.execute('PRAGMA busy_timeout = 10000');
+    await d.execute('PRAGMA foreign_keys = ON');
 
     // 1. Products Table
     await d.execute(`
@@ -23,6 +29,7 @@ export async function initDb() {
             name TEXT NOT NULL,
             sku TEXT,
             barcode TEXT,
+            scalePlu TEXT,
             price INTEGER NOT NULL,
             costPrice INTEGER DEFAULT 0,
             stockLevel INTEGER DEFAULT 0,
@@ -74,6 +81,16 @@ export async function initDb() {
             created_at TEXT
         )
     `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS _sync_conflicts (
+            id TEXT PRIMARY KEY,
+            table_name TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            data TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    `);
 
     // 4. Tiles Table
     await d.execute(`
@@ -105,9 +122,12 @@ export async function initDb() {
             name TEXT NOT NULL,
             phone TEXT,
             email TEXT,
+            postcode TEXT,
+            loyaltyCode TEXT,
             loyaltyPoints INTEGER DEFAULT 0,
             notes TEXT,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -119,6 +139,7 @@ export async function initDb() {
             customerId TEXT,
             employeeId TEXT,
             orderNumber INTEGER,
+            receiptKey TEXT UNIQUE,
             type TEXT,
             status TEXT,
             originalOrderId TEXT,
@@ -175,6 +196,7 @@ export async function initDb() {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             pin TEXT,
+            pinHash TEXT,
             role TEXT,
             isActive INTEGER DEFAULT 1,
             createdAt TEXT
@@ -225,7 +247,8 @@ export async function initDb() {
             maxApplications INTEGER,
             startAt TEXT,
             endAt TEXT,
-            priority INTEGER DEFAULT 0
+            priority INTEGER DEFAULT 0,
+            updatedAt TEXT
         )
     `);
 
@@ -237,7 +260,8 @@ export async function initDb() {
             startAt TEXT,
             endAt TEXT,
             isActive INTEGER DEFAULT 1,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -247,6 +271,7 @@ export async function initDb() {
             id TEXT PRIMARY KEY,
             groupId TEXT NOT NULL,
             productId TEXT NOT NULL,
+            updatedAt TEXT,
             FOREIGN KEY(groupId) REFERENCES promo_groups(id) ON DELETE CASCADE,
             FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
         )
@@ -258,14 +283,19 @@ export async function initDb() {
             id TEXT PRIMARY KEY,
             registerId TEXT,
             employeeId TEXT,
+            closedByEmployeeId TEXT,
             openedAt TEXT,
             closedAt TEXT,
             openingFloat INTEGER,
             expectedCash INTEGER,
             actualCash INTEGER,
             cashDifference INTEGER,
+            expectedCard INTEGER,
+            actualCard INTEGER,
+            cardDifference INTEGER,
             status TEXT,
-            notes TEXT
+            notes TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -289,7 +319,8 @@ export async function initDb() {
             orderId TEXT,
             pointsChange INTEGER,
             reason TEXT,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -319,6 +350,7 @@ export async function initDb() {
             reference TEXT,
             changeGiven INTEGER DEFAULT 0,
             createdAt TEXT,
+            updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
         )
     `);
@@ -376,6 +408,17 @@ export async function initDb() {
         )
     `);
 
+    // 25. Tombstones — records deleted rows so deletions propagate to other tills
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS tombstones (
+            id TEXT PRIMARY KEY,
+            table_name TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            deletedAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
     // Create performance indexes
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)`);
@@ -396,11 +439,17 @@ export async function initDb() {
     // Apply incremental migrations to existing tables (safe to re-run).
     await runMigrations();
     await addColumnIfMissing('products', 'goodsSortOrder', 'INTEGER DEFAULT 0');
-    await dropColumnIfExists('products', 'allowPriceOverride');
     await runDataMigrations();
 
     // Indexes on migration-added columns must run AFTER runMigrations().
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber)`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_barcode ON products(barcode) WHERE barcode IS NOT NULL AND barcode <> ''`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_scale_plu ON products(scalePlu) WHERE scalePlu IS NOT NULL AND scalePlu <> ''`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_sku ON products(sku) WHERE sku IS NOT NULL AND sku <> ''`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_group_product ON promo_group_items(groupId, productId)`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(registerId) WHERE status = 'open'`);
 
     console.log("Database initialized successfully!");
 }
@@ -419,24 +468,12 @@ async function addColumnIfMissing(table: string, column: string, definition: str
     console.log(`Migration: added ${table}.${column}`);
 }
 
-async function dropColumnIfExists(table: string, column: string) {
-    const d = await getDb();
-    const rows: any[] = await d.select(`PRAGMA table_info(${table})`);
-    if (!rows.some(r => r.name === column)) return;
-    try {
-        await d.execute(`ALTER TABLE ${table} DROP COLUMN ${column}`);
-        delete tableColumnsCache[table];
-        console.log(`Migration: dropped ${table}.${column}`);
-    } catch (e: any) {
-        console.warn(`Migration: could not drop ${table}.${column}:`, e.message);
-    }
-}
-
 /**
  * Idempotent migrations applied after CREATE TABLE IF NOT EXISTS.
  * Each entry uses addColumnIfMissing so it's safe to run on every startup.
  */
 async function runMigrations() {
+    const d = await getDb();
     // Discounts gained promo-engine fields after the first release.
     await addColumnIfMissing('discounts', 'kind', "TEXT DEFAULT 'manual_percent'");
     await addColumnIfMissing('discounts', 'autoApply', 'INTEGER DEFAULT 0');
@@ -449,6 +486,7 @@ async function runMigrations() {
     await addColumnIfMissing('discounts', 'startAt', 'TEXT');
     await addColumnIfMissing('discounts', 'endAt', 'TEXT');
     await addColumnIfMissing('discounts', 'priority', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('discounts', 'updatedAt', 'TEXT');
 
     // Payment split tracking columns (safe for existing rows — default 0).
     await addColumnIfMissing('payments', 'cashAmount', 'INTEGER DEFAULT 0');
@@ -463,8 +501,24 @@ async function runMigrations() {
     // Orders: amountTendered + updatedAt for delta sync
     await addColumnIfMissing('orders', 'amountTendered', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('orders', 'updatedAt', 'TEXT');
+    await addColumnIfMissing('orders', 'receiptKey', 'TEXT');
+    await addColumnIfMissing('orders', 'originalOrderId', 'TEXT');
+    await addColumnIfMissing('orders', 'discountId', 'TEXT');
 
-    // Order lines: updatedAt for delta sync
+    await addColumnIfMissing('customers', 'postcode', "TEXT DEFAULT ''");
+    await addColumnIfMissing('customers', 'loyaltyCode', "TEXT DEFAULT ''");
+    await addColumnIfMissing('customers', 'updatedAt', 'TEXT');
+    await addColumnIfMissing('loyalty_logs', 'updatedAt', 'TEXT');
+
+    // Order lines: sale snapshots and updatedAt for delta sync
+    await addColumnIfMissing('order_lines', 'costPrice', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'discountId', 'TEXT');
+    await addColumnIfMissing('order_lines', 'discountAmount', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'taxRate', 'REAL DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'taxAmount', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'isPriceOverride', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'originalPrice', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('order_lines', 'notes', 'TEXT');
     await addColumnIfMissing('order_lines', 'updatedAt', 'TEXT');
 
     // Payments: updatedAt for delta sync
@@ -473,6 +527,7 @@ async function runMigrations() {
     // Products: Add all potentially missing fields for older SQLite DBs
     await addColumnIfMissing('products', 'barcode', 'TEXT');
     await addColumnIfMissing('products', 'sku', 'TEXT');
+    await addColumnIfMissing('products', 'scalePlu', 'TEXT');
     await addColumnIfMissing('products', 'color', 'TEXT');
     await addColumnIfMissing('products', 'image', 'TEXT');
     await addColumnIfMissing('products', 'isWeighable', 'INTEGER DEFAULT 0');
@@ -484,11 +539,75 @@ async function runMigrations() {
     await addColumnIfMissing('products', 'trackStock', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'allowPriceOverride', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'updatedAt', 'TEXT');
+    await addColumnIfMissing('employees', 'pinHash', 'TEXT');
+
+    // Till cash-up and card reconciliation fields.
+    await addColumnIfMissing('shifts', 'closedByEmployeeId', "TEXT DEFAULT ''");
+    await addColumnIfMissing('shifts', 'expectedCard', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('shifts', 'actualCard', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('shifts', 'cardDifference', 'INTEGER DEFAULT 0');
+
+    // updatedAt on every remaining synced table so delta sync works for all.
+    for (const t of [
+        'categories', 'pos_pages', 'pos_tiles', 'tax_rates', 'customers',
+        'employees', 'registers', 'suppliers', 'product_suppliers',
+        'inventory_logs', 'promo_groups', 'promo_group_items',
+        'shifts', 'cash_movements', 'loyalty_logs', 'audit_logs'
+    ]) {
+        await addColumnIfMissing(t, 'updatedAt', 'TEXT');
+    }
+
+    const stamp = new Date().toISOString();
+    for (const t of ['discounts', 'promo_groups', 'promo_group_items']) {
+        await d.execute(`UPDATE ${t} SET updatedAt = ? WHERE updatedAt IS NULL OR updatedAt = ''`, [stamp]);
+    }
 }
 
 /** One-shot data migrations (tracked via settings table). */
 async function runDataMigrations() {
     const d = await getDb();
+
+    // Empty identifiers are not real identifiers. Convert them to NULL so
+    // database-level unique indexes can allow many products without barcodes.
+    await d.execute(`UPDATE products SET barcode = NULL WHERE TRIM(COALESCE(barcode, '')) = ''`);
+    await d.execute(`UPDATE products SET scalePlu = NULL WHERE TRIM(COALESCE(scalePlu, '')) = ''`);
+    await d.execute(`UPDATE products SET sku = NULL WHERE TRIM(COALESCE(sku, '')) = ''`);
+    // Keep the newest membership and open shift before adding uniqueness rules.
+    await d.execute(`
+        DELETE FROM promo_group_items
+        WHERE id NOT IN (
+            SELECT keep_id FROM (
+                SELECT MAX(id) AS keep_id FROM promo_group_items GROUP BY groupId, productId
+            )
+        )
+    `);
+    await d.execute(`
+        UPDATE shifts SET status = 'closed',
+            closedAt = COALESCE(NULLIF(closedAt, ''), updatedAt, openedAt),
+            notes = CASE WHEN COALESCE(notes, '') = '' THEN 'Automatically closed duplicate open till shift' ELSE notes END
+        WHERE status = 'open' AND id NOT IN (
+            SELECT keep_id FROM (
+                SELECT MAX(id) AS keep_id FROM shifts WHERE status = 'open' GROUP BY registerId
+            )
+        )
+    `);
+    for (const column of ['barcode', 'scalePlu', 'sku']) {
+        const duplicates = await d.select(
+            `SELECT ${column} AS value FROM products
+             WHERE ${column} IS NOT NULL AND ${column} <> ''
+             GROUP BY ${column} HAVING COUNT(*) > 1`,
+        ) as any[];
+        for (const duplicate of duplicates) {
+            const rows = await d.select(
+                `SELECT id FROM products WHERE ${column} = ?
+                 ORDER BY COALESCE(updatedAt, createdAt, '') DESC, id DESC`,
+                [duplicate.value],
+            ) as any[];
+            for (const row of rows.slice(1)) {
+                await d.execute(`UPDATE products SET ${column} = NULL WHERE id = ?`, [row.id]);
+            }
+        }
+    }
 
     // 1. Limit showInGoods to max 10 items and assign sort order.
     const alreadyDone = (await d.select(`SELECT 1 FROM settings WHERE key = 'migration_show_in_goods_limited'`)) as any[];
@@ -505,13 +624,62 @@ async function runDataMigrations() {
         const exists = (await d.select(`SELECT 1 FROM settings WHERE key = ?`, [key])) as any[];
         if (exists.length === 0) {
             const defaults: Record<string, string> = {
-                pos_cart_layout: JSON.stringify(['goods', 'recent_trans', 'change_price', 'drawer']),
-                pos_toolbar_layout: JSON.stringify(['scale', 'drawer', 'discount'])
+                pos_cart_layout: JSON.stringify(['goods', 'recent_trans', 'change_price', 'hold']),
+                pos_toolbar_layout: JSON.stringify(['scale', 'label_print', 'discount'])
             };
             await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`,
                 [key, defaults[key], new Date().toISOString()]);
             console.log(`Migration: seeded default ${key}`);
         }
+    }
+
+    // 3. Drawer controls were removed; replace them with cashier-accessible label printing.
+    const labelPrintMigration = (await d.select(`SELECT 1 FROM settings WHERE key = 'migration_drawer_to_label_print'`)) as any[];
+    if (labelPrintMigration.length === 0) {
+        for (const key of layoutKeys) {
+            const rows = (await d.select(`SELECT value FROM settings WHERE key = ? LIMIT 1`, [key])) as any[];
+            if (!rows[0]?.value) continue;
+            try {
+                const layout = JSON.parse(rows[0].value) as string[];
+                const updated = layout.map((button) => button === 'drawer' ? 'label_print' : button);
+                await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = ?`, [
+                    JSON.stringify(updated), new Date().toISOString(), key
+                ]);
+            } catch {
+                // Leave malformed legacy settings untouched so startup can continue.
+            }
+        }
+        await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`, [
+            'migration_drawer_to_label_print', 'done', new Date().toISOString()
+        ]);
+        console.log('Migration: replaced Drawer buttons with Label Print');
+    }
+
+    const holdButtonMigration = (await d.select(`SELECT 1 FROM settings WHERE key = 'migration_cart_label_print_to_hold'`)) as any[];
+    if (holdButtonMigration.length === 0) {
+        const rows = (await d.select(`SELECT value FROM settings WHERE key = 'pos_cart_layout' LIMIT 1`)) as any[];
+        if (rows[0]?.value) {
+            try {
+                const layout = JSON.parse(rows[0].value) as string[];
+                const updated = layout.map((button) =>
+                    button === 'drawer' || button === 'label_print' ? 'hold' : button
+                );
+                if (!updated.includes('hold')) updated.push('hold');
+                await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_cart_layout'`, [
+                    JSON.stringify([...new Set(updated)]),
+                    new Date().toISOString(),
+                ]);
+            } catch {
+                await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_cart_layout'`, [
+                    JSON.stringify(['goods', 'recent_trans', 'change_price', 'hold']),
+                    new Date().toISOString(),
+                ]);
+            }
+        }
+        await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`, [
+            'migration_cart_label_print_to_hold', 'done', new Date().toISOString()
+        ]);
+        console.log('Migration: replaced cart Label Print with Hold');
     }
 }
 
@@ -546,6 +714,7 @@ function normalizeValue(v: any): any {
  */
 export async function upsert(table: string, obj: any, idKey: string = 'id') {
     const d = await getDb();
+    if (table === 'products') obj = normalizeProductIdentifiers(obj);
     const validCols = await getTableColumns(table);
     const keys = Object.keys(obj).filter(k => validCols.includes(k));
     if (keys.length === 0) {
@@ -567,6 +736,7 @@ export async function upsert(table: string, obj: any, idKey: string = 'id') {
 
 export async function bulkUpsert(table: string, rows: any[], idKey: string = 'id') {
     if (rows.length === 0) return;
+    if (table === 'products') rows = rows.map(normalizeProductIdentifiers);
     const d = await getDb();
     const validCols = await getTableColumns(table);
 
@@ -581,18 +751,36 @@ export async function bulkUpsert(table: string, rows: any[], idKey: string = 'id
         ? `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO UPDATE SET ${updates}`
         : `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO NOTHING`;
 
-    // Wrapping all inserts in a single transaction makes SQLite extremely fast
-    await d.execute('BEGIN TRANSACTION');
-    try {
-        for (const row of rows) {
-            const values = columns.map(k => normalizeValue(row[k]));
-            await d.execute(sql, values);
+    // Do not manage BEGIN/COMMIT through the pooled plugin connection. A later
+    // execute may use a different connection and leave SQLite permanently locked.
+    for (const row of rows) {
+        // Membership identity historically used random IDs. If another client
+        // created the same group/product pair, replace the stale local identity
+        // before applying the authoritative MariaDB row.
+        if (table === 'promo_group_items' && row.groupId && row.productId && row.id) {
+            await d.execute(
+                `DELETE FROM promo_group_items WHERE groupId = ? AND productId = ? AND id <> ?`,
+                [row.groupId, row.productId, row.id]
+            );
         }
-        await d.execute('COMMIT');
-    } catch (e) {
-        await d.execute('ROLLBACK');
-        throw e;
+        const values = columns.map(k => normalizeValue(row[k]));
+        await d.execute(sql, values);
     }
+}
+
+function normalizeProductIdentifiers<T extends Record<string, any>>(product: T): T {
+    return {
+        ...product,
+        ...(Object.prototype.hasOwnProperty.call(product, 'barcode')
+            ? { barcode: String(product.barcode || '').trim() || null }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(product, 'scalePlu')
+            ? { scalePlu: String(product.scalePlu || '').trim() || null }
+            : {}),
+        ...(Object.prototype.hasOwnProperty.call(product, 'sku')
+            ? { sku: String(product.sku || '').trim() || null }
+            : {}),
+    };
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id') {
@@ -636,29 +824,12 @@ export interface SeedPayload {
 export async function migrateFromLocalStorage(seed: SeedPayload) {
     const d = await getDb();
 
-    // Skip if products already exist
+    // Historical builds seeded demo shop data here. New installations now stay
+    // empty until the setup wizard creates the real shop and administrator.
+    // Existing databases are left untouched.
+    void seed;
     const result: any[] = await d.select('SELECT id FROM products LIMIT 1');
-    if (result.length > 0) {
-        console.log("SQLite already contains data. Skipping seed.");
-        return;
-    }
-
-    console.log("Seeding SQLite with initial data...");
-
-    for (const p of (seed.products || [])) await upsert('products', p);
-    for (const c of (seed.categories || [])) await upsert('categories', c);
-    for (const pg of (seed.posPages || [])) await upsert('pos_pages', pg);
-    for (const t of (seed.posTiles || [])) await upsert('pos_tiles', t);
-    for (const tr of (seed.taxRates || [])) await upsert('tax_rates', tr);
-    for (const emp of (seed.employees || [])) await upsert('employees', emp);
-    for (const s of (seed.settings || [])) await upsert('settings', s, 'key');
-    for (const r of (seed.registers || [])) await upsert('registers', r);
-    for (const ds of (seed.discounts || [])) await upsert('discounts', ds);
-
-    // After seeding, enforce the 10-item goods-menu cap on whatever got inserted.
-    await limitGoodsMenuItems();
-
-    console.log("Seed complete.");
+    console.log(result.length > 0 ? "SQLite contains existing shop data." : "SQLite is ready for shop setup.");
 }
 
 /** 
@@ -669,19 +840,37 @@ export async function searchProduct(query: string) {
     const q = query.trim();
     if (!q) return null;
 
-    // 1. Exact match for Barcode (Highest priority, uses Index)
-    let rows: any[] = await d.select('SELECT * FROM products WHERE barcode = ? LIMIT 1', [q]);
-    if (rows.length > 0) return rows[0];
+    // Main POS scanner lookup: only a 100% barcode match should add an item.
+    const rows: any[] = await d.select(
+        'SELECT * FROM products WHERE isActive = 1 AND showInPos = 1 AND barcode = ? LIMIT 1',
+        [q],
+    );
+    return rows[0] || null;
+}
 
-    // 2. Exact match for SKU (High priority, uses Index)
-    rows = await d.select('SELECT * FROM products WHERE sku = ? LIMIT 1', [q]);
-    if (rows.length > 0) return rows[0];
+export async function searchProductByScalePlu(scalePlu: string) {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        'SELECT * FROM products WHERE scalePlu = ? AND isActive = 1 AND showInPos = 1 LIMIT 1',
+        [scalePlu],
+    );
+    return rows[0] || null;
+}
 
-    // 3. Partial match for Name (Lowest priority)
-    rows = await d.select('SELECT * FROM products WHERE name LIKE ? LIMIT 1', [`%${q}%`]);
-    if (rows.length > 0) return rows[0];
-
-    return null;
+export async function assertProductIdentifiersUnique(product: any): Promise<void> {
+    const d = await getDb();
+    const p = normalizeProductIdentifiers(product);
+    for (const column of ['barcode', 'scalePlu', 'sku']) {
+        if (!p[column]) continue;
+        const rows: any[] = await d.select(
+            `SELECT name FROM products WHERE ${column} = ? AND id <> ? LIMIT 1`,
+            [p[column], p.id],
+        );
+        if (rows.length > 0) {
+            const label = column === 'barcode' ? 'Barcode' : column === 'scalePlu' ? 'Scale PLU' : 'SKU';
+            throw new Error(`${label} is already used by ${rows[0].name}`);
+        }
+    }
 }
 
 /** Insert or update a product in SQLite (schema-aware). */
@@ -696,21 +885,14 @@ export async function bulkAddProducts(products: any[]) {
     const d = await getDb();
     const validCols = await getTableColumns("products");
 
-    await d.execute("BEGIN TRANSACTION");
-    try {
-        for (const p of products) {
-            const keys = Object.keys(p).filter((k) => validCols.includes(k));
-            const values = keys.map((k) => normalizeValue(p[k]));
-            const columns = keys.join(", ");
-            const placeholders = keys.map(() => "?").join(", ");
+    for (const p of products) {
+        const keys = Object.keys(p).filter((k) => validCols.includes(k));
+        const values = keys.map((k) => normalizeValue(p[k]));
+        const columns = keys.join(", ");
+        const placeholders = keys.map(() => "?").join(", ");
 
-            const sql = `INSERT INTO products (${columns}) VALUES (${placeholders}) ON CONFLICT(id) DO NOTHING`;
-            await d.execute(sql, values);
-        }
-        await d.execute("COMMIT");
-    } catch (e) {
-        await d.execute("ROLLBACK");
-        throw e;
+        const sql = `INSERT INTO products (${columns}) VALUES (${placeholders}) ON CONFLICT(id) DO NOTHING`;
+        await d.execute(sql, values);
     }
 }
 
@@ -719,23 +901,64 @@ export async function updateProduct(p: any) {
     await upsert('products', p);
 }
 
-/** Batch-update only showInGoods + goodsSortOrder for many products in one transaction. */
+/** Update selected fields on an existing product without replacing unrelated values. */
+export async function updateProductFields(patch: Record<string, any>) {
+    const d = await getDb();
+    const p = normalizeProductIdentifiers(patch);
+    const validCols = await getTableColumns('products');
+    const keys = Object.keys(p).filter((key) => key !== 'id' && validCols.includes(key));
+    if (!p.id || keys.length === 0) throw new Error('updateProductFields: product id and fields are required');
+    await d.execute(
+        `UPDATE products SET ${keys.map((key) => `${key} = ?`).join(', ')} WHERE id = ?`,
+        [...keys.map((key) => normalizeValue(p[key])), p.id],
+    );
+}
+
+/**
+ * Atomically change a product's stock level by `delta` (negative to decrement).
+ * Uses `stockLevel = stockLevel + ?` so concurrent adjustments can't clobber
+ * each other (avoids the read-10-write-9 race). Bumps updatedAt so the change
+ * propagates via delta sync.
+ */
+export async function adjustStock(productId: string, delta: number): Promise<void> {
+    if (!delta) return;
+    const d = await getDb();
+    await d.execute(
+        `UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?`,
+        [delta, new Date().toISOString(), productId]
+    );
+}
+
+/** Set an item's counted stock to an exact value. */
+export async function setStockLevel(productId: string, stockLevel: number): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+        `UPDATE products SET stockLevel = ?, updatedAt = ? WHERE id = ?`,
+        [stockLevel, new Date().toISOString(), productId]
+    );
+}
+
+/** Batch-update only showInGoods + goodsSortOrder for many products. */
 export async function batchUpdateGoodsMenu(changes: { id: string; showInGoods: boolean; goodsSortOrder: number; updatedAt: string }[]) {
     if (changes.length === 0) return;
     const d = await getDb();
-    await d.execute("BEGIN TRANSACTION");
-    try {
-        for (const c of changes) {
-            await d.execute(
-                `UPDATE products SET showInGoods = ?, goodsSortOrder = ?, updatedAt = ? WHERE id = ?`,
-                [c.showInGoods ? 1 : 0, c.goodsSortOrder, c.updatedAt, c.id]
-            );
-        }
-        await d.execute("COMMIT");
-    } catch (e) {
-        await d.execute("ROLLBACK");
-        throw e;
-    }
+    const ids = changes.map(() => '?').join(', ');
+    const boolCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    const orderCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    const stampCases = changes.map(() => 'WHEN ? THEN ?').join(' ');
+    await d.execute(
+        `UPDATE products SET
+            showInGoods = CASE id ${boolCases} ELSE showInGoods END,
+            goodsSortOrder = CASE id ${orderCases} ELSE goodsSortOrder END,
+            updatedAt = CASE id ${stampCases} ELSE updatedAt END
+         WHERE id IN (${ids})`,
+        [
+            ...changes.flatMap(c => [c.id, c.showInGoods ? 1 : 0]),
+            ...changes.flatMap(c => [c.id, c.goodsSortOrder]),
+            ...changes.flatMap(c => [c.id, c.updatedAt]),
+            ...changes.map(c => c.id),
+        ]
+    );
 }
 
 /** 
@@ -743,7 +966,26 @@ export async function batchUpdateGoodsMenu(changes: { id: string; showInGoods: b
  */
 export async function deleteProduct(id: string) {
     const d = await getDb();
-    await d.execute('UPDATE products SET isActive = 0 WHERE id = ?', [id]);
+    // Bump updatedAt so the soft-delete propagates to other tills via delta sync.
+    await d.execute('UPDATE products SET isActive = 0, showInGoods = 0, goodsSortOrder = 0, updatedAt = ? WHERE id = ?',
+        [new Date().toISOString(), id]);
+}
+
+export async function getProductTileIds(productId: string): Promise<string[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select('SELECT id FROM pos_tiles WHERE productId = ?', [productId]);
+    return rows.map((row) => row.id);
+}
+
+export async function getUnavailableProductTileIds(): Promise<string[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT tile.id
+         FROM pos_tiles tile
+         JOIN products product ON product.id = tile.productId
+         WHERE product.isActive = 0 OR product.showInPos = 0`,
+    );
+    return rows.map((row) => row.id);
 }
 
 /** 
@@ -752,10 +994,14 @@ export async function deleteProduct(id: string) {
 export async function savePosPage(p: any) {
     const d = await getDb();
     await d.execute(
-        `INSERT INTO pos_pages (id, name, position, color) 
-         VALUES (?, ?, ?, ?) 
-         ON CONFLICT(id) DO UPDATE SET name=excluded.name, position=excluded.position, color=excluded.color`,
-        [p.id, p.name, p.position, p.color]
+        `INSERT INTO pos_pages (id, name, position, color, updatedAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name,
+            position=excluded.position,
+            color=excluded.color,
+            updatedAt=excluded.updatedAt`,
+        [p.id, p.name, p.position, p.color, p.updatedAt]
     );
 }
 
@@ -774,8 +1020,14 @@ export async function deletePosPage(id: string) {
 export async function addTile(t: any) {
     const d = await getDb();
     await d.execute(
-        'INSERT INTO pos_tiles (id, pageId, productId, position) VALUES (?, ?, ?, ?)',
-        [t.id, t.pageId, t.productId, t.position]
+        `INSERT INTO pos_tiles (id, pageId, productId, position, updatedAt)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            pageId=excluded.pageId,
+            productId=excluded.productId,
+            position=excluded.position,
+            updatedAt=excluded.updatedAt`,
+        [t.id, t.pageId, t.productId, t.position, t.updatedAt]
     );
 }
 
@@ -830,6 +1082,7 @@ export function rehydrateBooleans<T extends Record<string, any>>(row: T, boolKey
 export interface SalesOverview {
     totalRevenue: number;
     totalTransactions: number;
+    refundTransactions: number;
     avgTransactionValue: number;
     totalItemsSold: number;
 }
@@ -837,12 +1090,21 @@ export interface SalesOverview {
 export interface PaymentBreakdown {
     totalCash: number;
     totalCard: number;
+    totalLoyalty: number;
     cashTxCount: number;
     cardTxCount: number;
     splitTxCount: number;
+    loyaltyTxCount: number;
     totalAmount: number;
     unrecordedAmount: number;
     unrecordedTxCount: number;
+}
+
+function reportDateBounds(startDate: string, endDate: string): [string, string] {
+    const start = new Date(`${startDate}T00:00:00`);
+    const end = new Date(`${endDate}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    return [start.toISOString(), end.toISOString()];
 }
 
 export interface TopProduct {
@@ -853,27 +1115,83 @@ export interface TopProduct {
     avgPrice: number;
 }
 
+export interface TillReportOption {
+    id: string;
+    name: string;
+}
+
+export interface TillSalesSummary extends TillReportOption {
+    netSales: number;
+    grossSales: number;
+    refunds: number;
+    taxTotal: number;
+    transactions: number;
+    refundTransactions: number;
+    itemsSold: number;
+    cashTotal: number;
+    cardTotal: number;
+    loyaltyTotal: number;
+}
+
+export interface DailySalesPoint {
+    date: string;
+    netSales: number;
+    transactions: number;
+}
+
+export interface BusinessSummary {
+    grossSales: number;
+    refunds: number;
+    voids: number;
+    voidTransactions: number;
+    netSales: number;
+    taxTotal: number;
+    discountTotal: number;
+    costTotal: number;
+    grossProfit: number;
+}
+
+export interface EmployeeSalesSummary {
+    employeeId: string;
+    employeeName: string;
+    netSales: number;
+    grossSales: number;
+    refunds: number;
+    transactions: number;
+    refundTransactions: number;
+    avgTransaction: number;
+}
+
 /** Fetch sales overview for a date range, optionally filtered by till. */
 export async function getSalesOverview(startDate: string, endDate: string, tillNumber?: string): Promise<SalesOverview> {
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
 
     const revRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue, COUNT(*) as totalTransactions
+        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) as saleRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) as totalTransactions,
+            COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) as refundTransactions
          FROM orders o
-         WHERE o.status = 'completed' AND date(o.completedAt) >= ? AND date(o.completedAt) <= ?${tillFilter}`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         params
     );
 
-    const itemParams: any[] = [startDate, endDate];
+    const itemParams: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) itemParams.push(tillNumber);
     const itemRows: any[] = await d.select(
         `SELECT COALESCE(SUM(ol.quantity), 0) as totalItems
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
-         WHERE o.status = 'completed' AND date(o.completedAt) >= ? AND date(o.completedAt) <= ?${tillFilter}`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         itemParams
     );
 
@@ -882,7 +1200,8 @@ export async function getSalesOverview(startDate: string, endDate: string, tillN
     return {
         totalRevenue: rev.totalRevenue || 0,
         totalTransactions: rev.totalTransactions || 0,
-        avgTransactionValue: rev.totalTransactions > 0 ? Math.round(rev.totalRevenue / rev.totalTransactions) : 0,
+        refundTransactions: rev.refundTransactions || 0,
+        avgTransactionValue: rev.totalTransactions > 0 ? Math.round((rev.saleRevenue || 0) / rev.totalTransactions) : 0,
         totalItemsSold: items.totalItems || 0,
     };
 }
@@ -891,24 +1210,42 @@ export async function getSalesOverview(startDate: string, endDate: string, tillN
 export async function getPaymentBreakdown(startDate: string, endDate: string, tillNumber?: string): Promise<PaymentBreakdown> {
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
 
     const rows: any[] = await d.select(
         `SELECT
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as totalCash,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as totalCard,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
+            COALESCE(SUM(p.totalCash), 0) as totalCash,
+            COALESCE(SUM(p.totalCard), 0) as totalCard,
+            COALESCE(SUM(p.totalLoyalty), 0) as totalLoyalty,
+            COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
             COALESCE(SUM(o.total), 0) as totalAmount,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN 1 ELSE 0 END), 0) as cashTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN 1 ELSE 0 END), 0) as cardTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN 1 ELSE 0 END), 0) as splitTxCount,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
+            COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) as cashTxCount,
+            COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) as cardTxCount,
+            COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) as splitTxCount,
+            COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) as loyaltyTxCount,
+            COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed' AND date(o.completedAt) >= ? AND date(o.completedAt) <= ?${tillFilter}`,
+         LEFT JOIN (
+            SELECT orderId,
+                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
+                SUM(amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                ) as totalLoyalty,
+                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+            FROM payments GROUP BY orderId
+         ) p ON o.id = p.orderId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         params
     );
 
@@ -916,9 +1253,11 @@ export async function getPaymentBreakdown(startDate: string, endDate: string, ti
     return {
         totalCash: r.totalCash || 0,
         totalCard: r.totalCard || 0,
+        totalLoyalty: r.totalLoyalty || 0,
         cashTxCount: r.cashTxCount || 0,
         cardTxCount: r.cardTxCount || 0,
         splitTxCount: r.splitTxCount || 0,
+        loyaltyTxCount: r.loyaltyTxCount || 0,
         totalAmount: r.totalAmount || 0,
         unrecordedAmount: r.unrecordedAmount || 0,
         unrecordedTxCount: r.unrecordedTxCount || 0,
@@ -936,7 +1275,7 @@ export async function getTopProducts(
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const orderClause = sortBy === 'revenue' ? 'totalRevenue DESC' : 'qtySold DESC';
-    const params: any[] = [startDate, endDate];
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
     params.push(limit);
 
@@ -946,12 +1285,16 @@ export async function getTopProducts(
             COALESCE(p.sku, '') as sku,
             SUM(ol.quantity) as qtySold,
             SUM(ol.lineTotal) as totalRevenue,
-            ROUND(AVG(ol.unitPrice)) as avgPrice
+            ROUND(SUM(ol.lineTotal) / NULLIF(SUM(ol.quantity), 0)) as avgPrice
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
          LEFT JOIN products p ON ol.productId = p.id
-         WHERE o.status = 'completed' AND date(o.completedAt) >= ? AND date(o.completedAt) <= ?${tillFilter}
-         GROUP BY ol.productId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}
+         GROUP BY ol.productId, ol.productName, p.sku
+         HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY ${orderClause}
          LIMIT ?`,
         params
@@ -970,23 +1313,28 @@ export async function getTopProducts(
 export async function aggregateDailySummary(date?: string): Promise<void> {
     const d = await getDb();
     const nowStr = new Date().toISOString();
-    const dateFilter = date ? ` AND date(o.completedAt) = ?` : '';
+    const dateFilter = date ? ` AND date(o.completedAt, 'localtime') = ?` : '';
     const params: any[] = date ? [date] : [];
 
     // Aggregate per-till and also an overall row (tillNumber = '')
     const rows: any[] = await d.select(
         `SELECT
-            date(o.completedAt) as day,
+            date(o.completedAt, 'localtime') as day,
             COALESCE(o.tillNumber, '') as till,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as cashTotal,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as cardTotal,
+            COALESCE(SUM((SELECT SUM(CASE
+                WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount)
+                WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END)
+                FROM payments p WHERE p.orderId = o.id)), 0) as cashTotal,
+            COALESCE(SUM((SELECT SUM(CASE
+                WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount)
+                WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END)
+                FROM payments p WHERE p.orderId = o.id)), 0) as cardTotal,
             COALESCE(SUM(o.total), 0) as totalSales,
-            COUNT(DISTINCT o.id) as txCount
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) as txCount
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed'${dateFilter}
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')${dateFilter}
          GROUP BY day, till`,
         params
     );
@@ -1022,11 +1370,10 @@ export async function getLastReportMarker(tillNumber: string): Promise<string | 
 export async function saveReportMarker(tillNumber: string, periodStart: string, periodEnd: string): Promise<void> {
     const d = await getDb();
     const id = crypto.randomUUID();
-    const nowStr = new Date().toISOString();
     await d.execute(
         `INSERT INTO till_report_markers (id, tillNumber, type, markerTime, periodStart, periodEnd, createdAt)
          VALUES (?, ?, 'period', ?, ?, ?, ?)`,
-        [id, tillNumber, nowStr, periodStart, periodEnd, nowStr]
+        [id, tillNumber, periodEnd, periodStart, periodEnd, new Date().toISOString()]
     );
 }
 
@@ -1073,6 +1420,180 @@ export async function getAllTillNumbers(): Promise<string[]> {
     return rows.map(r => r.tillNumber);
 }
 
+function friendlyTillName(id: string, name: string | null, minOrderNumber: number, index: number): string {
+    if (name?.trim()) return name.trim();
+    const sequence = Math.floor((minOrderNumber || 0) / 1_000_000);
+    return sequence > 0 ? `Till ${sequence}` : `Till ${index + 1}`;
+}
+
+/** Return every till used by sales with a human-friendly display name. */
+export async function getTillReportOptions(): Promise<TillReportOption[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT o.tillNumber as id, MAX(r.name) as name, MIN(o.orderNumber) as minOrderNumber
+         FROM orders o
+         LEFT JOIN registers r ON r.id = o.tillNumber
+         WHERE o.tillNumber IS NOT NULL AND o.tillNumber != ''
+         GROUP BY o.tillNumber
+         ORDER BY MIN(o.orderNumber), o.tillNumber`
+    );
+    const usedNames = new Map<string, number>();
+    return rows.map((row, index) => {
+        const baseName = friendlyTillName(row.id, row.name, row.minOrderNumber || 0, index);
+        const occurrence = (usedNames.get(baseName) || 0) + 1;
+        usedNames.set(baseName, occurrence);
+        return {
+            id: row.id,
+            name: occurrence === 1 ? baseName : `${baseName} (${occurrence})`,
+        };
+    });
+}
+
+/** Aggregate sales by till without multiplying totals across payment/line joins. */
+export async function getTillSalesSummaries(startDate: string, endDate: string): Promise<TillSalesSummary[]> {
+    const d = await getDb();
+    const options = await getTillReportOptions();
+    const bounds = reportDateBounds(startDate, endDate);
+    const rows: any[] = await d.select(
+        `SELECT
+            o.tillNumber as id,
+            COALESCE(SUM(o.total), 0) as netSales,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) as saleRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) as grossSales,
+            ABS(COALESCE(SUM(CASE WHEN o.total < 0 THEN o.total ELSE 0 END), 0)) as refunds,
+            COALESCE(SUM(o.taxTotal), 0) as taxTotal,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) as transactions,
+            COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) as refundTransactions,
+            COALESCE(SUM((SELECT SUM(ol.quantity) FROM order_lines ol WHERE ol.orderId = o.id)), 0) as itemsSold,
+            COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) as cashTotal,
+            COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) as cardTotal,
+            COALESCE(SUM((SELECT SUM(p.amount
+                - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END
+                - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END
+            ) FROM payments p WHERE p.orderId = o.id)), 0) as loyaltyTotal
+         FROM orders o
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?
+         GROUP BY o.tillNumber
+         ORDER BY netSales DESC`,
+        bounds
+    );
+    return rows.map((row, index) => ({
+        id: row.id || '',
+        name: options.find((option) => option.id === row.id)?.name || `Till ${index + 1}`,
+        netSales: row.netSales || 0,
+        grossSales: row.grossSales || 0,
+        refunds: row.refunds || 0,
+        taxTotal: row.taxTotal || 0,
+        transactions: row.transactions || 0,
+        refundTransactions: row.refundTransactions || 0,
+        itemsSold: row.itemsSold || 0,
+        cashTotal: row.cashTotal || 0,
+        cardTotal: row.cardTotal || 0,
+        loyaltyTotal: row.loyaltyTotal || 0,
+    }));
+}
+
+/** Daily net-sales trend for the selected period and optional till. */
+export async function getDailySalesTrend(startDate: string, endDate: string, tillNumber?: string): Promise<DailySalesPoint[]> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT date(completedAt, 'localtime') as date, COALESCE(SUM(total), 0) as netSales,
+            COALESCE(SUM(CASE WHEN type != 'return' THEN 1 ELSE 0 END), 0) as transactions
+         FROM orders
+         WHERE status IN ('completed','refunded','partially_refunded','voided')
+           AND status != 'voided'
+           AND NOT (type = 'return' AND COALESCE(notes, '') LIKE 'Void of receipt %')
+           AND completedAt >= ? AND completedAt < ?${tillFilter}
+         GROUP BY date(completedAt, 'localtime')
+         ORDER BY date(completedAt, 'localtime')`,
+        params
+    );
+    return rows.map(row => ({
+        date: row.date,
+        netSales: row.netSales || 0,
+        transactions: row.transactions || 0,
+    }));
+}
+
+export async function getBusinessSummary(startDate: string, endDate: string, tillNumber?: string): Promise<BusinessSummary> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT
+            COALESCE(SUM(CASE WHEN o.type != 'return' AND o.status != 'voided' THEN o.total + o.discountAmount ELSE 0 END), 0) as grossSales,
+            ABS(COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') NOT LIKE 'Void of receipt %' THEN o.total ELSE 0 END), 0)) as refunds,
+            ABS(COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %' THEN o.total ELSE 0 END), 0)) as voids,
+            COALESCE(SUM(CASE WHEN o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %' THEN 1 ELSE 0 END), 0) as voidTransactions,
+            COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %') THEN o.total ELSE 0 END), 0) as netSales,
+            COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %') THEN o.taxTotal ELSE 0 END), 0) as taxTotal,
+            COALESCE(SUM(CASE WHEN o.type != 'return' AND o.status != 'voided' THEN o.discountAmount ELSE 0 END), 0) as discountTotal,
+            COALESCE(SUM(CASE WHEN o.status != 'voided' AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+                THEN (SELECT SUM(ol.quantity * ol.costPrice) FROM order_lines ol WHERE ol.orderId = o.id) ELSE 0 END), 0) as costTotal
+         FROM orders o
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
+        params
+    );
+    const row = rows[0] || {};
+    const netSales = row.netSales || 0;
+    const costTotal = row.costTotal || 0;
+    return {
+        grossSales: row.grossSales || 0,
+        refunds: row.refunds || 0,
+        voids: row.voids || 0,
+        voidTransactions: row.voidTransactions || 0,
+        netSales,
+        taxTotal: row.taxTotal || 0,
+        discountTotal: row.discountTotal || 0,
+        costTotal,
+        grossProfit: netSales - (row.taxTotal || 0) - costTotal,
+    };
+}
+
+export async function getEmployeeSalesSummaries(startDate: string, endDate: string, tillNumber?: string): Promise<EmployeeSalesSummary[]> {
+    const d = await getDb();
+    const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
+    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    if (tillNumber) params.push(tillNumber);
+    const rows: any[] = await d.select(
+        `SELECT o.employeeId,
+            COALESCE(MAX(e.name), 'Unknown employee') as employeeName,
+            COALESCE(SUM(o.total), 0) as netSales,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) as saleRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) as grossSales,
+            ABS(COALESCE(SUM(CASE WHEN o.total < 0 THEN o.total ELSE 0 END), 0)) as refunds,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) as transactions,
+            COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) as refundTransactions
+         FROM orders o
+         LEFT JOIN employees e ON e.id = o.employeeId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}
+         GROUP BY o.employeeId
+         ORDER BY netSales DESC`,
+        params
+    );
+    return rows.map(row => ({
+        employeeId: row.employeeId || '',
+        employeeName: row.employeeName || 'Unknown employee',
+        netSales: row.netSales || 0,
+        grossSales: row.grossSales || 0,
+        refunds: row.refunds || 0,
+        transactions: row.transactions || 0,
+        refundTransactions: row.refundTransactions || 0,
+        avgTransaction: row.transactions > 0 ? Math.round((row.saleRevenue || 0) / row.transactions) : 0,
+    }));
+}
+
 /** Get per-till report data between two timestamps. */
 export async function getTillPeriodReport(
     tillNumber: string,
@@ -1083,15 +1604,24 @@ export async function getTillPeriodReport(
 
     // Overview
     const revRows: any[] = await d.select(
-        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue, COUNT(*) as totalTransactions
+        `SELECT COALESCE(SUM(o.total), 0) as totalRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) as saleRevenue,
+            COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) as totalTransactions,
+            COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) as refundTransactions
          FROM orders o
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const itemRows: any[] = await d.select(
         `SELECT COALESCE(SUM(ol.quantity), 0) as totalItems
          FROM order_lines ol JOIN orders o ON ol.orderId = o.id
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const rev = revRows[0] || {};
@@ -1099,35 +1629,56 @@ export async function getTillPeriodReport(
     const overview: SalesOverview = {
         totalRevenue: rev.totalRevenue || 0,
         totalTransactions: rev.totalTransactions || 0,
-        avgTransactionValue: (rev.totalTransactions || 0) > 0 ? Math.round((rev.totalRevenue || 0) / rev.totalTransactions) : 0,
+        refundTransactions: rev.refundTransactions || 0,
+        avgTransactionValue: (rev.totalTransactions || 0) > 0 ? Math.round((rev.saleRevenue || 0) / rev.totalTransactions) : 0,
         totalItemsSold: items.totalItems || 0,
     };
 
     // Payment breakdown
     const bRows: any[] = await d.select(
         `SELECT
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END), 0) as totalCash,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN p.amount ELSE 0 END), 0) +
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END), 0) as totalCard,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
+            COALESCE(SUM(p.totalCash), 0) as totalCash,
+            COALESCE(SUM(p.totalCard), 0) as totalCard,
+            COALESCE(SUM(p.totalLoyalty), 0) as totalLoyalty,
+            COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) as unrecordedAmount,
             COALESCE(SUM(o.total), 0) as totalAmount,
-            COALESCE(SUM(CASE WHEN p.method = 'cash' THEN 1 ELSE 0 END), 0) as cashTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'card' THEN 1 ELSE 0 END), 0) as cardTxCount,
-            COALESCE(SUM(CASE WHEN p.method = 'split' THEN 1 ELSE 0 END), 0) as splitTxCount,
-            COALESCE(SUM(CASE WHEN p.id IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
+            COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) as cashTxCount,
+            COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) as cardTxCount,
+            COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) as splitTxCount,
+            COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) as loyaltyTxCount,
+            COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) as unrecordedTxCount
          FROM orders o
-         LEFT JOIN payments p ON o.id = p.orderId
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?`,
+         LEFT JOIN (
+            SELECT orderId,
+                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
+                SUM(amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                ) as totalLoyalty,
+                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN amount
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
+                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+            FROM payments GROUP BY orderId
+         ) p ON o.id = p.orderId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
         [tillNumber, startTime, endTime]
     );
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
         totalCash: b.totalCash || 0,
         totalCard: b.totalCard || 0,
+        totalLoyalty: b.totalLoyalty || 0,
         cashTxCount: b.cashTxCount || 0,
         cardTxCount: b.cardTxCount || 0,
         splitTxCount: b.splitTxCount || 0,
+        loyaltyTxCount: b.loyaltyTxCount || 0,
         totalAmount: b.totalAmount || 0,
         unrecordedAmount: b.unrecordedAmount || 0,
         unrecordedTxCount: b.unrecordedTxCount || 0,
@@ -1140,12 +1691,16 @@ export async function getTillPeriodReport(
             COALESCE(pr.sku, '') as sku,
             SUM(ol.quantity) as qtySold,
             SUM(ol.lineTotal) as totalRevenue,
-            ROUND(AVG(ol.unitPrice)) as avgPrice
+            ROUND(SUM(ol.lineTotal) / NULLIF(SUM(ol.quantity), 0)) as avgPrice
          FROM order_lines ol
          JOIN orders o ON ol.orderId = o.id
          LEFT JOIN products pr ON ol.productId = pr.id
-         WHERE o.status = 'completed' AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt <= ?
-         GROUP BY ol.productId
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?
+         GROUP BY ol.productId, ol.productName, pr.sku
+         HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY qtySold DESC
          LIMIT 10`,
         [tillNumber, startTime, endTime]

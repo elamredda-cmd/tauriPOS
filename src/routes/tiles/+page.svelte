@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { goBack } from '$lib/navigation';
     import { onMount } from "svelte";
     import {
         posPagesDB,
@@ -26,8 +27,11 @@
 
     // Wait for DB to load
     $: {
-        if ($activePosPages.length > 0 && !activePageId) {
+        if ($activePosPages.length > 0 && !$activePosPages.some((page) => page.id === activePageId)) {
             activePageId = $activePosPages[0].id;
+            currentPageIndex = 0;
+        } else if ($activePosPages.length === 0) {
+            activePageId = "";
         }
     }
 
@@ -101,59 +105,60 @@
         showPageModal = true;
     }
 
-    function savePage() {
+    async function savePage() {
         if (!editPageName.trim()) return;
-        if (pageModalMode === "add") {
-            const maxPos = $posPagesDB.reduce(
-                (m, p) => Math.max(m, p.position),
-                0,
-            );
-            const newPage = {
-                id: uuid(),
-                name: editPageName.trim(),
-                position: maxPos + 1,
-                color: editPageColor,
-            };
-            posPagesDB.update((p) => [...p, newPage]);
-            savePosPage(newPage);
-            activePageId = newPage.id;
-            toast("Page added", "success");
-        } else {
-            const updated = {
-                id: editPageId,
-                name: editPageName.trim(),
-                color: editPageColor,
-                position: 0,
-            }; 
-            posPagesDB.update((p) =>
-                p.map((pg) =>
-                    pg.id === editPageId
-                        ? {
-                                ...pg,
-                                name: editPageName.trim(),
-                                color: editPageColor,
-                            }
-                        : pg,
-                ),
-            );
-            savePosPage(updated);
-            toast("Page updated", "success");
+        try {
+            if (pageModalMode === "add") {
+                const maxPos = $posPagesDB.reduce(
+                    (m, p) => Math.max(m, p.position),
+                    0,
+                );
+                const newPage = {
+                    id: uuid(),
+                    name: editPageName.trim(),
+                    position: maxPos + 1,
+                    color: editPageColor,
+                };
+                await savePosPage(newPage);
+                posPagesDB.update((p) => [...p, newPage]);
+                activePageId = newPage.id;
+                toast("Page added", "success");
+            } else {
+                const existing = $posPagesDB.find((pg) => pg.id === editPageId);
+                if (!existing) throw new Error("Page no longer exists");
+                const updated = {
+                    ...existing,
+                    name: editPageName.trim(),
+                    color: editPageColor,
+                };
+                await savePosPage(updated);
+                posPagesDB.update((p) =>
+                    p.map((pg) => pg.id === editPageId ? updated : pg),
+                );
+                toast("Page updated", "success");
+            }
+            showPageModal = false;
+        } catch (e) {
+            toast(`Page was not saved: ${e}`, "error");
         }
-        showPageModal = false;
     }
 
     function confirmDeletePage() {
         showPageDelConfirm = true;
     }
 
-    function handlePageDelete() {
-        posPagesDB.update((p) => p.filter((pg) => pg.id !== editPageId));
-        tilesDB.update((t) => t.filter((x) => x.pageId !== editPageId));
-        deletePosPage(editPageId);
-        activePageId = "";
-        showPageModal = false;
-        showPageDelConfirm = false;
-        toast("Page deleted", "info");
+    async function handlePageDelete() {
+        try {
+            await deletePosPage(editPageId);
+            posPagesDB.update((p) => p.filter((pg) => pg.id !== editPageId));
+            tilesDB.update((t) => t.filter((x) => x.pageId !== editPageId));
+            activePageId = "";
+            showPageModal = false;
+            showPageDelConfirm = false;
+            toast("Page deleted", "info");
+        } catch (e) {
+            toast(`Page was not deleted: ${e}`, "error");
+        }
     }
 
     function handleEmptyTileClick(absolutePos: number) {
@@ -167,44 +172,58 @@
         showEditTileModal = true;
     }
 
-    function assignProductToTile(productId: string) {
-        // Cleanup existing tile at this position (including ghost tiles)
-        const existing = $tilesDB.find(t => t.pageId === activePageId && t.position === pendingTilePosition);
-        if (existing) {
-            tilesDB.update(list => list.filter(t => t.id !== existing.id));
-            deleteTile(existing.id);
-        }
+    async function assignProductToTile(productId: string) {
+        try {
+            const existing = $tilesDB.find(t => t.pageId === activePageId && t.position === pendingTilePosition);
+            if (existing) await deleteTile(existing.id);
 
-        const newTile: Tile = {
-            id: uuid(),
-            pageId: activePageId,
-            productId,
-            position: pendingTilePosition,
-        };
-        tilesDB.update((t) => [...t, newTile]);
-        addTile(newTile);
-        showTileSearchModal = false;
-        toast("Tile added");
+            const newTile: Tile = {
+                id: uuid(),
+                pageId: activePageId,
+                productId,
+                position: pendingTilePosition,
+            };
+            await addTile(newTile);
+            tilesDB.update((list) => [
+                ...list.filter((t) => t.id !== existing?.id),
+                newTile,
+            ]);
+            showTileSearchModal = false;
+            toast("Tile added");
+        } catch (e) {
+            toast(`Tile was not saved: ${e}`, "error");
+        }
     }
 
-    function removeTile() {
+    async function removeTile() {
         if (!editTileObj) return;
-        tilesDB.update((t) => t.filter((x) => x.id !== editTileObj!.id));
-        deleteTile(editTileObj.id);
-        showEditTileModal = false;
-        toast("Tile removed", "info");
+        try {
+            await deleteTile(editTileObj.id);
+            tilesDB.update((t) => t.filter((x) => x.id !== editTileObj!.id));
+            showEditTileModal = false;
+            toast("Tile removed", "info");
+        } catch (e) {
+            toast(`Tile was not removed: ${e}`, "error");
+        }
     }
 </script>
 
-<div class="flex flex-col h-screen w-screen bg-bg-base">
+<div class="tiles-management-page flex flex-col h-screen w-screen bg-bg-base">
     <div class="flat-panel flex justify-between items-center px-6 py-4 border-b border-border-flat">
         <div class="flex items-center gap-4">
-            <h2 class="m-0 text-[1.4rem]">POS Layout Designer</h2>
-            <p class="text-text-muted text-[0.9rem]">
-                Design your grid. Changes reflect immediately on the POS screen.
-            </p>
+            <button type="button" class="btn-icon shrink-0" aria-label="Go back" on:click={() => goBack('/design')}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
+                    <line x1="19" y1="12" x2="5" y2="12"></line>
+                    <polyline points="12 19 5 12 12 5"></polyline>
+                </svg>
+            </button>
+            <div>
+                <h2 class="m-0 text-[1.4rem]">POS Layout Designer</h2>
+                <p class="m-0 text-text-muted text-[0.9rem]">
+                    Design your grid. Changes reflect immediately on the POS screen.
+                </p>
+            </div>
         </div>
-        <a href="/" class="btn btn-secondary">Exit Designer</a>
     </div>
 
     <main class="flex-1 flex flex-col p-6 overflow-y-auto">
@@ -418,5 +437,3 @@
     variant="danger"
     on:confirm={handlePageDelete}
 />
-
-

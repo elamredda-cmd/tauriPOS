@@ -5,6 +5,7 @@ export interface EngineCartLine {
     id: string;       // productId
     price: number;    // pence per unit
     quantity: number;
+    basePrice?: number; // normal item/per-kg price; used for temporary sale prices on weighed lines
 }
 
 // One promo applied to one specific line.
@@ -64,7 +65,7 @@ export function evaluateCart(
     const promosByGroup = new Map<string, Discount[]>();
     for (const d of discounts) {
         if (!d.isActive || !d.autoApply || !d.groupId) continue;
-        if (d.kind !== 'bogo_fixed_price' && d.kind !== 'bundle_fixed_price') continue;
+        if (d.kind !== 'bogo_fixed_price' && d.kind !== 'bundle_fixed_price' && d.kind !== 'temporary_item') continue;
         if (!withinWindow(d.startAt, d.endAt, nowIso)) continue;
         const group = groups.find(g => g.id === d.groupId);
         if (!group || !group.isActive || !withinWindow(group.startAt, group.endAt, nowIso)) continue;
@@ -79,10 +80,14 @@ export function evaluateCart(
         if (!productSet || productSet.size === 0) continue;
 
         // Expand cart lines into units that belong to this group.
-        const units: { lineIndex: number; price: number }[] = [];
+        const units: { lineIndex: number; price: number; basePrice: number }[] = [];
         cart.forEach((line, i) => {
             if (!productSet.has(line.id)) return;
-            for (let q = 0; q < line.quantity; q++) units.push({ lineIndex: i, price: line.price });
+            for (let q = 0; q < line.quantity; q++) units.push({
+                lineIndex: i,
+                price: line.price,
+                basePrice: line.basePrice || line.price,
+            });
         });
 
         // Track the best plan across all promos on this group.
@@ -129,30 +134,62 @@ export function evaluateCart(
 
 function withinWindow(start: string, end: string, nowIso: string): boolean {
     const n = new Date(nowIso).getTime();
-    if (start && n < new Date(start).getTime()) return false;
-    if (end && n > new Date(end).getTime()) return false;
+    if (!Number.isFinite(n)) return false;
+    if (start) {
+        const startTime = new Date(start).getTime();
+        if (!Number.isFinite(startTime) || n < startTime) return false;
+    }
+    if (end) {
+        const endTime = new Date(end).getTime();
+        if (!Number.isFinite(endTime) || n > endTime) return false;
+    }
     return true;
 }
 
 interface SimPlan { savings: number; perUnit: { lineIndex: number; saving: number }[]; }
 
 /** Dispatch to the right simulator based on discount kind. */
-function simulate(promo: Discount, units: { lineIndex: number; price: number }[]): SimPlan {
+function simulate(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
     if (promo.kind === 'bogo_fixed_price') return simulateBogo(promo, units);
     if (promo.kind === 'bundle_fixed_price') return simulateBundle(promo, units);
+    if (promo.kind === 'temporary_item') return simulateTemporaryItem(promo, units);
     return { savings: 0, perUnit: [] };
+}
+
+/** Temporary item offer: apply a percentage saving or a fixed sale price to every eligible unit. */
+function simulateTemporaryItem(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
+    if (!Number.isFinite(promo.value) || promo.value <= 0) return { savings: 0, perUnit: [] };
+    if (promo.type === 'percentage' && promo.value > 100) return { savings: 0, perUnit: [] };
+    const perUnit: { lineIndex: number; saving: number }[] = [];
+    let total = 0;
+    for (const unit of units) {
+        const temporaryPrice = unit.basePrice > 0
+            ? Math.round(promo.value * (unit.price / unit.basePrice))
+            : promo.value;
+        const saving = promo.type === 'percentage'
+            ? Math.round(unit.price * promo.value / 100)
+            : Math.max(0, unit.price - temporaryPrice);
+        const safeSaving = Math.min(unit.price, Math.max(0, saving));
+        if (safeSaving > 0) {
+            total += safeSaving;
+            perUnit.push({ lineIndex: unit.lineIndex, saving: safeSaving });
+        }
+    }
+    return { savings: total, perUnit };
 }
 
 /**
  * BOGO: for every (minQuantity + 1) units, the cheapest pattern is N full-price + 1 at secondPrice.
  * Best-for-customer: discount the highest-priced units (largest gap to secondPrice).
  */
-function simulateBogo(promo: Discount, units: { lineIndex: number; price: number }[]): SimPlan {
+function simulateBogo(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
+    if (!Number.isInteger(promo.minQuantity) || promo.minQuantity < 1) return { savings: 0, perUnit: [] };
+    if (!Number.isFinite(promo.secondPrice) || promo.secondPrice < 0) return { savings: 0, perUnit: [] };
     const setSize = promo.minQuantity + 1;
     const sets = Math.floor(units.length / setSize);
     if (sets <= 0) return { savings: 0, perUnit: [] };
 
-    const cap = promo.maxApplications == null ? Infinity : promo.maxApplications;
+    const cap = normaliseApplicationCap(promo.maxApplications);
     const applications = Math.min(sets, cap);
     if (applications <= 0) return { savings: 0, perUnit: [] };
 
@@ -176,13 +213,14 @@ function simulateBogo(promo: Discount, units: { lineIndex: number; price: number
  * Best-for-customer: pick the highest-priced units for each bundle (max savings).
  * Discount is prorated across the units in each bundle.
  */
-function simulateBundle(promo: Discount, units: { lineIndex: number; price: number }[]): SimPlan {
+function simulateBundle(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
     const bq = promo.bundleQuantity;
-    if (bq <= 0) return { savings: 0, perUnit: [] };
+    if (!Number.isInteger(bq) || bq < 2) return { savings: 0, perUnit: [] };
+    if (!Number.isFinite(promo.bundlePrice) || promo.bundlePrice <= 0) return { savings: 0, perUnit: [] };
     const bundles = Math.floor(units.length / bq);
     if (bundles <= 0) return { savings: 0, perUnit: [] };
 
-    const cap = promo.maxApplications == null ? Infinity : promo.maxApplications;
+    const cap = normaliseApplicationCap(promo.maxApplications);
     const applications = Math.min(bundles, cap);
     if (applications <= 0) return { savings: 0, perUnit: [] };
 
@@ -209,4 +247,10 @@ function simulateBundle(promo: Discount, units: { lineIndex: number; price: numb
         total += bundleSaving;
     }
     return { savings: total, perUnit };
+}
+
+function normaliseApplicationCap(maxApplications: number | null): number {
+    if (maxApplications == null) return Infinity;
+    if (!Number.isInteger(maxApplications) || maxApplications < 1) return 0;
+    return maxApplications;
 }

@@ -1,81 +1,180 @@
-/** Sound engine – generates WAV data-URIs locally so everything works offline. */
+/** Low-latency synthesized POS sounds. No files or decoding are required. */
 
-function encodeWav(samples: number[], sampleRate: number): string {
-    const len = 44 + samples.length;
-    const buf = new ArrayBuffer(len);
-    const view = new DataView(buf);
+import { get } from "svelte/store";
+import { settingsDB } from "$lib/stores/db";
 
-    const writeStr = (off: number, str: string) => {
-        for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
-    };
+let audioContext: AudioContext | null = null;
+let enginePrimed = false;
+let keepAliveOscillator: OscillatorNode | null = null;
+let keepAliveGain: GainNode | null = null;
+let soundWatchdog: ReturnType<typeof setInterval> | null = null;
+let lastSoundAt = 0;
+const STALE_AFTER_MS = 2 * 60 * 1000;
 
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + samples.length, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);        // PCM
-    view.setUint16(22, 1, true);        // mono
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate, true); // byte rate for 8-bit mono
-    view.setUint16(32, 1, true);        // block align
-    view.setUint16(34, 8, true);        // bits per sample
-    writeStr(36, 'data');
-    view.setUint32(40, samples.length, true);
-
-    for (let i = 0; i < samples.length; i++) {
-        view.setUint8(44 + i, Math.max(0, Math.min(255, Math.round(samples[i]))));
-    }
-
-    const bytes = new Uint8Array(buf);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return 'data:audio/wav;base64,' + btoa(binary);
+function settingEnabled(key: string, defaultValue = true): boolean {
+    const value = get(settingsDB).find((setting) => setting.key === key)?.value;
+    return value === undefined ? defaultValue : value !== "false";
 }
 
-function generateRingTone(): string {
-    const sr = 22050;
-    const dur = 0.7;
-    const samples: number[] = [];
-    for (let i = 0; i < sr * dur; i++) {
-        const t = i / sr;
-        let amp = 0;
-        // two rings: 0-0.25s, gap 0.1s, 0.35-0.6s
-        if (t < 0.25 || (t >= 0.35 && t < 0.6)) {
-            const ringT = t < 0.25 ? t : t - 0.35;
-            const env = Math.max(0, 1 - ringT / 0.25);
-            amp = (Math.sin(2 * Math.PI * 480 * t) + Math.sin(2 * Math.PI * 620 * t)) * 0.5 * env;
+function vibrate(pattern: number | number[]) {
+    if (!settingEnabled("feedback_haptics_enabled")) return;
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+        navigator.vibrate(pattern);
+    }
+}
+
+function createAudioContext(): AudioContext | null {
+    if (typeof window === "undefined") return null;
+    audioContext = new AudioContext({ latencyHint: "interactive" });
+    keepAliveOscillator = null;
+    keepAliveGain = null;
+    return audioContext;
+}
+
+function getAudioContext(): AudioContext | null {
+    if (typeof window === "undefined") return null;
+    const state = audioContext?.state as string | undefined;
+    if (!audioContext || state === "closed" || state === "interrupted") {
+        return createAudioContext();
+    }
+    return audioContext;
+}
+
+function startSilentKeepAlive(context: AudioContext) {
+    if (keepAliveOscillator || context.state !== "running") return;
+    try {
+        keepAliveOscillator = context.createOscillator();
+        keepAliveGain = context.createGain();
+        keepAliveOscillator.frequency.value = 20;
+        keepAliveGain.gain.value = 0.000001;
+        keepAliveOscillator.connect(keepAliveGain).connect(context.destination);
+        keepAliveOscillator.start();
+    } catch {
+        keepAliveOscillator = null;
+        keepAliveGain = null;
+    }
+}
+
+function resetSoundEngine() {
+    const oldContext = audioContext;
+    audioContext = null;
+    keepAliveOscillator = null;
+    keepAliveGain = null;
+    lastSoundAt = 0;
+    if (oldContext && oldContext.state !== "closed") void oldContext.close().catch(() => {});
+}
+
+async function wakeSoundEngine(): Promise<AudioContext | null> {
+    if (audioContext && lastSoundAt > 0 && Date.now() - lastSoundAt > STALE_AFTER_MS) {
+        resetSoundEngine();
+    }
+    let context = getAudioContext();
+    if (!context) return null;
+    if (context.state !== "running") {
+        try {
+            await context.resume();
+        } catch {
+            resetSoundEngine();
+            context = getAudioContext();
+            if (!context) return null;
+            try { await context.resume(); } catch { return null; }
         }
-        samples.push(128 + amp * 64);
     }
-    return encodeWav(samples, sr);
+    if (!context) return null;
+    if ((context.state as string) !== "running") {
+        resetSoundEngine();
+        context = getAudioContext();
+        if (!context) return null;
+        try { await context?.resume(); } catch { return null; }
+    }
+    if (!context) return null;
+    if ((context.state as string) !== "running") return null;
+    startSilentKeepAlive(context);
+    return context;
 }
 
-function generateChime(): string {
-    const sr = 22050;
-    const dur = 0.3;
-    const samples: number[] = [];
-    for (let i = 0; i < sr * dur; i++) {
-        const t = i / sr;
-        const freq = 523 + (784 - 523) * (t / dur);
-        const env = Math.max(0, 1 - t / 0.3);
-        const amp = Math.sin(2 * Math.PI * freq * t) * env;
-        samples.push(128 + amp * 64);
-    }
-    return encodeWav(samples, sr);
+function tone(
+    frequency: number,
+    durationMs: number,
+    volume: number,
+    type: OscillatorType = "sine",
+    delayMs = 0,
+) {
+    void wakeSoundEngine().then((context) => {
+        if (!context || context.state !== "running") return;
+        const start = context.currentTime + delayMs / 1000;
+        const end = start + durationMs / 1000;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, start);
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(volume, start + 0.003);
+        gain.gain.exponentialRampToValueAtTime(0.0001, end);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(start);
+        oscillator.stop(end + 0.005);
+        lastSoundAt = Date.now();
+    });
 }
 
-const errorUri = generateRingTone();
-const successUri = generateChime();
+/** Keep audio ready after OS inactivity, sleep, focus changes, or WebView suspension. */
+export function primeSoundEngine() {
+    if (typeof window === "undefined" || enginePrimed) return;
+    enginePrimed = true;
+    const wake = () => { void wakeSoundEngine(); };
+    const wakeWhenVisible = () => { if (!document.hidden) wake(); };
+    window.addEventListener("pointerdown", wake, { capture: true });
+    window.addEventListener("keydown", wake, { capture: true });
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wakeWhenVisible);
+    soundWatchdog ??= setInterval(() => {
+        if (!document.hidden && audioContext && (audioContext.state as string) !== "running") {
+            resetSoundEngine();
+        }
+    }, 15000);
+}
+
+/** Very short, tactile confirmation for every successful cart addition. */
+export function playItemAddedSound() {
+    if (settingEnabled("feedback_item_sound_enabled")) tone(1350, 34, 0.14, "square");
+    vibrate(8);
+}
+
+/** Softer tactile feedback for cart controls, distinct from adding an item. */
+export function playCartButtonFeedback() {
+    if (settingEnabled("feedback_button_sound_enabled")) tone(980, 22, 0.055, "triangle");
+    vibrate(6);
+}
 
 export function playErrorSound() {
-    const a = new Audio(errorUri);
-    a.volume = 0.6;
-    a.play().catch(() => {});
+    const style = get(settingsDB).find((setting) => setting.key === "barcode_error_sound")?.value || "vintage";
+    if (style === "silent") return;
+
+    if (style === "busy") {
+        for (const delay of [0, 230, 460]) {
+            tone(480, 150, 0.19, "square", delay);
+            tone(620, 150, 0.14, "sine", delay);
+        }
+    } else if (style === "beep") {
+        tone(980, 110, 0.22, "square");
+        tone(780, 150, 0.2, "square", 125);
+    } else {
+        // Attention-grabbing vintage mechanical telephone bell: two quick rings.
+        for (const ringStart of [0, 430]) {
+            for (let strike = 0; strike < 6; strike++) {
+                const delay = ringStart + strike * 48;
+                tone(strike % 2 === 0 ? 720 : 610, 70, 0.24, "square", delay);
+                tone(strike % 2 === 0 ? 1440 : 1220, 55, 0.105, "sine", delay + 2);
+            }
+        }
+    }
+    vibrate([55, 35, 55, 190, 55, 35, 55]);
 }
 
 export function playSuccessSound() {
-    const a = new Audio(successUri);
-    a.volume = 0.5;
-    a.play().catch(() => {});
+    if (!settingEnabled("feedback_sale_sound_enabled")) return;
+    tone(660, 70, 0.16, "sine");
+    tone(990, 100, 0.15, "sine", 65);
 }

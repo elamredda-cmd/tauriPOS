@@ -1,0 +1,175 @@
+<script lang="ts">
+    import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import Receipt from '$lib/components/Receipt.svelte';
+    import { now, settingsDB, storeDB, type Order } from '$lib/stores/db';
+    import { upsert } from '$lib/stores/database';
+    import { toast } from '$lib/stores/toast';
+    import { defaultReceiptDesign, getReceiptDesign, type ReceiptDesign } from '$lib/receipt';
+
+    let design: ReceiptDesign = getReceiptDesign($settingsDB);
+
+    const previewOrder: Order = {
+        id: 'preview-order',
+        shiftId: '',
+        customerId: '',
+        employeeId: 'preview-employee',
+        orderNumber: 10042,
+        receiptKey: 'preview:10042',
+        type: 'sale',
+        status: 'completed',
+        originalOrderId: '',
+        subtotal: 1350,
+        discountId: '',
+        discountAmount: 100,
+        taxTotal: 208,
+        total: 1250,
+        tillNumber: 'preview-till',
+        notes: '',
+        paymentMethod: 'cash',
+        amountTendered: 1500,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    };
+
+    const previewLines = [
+        { productName: 'Coffee', sku: 'DRINK-COFFEE', quantity: 2, unitPrice: 350 },
+        { productName: 'Sandwich', sku: 'FOOD-SANDWICH', quantity: 1, unitPrice: 650 },
+    ];
+
+    function setBoolean(key: keyof ReceiptDesign, checked: boolean) {
+        design = { ...design, [key]: checked };
+    }
+
+    async function saveDesign() {
+        const setting = { key: 'receipt_design', value: JSON.stringify(design), updatedAt: now() };
+        settingsDB.update((settings) => {
+            const index = settings.findIndex((item) => item.key === setting.key);
+            if (index >= 0) settings[index] = setting;
+            else settings.push(setting);
+            return settings;
+        });
+        await upsert('settings', setting, 'key');
+        toast('Receipt design saved', 'success');
+    }
+
+    function resetDesign() {
+        design = { ...defaultReceiptDesign };
+        toast('Receipt design reset. Save to keep it.', 'info');
+    }
+
+    function testPrint() {
+        window.print();
+    }
+
+    const switches: Array<{ key: keyof ReceiptDesign; label: string }> = [
+        { key: 'showAddress', label: 'Store address' },
+        { key: 'showPhone', label: 'Store phone' },
+        { key: 'showEmail', label: 'Store email' },
+        { key: 'showReceiptNumber', label: 'Receipt number' },
+        { key: 'showDateTime', label: 'Date and time' },
+        { key: 'showCashier', label: 'Cashier name' },
+        { key: 'showTill', label: 'Till name' },
+        { key: 'showSku', label: 'Product SKU' },
+        { key: 'showTax', label: 'Tax total' },
+        { key: 'showPayment', label: 'Payment and change' },
+        { key: 'showBarcode', label: 'Receipt barcode' },
+    ];
+</script>
+
+<MgmtPage title="Receipt Designer" backFallback="/settings">
+    <div slot="actions" class="flex gap-3">
+        <button class="btn btn-secondary" on:click={resetDesign}>Reset</button>
+        <button class="btn btn-secondary" on:click={testPrint}>Test Print</button>
+        <button class="btn btn-primary" on:click={saveDesign}>Save Design</button>
+    </div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(480px,1fr)_minmax(340px,0.8fr)] gap-6 p-6">
+        <div class="flex flex-col gap-6">
+            <section class="settings-section">
+                <h3 class="settings-section-title">Paper and Text</h3>
+                <div class="form-grid">
+                    <div class="field">
+                        <label>Paper Width</label>
+                        <select bind:value={design.paperWidth}>
+                            <option value="58mm">58mm Thermal</option>
+                            <option value="80mm">80mm Thermal</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Text Size</label>
+                        <select bind:value={design.textSize}>
+                            <option value="small">Small</option>
+                            <option value="normal">Normal</option>
+                            <option value="large">Large</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label>Spacing</label>
+                        <select bind:value={design.density}>
+                            <option value="compact">Compact</option>
+                            <option value="comfortable">Comfortable</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h3 class="settings-section-title">Receipt Messages</h3>
+                <div class="form-grid">
+                    <div class="field span-2">
+                        <label>Header Text</label>
+                        <textarea bind:value={design.headerText} placeholder="Leave blank to use store name"></textarea>
+                    </div>
+                    <div class="field span-2">
+                        <label>Message Below Store Details</label>
+                        <textarea bind:value={design.customMessage} placeholder="Optional message"></textarea>
+                    </div>
+                    <div class="field span-2">
+                        <label>Footer Text</label>
+                        <textarea bind:value={design.footerText}></textarea>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <h3 class="settings-section-title">Information to Show</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {#each switches as item}
+                        <label class="flex items-center gap-3 p-3 bg-bg-root border border-border-flat rounded-md cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(design[item.key])}
+                                on:change={(event) => setBoolean(item.key, event.currentTarget.checked)}
+                            />
+                            <span>{item.label}</span>
+                        </label>
+                    {/each}
+                </div>
+            </section>
+        </div>
+
+        <aside class="settings-section flex flex-col items-center gap-4 xl:sticky xl:top-0 self-start">
+            <div class="w-full flex justify-between items-center">
+                <h3 class="settings-section-title !mb-0">Live Preview</h3>
+                <span class="text-xs text-text-muted">{design.paperWidth}</span>
+            </div>
+            <div class="w-full overflow-auto p-4 bg-bg-root rounded-md flex justify-center">
+                <div class="receipt-print-target">
+                    <Receipt
+                        store={$storeDB}
+                        order={previewOrder}
+                        lines={previewLines}
+                        cashierName="Alex"
+                        tillName="Till 1"
+                        {design}
+                        preview
+                    />
+                </div>
+            </div>
+            <p class="text-xs text-text-muted text-center">
+                Printer selection and paper settings are chosen in the system print dialog on each till.
+            </p>
+        </aside>
+    </div>
+</MgmtPage>

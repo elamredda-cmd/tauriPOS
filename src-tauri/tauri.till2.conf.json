@@ -1,0 +1,17 @@
+{
+  "productName": "L&Bj POS Till 2",
+  "identifier": "com.elamreda.tauri-app.till2",
+  "build": {
+    "beforeDevCommand": "VITE_POS_PROFILE=till2 VITE_PORT=1430 npm run dev",
+    "devUrl": "http://localhost:1430"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "L&Bj POS Till 2",
+        "width": 1280,
+        "height": 800
+      }
+    ]
+  }
+}

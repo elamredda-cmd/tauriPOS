@@ -8,12 +8,12 @@
         goods: 'Goods',
         recent_trans: 'Recent Trans',
         change_price: 'Change Price',
-        drawer: 'Drawer',
+        hold: 'Hold',
     };
 
     const TOOLBAR_BUTTONS: Record<string, string> = {
         scale: 'Scale',
-        drawer: 'Drawer',
+        label_print: 'Label Print',
         discount: 'Discount',
     };
 
@@ -32,8 +32,25 @@
         upsert('settings', s, 'key');
     }
 
-    let cartLayout: string[] = JSON.parse(getSetting('pos_cart_layout', JSON.stringify(['goods', 'recent_trans', 'change_price', 'drawer'])));
-    let toolbarLayout: string[] = JSON.parse(getSetting('pos_toolbar_layout', JSON.stringify(['scale', 'drawer', 'discount'])));
+    function parseLayout(key: string, fallback: string[], allowed: Record<string, string>) {
+        try {
+            const parsed = JSON.parse(getSetting(key, JSON.stringify(fallback)));
+            if (!Array.isArray(parsed)) return fallback;
+            const mapped = parsed
+                .map((button) => {
+                    if (key === 'pos_cart_layout' && (button === 'drawer' || button === 'label_print')) return 'hold';
+                    if (key === 'pos_toolbar_layout' && button === 'drawer') return 'label_print';
+                    return button;
+                })
+                .filter((button): button is string => typeof button === 'string' && button in allowed);
+            return mapped.length > 0 ? [...new Set(mapped)] : fallback;
+        } catch {
+            return fallback;
+        }
+    }
+
+    let cartLayout: string[] = parseLayout('pos_cart_layout', ['goods', 'recent_trans', 'change_price', 'hold'], CART_BUTTONS);
+    let toolbarLayout: string[] = parseLayout('pos_toolbar_layout', ['scale', 'label_print', 'discount'], TOOLBAR_BUTTONS);
 
     function move(arr: string[], i: number, dir: number) {
         const j = i + dir;
@@ -50,7 +67,7 @@
     }
 </script>
 
-<MgmtPage title="Button Layout">
+<MgmtPage title="Button Layout" backFallback="/settings">
     <button slot="actions" class="btn btn-primary" on:click={save}>Save Layout</button>
 
     <div class="p-6 flex flex-col gap-8 max-w-2xl">
