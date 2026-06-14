@@ -19,6 +19,7 @@
         paymentsDB,
         inventoryLogDB,
         loyaltyLogDB,
+        auditLogDB,
         registersDB,
         heldOrders,
         discountsDB,
@@ -48,6 +49,8 @@
         ensureOpenShift,
         findOpenShiftForRegister,
         retireOpenShiftsBefore,
+        ensureTillReceiptSequence,
+        type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
     import { calculateCartTotals, calculateTaxLine } from "$lib/utils/commerceMath";
@@ -509,7 +512,10 @@
         }, 60000);
 
         // Auto-generate and cache till identity for this machine
-        getOrCreateTillId().then(id => { tillId = id; });
+        getOrCreateTillId().then(async id => {
+            tillId = id;
+            await ensureTillReceiptSequence();
+        });
         getTillName().then(name => { tillName = name; });
         document.addEventListener("pointerup", handlePosPointerUp);
         focusScannerSoon();
@@ -1665,6 +1671,76 @@
         hasTypedPayment = false;
     }
 
+    function applyCompletedSaleToStores(bundle: SaleBundle) {
+        const order = bundle.order;
+        ordersDB.update((list) => [
+            ...list.filter((existing) => existing.id !== order.id),
+            order,
+        ]);
+        orderLinesDB.update((list) => [
+            ...list.filter((existing) => existing.orderId !== order.id),
+            ...bundle.lines,
+        ]);
+        paymentsDB.update((list) => [
+            ...list.filter((existing) => existing.orderId !== order.id),
+            bundle.payment,
+        ]);
+        inventoryLogDB.update((list) => [
+            ...list,
+            ...bundle.stockChanges.map((change) => ({
+                id: change.logId,
+                productId: change.productId,
+                quantityChange: change.delta,
+                type: (change.movementType || "sale") as "sale" | "return" | "restock" | "adjustment" | "waste",
+                referenceId: order.id,
+                employeeId: change.employeeId,
+                notes: change.notes,
+                createdAt: order.completedAt,
+                updatedAt: order.updatedAt,
+            })),
+        ]);
+        if (bundle.stockChanges.length > 0) {
+            const deltas = new Map<string, number>();
+            for (const change of bundle.stockChanges) {
+                deltas.set(change.productId, (deltas.get(change.productId) || 0) + change.delta);
+            }
+            productsDB.update((list) => list.map((product) => {
+                const delta = deltas.get(product.id);
+                return delta
+                    ? { ...product, stockLevel: (product.stockLevel || 0) + delta, updatedAt: order.updatedAt }
+                    : product;
+            }));
+        }
+        if (bundle.loyaltyChanges?.length) {
+            loyaltyLogDB.update((list) => [
+                ...list,
+                ...bundle.loyaltyChanges!.map((change) => ({
+                    ...change,
+                    reason: change.reason as "earned" | "redeemed" | "manual_adjustment" | "refund_adjustment",
+                    updatedAt: order.updatedAt,
+                })),
+            ]);
+            const loyaltyDeltas = new Map<string, number>();
+            for (const change of bundle.loyaltyChanges) {
+                loyaltyDeltas.set(change.customerId, (loyaltyDeltas.get(change.customerId) || 0) + change.pointsChange);
+            }
+            customersDB.update((list) => list.map((customer) => {
+                const delta = loyaltyDeltas.get(customer.id);
+                return delta
+                    ? { ...customer, loyaltyPoints: (customer.loyaltyPoints || 0) + delta, updatedAt: order.updatedAt }
+                    : customer;
+            }));
+        }
+        auditLogDB.update((list) => [...list, bundle.audit]);
+        if (bundle.originalOrderToUpdate && bundle.originalStatusUpdate) {
+            ordersDB.update((list) => list.map((existing) =>
+                existing.id === bundle.originalOrderToUpdate
+                    ? { ...existing, status: bundle.originalStatusUpdate as any, updatedAt: order.updatedAt }
+                    : existing,
+            ));
+        }
+    }
+
     async function completeSale() {
         if (isCompletingSale) return;
         if (!$currentEmployee || !$currentShiftId || !tillId) {
@@ -1693,6 +1769,7 @@
             toast("Amount tendered is less than total", "error");
             return;
         }
+        await ensureTillReceiptSequence();
 
         // Determine split amounts
         let cashAmount = 0;
@@ -1763,10 +1840,9 @@
             updatedAt: timestamp,
             };
 
-            const allProducts = get(productsDB);
             const lines = cart.map((item, i) => {
                 const ev = cartEval.lines[i];
-                const product = allProducts.find((p) => p.id === item.id);
+                const product = productById.get(item.id);
                 const lineDiscount = ev?.savings || 0;
                 const lineDiscountId = ev?.applied?.[0]?.discountId || "";
                 const tax = calculatedTaxLines[i];
@@ -1805,7 +1881,7 @@
             updatedAt: timestamp,
             };
             const stockChanges = stockTrackingEnabled ? cart.flatMap((item) => {
-                const product = allProducts.find((p) => p.id === item.id);
+                const product = productById.get(item.id);
                 return product?.trackStock && !item.skipStockAdjustment ? [{
                     productId: item.id,
                     delta: -item.quantity,
@@ -1837,7 +1913,8 @@
                 }] : []),
             ] : [];
 
-            await commitSale({ order: newOrder, lines, payment, stockChanges, loyaltyChanges, audit });
+            const committedSale = await commitSale({ order: newOrder, lines, payment, stockChanges, loyaltyChanges, audit });
+            applyCompletedSaleToStores(committedSale);
             sendCctvReceipt({
                 storeName: $storeDB.name,
                 tillName,
@@ -1854,7 +1931,6 @@
                     discount: cartEval.lines[index]?.savings || 0,
                 })),
             });
-            await hydrateSvelteStores();
 
             cart = [];
             selectedCartIndex = 0;

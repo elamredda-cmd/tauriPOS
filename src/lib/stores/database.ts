@@ -771,17 +771,17 @@ interface CommitSaleResult {
  * same immutable bundle is committed to MariaDB as one transaction, or queued
  * as one unit if the server is unavailable. This prevents half-written sales.
  */
-export async function commitSale(bundle: SaleBundle): Promise<void> {
+export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
     if (isMultiMode() && bundle.order?.type === 'return') {
         const state = get(connectionState);
         if (state.mysqlOnline) {
             if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
             try {
-                await invoke<CommitSaleResult>('commit_online_reversal', {
+                const committed = await invoke<CommitSaleResult>('commit_online_reversal', {
                     mysqlUri: buildMysqlUri(state.mysqlConfig),
                     bundle,
                 });
-                return;
+                return committed.bundle;
             } catch (e) {
                 connectionState.update(s => ({ ...s, syncError: String(e) }));
                 throw e;
@@ -797,12 +797,12 @@ export async function commitSale(bundle: SaleBundle): Promise<void> {
         const config = state.mysqlConfig;
         if (!state.mysqlOnline) {
             await queueOffline('sale_bundle', 'saleBundle', bundle);
-            return;
+            return bundle;
         }
         if (!config) {
             await queueOffline('sale_bundle', 'saleBundle', bundle);
             connectionState.update(s => ({ ...s, mysqlOnline: false }));
-            return;
+            return bundle;
         }
 
         // Keep the cashier flow instant: SQLite already committed the sale,
@@ -814,6 +814,7 @@ export async function commitSale(bundle: SaleBundle): Promise<void> {
                 connectionState.update(s => ({ ...s, mysqlOnline: false }));
             });
     }
+    return bundle;
 }
 
 export async function deleteProduct(id: string): Promise<void> {
@@ -1434,6 +1435,62 @@ export async function getTillSequence(): Promise<number> {
         console.warn('database: could not claim till sequence:', e);
     }
     return 0;
+}
+
+function sequenceFromTillName(name: string | null): number | null {
+    const match = (name || '').trim().match(/^till\s*(\d+)$/i);
+    if (!match) return null;
+    const parsed = parseInt(match[1], 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * Repair cloned/copy-pasted till databases where the human till name says
+ * "Till 1" but the cached receipt block is still "2" from another machine.
+ * This is local-only and affects future receipts, never historical receipts.
+ */
+export async function ensureTillReceiptSequence(): Promise<number> {
+    const tillName = await getSettingValue('till_name');
+    const sequenceFromName = sequenceFromTillName(tillName);
+    const cached = await getSettingValue('till_seq');
+    const cachedSeq = cached ? parseInt(cached, 10) : 0;
+
+    if (sequenceFromName && sequenceFromName !== cachedSeq) {
+        const tillId = await getSettingValue('till_id');
+        let remoteConflict = false;
+        if (isMultiMode() && tillId) {
+            try {
+                const remote = await getMysqlDb();
+                if (remote) {
+                    const blockStart = sequenceFromName * RECEIPT_BLOCK;
+                    const rows: any[] = await remote.select(
+                        `SELECT COUNT(*) AS count
+                         FROM orders
+                         WHERE orderNumber >= ? AND orderNumber < ?
+                           AND tillNumber <> ?`,
+                        [blockStart, blockStart + RECEIPT_BLOCK, tillId],
+                    );
+                    remoteConflict = Number(rows[0]?.count || 0) > 0;
+                }
+            } catch (e) {
+                console.warn('database: could not check till sequence conflicts:', e);
+            }
+        }
+
+        if (!remoteConflict) {
+            await sqlite.upsert('settings', {
+                key: 'till_seq',
+                value: String(sequenceFromName),
+                updatedAt: new Date().toISOString(),
+            }, 'key');
+            console.log(`database: repaired local till receipt sequence to #${sequenceFromName}`);
+            return sequenceFromName;
+        }
+
+        console.warn(`database: did not switch to receipt sequence #${sequenceFromName}; that block is already used by another till`);
+    }
+
+    return getTillSequence();
 }
 
 export async function createLocalBackup(): Promise<string> {
