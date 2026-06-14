@@ -251,6 +251,12 @@ export async function flushOfflineQueue(): Promise<number> {
     return flushed;
 }
 
+async function pendingOfflineQueueCount(): Promise<number> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(`SELECT COUNT(*) AS count FROM _offline_queue`);
+    return Number(rows[0]?.count || 0);
+}
+
 // ─── Helper: try MySQL, fall back to SQLite ─────────────────────────────────
 
 async function tryMysql(): Promise<boolean> {
@@ -1810,26 +1816,34 @@ export async function runFastSyncCycle(): Promise<void> {
     if (!isMultiMode() || isFastSyncRunning || isSyncRunning) return;
     isFastSyncRunning = true;
     try {
+        const wasOnline = get(connectionState).mysqlOnline;
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) return;
+
+        const pendingBeforeFlush = await pendingOfflineQueueCount();
+        const flushed = pendingBeforeFlush > 0 ? await flushOfflineQueue() : 0;
+        const shouldCatchUpEverything = !wasOnline || flushed > 0;
+        const tablesToPull = shouldCatchUpEverything ? ALL_SYNC_TABLES : FAST_SYNC_TABLES;
 
         // Server clock is the authority for delta sync; read it once per cycle.
         const newSyncTime = await mysql.mysqlGetServerTime();
 
         let totalChanges = 0;
 
-        for (const table of FAST_SYNC_TABLES) {
+        for (const table of tablesToPull) {
             // Per-table watermark: only advances when THIS table's pull succeeds,
             // so a transient error on one table never permanently skips its rows.
             const since = overlapWatermark(table, await getTableWatermark(table));
             try {
-                const pulledRows: any[] = since
+                let pulledRows: any[] = since
                     ? await mysql.mysqlGetUpdatedSince(table, since)
                     : await mysql.mysqlGetAll(table);
-                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows);
+                if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
+                const idKey = table === 'settings' ? 'key' : 'id';
+                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows, idKey);
 
                 if (rows.length > 0) {
-                    await sqlite.bulkUpsert(table, rows, 'id');
+                    await sqlite.bulkUpsert(table, rows, idKey);
                     totalChanges += rows.length;
                 }
                 await setTableWatermark(table, newSyncTime);
@@ -1842,7 +1856,7 @@ export async function runFastSyncCycle(): Promise<void> {
         const removed = await applyTombstones(newSyncTime);
 
         // Only rehydrate stores if there were actual changes (avoids unnecessary re-renders)
-        if (totalChanges > 0 || removed > 0) {
+        if (totalChanges > 0 || removed > 0 || shouldCatchUpEverything) {
             console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
             await hydrateSvelteStores();
         }
