@@ -97,6 +97,48 @@ fn send_cctv_pos_text(
     Ok(())
 }
 
+#[tauri::command]
+fn open_cash_drawer(
+    host: String,
+    port: u16,
+    pin: Option<u8>,
+    pulse_on_ms: Option<u16>,
+    pulse_off_ms: Option<u16>,
+    timeout_ms: Option<u64>,
+) -> Result<(), String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Drawer printer IP address is required".into());
+    }
+    if port == 0 {
+        return Err("Drawer printer port is required".into());
+    }
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(800).clamp(100, 5_000));
+    let address = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Could not resolve drawer printer: {error}"))?
+        .next()
+        .ok_or_else(|| "Could not resolve drawer printer".to_string())?;
+
+    let drawer_pin = match pin.unwrap_or(0) {
+        0 | 1 => pin.unwrap_or(0),
+        _ => return Err("Drawer pin must be 0 or 1".into()),
+    };
+    let on_units = ((pulse_on_ms.unwrap_or(50).max(2) as u32 + 1) / 2).clamp(1, 255) as u8;
+    let off_units = ((pulse_off_ms.unwrap_or(250).max(2) as u32 + 1) / 2).clamp(1, 255) as u8;
+    let payload = [0x1b, 0x70, drawer_pin, on_units, off_units];
+
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("Could not connect to drawer printer: {error}"))?;
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(&payload)
+        .map_err(|error| format!("Could not send drawer pulse: {error}"))?;
+    stream.flush().map_err(|error| format!("Could not flush drawer pulse: {error}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -127,6 +169,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             send_cctv_pos_text,
+            open_cash_drawer,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,
             commerce::commit_online_reversal,

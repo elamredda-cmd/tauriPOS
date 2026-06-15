@@ -300,6 +300,8 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'cctv_pos_enabled', 'cctv_pos_host', 'cctv_pos_port', 'cctv_pos_number',
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
     'cctv_pos_send_items', 'cctv_pos_send_receipts',
+    'cash_drawer_enabled', 'cash_drawer_printer_host', 'cash_drawer_printer_port',
+    'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done',
 ]);

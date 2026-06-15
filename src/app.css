@@ -195,10 +195,19 @@
   }
   a { @apply no-underline text-inherit; }
 
-  ::-webkit-scrollbar { @apply w-1.5 h-1.5; }
-  ::-webkit-scrollbar-track { @apply bg-transparent; }
-  ::-webkit-scrollbar-thumb { @apply bg-border-flat rounded-full; }
-  ::-webkit-scrollbar-thumb:hover { @apply bg-accent-primary; }
+  ::-webkit-scrollbar { width: 18px; height: 18px; }
+  ::-webkit-scrollbar-track {
+    background: var(--bg-card);
+    border-left: 1px solid var(--border-flat);
+    border-top: 1px solid var(--border-flat);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--text-muted);
+    border: 4px solid var(--bg-card);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--accent-primary); }
+  ::-webkit-scrollbar-corner { background: var(--bg-card); }
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -341,8 +350,8 @@
 
 /* Touch-friendly thick scrollbars */
 ::-webkit-scrollbar {
-    width: 14px;
-    height: 14px;
+    width: 18px;
+    height: 18px;
 }
 ::-webkit-scrollbar-track {
     background: var(--bg-card);
@@ -351,12 +360,11 @@
 }
 ::-webkit-scrollbar-thumb {
     background: var(--text-muted);
-    border: 3px solid var(--bg-card);
-    border-radius: 8px;
-    opacity: 0.8;
+    border: 4px solid var(--bg-card);
+    border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: var(--text-main);
+    background: var(--accent-primary);
 }
 /* Ensure the corner where scrollbars meet is styled */
 ::-webkit-scrollbar-corner {

@@ -67,6 +67,7 @@
     import { broadcastCustomerDisplay, type CustomerDisplayState } from "$lib/customerDisplay";
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
+    import { getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
 
     let activePageId = "";
     let currentPageIndex = 0;
@@ -166,6 +167,7 @@
     let isHoldingOrder = false;
     let isFullscreen = false;
     let fullscreenBusy = false;
+    let drawerBusy = false;
     let selectedLoginEmployeeId = "";
     let loginPin = "";
     let loginError = "";
@@ -202,6 +204,7 @@
         : syncLabel === "Offline" || syncLabel === "Sync issue"
             ? "text-danger border-danger/40 bg-danger/10"
             : "text-text-muted border-border-flat bg-bg-card";
+    $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
 
     let goodsSearchQuery = "";
     $: filteredGoods = $activeProducts
@@ -1378,6 +1381,23 @@
         window.print();
     }
 
+    async function handleOpenCashDrawer() {
+        if (drawerBusy) return;
+        if (!cashDrawerConfig.host.trim()) {
+            toast("Set the drawer receipt-printer IP in Settings first", "error");
+            return;
+        }
+        drawerBusy = true;
+        try {
+            await openCashDrawer(cashDrawerConfig);
+            toast("Drawer opened");
+        } catch (error) {
+            toast(`Drawer failed: ${error}`, "error");
+        } finally {
+            drawerBusy = false;
+        }
+    }
+
     async function reverseOrder(orderId: string, partial: boolean, voiding: boolean) {
         if (isReversingOrder) return;
         if (!canManage($currentEmployee)) {
@@ -2319,6 +2339,32 @@
                 {/each}
             </div>
             <div class="flex items-center gap-1.5 md:gap-2 h-11 md:h-14 shrink-0">
+                <button
+                    class="h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
+                    title="Open cash drawer"
+                    disabled={drawerBusy}
+                    on:click={handleOpenCashDrawer}
+                >
+                    {#if drawerBusy}
+                        <span class="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin"></span>
+                    {:else}
+                        <svg
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            width="18"
+                        >
+                            <rect x="3" y="7" width="18" height="12" rx="2"></rect>
+                            <path d="M7 7V5h10v2"></path>
+                            <path d="M3 12h18"></path>
+                            <path d="M10 16h4"></path>
+                        </svg>
+                    {/if}
+                    <span class="hidden xl:inline text-xs font-black uppercase tracking-wide">Drawer</span>
+                </button>
                 {#if totalPages > 1}
                     <button
                         class="w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"

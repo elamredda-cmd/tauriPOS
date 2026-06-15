@@ -10,6 +10,7 @@
     import { currentEmployee } from '$lib/stores/session';
     import { playCartButtonFeedback, playErrorSound, playItemAddedSound, playSuccessSound } from '$lib/sounds';
     import { getCctvPosConfig, sendCctvPosText } from '$lib/cctvPos';
+    import { getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
 
     let store = { ...$storeDB };
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
@@ -23,6 +24,7 @@
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
     $: cctvConfig = getCctvPosConfig($settingsDB);
+    $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
 
     function setStockTracking(enabled: boolean) {
         updateSetting('stock_tracking_enabled', enabled ? 'true' : 'false');
@@ -69,6 +71,7 @@
     let tillId = '';
     let backupStatus = '';
     let cctvTestStatus = '';
+    let drawerTestStatus = '';
 
     import { onMount } from 'svelte';
     onMount(async () => {
@@ -113,6 +116,27 @@
         } catch (error) {
             cctvTestStatus = `Test failed: ${error}`;
             toast(`CCTV POS test failed: ${error}`, 'error');
+        }
+    }
+
+    async function testCashDrawer() {
+        const config = getCashDrawerConfig($settingsDB);
+        if (!config.host.trim()) {
+            toast('Enter the receipt printer IP address first', 'error');
+            return;
+        }
+        if (!config.enabled) {
+            toast('Turn Cash Drawer on before testing', 'error');
+            return;
+        }
+        drawerTestStatus = 'Opening drawer...';
+        try {
+            await openCashDrawer(config);
+            drawerTestStatus = 'Drawer pulse sent.';
+            toast('Drawer opened');
+        } catch (error) {
+            drawerTestStatus = `Drawer failed: ${error}`;
+            toast(`Drawer failed: ${error}`, 'error');
         }
     }
 
@@ -318,6 +342,81 @@
                     <label>Till ID (auto-generated)</label>
                     <input value={tillId} disabled class="!opacity-60" />
                 </div>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <div class="section-topline">
+                <div>
+                    <h3 class="settings-section-title">Cash Drawer</h3>
+                    <p>Open the drawer through the receipt/thermal printer cash-drawer port.</p>
+                </div>
+                <button
+                    class="btn {cashDrawerConfig.enabled ? 'btn-success' : 'btn-secondary'}"
+                    on:click={() => updateSetting('cash_drawer_enabled', cashDrawerConfig.enabled ? 'false' : 'true')}
+                >
+                    Drawer: {cashDrawerConfig.enabled ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
+            <p class="text-text-muted text-[0.9rem] mb-4">
+                Most cash drawers plug into the receipt printer with an RJ11/RJ12 cable. The POS sends the standard ESC/POS pulse to the printer, and the printer kicks the drawer open.
+            </p>
+            <div class="form-grid">
+                <div class="field">
+                    <label>Receipt Printer IP Address</label>
+                    <input
+                        value={cashDrawerConfig.host}
+                        placeholder="e.g. 192.168.1.50"
+                        on:change={(e) => updateSetting('cash_drawer_printer_host', e.currentTarget.value.trim())}
+                    />
+                </div>
+                <div class="field">
+                    <label>Printer Port</label>
+                    <input
+                        type="number"
+                        min="1"
+                        max="65535"
+                        value={cashDrawerConfig.port}
+                        on:change={(e) => updateSetting('cash_drawer_printer_port', e.currentTarget.value || '9100')}
+                    />
+                    <small class="text-text-muted">Network thermal printers normally use port 9100.</small>
+                </div>
+                <div class="field">
+                    <label>Drawer Pin</label>
+                    <select
+                        value={cashDrawerConfig.pin}
+                        on:change={(e) => updateSetting('cash_drawer_pin', e.currentTarget.value)}
+                    >
+                        <option value="0">Pin 2 / drawer 1</option>
+                        <option value="1">Pin 5 / drawer 2</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label>Pulse Timing</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <input
+                            type="number"
+                            min="2"
+                            max="510"
+                            value={cashDrawerConfig.pulseOnMs}
+                            on:change={(e) => updateSetting('cash_drawer_pulse_on_ms', e.currentTarget.value || '50')}
+                            title="Pulse on milliseconds"
+                        />
+                        <input
+                            type="number"
+                            min="2"
+                            max="510"
+                            value={cashDrawerConfig.pulseOffMs}
+                            on:change={(e) => updateSetting('cash_drawer_pulse_off_ms', e.currentTarget.value || '250')}
+                            title="Pulse off milliseconds"
+                        />
+                    </div>
+                    <small class="text-text-muted">50 / 250 works for most Epson-compatible printers.</small>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-3 items-center mt-4">
+                <button class="btn btn-secondary" on:click={testCashDrawer}>Test Drawer</button>
+                <span class="text-sm text-text-muted">{drawerTestStatus}</span>
             </div>
         </section>
 

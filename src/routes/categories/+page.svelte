@@ -13,6 +13,21 @@
     let showDelConfirm = false;
     let idToDelete = "";
     let cur: Partial<Category> & { updatedAt?: string } = {};
+    let searchQuery = "";
+
+    $: filteredCategories = $categoriesDB.filter((category) => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return true;
+        const usage = categoryUsage(category.id);
+        return [
+            category.name,
+            category.isActive ? 'active' : 'inactive',
+            category.showOnPos ? 'pos' : '',
+            usage.total,
+            usage.active,
+            usage.deactivated,
+        ].some((value) => String(value || '').toLowerCase().includes(q));
+    });
 
     function add() { 
         cur = { id: uuid(), name:'', color:'#3b82f6', sortOrder: $categoriesDB.length + 1, isActive:true, showOnPos:true, createdAt: now() }; 
@@ -88,10 +103,40 @@
 
 <MgmtPage title="Categories">
     <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Category</button>
+    <div class="p-4 border-b border-border-flat bg-bg-panel">
+        <div class="flat-card p-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div class="min-w-0">
+                <p class="text-xs uppercase tracking-[0.22em] text-accent-primary font-bold mb-1">Category lookup</p>
+                <h2 class="text-xl m-0">Find and manage groups</h2>
+                <p class="text-sm text-text-muted mt-1">Search by category name, active status, POS visibility, or item count.</p>
+            </div>
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center lg:min-w-[520px]">
+                <div class="relative flex-1">
+                    <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input
+                        class="w-full min-h-[56px] rounded-md border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                        bind:value={searchQuery}
+                        placeholder="Search categories..."
+                    />
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="rounded-full border border-border-flat bg-bg-base px-4 py-3 text-sm font-bold text-text-muted whitespace-nowrap">
+                        {filteredCategories.length} / {$categoriesDB.length}
+                    </span>
+                    {#if searchQuery}
+                        <button class="btn btn-secondary !min-h-[56px]" on:click={() => searchQuery = ''}>Clear</button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+    </div>
     <table class="tbl">
         <thead><tr><th>Color</th><th>Name</th><th>Sort Order</th><th>Items</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody>
-            {#each $categoriesDB as cat}
+            {#each filteredCategories as cat}
             {@const usage = categoryUsage(cat.id)}
             <tr>
                 <td><div class="swatch" style="background:{cat.color}"></div></td>
@@ -112,6 +157,7 @@
             </tr>
             {/each}
             {#if $categoriesDB.length === 0}<tr class="empty-row"><td colspan="6">No categories yet.</td></tr>{/if}
+            {#if $categoriesDB.length > 0 && filteredCategories.length === 0}<tr class="empty-row"><td colspan="6">No categories match your search.</td></tr>{/if}
         </tbody>
     </table>
 </MgmtPage>

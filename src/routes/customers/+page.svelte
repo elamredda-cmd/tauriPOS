@@ -9,7 +9,19 @@
     import { onMount } from 'svelte';
     let show = false; let editing = false;
     let cur: Partial<Customer> = {};
+    let searchQuery = '';
     $: loyaltyConfig = getLoyaltyConfig($settingsDB);
+    $: filteredCustomers = $customersDB.filter((customer) => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [
+            customer.name,
+            customer.postcode,
+            customer.phone,
+            customer.email,
+            customer.loyaltyCode,
+        ].some((value) => String(value || '').toLowerCase().includes(q));
+    });
     onMount(async () => {
         const used = [...$customersDB];
         const updated = await Promise.all($customersDB.map(async (customer) => {
@@ -43,10 +55,40 @@
 
 <MgmtPage title="Customers">
     <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Customer</button>
+    <div class="p-4 border-b border-border-flat bg-bg-panel">
+        <div class="flat-card p-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div class="min-w-0">
+                <p class="text-xs uppercase tracking-[0.22em] text-accent-primary font-bold mb-1">Customer lookup</p>
+                <h2 class="text-xl m-0">Find loyalty customers fast</h2>
+                <p class="text-sm text-text-muted mt-1">Search by name, postcode, phone, email, or loyalty code.</p>
+            </div>
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-center lg:min-w-[520px]">
+                <div class="relative flex-1">
+                    <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    <input
+                        class="w-full min-h-[56px] rounded-md border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                        bind:value={searchQuery}
+                        placeholder="Search customers..."
+                    />
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="rounded-full border border-border-flat bg-bg-base px-4 py-3 text-sm font-bold text-text-muted whitespace-nowrap">
+                        {filteredCustomers.length} / {$customersDB.length}
+                    </span>
+                    {#if searchQuery}
+                        <button class="btn btn-secondary !min-h-[56px]" on:click={() => searchQuery = ''}>Clear</button>
+                    {/if}
+                </div>
+            </div>
+        </div>
+    </div>
     <table class="tbl">
         <thead><tr><th>Name</th><th>Postcode</th><th>Loyalty Code</th><th>Points</th><th>Credit</th><th>Actions</th></tr></thead>
         <tbody>
-            {#each $customersDB as c}
+            {#each filteredCustomers as c}
             <tr>
                 <td style="font-weight:600">{c.name}</td>
                 <td class="mono">{c.postcode || '-'}</td>
@@ -60,6 +102,7 @@
             </tr>
             {/each}
             {#if $customersDB.length===0}<tr class="empty-row"><td colspan="6">No customers yet.</td></tr>{/if}
+            {#if $customersDB.length > 0 && filteredCustomers.length===0}<tr class="empty-row"><td colspan="6">No customers match your search.</td></tr>{/if}
         </tbody>
     </table>
 </MgmtPage>
