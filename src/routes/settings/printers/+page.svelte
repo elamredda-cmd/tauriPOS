@@ -87,17 +87,17 @@
     }
 
     const receiptConnections: Array<{ value: PrinterConnectionType; label: string; note: string; enabled: boolean }> = [
-        { value: 'system', label: 'System printer', note: 'Uses the Windows/macOS printer driver and print dialog.', enabled: true },
+        { value: 'system', label: 'System / driver print', note: 'Uses the normal Windows/macOS printer driver. Best for manual printing.', enabled: true },
         { value: 'network_escpos', label: 'ESC/POS network', note: 'Direct thermal receipt printing by IP address, normally port 9100.', enabled: true },
-        { value: 'usb_raw', label: 'USB raw', note: 'Windows raw printing by installed printer name.', enabled: true },
+        { value: 'usb_raw', label: 'Windows USB raw', note: 'Silent Windows USB printing by exact installed printer name.', enabled: true },
         { value: 'serial', label: 'Serial / COM', note: 'Direct serial/COM device path such as COM3 or /dev/tty.usbserial.', enabled: true },
         { value: 'bluetooth', label: 'Bluetooth', note: 'Bluetooth SPP printers usually appear as a COM port/device path.', enabled: true },
     ];
 
     const labelConnections: Array<{ value: PrinterConnectionType; label: string; note: string; enabled: boolean }> = [
-        { value: 'system', label: 'System printer', note: 'Best first option for USB label printers.', enabled: true },
+        { value: 'system', label: 'System / driver print', note: 'Best first option for normal USB label printers.', enabled: true },
         { value: 'network_escpos', label: 'Network label printer', note: 'Direct ZPL/TSPL label printing by IP address.', enabled: true },
-        { value: 'usb_raw', label: 'USB raw', note: 'Windows raw printing by installed printer name.', enabled: true },
+        { value: 'usb_raw', label: 'Windows USB raw', note: 'Silent Windows USB label printing by exact installed printer name.', enabled: true },
         { value: 'serial', label: 'Serial / COM', note: 'Direct serial/COM device path.', enabled: true },
         { value: 'bluetooth', label: 'Bluetooth', note: 'Bluetooth SPP printers usually appear as a COM port/device path.', enabled: true },
     ];

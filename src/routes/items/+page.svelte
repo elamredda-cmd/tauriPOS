@@ -195,7 +195,7 @@
                 image.src = objectUrl;
             });
 
-            const maxSide = 420;
+            const maxSide = 360;
             const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
             const width = Math.max(1, Math.round(image.width * ratio));
             const height = Math.max(1, Math.round(image.height * ratio));
@@ -209,9 +209,7 @@
             ctx.drawImage(image, 0, 0, width, height);
 
             const blob = await new Promise<Blob | null>((resolve) => {
-                canvas.toBlob(resolve, "image/webp", 0.72);
-            }) || await new Promise<Blob | null>((resolve) => {
-                canvas.toBlob(resolve, "image/jpeg", 0.76);
+                canvas.toBlob(resolve, "image/jpeg", 0.72);
             });
             if (!blob) throw new Error("Could not prepare image");
             return blobToDataUrl(blob);
@@ -689,7 +687,7 @@
                             <div>
                                 <p class="m-0 font-bold text-text-main">Add a small image for this product tile</p>
                                 <p class="m-0 mt-1 text-sm text-text-muted">
-                                    The app resizes and compresses it before saving, then syncs it through the product record.
+                                    The app resizes it to a small JPEG before saving, then syncs it through the product record.
                                 </p>
                             </div>
                             <div class="flex flex-wrap gap-2">

@@ -33,7 +33,9 @@
     function formatDisplay(v: string) {
         if (!v) return "Not Set";
         const d = new Date(v);
-        return d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+        if (Number.isNaN(d.getTime())) return "Not Set";
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
     function adjust(type: string, delta: number) {

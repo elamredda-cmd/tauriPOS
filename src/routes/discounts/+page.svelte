@@ -37,10 +37,24 @@
     let showQtyPad = false;
     let qtyString = '2';
 
-    $: bundles = $discountsDB.filter(d => d.kind === 'bundle_fixed_price');
-    $: bogos = $discountsDB.filter(d => d.kind === 'bogo_fixed_price');
-    $: temporaryItems = $discountsDB.filter(d => d.kind === 'temporary_item');
-    $: percentages = $discountsDB.filter(d => d.kind === 'manual_percent');
+    function discountKind(discount: Discount): string {
+        if (discount.kind) return discount.kind;
+        return discount.type === 'percentage' ? 'manual_percent' : 'manual_fixed';
+    }
+
+    function numeric(value: unknown, fallback = 0): number {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function safeDiscounts(kind: string): Discount[] {
+        return $discountsDB.filter((discount) => discount && discountKind(discount) === kind);
+    }
+
+    $: bundles = safeDiscounts('bundle_fixed_price');
+    $: bogos = safeDiscounts('bogo_fixed_price');
+    $: temporaryItems = safeDiscounts('temporary_item');
+    $: percentages = safeDiscounts('manual_percent');
 
     function validatePromotionWindow(startAt: string, endAt: string): boolean {
         if (startAt && Number.isNaN(new Date(startAt).getTime())) {
@@ -167,7 +181,7 @@
     }
 
     function temporaryDeal(d: Discount): string {
-        return d.type === 'percentage' ? `${d.value}% off` : `${formatMoney(d.value)} sale price`;
+        return d.type === 'percentage' ? `${numeric(d.value)}% off` : `${formatMoney(numeric(d.value))} sale price`;
     }
 
     function selectTemporaryProduct(productId: string) {
@@ -247,8 +261,8 @@
         bogoGroupId = d.groupId;
         bogoName = d.name;
         bogoBuyQty = d.minQuantity || 1;
-        bogoSecondPricePounds = (d.secondPrice || 0) / 100;
-        bogoMaxApplications = d.maxApplications;
+        bogoSecondPricePounds = numeric(d.secondPrice) / 100;
+        bogoMaxApplications = d.maxApplications ?? null;
         bogoStartAt = g?.startAt || d.startAt || '';
         bogoEndAt = g?.endAt || d.endAt || '';
         bogoActive = d.isActive && (g?.isActive ?? true);
@@ -324,7 +338,7 @@
     function editPercent(d: Discount) {
         percentId = d.id;
         percentName = d.name;
-        percentValue = d.value;
+        percentValue = numeric(d.value, 10);
         percentActive = d.isActive;
         editingPercent = true;
         showPercent = true;
@@ -389,16 +403,16 @@
         curDiscountId = d.id;
         curGroupId = d.groupId;
         curName = d.name;
-        curQty = d.bundleQuantity || 2;
-        curPrice = d.bundlePrice || 0;
+        curQty = numeric(d.bundleQuantity, 2) || 2;
+        curPrice = numeric(d.bundlePrice);
         const g = $promoGroupsDB.find(g => g.id === d.groupId);
         curStartAt = g?.startAt || d.startAt || '';
         curEndAt = g?.endAt || d.endAt || '';
         curActive = d.isActive && (g?.isActive ?? true);
         curProductIds = new Set($promoGroupItemsDB.filter(i => i.groupId === d.groupId).map(i => i.productId));
         productSearch = '';
-        priceString = d.bundlePrice.toString();
-        qtyString = d.bundleQuantity.toString();
+        priceString = String(numeric(d.bundlePrice));
+        qtyString = String(numeric(d.bundleQuantity, 2));
         editingBundle = true;
         showBundle = true;
     }
@@ -588,7 +602,7 @@
                 {#each bundles as d}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
-                        <td>Any {d.bundleQuantity} for {formatMoney(d.bundlePrice)}</td>
+                        <td>Any {numeric(d.bundleQuantity)} for {formatMoney(numeric(d.bundlePrice))}</td>
                         <td>{bundleItemCount(d)}</td>
                         <td>{bundleWindow(d)}</td>
                         <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
@@ -608,10 +622,10 @@
                 {#each bogos as d}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
-                        <td>Buy {d.minQuantity}, next for {formatMoney(d.secondPrice)}</td>
+                        <td>Buy {numeric(d.minQuantity, 1)}, next for {formatMoney(numeric(d.secondPrice))}</td>
                         <td>{bundleItemCount(d)}</td>
                         <td>{bundleWindow(d)}</td>
-                        <td>{d.maxApplications === null ? 'Unlimited' : `${d.maxApplications} per sale`}</td>
+                        <td>{d.maxApplications == null ? 'Unlimited' : `${numeric(d.maxApplications)} per sale`}</td>
                         <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editBogo(d)}>✎</button>
@@ -649,7 +663,7 @@
                 {#each percentages as d}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
-                        <td>{d.value}% off</td>
+                        <td>{numeric(d.value)}% off</td>
                         <td>Cashier</td>
                         <td><span class="tag {d.isActive ? 'text-success' : 'text-danger'}">{d.isActive?'Active':'Inactive'}</span></td>
                         <td><div class="act-row">

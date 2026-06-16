@@ -47,9 +47,23 @@ function portSetting(settings: Setting[], key: string, fallback: number): number
     return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
 }
 
+const DIRECT_CONNECTIONS = new Set<PrinterConnectionType>(['network_escpos', 'usb_raw', 'serial', 'bluetooth']);
+const ALL_CONNECTIONS = new Set<PrinterConnectionType>(['system', 'network_escpos', 'usb_raw', 'serial', 'bluetooth']);
+
+function normalizePrinterConnection(value: string, fallback: PrinterConnectionType): PrinterConnectionType {
+    if (ALL_CONNECTIONS.has(value as PrinterConnectionType)) return value as PrinterConnectionType;
+    if (value === 'network' || value === 'tcp' || value === 'ethernet') return 'network_escpos';
+    if (value === 'usb' || value === 'windows' || value === 'windows_raw') return 'usb_raw';
+    if (value === 'com') return 'serial';
+    return fallback;
+}
+
 export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): ReceiptPrinterConfig {
     const host = setting(settings, 'receipt_printer_host');
-    const connection = setting(settings, 'receipt_printer_connection', host.trim() ? 'network_escpos' : 'system') as PrinterConnectionType;
+    const connection = normalizePrinterConnection(
+        setting(settings, 'receipt_printer_connection', host.trim() ? 'network_escpos' : 'system'),
+        host.trim() ? 'network_escpos' : 'system'
+    );
     return {
         enabled: boolSetting(settings, 'receipt_printer_enabled', true),
         connection,
@@ -72,12 +86,13 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
 
 export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): LabelPrinterConfig {
     const host = setting(settings, 'label_printer_host');
-    const connection = setting(settings, 'label_printer_connection', 'system') as PrinterConnectionType;
+    const connection = normalizePrinterConnection(setting(settings, 'label_printer_connection', 'system'), 'system');
     const protocolRaw = setting(settings, 'label_printer_protocol', 'system');
+    const directProtocol = protocolRaw === 'zpl' || protocolRaw === 'tspl' ? protocolRaw : 'zpl';
     return {
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
-        protocol: protocolRaw === 'zpl' || protocolRaw === 'tspl' ? protocolRaw : 'system',
+        protocol: DIRECT_CONNECTIONS.has(connection) ? directProtocol : 'system',
         host,
         port: portSetting(settings, 'label_printer_port', 9100),
         printerName: setting(settings, 'label_printer_name'),
@@ -152,7 +167,7 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
 }
 
 function isDirectConnection(connection: PrinterConnectionType): boolean {
-    return connection === 'network_escpos' || connection === 'usb_raw' || connection === 'serial' || connection === 'bluetooth';
+    return DIRECT_CONNECTIONS.has(connection);
 }
 
 async function sendDirectPrinterData(args: {

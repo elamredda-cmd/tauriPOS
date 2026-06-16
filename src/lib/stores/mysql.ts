@@ -75,7 +75,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             goodsSortOrder INT DEFAULT 0,
             showInPos INT DEFAULT 1,
             color TEXT,
-            image TEXT,
+            image MEDIUMTEXT,
             isActive INT DEFAULT 1,
             createdAt TEXT,
             updatedAt TEXT
@@ -477,7 +477,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS sku TEXT`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS scalePlu TEXT`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS color TEXT`,
-        `ALTER TABLE products ADD COLUMN IF NOT EXISTS image TEXT`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS image MEDIUMTEXT`,
+        `ALTER TABLE products MODIFY COLUMN image MEDIUMTEXT`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS isWeighable INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInPos INT DEFAULT 1`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInGoods INT DEFAULT 0`,
