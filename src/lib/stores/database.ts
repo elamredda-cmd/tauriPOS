@@ -162,7 +162,7 @@ async function discardLocalConflictingReversal(bundle: any, mysqlDb: any): Promi
 /** Queue a write operation for later sync to MySQL. */
 async function queueOffline(
     tableName: string,
-    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle',
+    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle' | 'promotionBundle',
     data: any,
     idKey: string = 'id'
 ): Promise<void> {
@@ -204,6 +204,10 @@ export async function flushOfflineQueue(): Promise<number> {
         try {
             const data = JSON.parse(row.data);
             if (row.operation === 'upsert') {
+                if (row.table_name === 'promo_group_items' && data?.productId) {
+                    const products = await getLocalProductsForPromotionItems([data]);
+                    await mysql.mysqlEnsureProductSnapshots(products);
+                }
                 await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
             } else if (row.operation === 'remove') {
                 await mysql.mysqlRemove(row.table_name, data.id, row.id_key);
@@ -215,6 +219,13 @@ export async function flushOfflineQueue(): Promise<number> {
                 const config = get(connectionState).mysqlConfig;
                 if (!config) throw new Error('MariaDB configuration is unavailable');
                 await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle: data });
+            } else if (row.operation === 'promotionBundle') {
+                await mysql.mysqlSavePromotionBundle(
+                    data.group,
+                    data.discount,
+                    Array.isArray(data.items) ? data.items : [],
+                    Array.isArray(data.products) ? data.products : [],
+                );
             }
             await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
             flushed++;
@@ -796,6 +807,51 @@ export async function remove(table: string, id: string, idKey: string = 'id'): P
     if (idKey === 'id' && table !== 'tombstones') {
         await recordTombstone(table, id);
     }
+}
+
+async function getLocalProductsForPromotionItems(items: any[]): Promise<any[]> {
+    const productIds = Array.from(new Set(items.map(item => item.productId).filter(Boolean)));
+    if (productIds.length === 0) return [];
+    const d = await sqlite.getDb();
+    const products: any[] = [];
+    for (const productId of productIds) {
+        const rows: any[] = await d.select(`SELECT * FROM products WHERE id = ? LIMIT 1`, [productId]);
+        if (rows[0]) products.push(rows[0]);
+    }
+    return products;
+}
+
+async function saveLocalPromotionBundle(group: any, discount: any, items: any[]): Promise<void> {
+    const d = await sqlite.getDb();
+    await sqlite.upsert('promo_groups', group, 'id');
+    await sqlite.upsert('discounts', discount, 'id');
+
+    const itemIds = items.map(item => item.id).filter(Boolean);
+    if (itemIds.length > 0) {
+        const placeholders = itemIds.map(() => '?').join(', ');
+        await d.execute(
+            `DELETE FROM promo_group_items WHERE groupId = ? AND id NOT IN (${placeholders})`,
+            [group.id, ...itemIds],
+        );
+    } else {
+        await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [group.id]);
+    }
+
+    for (const item of items) {
+        await sqlite.upsert('promo_group_items', item, 'id');
+    }
+}
+
+export async function savePromotionBundle(group: any, discount: any, items: any[]): Promise<void> {
+    await saveLocalPromotionBundle(group, discount, items);
+
+    const products = await getLocalProductsForPromotionItems(items);
+    const payload = { group, discount, items, products };
+    await writeOrQueueImmediately(
+        `promotion bundle ${discount?.id || group?.id || ''}`,
+        () => mysql.mysqlSavePromotionBundle(group, discount, items, products),
+        () => queueOffline('promotion_bundle', 'promotionBundle', payload),
+    );
 }
 
 // ─── Read Operations ────────────────────────────────────────────────────────

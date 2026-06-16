@@ -806,6 +806,61 @@ export async function mysqlSafeOfflineUpsert(table: string, obj: any, idKey: str
     }
 }
 
+async function mysqlInsertIgnoreProductSnapshot(product: any): Promise<void> {
+    const d = await getDb();
+    const validCols = await getTableColumns('products');
+    const keys = Object.keys(product).filter(k => validCols.includes(k));
+    if (keys.length === 0) return;
+
+    const columns = keys.map(k => `\`${k}\``).join(', ');
+    const placeholders = keys.map(() => '?').join(', ');
+    const values = keys.map(k => normalizeValue(product[k]));
+    await d.execute(`INSERT IGNORE INTO products (${columns}) VALUES (${placeholders})`, values);
+}
+
+export async function mysqlEnsureProductSnapshots(products: any[]): Promise<void> {
+    for (const product of products) {
+        await mysqlInsertIgnoreProductSnapshot(product);
+    }
+}
+
+export async function mysqlSavePromotionBundle(
+    group: any,
+    discount: any,
+    items: any[],
+    products: any[] = [],
+): Promise<void> {
+    const d = await getDb();
+    await d.execute('START TRANSACTION');
+    try {
+        // Membership rows have product foreign keys. Insert missing product
+        // snapshots first without overwriting newer product edits on MariaDB.
+        await mysqlEnsureProductSnapshots(products);
+
+        await mysqlUpsert('promo_groups', group);
+        await mysqlUpsert('discounts', discount);
+
+        const itemIds = items.map(item => item.id).filter(Boolean);
+        if (itemIds.length > 0) {
+            const placeholders = itemIds.map(() => '?').join(', ');
+            await d.execute(
+                `DELETE FROM promo_group_items WHERE groupId = ? AND id NOT IN (${placeholders})`,
+                [group.id, ...itemIds],
+            );
+        } else {
+            await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [group.id]);
+        }
+
+        for (const item of items) {
+            await mysqlUpsert('promo_group_items', item);
+        }
+        await d.execute('COMMIT');
+    } catch (error) {
+        await d.execute('ROLLBACK');
+        throw error;
+    }
+}
+
 function isProductIdentifierConflict(error: unknown): boolean {
     const message = String(error).toLowerCase();
     return message.includes('duplicate entry')

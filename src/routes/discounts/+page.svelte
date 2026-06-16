@@ -7,7 +7,7 @@
         uuid, now, formatMoney
     } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/database';
+    import { upsert, remove as removeSql, savePromotionBundle } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
@@ -157,9 +157,8 @@
             endAt: temporaryEndAt, priority: 0
         };
         try {
-            await upsert('promo_groups', group);
-            await upsert('discounts', discount);
-            const items = await replaceGroupItems(temporaryGroupId, new Set([temporaryProductId]));
+            const items = buildGroupItems(temporaryGroupId, new Set([temporaryProductId]));
+            await savePromotionBundle(group, discount, items);
             promoGroupsDB.update(list => editingTemporary ? list.map(g => g.id === group.id ? group : g) : [...list, group]);
             discountsDB.update(list => editingTemporary ? list.map(d => d.id === discount.id ? discount : d) : [...list, discount]);
             promoGroupItemsDB.update(list => [...list.filter(i => i.groupId !== temporaryGroupId), ...items]);
@@ -305,9 +304,8 @@
         };
 
         try {
-            await upsert('promo_groups', group);
-            await upsert('discounts', discount);
-            const items = await replaceGroupItems(bogoGroupId, bogoProductIds);
+            const items = buildGroupItems(bogoGroupId, bogoProductIds);
+            await savePromotionBundle(group, discount, items);
             promoGroupsDB.update(list => editingBogo ? list.map(g => g.id === group.id ? group : g) : [...list, group]);
             discountsDB.update(list => editingBogo ? list.map(d => d.id === discount.id ? discount : d) : [...list, discount]);
             promoGroupItemsDB.update(list => [...list.filter(i => i.groupId !== bogoGroupId), ...items]);
@@ -367,18 +365,14 @@
         }
     }
 
-    async function replaceGroupItems(groupId: string, productIds: Set<string>): Promise<PromoGroupItem[]> {
+    function buildGroupItems(groupId: string, productIds: Set<string>): PromoGroupItem[] {
         const oldItems = $promoGroupItemsDB.filter(i => i.groupId === groupId);
         const existingByProduct = new Map(oldItems.map(item => [item.productId, item]));
         const timestamp = now();
-        for (const item of oldItems) {
-            if (!productIds.has(item.productId)) await removeSql('promo_group_items', item.id);
-        }
         const keptItems = oldItems.filter(item => productIds.has(item.productId));
         const newItems: PromoGroupItem[] = Array.from(productIds)
             .filter(productId => !existingByProduct.has(productId))
             .map(productId => ({ id: uuid(), groupId, productId, updatedAt: timestamp }));
-        for (const item of newItems) await upsert('promo_group_items', item);
         return [...keptItems, ...newItems];
     }
 
@@ -448,9 +442,8 @@
         };
 
         try {
-            await upsert('promo_groups', group);
-            await upsert('discounts', discount);
-            const items = await replaceGroupItems(curGroupId, curProductIds);
+            const items = buildGroupItems(curGroupId, curProductIds);
+            await savePromotionBundle(group, discount, items);
             promoGroupsDB.update(list => editingBundle
                 ? list.map(g => g.id === group.id ? group : g)
                 : [...list, group]);
