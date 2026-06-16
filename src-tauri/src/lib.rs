@@ -195,6 +195,7 @@ fn send_system_printer_data(
     document_name: Option<String>,
 ) -> Result<(), String> {
     use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Graphics::Printing::{
         ClosePrinter, EndDocPrinter, EndPagePrinter, OpenPrinterW, StartDocPrinterW,
         StartPagePrinter, WritePrinter, DOC_INFO_1W,
@@ -212,7 +213,7 @@ fn send_system_printer_data(
     }
 
     let mut printer_name_w = wide_null(printer_name);
-    let mut printer = 0;
+    let mut printer: HANDLE = std::ptr::null_mut();
     let opened = unsafe {
         OpenPrinterW(printer_name_w.as_mut_ptr(), &mut printer, std::ptr::null_mut())
     };
@@ -229,7 +230,7 @@ fn send_system_printer_data(
             pDatatype: data_type_w.as_mut_ptr(),
         };
 
-        let job = unsafe { StartDocPrinterW(printer, 1, &doc_info as *const _ as *const u8) };
+        let job = unsafe { StartDocPrinterW(printer, 1, &doc_info) };
         if job == 0 {
             return Err(last_windows_error("Could not start raw print job"));
         }
@@ -264,7 +265,17 @@ fn send_system_printer_data(
 }
 
 #[tauri::command]
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn send_system_printer_data(
+    _printer_name: String,
+    _data: Vec<u8>,
+    _document_name: Option<String>,
+) -> Result<(), String> {
+    Err("Raw USB/system printer mode uses the Windows print spooler and is not available on macOS. Use network ESC/POS or a macOS device path instead.".into())
+}
+
+#[tauri::command]
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn send_system_printer_data(
     _printer_name: String,
     _data: Vec<u8>,
