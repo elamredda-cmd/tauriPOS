@@ -6,7 +6,7 @@
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
-    import { hydrateSvelteStores, startBackgroundSync } from '$lib/stores/database';
+    import { ensureDatabaseIdentityForSync, hydrateSvelteStores, startBackgroundSync } from '$lib/stores/database';
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
         settingsDB, customersDB, storeDB, registersDB, discountsDB,
@@ -66,8 +66,16 @@
                 const config = get(connectionState).mysqlConfig;
                 if (config) {
                     initMysqlDb(config)
-                        .catch((error) => console.warn('POS: MariaDB migration deferred:', error))
-                        .finally(() => startBackgroundSync());
+                        .then(() => ensureDatabaseIdentityForSync())
+                        .then(() => startBackgroundSync())
+                        .catch((error) => {
+                            console.warn('POS: MariaDB sync blocked/deferred:', error);
+                            connectionState.update((state) => ({
+                                ...state,
+                                mysqlOnline: false,
+                                syncError: String(error),
+                            }));
+                        });
                 } else {
                     startBackgroundSync();
                 }
@@ -125,7 +133,21 @@
 
 <svelte:window on:pointerdown|capture={handleGlobalButtonFeedback} />
 
-{#if dbReady}
+{#if $connectionState.syncError?.includes('DATABASE_IDENTITY_MISMATCH')}
+    <div class="fixed inset-0 z-[3000] flex items-center justify-center bg-bg-base p-6 font-sans text-text-main">
+        <div class="w-full max-w-[640px] rounded-2xl border border-danger/50 bg-bg-panel p-7 shadow-[0_20px_80px_var(--shadow)]">
+            <p class="mb-3 text-xs font-black uppercase tracking-[0.16em] text-danger">Database protected</p>
+            <h2 class="mb-3 text-2xl font-black">This database belongs to a different shop</h2>
+            <p class="mb-4 text-text-muted">
+                Sync has been stopped so this till does not mix data with another shop.
+                To use this MariaDB database, reset this local till first or restore a backup that belongs to the same shop.
+            </p>
+            <div class="rounded-xl border border-border-flat bg-bg-card p-4 text-sm text-text-muted">
+                {$connectionState.syncError}
+            </div>
+        </div>
+    </div>
+{:else if dbReady}
     <slot />
 {:else if dbError}
     <div class="fixed inset-0 flex items-center justify-center bg-bg-base font-sans text-text-main">

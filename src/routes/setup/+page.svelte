@@ -2,7 +2,7 @@
     import { goto } from '$app/navigation';
     import { getMysqlDb, saveMode, testMysqlConnection, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
-    import { hydrateSvelteStores, wipeAndPullFromServer } from '$lib/stores/database';
+    import { ensureDatabaseIdentityForSync, ensureLocalShopIdentity, hydrateSvelteStores, wipeAndPullFromServer } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
     import { hashPin } from '$lib/stores/session';
     import { employeesDB, settingsDB, now, uuid } from '$lib/stores/db';
@@ -43,6 +43,7 @@
             throw new Error(`${needsShopDetails ? 'Enter a shop name, ' : 'Enter '}administrator name, and a 4 to 8 digit PIN.`);
         }
         const stamp = now();
+        await ensureLocalShopIdentity(needsShopDetails ? storeName.trim() : '');
         if (needsShopDetails) {
             await upsert('settings', {
                 key: 'store_info',
@@ -109,6 +110,7 @@
             const cfg = buildConfig();
             await initMysqlDb(cfg);
             await saveMode('multi', cfg);
+            await ensureDatabaseIdentityForSync();
             const server = await getMysqlDb();
             if (!server) throw new Error('MariaDB connected during the test but could not be opened.');
             const admins: any[] = await server.select(

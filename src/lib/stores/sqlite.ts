@@ -91,6 +91,17 @@ export async function initDb() {
             created_at TEXT NOT NULL
         )
     `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS app_identity (
+            id TEXT PRIMARY KEY,
+            shopId TEXT NOT NULL,
+            shopName TEXT,
+            licenseId TEXT,
+            createdAt TEXT,
+            updatedAt TEXT,
+            identitySignature TEXT
+        )
+    `);
 
     // 4. Tiles Table
     await d.execute(`

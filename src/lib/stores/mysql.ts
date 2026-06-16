@@ -432,6 +432,19 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
+    // 26. App / shop identity — never merge data between different shops
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS app_identity (
+            id VARCHAR(36) PRIMARY KEY,
+            shopId VARCHAR(64) NOT NULL,
+            shopName TEXT,
+            licenseId VARCHAR(64),
+            createdAt TEXT,
+            updatedAt TEXT,
+            identitySignature TEXT
+        )
+    `);
+
     // ─── Migrations for existing databases ─────────────────────────────────
     const migrations = [
         // Orders

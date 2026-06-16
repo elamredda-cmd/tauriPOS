@@ -176,6 +176,7 @@ async function queueOffline(
 export async function flushOfflineQueue(): Promise<number> {
     const mysqlDb = await getMysqlDb();
     if (!mysqlDb) return 0;
+    await ensureDatabaseIdentityForSync();
 
     const d = await sqlite.getDb();
     const purgeRows: any[] = await mysqlDb.select(
@@ -263,8 +264,12 @@ function pushWriteInBackground(
     queue: () => Promise<void>,
 ): void {
     if (!isMultiMode()) return;
-    void write().catch(async (e) => {
+    void ensureDatabaseIdentityForSync().then(write).catch(async (e) => {
         console.warn(`database: background ${label} failed, queuing offline:`, e);
+        if (isDatabaseIdentityMismatch(e)) {
+            connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
+            return;
+        }
         try {
             await queue();
         } catch (queueError) {
@@ -320,6 +325,208 @@ function isSyncableSetting(key: string): boolean {
     if (key.startsWith('sync_ts_')) return false;
     if (key.startsWith('migration_')) return false;
     return true;
+}
+
+// ─── Shop / database identity guard ─────────────────────────────────────────
+// This prevents a till from silently merging Shop A's local SQLite cache with
+// Shop B's MariaDB database. Licensing will build on top of this later.
+
+const APP_IDENTITY_ID = 'main';
+const DATABASE_IDENTITY_MISMATCH_CODE = 'DATABASE_IDENTITY_MISMATCH';
+
+export interface AppIdentity {
+    id: string;
+    shopId: string;
+    shopName: string;
+    licenseId: string;
+    createdAt: string;
+    updatedAt: string;
+    identitySignature: string;
+}
+
+export class DatabaseIdentityMismatchError extends Error {
+    code = DATABASE_IDENTITY_MISMATCH_CODE;
+}
+
+function makeShopId(): string {
+    const cryptoObj = globalThis.crypto;
+    if (cryptoObj?.randomUUID) return `shop_${cryptoObj.randomUUID()}`;
+    return `shop_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeIdentity(row: any | null): AppIdentity | null {
+    if (!row?.shopId) return null;
+    return {
+        id: row.id || APP_IDENTITY_ID,
+        shopId: String(row.shopId),
+        shopName: String(row.shopName || ''),
+        licenseId: String(row.licenseId || ''),
+        createdAt: String(row.createdAt || row.updatedAt || new Date().toISOString()),
+        updatedAt: String(row.updatedAt || row.createdAt || new Date().toISOString()),
+        identitySignature: String(row.identitySignature || ''),
+    };
+}
+
+async function getLocalAppIdentity(): Promise<AppIdentity | null> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(`SELECT * FROM app_identity WHERE id = ? LIMIT 1`, [APP_IDENTITY_ID]);
+    return normalizeIdentity(rows[0] || null);
+}
+
+async function getRemoteAppIdentity(): Promise<AppIdentity | null> {
+    const d = await getMysqlDb();
+    if (!d) return null;
+    const rows: any[] = await d.select(`SELECT * FROM app_identity WHERE id = ? LIMIT 1`, [APP_IDENTITY_ID]);
+    return normalizeIdentity(rows[0] || null);
+}
+
+async function saveLocalAppIdentity(identity: AppIdentity): Promise<void> {
+    await sqlite.upsert('app_identity', identity, 'id');
+}
+
+async function saveRemoteAppIdentity(identity: AppIdentity): Promise<void> {
+    await mysql.mysqlUpsert('app_identity', identity, 'id');
+}
+
+function makeIdentity(shopName = ''): AppIdentity {
+    const stamp = new Date().toISOString();
+    return {
+        id: APP_IDENTITY_ID,
+        shopId: makeShopId(),
+        shopName,
+        licenseId: '',
+        createdAt: stamp,
+        updatedAt: stamp,
+        identitySignature: '',
+    };
+}
+
+async function getLocalStoreName(): Promise<string> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(`SELECT value FROM settings WHERE key = 'store_info' LIMIT 1`);
+    try {
+        return rows[0]?.value ? String(JSON.parse(rows[0].value)?.name || '') : '';
+    } catch {
+        return '';
+    }
+}
+
+async function getRemoteStoreName(): Promise<string> {
+    const d = await getMysqlDb();
+    if (!d) return '';
+    const rows: any[] = await d.select("SELECT value FROM settings WHERE `key` = 'store_info' LIMIT 1");
+    try {
+        return rows[0]?.value ? String(JSON.parse(rows[0].value)?.name || '') : '';
+    } catch {
+        return '';
+    }
+}
+
+async function remoteHasShopData(): Promise<boolean> {
+    const d = await getMysqlDb();
+    if (!d) return false;
+    const rows: any[] = await d.select(
+        `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM orders) AS orders,
+                (SELECT COUNT(*) FROM customers) AS customers,
+                (SELECT COUNT(*) FROM employees) AS employees,
+                (SELECT COUNT(*) FROM settings WHERE \`key\` = 'store_info') AS storeInfo`
+    );
+    const row = rows[0] || {};
+    return ['products', 'orders', 'customers', 'employees', 'storeInfo']
+        .some((key) => Number(row[key] || 0) > 0);
+}
+
+function namesConflict(localName: string, remoteName: string): boolean {
+    return Boolean(localName.trim() && remoteName.trim()
+        && localName.trim().toLowerCase() !== remoteName.trim().toLowerCase());
+}
+
+function identityMismatchMessage(localIdentity: AppIdentity, remoteIdentity: AppIdentity): string {
+    return `${DATABASE_IDENTITY_MISMATCH_CODE}: This MariaDB database belongs to a different shop. ` +
+        `Local shop: ${localIdentity.shopName || localIdentity.shopId}. ` +
+        `MariaDB shop: ${remoteIdentity.shopName || remoteIdentity.shopId}. ` +
+        `Sync has been blocked to protect your data. Reset this till or restore a backup that belongs to the correct shop.`;
+}
+
+export async function ensureLocalShopIdentity(shopName = ''): Promise<AppIdentity> {
+    const existing = await getLocalAppIdentity();
+    if (existing) {
+        const nextName = shopName.trim();
+        if (nextName && !existing.shopName) {
+            const updated = { ...existing, shopName: nextName, updatedAt: new Date().toISOString() };
+            await saveLocalAppIdentity(updated);
+            return updated;
+        }
+        return existing;
+    }
+    const identity = makeIdentity(shopName.trim() || await getLocalStoreName());
+    await saveLocalAppIdentity(identity);
+    return identity;
+}
+
+export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | null> {
+    if (!isMultiMode()) return ensureLocalShopIdentity();
+
+    const remoteDb = await getMysqlDb();
+    if (!remoteDb) return getLocalAppIdentity();
+
+    let localIdentity = await getLocalAppIdentity();
+    let remoteIdentity = await getRemoteAppIdentity();
+    const localName = localIdentity?.shopName || await getLocalStoreName();
+    const remoteName = remoteIdentity?.shopName || await getRemoteStoreName();
+
+    if (localIdentity && remoteIdentity) {
+        if (localIdentity.shopId !== remoteIdentity.shopId) {
+            throw new DatabaseIdentityMismatchError(identityMismatchMessage(localIdentity, remoteIdentity));
+        }
+        return localIdentity;
+    }
+
+    if (!localIdentity && remoteIdentity) {
+        if (namesConflict(localName, remoteIdentity.shopName || remoteName)) {
+            const preview = makeIdentity(localName);
+            throw new DatabaseIdentityMismatchError(identityMismatchMessage(preview, remoteIdentity));
+        }
+        await saveLocalAppIdentity(remoteIdentity);
+        return remoteIdentity;
+    }
+
+    if (localIdentity && !remoteIdentity) {
+        if (await remoteHasShopData()) {
+            if (namesConflict(localIdentity.shopName || localName, remoteName)) {
+                const preview = { ...localIdentity, shopName: localIdentity.shopName || localName };
+                const remotePreview = makeIdentity(remoteName);
+                throw new DatabaseIdentityMismatchError(identityMismatchMessage(preview, remotePreview));
+            }
+        }
+        const identity = {
+            ...localIdentity,
+            shopName: localIdentity.shopName || localName || remoteName,
+            updatedAt: new Date().toISOString(),
+        };
+        await saveRemoteAppIdentity(identity);
+        if (identity.shopName !== localIdentity.shopName) await saveLocalAppIdentity(identity);
+        return identity;
+    }
+
+    if (namesConflict(localName, remoteName)) {
+        throw new DatabaseIdentityMismatchError(
+            `${DATABASE_IDENTITY_MISMATCH_CODE}: This MariaDB database appears to belong to a different shop. ` +
+            `Local shop: ${localName}. MariaDB shop: ${remoteName}. ` +
+            `Sync has been blocked to protect your data. Reset this till or restore a backup that belongs to the correct shop.`
+        );
+    }
+
+    const identity = makeIdentity(remoteName || localName);
+    await saveLocalAppIdentity(identity);
+    await saveRemoteAppIdentity(identity);
+    return identity;
+}
+
+function isDatabaseIdentityMismatch(error: unknown): boolean {
+    return error instanceof DatabaseIdentityMismatchError
+        || String(error).includes(DATABASE_IDENTITY_MISMATCH_CODE);
 }
 
 // ─── Per-table sync watermarks ──────────────────────────────────────────────
@@ -478,6 +685,7 @@ async function forcePushTables(localDb: any): Promise<void> {
  */
 async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
     try {
+        await ensureDatabaseIdentityForSync();
         const flag: any[] = await mysqlDb.select(`SELECT value FROM settings WHERE \`key\` = 'bootstrap_done'`);
         if (flag.length > 0) return;
 
@@ -1511,6 +1719,7 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
     audit_logs: ['id', 'employeeId', 'action', 'entityId', 'updatedAt'],
     shifts: ['id', 'registerId', 'employeeId', 'status', 'updatedAt'],
     tombstones: ['id', 'table_name', 'row_id', 'updatedAt'],
+    app_identity: ['id', 'shopId', 'shopName', 'licenseId', 'updatedAt'],
 };
 
 export async function validateDatabaseSchemas(): Promise<SchemaValidationResult> {
@@ -1550,6 +1759,7 @@ export async function migrateLocalDataToServer(): Promise<void> {
     if (!isMultiMode()) throw new Error('Connect to MariaDB multi-till mode first');
     const remote = await getMysqlDb();
     if (!remote) throw new Error('MariaDB is unavailable');
+    await ensureDatabaseIdentityForSync();
     const counts: any[] = await remote.select(
         `SELECT (SELECT COUNT(*) FROM products) AS products,
                 (SELECT COUNT(*) FROM orders) AS orders,
@@ -1866,6 +2076,7 @@ export async function runFastSyncCycle(): Promise<void> {
         const wasOnline = get(connectionState).mysqlOnline;
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) return;
+        await ensureDatabaseIdentityForSync();
 
         const pendingBeforeFlush = await pendingOfflineQueueCount();
         const flushed = pendingBeforeFlush > 0 ? await flushOfflineQueue() : 0;
@@ -1929,6 +2140,7 @@ export async function runSyncCycle(): Promise<void> {
     try {
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) return;
+        await ensureDatabaseIdentityForSync();
 
         // Flush any queued offline operations first (replays writes made while offline).
         await flushOfflineQueue();
@@ -2094,6 +2306,7 @@ export async function forceFullSync(): Promise<void> {
     }
 
     try {
+        await ensureDatabaseIdentityForSync();
         const localDb = await sqlite.getDb();
         // Clear every per-table watermark so the next cycle re-pulls all tables.
         await localDb.execute(
@@ -2128,6 +2341,7 @@ export async function forcePushToServer(): Promise<void> {
     }
 
     try {
+        await ensureDatabaseIdentityForSync();
         const localDb = await sqlite.getDb();
         // Reuse the shared push helper (skips device-local settings keys).
         await forcePushTables(localDb);
@@ -2154,6 +2368,7 @@ export async function wipeAndPullFromServer(): Promise<void> {
     }
 
     try {
+        await ensureDatabaseIdentityForSync();
         const localDb = await sqlite.getDb();
 
         // Wipe local tables
