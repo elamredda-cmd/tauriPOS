@@ -19,6 +19,9 @@ import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri } fr
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
+const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
+const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+
 // ─── Re-exports that never change (always local SQLite) ─────────────────────
 
 export {
@@ -277,6 +280,32 @@ function pushWriteInBackground(
         }
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
     });
+}
+
+async function writeOrQueueImmediately(
+    label: string,
+    write: () => Promise<void>,
+    queue: () => Promise<void>,
+): Promise<void> {
+    if (!isMultiMode()) return;
+    try {
+        await ensureDatabaseIdentityForSync();
+        await write();
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+    } catch (e) {
+        console.warn(`database: ${label} failed, queuing offline:`, e);
+        if (isDatabaseIdentityMismatch(e)) {
+            connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
+            throw e;
+        }
+        try {
+            await queue();
+        } catch (queueError) {
+            console.warn(`database: failed to queue ${label}:`, queueError);
+            throw queueError;
+        }
+        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
+    }
 }
 
 async function queueLocalProductSnapshot(productId: string, fallback?: any): Promise<void> {
@@ -727,6 +756,17 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
         return;
     }
 
+    if (PROMOTION_SYNC_TABLE_SET.has(table)) {
+        await writeOrQueueImmediately(
+            `promotion upsert for ${table}`,
+            () => table === 'promo_group_items'
+                ? mysql.mysqlSafeOfflineUpsert(table, obj, idKey)
+                : mysql.mysqlUpsert(table, obj, idKey),
+            () => queueOffline(table, 'upsert', obj, idKey),
+        );
+        return;
+    }
+
     pushWriteInBackground(
         `upsert for ${table}`,
         () => mysql.mysqlUpsert(table, obj, idKey),
@@ -737,11 +777,19 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
 export async function remove(table: string, id: string, idKey: string = 'id'): Promise<void> {
     await sqlite.remove(table, id, idKey);
 
-    pushWriteInBackground(
-        `remove for ${table}`,
-        () => mysql.mysqlRemove(table, id, idKey),
-        () => queueOffline(table, 'remove', { id }, idKey),
-    );
+    if (PROMOTION_SYNC_TABLE_SET.has(table)) {
+        await writeOrQueueImmediately(
+            `promotion remove for ${table}`,
+            () => mysql.mysqlRemove(table, id, idKey),
+            () => queueOffline(table, 'remove', { id }, idKey),
+        );
+    } else {
+        pushWriteInBackground(
+            `remove for ${table}`,
+            () => mysql.mysqlRemove(table, id, idKey),
+            () => queueOffline(table, 'remove', { id }, idKey),
+        );
+    }
 
     // Record a tombstone so other tills delete the same row on their next sync.
     // Only for id-keyed tables (tombstone apply removes by the `id` column).
@@ -1846,6 +1894,9 @@ import { hydrateTheme } from './theme';
  */
 export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<void> {
     const requested = tables ? new Set(tables) : null;
+    if (requested && PROMOTION_SYNC_TABLES.some(table => requested.has(table))) {
+        for (const table of PROMOTION_SYNC_TABLES) requested.add(table);
+    }
     if (requested && requested.size === 0) return;
     console.log(requested
         ? `database: hydrating Svelte stores for ${Array.from(requested).join(', ')}…`
@@ -2023,6 +2074,10 @@ const TRANSACTION_SYNC_TABLES = new Set([
     'orders', 'order_lines', 'payments', 'inventory_logs',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
 ]);
+const LOCAL_UPSERT_COMPARE_TABLES = new Set([
+    ...TRANSACTION_SYNC_TABLES,
+    ...PROMOTION_SYNC_TABLES,
+]);
 const TRANSACTION_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
 
 /** All tables — synced every 10s so product and pricing changes appear quickly. */
@@ -2044,7 +2099,7 @@ function overlapWatermark(table: string, since: string | null): string | null {
 
 async function filterRowsNeedingLocalUpsert(table: string, rows: any[], idKey = 'id'): Promise<any[]> {
     if (rows.length === 0) return rows;
-    if (!TRANSACTION_SYNC_TABLES.has(table)) return rows;
+    if (!LOCAL_UPSERT_COMPARE_TABLES.has(table)) return rows;
     const d = await sqlite.getDb();
     const changed: any[] = [];
     for (const row of rows) {
@@ -2094,7 +2149,7 @@ export async function runFastSyncCycle(): Promise<void> {
             // so a transient error on one table never permanently skips its rows.
             const since = overlapWatermark(table, await getTableWatermark(table));
             try {
-                let pulledRows: any[] = since
+                let pulledRows: any[] = since && !PROMOTION_SYNC_TABLE_SET.has(table)
                     ? await mysql.mysqlGetUpdatedSince(table, since)
                     : await mysql.mysqlGetAll(table);
                 if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
@@ -2154,7 +2209,7 @@ export async function runSyncCycle(): Promise<void> {
             // Per-table watermark: only advances when THIS table's pull succeeds.
             const since = overlapWatermark(table, await getTableWatermark(table));
             try {
-                let pulledRows: any[] = since
+                let pulledRows: any[] = since && !PROMOTION_SYNC_TABLE_SET.has(table)
                     ? await mysql.mysqlGetUpdatedSince(table, since)
                     : await mysql.mysqlGetAll(table);
 
