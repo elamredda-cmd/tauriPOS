@@ -66,41 +66,69 @@
         <button class="btn btn-danger" disabled={selected.size === 0} on:click={() => selected = new Map()}>Clear</button>
         <button class="btn btn-primary" disabled={totalLabels === 0} on:click={printLabels}>Print {totalLabels} Label{totalLabels === 1 ? '' : 's'}</button>
     </div>
-    <div class="quick-label-layout">
-        <section class="settings-section quick-picker">
-            <h3 class="settings-section-title">Scan or Find Items</h3>
-            <div class="field">
-                <label>Scan barcode or search name, SKU, barcode, or PLU</label>
-                <input bind:this={searchInput} bind:value={search} data-touch-keyboard="off" on:keydown={handleSearchKeydown} placeholder="Scan or type, then press Enter..." />
+    <div class="grid h-full min-h-0 grid-cols-[minmax(300px,0.9fr)_minmax(380px,1.1fr)] gap-4 p-4 max-[850px]:grid-cols-1 max-[850px]:overflow-y-auto">
+        <section class="settings-section flex min-h-0 flex-col max-[850px]:min-h-[420px]">
+            <div class="flex flex-col gap-1">
+                <p class="text-xs uppercase tracking-[0.22em] text-accent-primary font-bold">Item lookup</p>
+                <h3 class="settings-section-title !mb-0">Scan or Find Items</h3>
+                <p class="text-sm text-text-muted">Search by name, SKU, barcode, or PLU. Press Enter to add the first match.</p>
             </div>
-            <div class="quick-results">
+            <div class="relative mt-4">
+                <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input
+                    class="w-full min-h-[56px] rounded-lg border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                    bind:this={searchInput}
+                    bind:value={search}
+                    data-touch-keyboard="off"
+                    on:keydown={handleSearchKeydown}
+                    placeholder="Scan or type, then press Enter..."
+                />
+            </div>
+            <div class="mt-3 min-h-0 flex-1 overflow-y-auto rounded-lg border border-border-flat">
                 {#each matches as product}
-                    <button on:click={() => selectProduct(product)}>
-                        <span><strong>{product.name}</strong><small>{product.sku || product.barcode || product.scalePlu || ''}</small></span>
-                        <b>{formatMoney(product.price)}</b>
+                    <button
+                        class="flex min-h-[58px] w-full items-center justify-between gap-4 border-b border-border-flat bg-bg-panel px-3 py-2 text-left transition hover:bg-bg-card-hover"
+                        on:click={() => selectProduct(product)}
+                    >
+                        <span class="min-w-0">
+                            <strong class="block truncate">{product.name}</strong>
+                            <small class="block text-text-muted">{product.sku || product.barcode || product.scalePlu || ''}</small>
+                        </span>
+                        <b class="shrink-0">{formatMoney(product.price)}</b>
                     </button>
                 {/each}
-                {#if matches.length === 0}<p>No matching items.</p>{/if}
+                {#if matches.length === 0}<p class="p-6 text-center text-text-muted">No matching items.</p>{/if}
             </div>
         </section>
 
-        <section class="settings-section selected-labels">
-            <div class="selected-heading"><h3 class="settings-section-title !mb-0">Selected Labels</h3><strong>{totalLabels} total</strong></div>
-            <div class="selected-list">
+        <section class="settings-section flex min-h-0 flex-col max-[850px]:min-h-[420px]">
+            <div class="flex items-center justify-between gap-4">
+                <h3 class="settings-section-title !mb-0">Selected Labels</h3>
+                <strong>{totalLabels} total</strong>
+            </div>
+            <div class="mt-3 min-h-0 flex-1 overflow-y-auto rounded-lg border border-border-flat">
                 {#each selectedProducts as item}
-                    <article>
-                        <div><strong>{item.product.name}</strong><small>{formatMoney(item.product.price)}</small></div>
-                        <div class="quantity-control">
-                            <button on:click={() => setQuantity(item.product.id, item.quantity - 1)}>−</button>
-                            <input type="number" min="1" max="500" value={item.quantity} on:change={(event) => setQuantity(item.product.id, Number(event.currentTarget.value))} />
-                            <button on:click={() => setQuantity(item.product.id, item.quantity + 1)}>+</button>
+                    <article class="grid min-h-[68px] grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-border-flat bg-bg-panel p-3">
+                        <div class="min-w-0">
+                            <strong class="block truncate">{item.product.name}</strong>
+                            <small class="block text-text-muted">{formatMoney(item.product.price)}</small>
                         </div>
-                        <button class="remove" on:click={() => setQuantity(item.product.id, 0)}>Remove</button>
+                        <div class="grid grid-cols-[44px_68px_44px] gap-1">
+                            <button class="h-11 rounded-md border border-border-flat bg-bg-card text-lg font-black transition hover:bg-bg-card-hover" on:click={() => setQuantity(item.product.id, item.quantity - 1)}>−</button>
+                            <input class="h-11 w-[68px] rounded-md border border-border-flat bg-bg-card text-center font-bold" type="number" min="1" max="500" value={item.quantity} on:change={(event) => setQuantity(item.product.id, Number(event.currentTarget.value))} />
+                            <button class="h-11 rounded-md border border-border-flat bg-bg-card text-lg font-black transition hover:bg-bg-card-hover" on:click={() => setQuantity(item.product.id, item.quantity + 1)}>+</button>
+                        </div>
+                        <button class="h-11 rounded-md border border-border-flat bg-bg-card px-3 font-bold text-danger transition hover:border-danger hover:bg-danger/10" on:click={() => setQuantity(item.product.id, 0)}>Remove</button>
                     </article>
                 {/each}
-                {#if selectedProducts.length === 0}<div class="empty-selection"><h3>No labels selected</h3><p>Scan an item or choose it from the list.</p></div>{/if}
+                {#if selectedProducts.length === 0}
+                    <div class="grid h-full place-content-center p-6 text-center">
+                        <h3>No labels selected</h3>
+                        <p class="text-text-muted">Scan an item or choose it from the list.</p>
+                    </div>
+                {/if}
             </div>
-            <p class="design-note">Uses the saved label design: {design.widthMm} × {design.heightMm} mm · {design.template}</p>
+            <p class="mt-3 text-xs text-text-muted capitalize">Uses the saved label design: {design.widthMm} × {design.heightMm} mm · {design.template}</p>
         </section>
     </div>
 </MgmtPage>
@@ -110,26 +138,7 @@
 </div>
 
 <style>
-    .quick-label-layout { height: 100%; min-height: 0; padding: 1rem; display: grid; grid-template-columns: minmax(300px, .9fr) minmax(380px, 1.1fr); gap: 1rem; }
-    .quick-picker, .selected-labels { min-height: 0; display: flex; flex-direction: column; }
-    .quick-results, .selected-list { min-height: 0; flex: 1; margin-top: .75rem; overflow-y: auto; border: 1px solid var(--border-flat); border-radius: .5rem; }
-    .quick-results button { width: 100%; min-height: 58px; padding: .65rem .8rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; text-align: left; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .quick-results button:hover { background: var(--bg-card-hover); }
-    .quick-results span, .quick-results small, .selected-list article div:first-child small { display: block; min-width: 0; }
-    .quick-results strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .quick-results small, .selected-list small, .design-note, .empty-selection p { color: var(--text-muted); }
-    .selected-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
-    .selected-list article { min-height: 68px; padding: .6rem; display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: .7rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .selected-list article div:first-child { min-width: 0; }
-    .selected-list article div:first-child strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .quantity-control { display: grid; grid-template-columns: 44px 68px 44px; gap: .25rem; }
-    .quantity-control button, .quantity-control input, .remove { height: 44px; border: 1px solid var(--border-flat); border-radius: .35rem; text-align: center; background: var(--bg-card); }
-    .quantity-control input { width: 68px; }
-    .remove { padding: 0 .7rem; color: var(--danger); }
-    .empty-selection { height: 100%; display: grid; place-content: center; text-align: center; }
-    .design-note { margin: .75rem 0 0; font-size: .78rem; text-transform: capitalize; }
     .quick-label-print-sheet { display: none; }
-    @media (max-width: 850px) { .quick-label-layout { grid-template-columns: 1fr; overflow-y: auto; } .quick-picker, .selected-labels { min-height: 420px; } }
     @media print {
         :global(.management-page), :global(.fullscreen-toggle), :global(.toast-pop), :global(.touch-input-backdrop) { display: none !important; }
         .quick-label-print-sheet { display: block !important; }

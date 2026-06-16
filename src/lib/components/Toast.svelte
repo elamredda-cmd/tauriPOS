@@ -5,13 +5,11 @@
 
 {#if items.length > 0}
 <div
-    class="fixed inset-0 z-[9999] flex flex-col items-center justify-center gap-4 pointer-events-auto"
-    style="background: var(--overlay);"
+    class="fixed inset-0 z-[9999] flex flex-col items-center justify-center gap-4 pointer-events-auto bg-[var(--overlay)]"
 >
     {#each items as t (t.id)}
         <div
-            class="toast-pop p-10 rounded-sm font-bold text-[1.6rem] flex flex-col gap-8 min-w-[450px] min-h-[300px] justify-center items-center bg-bg-panel border border-border-flat text-text-main"
-            style="box-shadow: 0 10px 40px var(--shadow);"
+            class="toast-pop p-10 rounded-sm font-bold text-[1.6rem] flex flex-col gap-8 min-w-[450px] min-h-[300px] justify-center items-center bg-bg-panel border border-border-flat text-text-main shadow-[0_10px_40px_var(--shadow)]"
         >
             <div class="flex flex-col items-center gap-5 text-center flex-1 justify-center">
                 <span

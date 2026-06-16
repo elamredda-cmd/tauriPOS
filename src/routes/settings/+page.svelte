@@ -1,5 +1,6 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import {
@@ -25,6 +26,24 @@
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
     $: cctvConfig = getCctvPosConfig($settingsDB);
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
+    const drawerPinOptions = [
+        { label: 'Pin 2 / drawer 1', value: '0' },
+        { label: 'Pin 5 / drawer 2', value: '1' },
+    ];
+    const cctvEncodingOptions = [
+        { label: 'Latin-1 / ISO-8859-1', value: 'latin1' },
+        { label: 'UTF-8', value: 'utf8' },
+    ];
+    const switchCardBase = 'relative min-h-[86px] rounded-xl border p-4 pr-16 text-left transition disabled:cursor-not-allowed disabled:opacity-45';
+    const alertCardBase = 'min-h-[78px] rounded-xl border p-3 text-left transition';
+
+    function switchCardClass(active: boolean): string {
+        return `${switchCardBase} ${active ? 'border-success bg-success/10 text-text-main' : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover'}`;
+    }
+
+    function alertCardClass(active: boolean): string {
+        return `${alertCardBase} ${active ? 'border-accent-primary bg-accent-primary/10 text-accent-primary' : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover'}`;
+    }
 
     function setStockTracking(enabled: boolean) {
         updateSetting('stock_tracking_enabled', enabled ? 'true' : 'false');
@@ -165,6 +184,9 @@
             <a href="/settings/receipt" class="settings-tile tile-amber">
                 <span>Printing</span><b>Receipt Designer</b><p>Control receipt size, content, and messages.</p><strong>Design receipt &rarr;</strong>
             </a>
+            <a href="/settings/printers" class="settings-tile tile-green">
+                <span>Hardware</span><b>Printer Setup</b><p>Configure receipt printers, label printers, and direct ESC/POS test printing.</p><strong>Set printers &rarr;</strong>
+            </a>
             <a href="/settings/customer-display" class="settings-tile tile-purple">
                 <span>Checkout</span><b>Customer Screen</b><p>Open the live basket and total on a second monitor.</p><strong>Configure display &rarr;</strong>
             </a>
@@ -252,24 +274,24 @@
                     Cash-Up: {cashUpEnabled ? 'Enabled' : 'Disabled'}
                 </button>
             </div>
-            <div class="feedback-switches">
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <button
-                    class:active={openingFloatRequired}
+                    class={switchCardClass(openingFloatRequired)}
                     disabled={!cashUpEnabled}
                     on:click={() => updateSetting('cash_up_require_opening_float', openingFloatRequired ? 'false' : 'true')}
                 >
-                    <span>Opening float</span>
-                    <small>Ask the cashier how much cash is in the drawer when opening a new shift.</small>
-                    <b>{openingFloatRequired ? 'On' : 'Off'}</b>
+                    <span class="font-extrabold">Opening float</span>
+                    <small class="mt-1 block text-text-muted">Ask the cashier how much cash is in the drawer when opening a new shift.</small>
+                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {openingFloatRequired ? 'text-success' : 'text-text-muted'}">{openingFloatRequired ? 'On' : 'Off'}</b>
                 </button>
                 <button
-                    class:active={cardReconciliationEnabled}
+                    class={switchCardClass(cardReconciliationEnabled)}
                     disabled={!cashUpEnabled}
                     on:click={() => updateSetting('cash_up_reconcile_card', cardReconciliationEnabled ? 'false' : 'true')}
                 >
-                    <span>Card-machine total</span>
-                    <small>Ask for the card terminal total and show any difference when closing.</small>
-                    <b>{cardReconciliationEnabled ? 'On' : 'Off'}</b>
+                    <span class="font-extrabold">Card-machine total</span>
+                    <small class="mt-1 block text-text-muted">Ask for the card terminal total and show any difference when closing.</small>
+                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cardReconciliationEnabled ? 'text-success' : 'text-text-muted'}">{cardReconciliationEnabled ? 'On' : 'Off'}</b>
                 </button>
             </div>
             <p class="text-text-muted text-[0.82rem] mt-3">
@@ -286,39 +308,39 @@
                 <button class="btn btn-secondary" on:click={playCartButtonFeedback}>Test Button Click</button>
             </div>
 
-            <div class="feedback-switches">
-                <button class:active={buttonSoundEnabled} on:click={() => setFeedbackSetting('feedback_button_sound_enabled', !buttonSoundEnabled)}>
-                    <span>Button click sound</span><small>Short click on enabled buttons and links.</small><b>{buttonSoundEnabled ? 'On' : 'Off'}</b>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button class={switchCardClass(buttonSoundEnabled)} on:click={() => setFeedbackSetting('feedback_button_sound_enabled', !buttonSoundEnabled)}>
+                    <span class="font-extrabold">Button click sound</span><small class="mt-1 block text-text-muted">Short click on enabled buttons and links.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {buttonSoundEnabled ? 'text-success' : 'text-text-muted'}">{buttonSoundEnabled ? 'On' : 'Off'}</b>
                 </button>
-                <button class:active={itemSoundEnabled} on:click={() => setFeedbackSetting('feedback_item_sound_enabled', !itemSoundEnabled)}>
-                    <span>Item-added sound</span><small>Fast confirmation after adding an item.</small><b>{itemSoundEnabled ? 'On' : 'Off'}</b>
+                <button class={switchCardClass(itemSoundEnabled)} on:click={() => setFeedbackSetting('feedback_item_sound_enabled', !itemSoundEnabled)}>
+                    <span class="font-extrabold">Item-added sound</span><small class="mt-1 block text-text-muted">Fast confirmation after adding an item.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {itemSoundEnabled ? 'text-success' : 'text-text-muted'}">{itemSoundEnabled ? 'On' : 'Off'}</b>
                 </button>
-                <button class:active={hapticsEnabled} on:click={() => setFeedbackSetting('feedback_haptics_enabled', !hapticsEnabled)}>
-                    <span>Haptic vibration</span><small>Vibration on supported phones and tablets.</small><b>{hapticsEnabled ? 'On' : 'Off'}</b>
+                <button class={switchCardClass(hapticsEnabled)} on:click={() => setFeedbackSetting('feedback_haptics_enabled', !hapticsEnabled)}>
+                    <span class="font-extrabold">Haptic vibration</span><small class="mt-1 block text-text-muted">Vibration on supported phones and tablets.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {hapticsEnabled ? 'text-success' : 'text-text-muted'}">{hapticsEnabled ? 'On' : 'Off'}</b>
                 </button>
-                <button class:active={saleSoundEnabled} on:click={() => setFeedbackSetting('feedback_sale_sound_enabled', !saleSoundEnabled)}>
-                    <span>Sale-completed sound</span><small>Confirmation chime when payment finishes.</small><b>{saleSoundEnabled ? 'On' : 'Off'}</b>
+                <button class={switchCardClass(saleSoundEnabled)} on:click={() => setFeedbackSetting('feedback_sale_sound_enabled', !saleSoundEnabled)}>
+                    <span class="font-extrabold">Sale-completed sound</span><small class="mt-1 block text-text-muted">Confirmation chime when payment finishes.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {saleSoundEnabled ? 'text-success' : 'text-text-muted'}">{saleSoundEnabled ? 'On' : 'Off'}</b>
                 </button>
             </div>
 
-            <div class="barcode-alerts">
-                <div>
-                    <span>Failed barcode alert</span>
-                    <small>Choose the sound that gets the operator’s attention.</small>
+            <div class="mt-4 border-t border-border-flat pt-4">
+                <div class="flex flex-col gap-1">
+                    <span class="font-extrabold">Failed barcode alert</span>
+                    <small class="text-text-muted">Choose the sound that gets the operator’s attention.</small>
                 </div>
-                <div class="alert-options">
+                <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     {#each [
                         { id: 'vintage', name: 'Vintage Ring', detail: 'Mechanical telephone bell' },
                         { id: 'busy', name: 'Busy Line', detail: 'Three telephone pulses' },
                         { id: 'beep', name: 'Warning Beep', detail: 'Short two-tone warning' },
                         { id: 'silent', name: 'Silent', detail: 'Visual warning only' },
                     ] as option}
-                        <button class:active={barcodeErrorSound === option.id} on:click={() => selectBarcodeErrorSound(option.id)}>
-                            <strong>{option.name}</strong><small>{option.detail}</small>
+                        <button class={alertCardClass(barcodeErrorSound === option.id)} on:click={() => selectBarcodeErrorSound(option.id)}>
+                            <strong class="block">{option.name}</strong><small class="mt-1 block text-text-muted">{option.detail}</small>
                         </button>
                     {/each}
                 </div>
-                <div class="feedback-tests">
+                <div class="mt-3 flex flex-wrap gap-2">
                     <button class="btn btn-secondary" on:click={playItemAddedSound}>Test Item Added</button>
                     <button class="btn btn-secondary" on:click={playSuccessSound}>Test Sale Complete</button>
                     <button class="btn btn-secondary" on:click={playErrorSound} disabled={barcodeErrorSound === 'silent'}>Test Barcode Alert</button>
@@ -382,14 +404,12 @@
                     <small class="text-text-muted">Network thermal printers normally use port 9100.</small>
                 </div>
                 <div class="field">
-                    <label>Drawer Pin</label>
-                    <select
+                    <CustomSelect
+                        label="Drawer Pin"
                         value={cashDrawerConfig.pin}
-                        on:change={(e) => updateSetting('cash_drawer_pin', e.currentTarget.value)}
-                    >
-                        <option value="0">Pin 2 / drawer 1</option>
-                        <option value="1">Pin 5 / drawer 2</option>
-                    </select>
+                        options={drawerPinOptions}
+                        on:change={(event) => updateSetting('cash_drawer_pin', event.detail)}
+                    />
                 </div>
                 <div class="field">
                     <label>Pulse Timing</label>
@@ -478,22 +498,20 @@
                     <small class="text-text-muted">Put this same IP in the DVR “Allowed Remote IP” field.</small>
                 </div>
                 <div class="field">
-                    <label>Character Encoding</label>
-                    <select
+                    <CustomSelect
+                        label="Character Encoding"
                         value={cctvConfig.encoding}
-                        on:change={(e) => updateSetting('cctv_pos_encoding', e.currentTarget.value)}
-                    >
-                        <option value="latin1">Latin-1 / ISO-8859-1</option>
-                        <option value="utf8">UTF-8</option>
-                    </select>
+                        options={cctvEncodingOptions}
+                        on:change={(event) => updateSetting('cctv_pos_encoding', event.detail)}
+                    />
                 </div>
             </div>
-            <div class="feedback-switches mt-4">
-                <button class:active={cctvConfig.sendItems} on:click={() => updateSetting('cctv_pos_send_items', cctvConfig.sendItems ? 'false' : 'true')}>
-                    <span>Send item scans</span><small>Show each item as it is added to the cart.</small><b>{cctvConfig.sendItems ? 'On' : 'Off'}</b>
+            <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button class={switchCardClass(cctvConfig.sendItems)} on:click={() => updateSetting('cctv_pos_send_items', cctvConfig.sendItems ? 'false' : 'true')}>
+                    <span class="font-extrabold">Send item scans</span><small class="mt-1 block text-text-muted">Show each item as it is added to the cart.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendItems ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendItems ? 'On' : 'Off'}</b>
                 </button>
-                <button class:active={cctvConfig.sendReceipts} on:click={() => updateSetting('cctv_pos_send_receipts', cctvConfig.sendReceipts ? 'false' : 'true')}>
-                    <span>Send final receipt</span><small>Show the sale total after payment is completed.</small><b>{cctvConfig.sendReceipts ? 'On' : 'Off'}</b>
+                <button class={switchCardClass(cctvConfig.sendReceipts)} on:click={() => updateSetting('cctv_pos_send_receipts', cctvConfig.sendReceipts ? 'false' : 'true')}>
+                    <span class="font-extrabold">Send final receipt</span><small class="mt-1 block text-text-muted">Show the sale total after payment is completed.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendReceipts ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendReceipts ? 'On' : 'Off'}</b>
                 </button>
             </div>
             <div class="flex flex-wrap gap-3 items-center mt-4">
@@ -575,24 +593,9 @@
     .tile-red { --tile-accent: var(--danger); }
     .section-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .section-topline p { margin: -.6rem 0 1rem; color: var(--text-muted); font-size: .85rem; }
-    .feedback-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
-    .feedback-switches button { position: relative; padding: 1rem 4rem 1rem 1rem; display: flex; flex-direction: column; gap: .2rem; text-align: left; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .75rem; background: var(--bg-panel); }
-    .feedback-switches button.active { border-color: var(--success); background: color-mix(in srgb, var(--success) 9%, var(--bg-panel)); }
-    .feedback-switches span { font-weight: 800; }
-    .feedback-switches small, .barcode-alerts small { color: var(--text-muted); }
-    .feedback-switches b { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); }
-    .feedback-switches button.active b { color: var(--success); }
-    .barcode-alerts { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-flat); }
-    .barcode-alerts > div:first-child { display: flex; flex-direction: column; gap: .15rem; }
-    .barcode-alerts > div:first-child span { font-weight: 800; }
-    .alert-options { margin-top: .7rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
-    .alert-options button { min-height: 78px; padding: .75rem; display: flex; flex-direction: column; gap: .2rem; text-align: left; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .7rem; background: var(--bg-panel); }
-    .alert-options button.active { color: var(--accent-primary); border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-panel)); }
-    .feedback-tests { margin-top: .8rem; display: flex; flex-wrap: wrap; gap: .5rem; }
     @media (max-width: 850px) {
         .settings-hero { align-items: stretch; flex-direction: column; }
         .settings-tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .tile-large, .tile-wide { grid-column: span 2; }
-        .alert-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 </style>

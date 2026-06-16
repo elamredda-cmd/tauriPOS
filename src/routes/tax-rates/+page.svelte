@@ -84,7 +84,7 @@
         <tbody>
             {#each $taxRatesDB as t}
             <tr>
-                <td style="font-weight:600">{t.name}</td>
+                <td class="font-semibold">{t.name}</td>
                 <td>{(t.rate * 100).toFixed(1)}%</td>
                 <td>{t.isDefault ? '✓ Yes' : '-'}</td>
                 <td><div class="act-row">

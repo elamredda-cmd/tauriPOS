@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, tick } from 'svelte';
     import { listen } from '@tauri-apps/api/event';
     import { formatMoney } from '$lib/stores/db';
     import type { CustomerDisplayState } from '$lib/customerDisplay';
@@ -15,6 +15,22 @@
         message: 'Welcome',
         change: 0,
     };
+    let linesEl: HTMLDivElement;
+    let previousLinesKey = '';
+
+    $: linesKey = state.lines
+        .map((line) => `${line.name}|${line.quantity}|${line.unitPrice}|${line.total}|${line.discount}`)
+        .join('¬');
+    $: if (linesEl && state.status !== 'complete' && linesKey !== previousLinesKey) {
+        previousLinesKey = linesKey;
+        void scrollLinesToBottom();
+    }
+
+    async function scrollLinesToBottom() {
+        await tick();
+        if (!linesEl) return;
+        linesEl.scrollTo({ top: linesEl.scrollHeight, behavior: 'smooth' });
+    }
 
     onMount(() => {
         let unlisten: (() => void) | undefined;
@@ -41,7 +57,7 @@
         </section>
     {:else}
         <section class="display-body">
-            <div class="display-lines">
+            <div class="display-lines" bind:this={linesEl}>
                 {#if state.lines.length === 0}
                     <div class="display-empty"><h2>Ready for your items</h2><p>Your shopping will appear here.</p></div>
                 {:else}

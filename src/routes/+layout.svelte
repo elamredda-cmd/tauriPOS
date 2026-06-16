@@ -128,16 +128,16 @@
 {#if dbReady}
     <slot />
 {:else if dbError}
-    <div class="db-loading">
-        <div class="db-loading-card error">
+    <div class="fixed inset-0 flex items-center justify-center bg-bg-base font-sans text-text-main">
+        <div class="max-w-[480px] rounded-md border border-danger bg-bg-panel p-6 text-center">
             <h2>Database Error</h2>
             <p>{dbError}</p>
         </div>
     </div>
 {:else}
-    <div class="db-loading">
-        <div class="db-loading-card">
-            <div class="spinner"></div>
+    <div class="fixed inset-0 flex items-center justify-center bg-bg-base font-sans text-text-main">
+        <div class="text-center">
+            <div class="mx-auto mb-3 h-9 w-9 animate-spin rounded-full border-[3px] border-border-flat border-t-accent-primary"></div>
             <p>Loading…</p>
         </div>
     </div>
@@ -146,38 +146,3 @@
 <Toast />
 <GlobalTouchInput />
 {/if}
-
-<style>
-    .db-loading {
-        position: fixed;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--bg-base);
-        color: var(--text-main);
-        font-family: system-ui, -apple-system, sans-serif;
-    }
-    .db-loading-card {
-        text-align: center;
-    }
-    .db-loading-card.error {
-        max-width: 480px;
-        padding: 24px;
-        border: 1px solid var(--danger);
-        border-radius: var(--radius-md);
-        background: var(--bg-panel);
-    }
-    .spinner {
-        width: 36px;
-        height: 36px;
-        margin: 0 auto 12px;
-        border: 3px solid var(--border-flat);
-        border-top-color: var(--accent-primary);
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin {
-        to { transform: rotate(360deg); }
-    }
-</style>

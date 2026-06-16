@@ -316,10 +316,19 @@
                     history that you choose to permanently delete. Create a backup first if you may need this data later.
                 </p>
             </div>
-            <label class="purge-confirmation">
-                <input type="checkbox" bind:checked={purgeResponsibilityAccepted} on:change={() => purgeFinalConfirmation = false} />
-                <span>I understand this permanently deletes database history from all tills, and I choose to continue.</span>
-            </label>
+            <button
+                type="button"
+                class="mb-4 flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition {purgeResponsibilityAccepted ? 'border-danger bg-danger/10 text-danger' : 'border-border-flat bg-bg-panel text-text-main hover:border-danger hover:bg-danger/5'}"
+                role="switch"
+                aria-checked={purgeResponsibilityAccepted}
+                on:click={() => {
+                    purgeResponsibilityAccepted = !purgeResponsibilityAccepted;
+                    purgeFinalConfirmation = false;
+                }}
+            >
+                <span class="font-bold">I understand this permanently deletes database history from all tills, and I choose to continue.</span>
+                <b class="shrink-0 text-xs uppercase tracking-[0.12em]">{purgeResponsibilityAccepted ? 'Accepted' : 'Required'}</b>
+            </button>
             <button
                 class="btn btn-danger"
                 disabled={busy || !purgeResponsibilityAccepted}
@@ -364,9 +373,6 @@
     .purge-disclaimer { max-width: 760px; margin-bottom: .8rem; padding: .9rem 1rem; border: 1px solid var(--danger); border-radius: .7rem; background: color-mix(in srgb, var(--danger) 8%, var(--bg-panel)); }
     .purge-disclaimer strong { color: var(--danger); }
     .purge-disclaimer p { margin: .3rem 0 0; color: var(--text-muted); }
-    .purge-confirmation { max-width: 760px; margin-bottom: .8rem; display: flex; align-items: flex-start; gap: .65rem; cursor: pointer; }
-    .purge-confirmation input { width: 1.25rem; height: 1.25rem; flex: 0 0 auto; margin-top: .05rem; accent-color: var(--danger); }
-    .purge-confirmation span { color: var(--text-muted); font-size: .85rem; }
     .purge-warning { color: var(--danger); }
     .purge-warning { margin: 0 0 .8rem; font-weight: 800; }
     @media (max-width: 900px) {

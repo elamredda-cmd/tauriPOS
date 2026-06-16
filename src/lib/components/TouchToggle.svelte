@@ -5,13 +5,13 @@
 
 <button
     type="button"
-    class="w-full flex items-center justify-between p-3.5 bg-bg-panel border border-border-flat rounded-sm cursor-pointer select-none hover:bg-bg-card-hover transition-colors"
+    class="w-full min-h-[58px] flex items-center justify-between gap-4 p-3.5 bg-bg-panel border border-border-flat rounded-lg cursor-pointer select-none hover:bg-bg-card-hover hover:border-accent-primary transition-all duration-150"
     role="switch"
     aria-checked={checked}
     on:click={() => checked = !checked}
 >
-    <span class="font-semibold text-base text-text-main">{label}</span>
-    <div class="w-12 h-[26px] rounded-full relative transition-colors duration-300 border border-border-flat {checked ? 'bg-success' : 'bg-bg-card-hover'}">
-        <div class="w-5 h-5 rounded-full absolute top-[2px] left-[2px] transition-transform duration-300 shadow-md {checked ? 'translate-x-[22px] bg-text-inverse' : 'translate-x-0 bg-text-muted'}"></div>
+    <span class="font-bold text-base text-text-main text-left">{label}</span>
+    <div class="w-[54px] h-8 rounded-full relative transition-colors duration-200 border border-border-flat shrink-0 {checked ? 'bg-success' : 'bg-bg-card-hover'}">
+        <div class="w-6 h-6 rounded-full absolute top-[3px] left-[3px] transition-transform duration-200 shadow-md {checked ? 'translate-x-[22px] bg-white' : 'translate-x-0 bg-text-muted'}"></div>
     </div>
 </button>

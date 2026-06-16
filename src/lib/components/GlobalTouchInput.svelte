@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from "svelte";
+    import { onMount, tick } from "svelte";
     import TouchKeyboard from "./TouchKeyboard.svelte";
     import TouchDigitPad from "./TouchDigitPad.svelte";
 
@@ -12,6 +12,17 @@
     let title = "Enter text";
     let lastAppliedValue = "";
     let lastPointerTarget: Element | null = null;
+    let focusTimer: number | undefined;
+    let targetRectStyle = "";
+    let liftedText = "";
+    let liftedIsPlaceholder = true;
+    const activeInputClasses = [
+        "!border-accent-primary",
+        "!bg-bg-card",
+        "!outline-4",
+        "!outline-accent-primary/40",
+        "!outline-offset-2",
+    ];
 
     const ignoredTypes = new Set([
         "checkbox", "radio", "color", "date", "datetime-local", "time",
@@ -36,7 +47,9 @@
     }
 
     function openFor(element: HTMLInputElement | HTMLTextAreaElement) {
+        if (target && target !== element) target.classList.remove(...activeInputClasses);
         target = element;
+        target.classList.add(...activeInputClasses);
         value = element.value || "";
         lastAppliedValue = value;
         numeric = element instanceof HTMLInputElement &&
@@ -46,6 +59,8 @@
         masked = element instanceof HTMLInputElement && element.type === "password";
         title = fieldTitle(element);
         visible = true;
+        updateTargetRect();
+        refocusTarget();
     }
 
     function handleFocus(event: FocusEvent) {
@@ -59,17 +74,71 @@
         target.value = value;
         lastAppliedValue = value;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        updateTargetRect();
+        refocusTarget();
     }
 
     function done() {
+        const finishedTarget = target;
         applyValue();
-        target?.dispatchEvent(new Event("change", { bubbles: true }));
+        finishedTarget?.dispatchEvent(new Event("change", { bubbles: true }));
         visible = false;
+        finishedTarget?.classList.remove(...activeInputClasses);
         target = null;
+        targetRectStyle = "";
+        if (focusTimer) window.clearTimeout(focusTimer);
+    }
+
+    function keepTargetFocused(event: PointerEvent) {
+        const element = event.target as Element | null;
+        if (element?.closest("button, .digit-display")) {
+            event.preventDefault();
+            refocusTarget();
+        }
+    }
+
+    function refocusTarget() {
+        if (!target?.isConnected) return;
+        const element = target;
+        if (focusTimer) window.clearTimeout(focusTimer);
+        focusTimer = window.setTimeout(async () => {
+            await tick();
+            if (!element.isConnected || target !== element) return;
+            updateTargetRect();
+            element.focus({ preventScroll: true });
+            try {
+                const end = element.value.length;
+                element.setSelectionRange(end, end);
+            } catch {
+                // Some input types do not support text selection.
+            }
+        }, 0);
+    }
+
+    function updateTargetRect() {
+        if (!target?.isConnected) {
+            targetRectStyle = "";
+            return;
+        }
+        const rect = target.getBoundingClientRect();
+        targetRectStyle = [
+            `left:${Math.max(8, rect.left)}px`,
+            `top:${Math.max(8, rect.top)}px`,
+            `width:${rect.width}px`,
+            `height:${rect.height}px`,
+        ].join(";");
     }
 
     $: if (visible && target && value !== lastAppliedValue) {
         applyValue();
+    }
+
+    $: {
+        const rawText = value || target?.value || "";
+        liftedIsPlaceholder = !rawText;
+        liftedText = rawText
+            ? (masked ? "●".repeat(rawText.length) : rawText)
+            : (target?.placeholder || title);
     }
 
     onMount(() => {
@@ -78,22 +147,50 @@
         document.addEventListener("pointerdown", handlePointer, true);
         document.addEventListener("focusin", handleFocus, true);
         document.addEventListener("close-touch-keyboard", handleClose);
+        window.addEventListener("resize", updateTargetRect);
+        window.addEventListener("scroll", updateTargetRect, true);
         return () => {
             document.removeEventListener("pointerdown", handlePointer, true);
             document.removeEventListener("focusin", handleFocus, true);
             document.removeEventListener("close-touch-keyboard", handleClose);
+            window.removeEventListener("resize", updateTargetRect);
+            window.removeEventListener("scroll", updateTargetRect, true);
+            target?.classList.remove(...activeInputClasses);
+            if (focusTimer) window.clearTimeout(focusTimer);
         };
     });
 </script>
 
 {#if visible}
-    <div class="touch-input-backdrop" on:click={done}>
-        <div class="touch-input-panel" on:click|stopPropagation>
-            {#if numeric}
-                <div class="digit-panel-heading">
-                    <div><span>Touch digit pad</span><strong>{title}</strong></div>
-                    <button type="button" on:click={done}>Close</button>
+    <div
+        class="fixed inset-0 z-[1900] bg-[color-mix(in_srgb,var(--overlay)_55%,transparent)]"
+        on:click={done}
+    ></div>
+    {#if targetRectStyle}
+        <div
+            class="pointer-events-none fixed z-[1901] flex items-center overflow-hidden rounded-xl border-2 border-accent-primary bg-bg-card px-4 font-bold text-text-main shadow-[0_18px_45px_var(--shadow)] ring-[5px] ring-[color-mix(in_srgb,var(--accent-primary)_24%,transparent)]"
+            style={targetRectStyle}
+            aria-hidden="true"
+        >
+            <span class="overflow-hidden text-ellipsis whitespace-nowrap {liftedIsPlaceholder ? 'text-text-muted font-bold' : ''}">
+                {liftedText}
+            </span>
+        </div>
+    {/if}
+    <div
+        class="touch-input-panel fixed bottom-2 left-1/2 z-[1902] w-[min(980px,calc(100%_-_1rem))] -translate-x-1/2 overflow-hidden rounded-xl border border-border-flat bg-bg-panel shadow-[0_-15px_55px_var(--shadow)]"
+        on:pointerdown={keepTargetFocused}
+        on:click|stopPropagation
+    >
+        {#if numeric}
+            <div class="flex items-center justify-between gap-2 px-[.8rem] pb-0 pt-[.7rem]">
+                <div class="flex flex-col">
+                    <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">Touch digit pad</span>
+                    <strong>{title}</strong>
                 </div>
+                <button type="button" class="rounded-[.45rem] border border-border-flat bg-bg-card px-[.8rem] py-[.55rem] text-text-main" on:click={done}>Close</button>
+            </div>
+            <div class="mx-auto w-[min(420px,100%)] p-[.65rem]">
                 <TouchDigitPad
                     bind:value
                     {masked}
@@ -103,27 +200,16 @@
                     submitLabel="Done"
                     onSubmit={done}
                 />
-            {:else}
-                <TouchKeyboard
-                    bind:value
-                    bind:visible
-                    {masked}
-                    {title}
-                    placeholder={target?.placeholder || "Touch the keys to enter text"}
-                    onDone={done}
-                />
-            {/if}
-        </div>
+            </div>
+        {:else}
+            <TouchKeyboard
+                bind:value
+                bind:visible
+                {masked}
+                {title}
+                placeholder={target?.placeholder || "Touch the keys to enter text"}
+                onDone={done}
+            />
+        {/if}
     </div>
 {/if}
-
-<style>
-    .touch-input-backdrop { position: fixed; inset: 0; z-index: 1900; display: flex; align-items: flex-end; justify-content: center; padding: .5rem; background: color-mix(in srgb, var(--overlay) 55%, transparent); }
-    .touch-input-panel { width: min(980px, 100%); overflow: hidden; border: 1px solid var(--border-flat); border-radius: .9rem; background: var(--bg-panel); box-shadow: 0 -15px 55px var(--shadow); }
-    .touch-input-panel :global(.touch-keyboard) { border-top: 0; }
-    .touch-input-panel :global(.digit-pad) { width: min(420px, 100%); margin: 0 auto; padding: .65rem; }
-    .digit-panel-heading { padding: .7rem .8rem 0; display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
-    .digit-panel-heading div { display: flex; flex-direction: column; }
-    .digit-panel-heading span { color: var(--accent-primary); font-size: .65rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
-    .digit-panel-heading button { padding: .55rem .8rem; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
-</style>

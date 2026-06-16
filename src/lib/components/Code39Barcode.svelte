@@ -31,15 +31,15 @@
     })();
 </script>
 
-<div class="loyalty-barcode">
-    <svg style="height:{height}px" viewBox="0 0 {bars.width} {height}" preserveAspectRatio="none" aria-label="Barcode {value}">
+<div class="loyalty-barcode rounded-[.55rem] bg-white p-[.65rem] text-center text-black">
+    <svg
+        class="block w-full fill-black"
+        style="height:{height}px"
+        viewBox="0 0 {bars.width} {height}"
+        preserveAspectRatio="none"
+        aria-label="Barcode {value}"
+    >
         {#each bars.items as bar}<rect x={bar.x} y="0" width={bar.width} height={height} />{/each}
     </svg>
-    <strong>{value}</strong>
+    <strong class="mt-[.3rem] block font-mono text-[.82rem] tracking-[.16em]">{value}</strong>
 </div>
-
-<style>
-    .loyalty-barcode { padding: .65rem; color: #000; text-align: center; border-radius: .55rem; background: #fff; }
-    svg { width: 100%; height: 54px; display: block; fill: #000; }
-    strong { display: block; margin-top: .3rem; font-family: ui-monospace, monospace; font-size: .82rem; letter-spacing: .16em; }
-</style>

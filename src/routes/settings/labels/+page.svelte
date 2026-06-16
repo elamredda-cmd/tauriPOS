@@ -59,16 +59,33 @@
         <button class="btn btn-secondary" on:click={saveDesign}>Save Design</button>
         <button class="btn btn-primary" on:click={printLabels}>Print Labels</button>
     </div>
-    <div class="label-workspace">
-        <section class="label-controls">
+    <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(340px,0.8fr)] gap-6 p-6 max-[950px]:grid-cols-1 max-[950px]:p-3">
+        <section class="flex flex-col gap-4">
             <div class="settings-section">
-                <h3 class="settings-section-title">Choose Item</h3>
-                <div class="field"><label>Search name, SKU, barcode, or PLU</label><input bind:value={search} /></div>
-                <div class="product-results">
+                <div class="flex flex-col gap-1">
+                    <p class="text-xs uppercase tracking-[0.22em] text-accent-primary font-bold">Item lookup</p>
+                    <h3 class="settings-section-title !mb-0">Choose Item</h3>
+                    <p class="text-sm text-text-muted">Search by name, SKU, barcode, or PLU before previewing and printing.</p>
+                </div>
+                <div class="relative mt-4">
+                    <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input
+                        class="w-full min-h-[56px] rounded-lg border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                        bind:value={search}
+                        placeholder="Search items..."
+                    />
+                </div>
+                <div class="mt-3 max-h-[220px] overflow-y-auto rounded-lg border border-border-flat">
                     {#each filteredProducts as product}
-                        <button class:active={selectedProduct?.id === product.id} on:click={() => selectedProductId = product.id}>
-                            <span><strong>{product.name}</strong><small>{product.sku || product.barcode || product.scalePlu || ''}</small></span>
-                            <b>£{(product.price / 100).toFixed(2)}</b>
+                        <button
+                            class="flex w-full items-center justify-between gap-4 border-b border-border-flat px-3 py-2 text-left transition {selectedProduct?.id === product.id ? 'bg-accent-primary/15 text-accent-primary' : 'bg-bg-panel hover:bg-bg-card-hover'}"
+                            on:click={() => selectedProductId = product.id}
+                        >
+                            <span class="min-w-0">
+                                <strong class="block truncate">{product.name}</strong>
+                                <small class="block text-text-muted">{product.sku || product.barcode || product.scalePlu || ''}</small>
+                            </span>
+                            <b class="shrink-0">£{(product.price / 100).toFixed(2)}</b>
                         </button>
                     {/each}
                 </div>
@@ -76,8 +93,13 @@
 
             <div class="settings-section">
                 <h3 class="settings-section-title">Label Size</h3>
-                <div class="preset-grid">
-                    {#each labelSizePresets as preset}<button class:active={design.widthMm === preset.width && design.heightMm === preset.height} on:click={() => usePreset(preset.width, preset.height)}>{preset.label}</button>{/each}
+                <div class="grid grid-cols-3 gap-2">
+                    {#each labelSizePresets as preset}
+                        <button
+                            class="min-h-[54px] rounded-lg border p-3 font-bold transition {design.widthMm === preset.width && design.heightMm === preset.height ? 'border-accent-primary bg-accent-primary/15 text-accent-primary' : 'border-border-flat bg-bg-panel hover:border-accent-primary hover:bg-bg-card-hover'}"
+                            on:click={() => usePreset(preset.width, preset.height)}
+                        >{preset.label}</button>
+                    {/each}
                 </div>
                 <div class="form-grid mt-4">
                     <div class="field"><label>Custom width (mm)</label><input type="number" min="15" max="210" bind:value={design.widthMm} /></div>
@@ -88,19 +110,41 @@
 
             <div class="settings-section">
                 <h3 class="settings-section-title">Design</h3>
-                <div class="template-grid">
-                    {#each templates as template}<button class:active={design.template === template.id} on:click={() => design = { ...design, template: template.id }}><strong>{template.name}</strong><small>{template.description}</small></button>{/each}
+                <div class="grid grid-cols-2 gap-2">
+                    {#each templates as template}
+                        <button
+                            class="rounded-lg border p-3 text-left transition {design.template === template.id ? 'border-accent-primary bg-accent-primary/15 text-accent-primary' : 'border-border-flat bg-bg-panel hover:border-accent-primary hover:bg-bg-card-hover'}"
+                            on:click={() => design = { ...design, template: template.id }}
+                        >
+                            <strong class="block">{template.name}</strong>
+                            <small class="mt-1 block text-text-muted">{template.description}</small>
+                        </button>
+                    {/each}
                 </div>
-                <div class="switch-grid">
+                <div class="mt-4 grid grid-cols-2 gap-2">
                     {#each [['showStore','Store name'],['showName','Item name'],['showPrice','Price'],['showBarcodeText','Barcode text'],['showSku','SKU'],['showPlu','PLU']] as option}
-                        <label><input type="checkbox" checked={Boolean(design[option[0] as keyof LabelDesign])} on:change={(event) => setBoolean(option[0] as keyof LabelDesign, event.currentTarget.checked)} />{option[1]}</label>
+                        <button
+                            type="button"
+                            class="min-h-[54px] rounded-lg border p-3 text-left font-bold transition {design[option[0] as keyof LabelDesign] ? 'border-accent-primary bg-accent-primary/15 text-accent-primary' : 'border-border-flat bg-bg-panel hover:border-accent-primary hover:bg-bg-card-hover'}"
+                            role="switch"
+                            aria-checked={Boolean(design[option[0] as keyof LabelDesign])}
+                            on:click={() => setBoolean(option[0] as keyof LabelDesign, !design[option[0] as keyof LabelDesign])}
+                        >
+                            <span class="flex items-center justify-between gap-3">
+                                <span>{option[1]}</span>
+                                <b class="text-xs uppercase tracking-[0.12em]">{design[option[0] as keyof LabelDesign] ? 'On' : 'Off'}</b>
+                            </span>
+                        </button>
                     {/each}
                 </div>
             </div>
         </section>
 
-        <aside class="settings-section label-preview-area">
-            <div><h3 class="settings-section-title !mb-0">Live Preview</h3><span>{design.widthMm} × {design.heightMm} mm</span></div>
+        <aside class="settings-section sticky top-0 self-start min-h-[520px] flex flex-col items-center justify-center gap-8 overflow-auto max-[950px]:static max-[950px]:min-h-[360px]">
+            <div class="flex w-full items-center justify-between gap-4">
+                <h3 class="settings-section-title !mb-0">Live Preview</h3>
+                <span class="text-sm text-text-muted">{design.widthMm} × {design.heightMm} mm</span>
+            </div>
             {#if selectedProduct}<ProductLabel product={selectedProduct as Product} store={$storeDB} {design} preview />{:else}<p>Select an item to preview its label.</p>{/if}
         </aside>
     </div>
@@ -111,25 +155,7 @@
 </div>
 
 <style>
-    .label-workspace { padding: 1.5rem; display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(340px, .8fr); gap: 1.5rem; }
-    .label-controls { display: flex; flex-direction: column; gap: 1rem; }
-    .product-results { margin-top: .75rem; max-height: 220px; overflow-y: auto; border: 1px solid var(--border-flat); border-radius: .5rem; }
-    .product-results button { width: 100%; padding: .7rem; display: flex; justify-content: space-between; gap: 1rem; text-align: left; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .product-results button.active { background: color-mix(in srgb, var(--accent-primary) 16%, var(--bg-panel)); }
-    .product-results span, .product-results small { display: block; }
-    .product-results small { color: var(--text-muted); }
-    .preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .5rem; }
-    .preset-grid button, .template-grid button { padding: .75rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); }
-    .preset-grid button.active, .template-grid button.active { border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 14%, var(--bg-panel)); }
-    .template-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: .6rem; }
-    .template-grid button { text-align: left; }
-    .template-grid small { display: block; margin-top: .25rem; color: var(--text-muted); }
-    .switch-grid { margin-top: 1rem; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .5rem; }
-    .switch-grid label { padding: .7rem; display: flex; align-items: center; gap: .6rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); }
-    .label-preview-area { position: sticky; top: 0; align-self: start; min-height: 520px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2rem; overflow: auto; }
-    .label-preview-area > div:first-child { width: 100%; display: flex; justify-content: space-between; }
     .label-print-sheet { display: none; }
-    @media (max-width: 950px) { .label-workspace { grid-template-columns: 1fr; padding: .75rem; } .label-preview-area { position: static; min-height: 360px; } }
     @media print {
         :global(.management-page), :global(.fullscreen-toggle), :global(.toast-pop), :global(.touch-input-backdrop) { display: none !important; }
         .label-print-sheet { display: block !important; }

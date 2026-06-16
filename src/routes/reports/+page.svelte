@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { formatMoney } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import {
@@ -33,6 +34,14 @@
 
     let sortBy: 'quantity' | 'revenue' = 'quantity';
     let selectedTill = ''; // empty = all tills
+    $: tillOptions = [
+        { label: 'All Tills', value: '' },
+        ...allTills.map((till) => ({ label: till.name, value: till.id })),
+    ];
+    const sortOptions = [
+        { label: 'Quantity Sold', value: 'quantity' },
+        { label: 'Revenue', value: 'revenue' },
+    ];
 
     let overview: SalesOverview = { totalRevenue: 0, totalTransactions: 0, refundTransactions: 0, avgTransactionValue: 0, totalItemsSold: 0 };
     let breakdown: PaymentBreakdown = { totalCash: 0, totalCard: 0, totalLoyalty: 0, cashTxCount: 0, cardTxCount: 0, splitTxCount: 0, loyaltyTxCount: 0, totalAmount: 0, unrecordedAmount: 0, unrecordedTxCount: 0 };
@@ -280,21 +289,11 @@
                 <label>End Date</label>
                 <input type="date" bind:value={endDate} />
             </div>
-            <div class="field">
-                <label>Till</label>
-                <select bind:value={selectedTill}>
-                    <option value="">All Tills</option>
-                    {#each allTills as t}
-                        <option value={t.id}>{t.name}</option>
-                    {/each}
-                </select>
+            <div class="field min-w-[190px]">
+                <CustomSelect label="Till" bind:value={selectedTill} options={tillOptions} />
             </div>
-            <div class="field">
-                <label>Sort Products By</label>
-                <select bind:value={sortBy}>
-                    <option value="quantity">Quantity Sold</option>
-                    <option value="revenue">Revenue</option>
-                </select>
+            <div class="field min-w-[190px]">
+                <CustomSelect label="Sort Products By" bind:value={sortBy} options={sortOptions} />
             </div>
             <button class="btn btn-primary" disabled={loading} on:click={loadData}>
                 {loading ? 'Loading…' : 'Refresh'}

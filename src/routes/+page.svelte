@@ -68,6 +68,7 @@
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
+    import { getReceiptPrinterConfig, sendEscposReceipt } from "$lib/printers";
 
     let activePageId = "";
     let currentPageIndex = 0;
@@ -205,6 +206,7 @@
             ? "text-danger border-danger/40 bg-danger/10"
             : "text-text-muted border-border-flat bg-bg-card";
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
+    $: receiptPrinterConfig = getReceiptPrinterConfig($settingsDB);
 
     let goodsSearchQuery = "";
     $: filteredGoods = $activeProducts
@@ -1398,6 +1400,33 @@
         }
     }
 
+    async function openDrawerAfterSuccessfulPayment() {
+        if (!receiptPrinterConfig.openDrawerAfterPayment) return;
+        try {
+            await openCashDrawer(cashDrawerConfig);
+        } catch (error) {
+            console.warn("Drawer failed after payment:", error);
+            toast(`Sale completed, but drawer did not open: ${error}`, "error");
+        }
+    }
+
+    async function printReceiptAfterSuccessfulPayment(bundle: SaleBundle) {
+        if (!receiptPrinterConfig.autoPrintAfterPayment) return;
+        try {
+            await sendEscposReceipt({
+                store: $storeDB,
+                order: bundle.order,
+                lines: bundle.lines,
+                cashierName: $currentEmployee?.name || "",
+                tillName,
+                design: receiptDesign,
+            }, receiptPrinterConfig);
+        } catch (error) {
+            console.warn("Receipt auto-print failed:", error);
+            toast(`Sale completed, but receipt did not print: ${error}`, "error");
+        }
+    }
+
     async function reverseOrder(orderId: string, partial: boolean, voiding: boolean) {
         if (isReversingOrder) return;
         if (!canManage($currentEmployee)) {
@@ -1974,6 +2003,8 @@
 
             const committedSale = await commitSale({ order: newOrder, lines, payment, stockChanges, loyaltyChanges, audit });
             applyCompletedSaleToStores(committedSale);
+            void openDrawerAfterSuccessfulPayment();
+            void printReceiptAfterSuccessfulPayment(committedSale);
             sendCctvReceipt({
                 storeName: $storeDB.name,
                 tillName,
@@ -2102,9 +2133,9 @@
     <!-- Main Content (Products) -->
     <main class="pos-products flex-1 flex flex-col p-2 md:p-3 lg:p-5 overflow-hidden">
         <header
-            class="flex justify-between items-center h-12 md:h-14 lg:h-16 mb-2 md:mb-3 lg:mb-5 shrink-0"
+            class="pos-main-header grid grid-cols-[minmax(0,1fr)_minmax(0,auto)_minmax(0,1fr)] items-center gap-3 h-12 md:h-14 lg:h-16 mb-2 md:mb-3 lg:mb-5 shrink-0"
         >
-            <div class="flex items-center gap-4">
+            <div class="flex min-w-0 items-center gap-4">
                 <div class="relative">
                     <button
                         class="w-12 h-12 rounded-md bg-bg-card border border-border-flat flex items-center justify-center hover:bg-bg-card-hover transition-colors"
@@ -2244,7 +2275,7 @@
                     >
                         {$storeDB.name.substring(0, 2).toUpperCase()}
                     </div>
-                    <span class="font-semibold text-text-muted">{$currentEmployee?.name || 'Signed out'}</span>
+                    <span class="max-w-[120px] truncate font-semibold text-text-muted xl:max-w-[180px]">{$currentEmployee?.name || 'Signed out'}</span>
                     <svg
                         viewBox="0 0 24 24"
                         fill="none"
@@ -2258,9 +2289,14 @@
                 </button>
             </div>
 
-            <h1 class="absolute left-1/2 -translate-x-1/2 text-xl md:text-2xl lg:text-3xl font-black text-text-main tracking-tight">{$storeDB.name}</h1>
+            <h1
+                class="min-w-0 max-w-[34vw] truncate text-center text-xl md:text-2xl lg:text-3xl font-black text-text-main tracking-tight"
+                title={$storeDB.name}
+            >
+                {$storeDB.name}
+            </h1>
             <div
-                class="flex items-center gap-2 px-2.5 py-1.5 rounded-full border text-[11px] font-bold {syncStyle}"
+                class="justify-self-end flex items-center gap-2 px-2.5 py-1.5 rounded-full border text-[11px] font-bold {syncStyle}"
                 title={$connectionState.syncError || syncLabel}
             >
                 <span class="w-2 h-2 rounded-full bg-current"></span>
@@ -2269,7 +2305,7 @@
         </header>
 
         <!-- POS Pages -->
-        <div class="flex gap-3 overflow-x-auto pb-3 mb-5">
+        <div class="pos-page-tabs flex gap-3 overflow-x-auto pb-3 mb-5">
             {#each $activePosPages as page}
                 <button
                     class="whitespace-nowrap px-6 py-3 rounded-sm font-semibold text-sm transition-colors {activePageId ===
@@ -2287,8 +2323,8 @@
         </div>
 
         <!-- Product Grid (Fixed 4x3) -->
-        <div class="flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
-            <div class="grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1">
+        <div class="pos-product-workspace flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
+            <div class="pos-product-grid grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
                     {#if slot && slot.product}
                         {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, currentTime)}
@@ -2338,7 +2374,7 @@
                     {/if}
                 {/each}
             </div>
-            <div class="flex items-center gap-1.5 md:gap-2 h-11 md:h-14 shrink-0">
+            <div class="pos-toolbar flex items-center gap-1.5 md:gap-2 h-11 md:h-14 shrink-0">
                 <button
                     class="h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
                     title="Open cash drawer"
@@ -2413,7 +2449,7 @@
     >
         <!-- Compact Trolly Header (Order info + Search + Clear) -->
         <div
-            class="flex items-center gap-2 md:gap-3 p-3 md:p-4 border-b border-border-flat bg-bg-panel shrink-0"
+            class="pos-cart-header flex items-center gap-2 md:gap-3 p-3 md:p-4 border-b border-border-flat bg-bg-panel shrink-0"
         >
             <div class="flex flex-col gap-0.5 min-w-[80px]">
                 <span
@@ -2488,7 +2524,7 @@
         </div>
 
         <!-- Cart Items List -->
-        <div class="flex-1 overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 relative">
+        <div class="pos-cart-items flex-1 overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 relative">
             {#if trolleyMessage}
                 <div
                     class="absolute top-2 left-3 right-3 z-10 p-3 rounded-md text-sm font-semibold shadow-lg text-center transition-all {trolleyMessageType ===
@@ -2626,7 +2662,7 @@
         </div>
 
         <!-- Selection Controls & Quantity -->
-        <div class="flex gap-1 md:gap-2 p-2 md:p-4 pb-0 shrink-0">
+        <div class="pos-cart-controls flex gap-1 md:gap-2 p-2 md:p-4 pb-0 shrink-0">
             <button
                 disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
                 title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Increase quantity"}
@@ -2717,7 +2753,7 @@
         </div>
 
         <!-- Total Section -->
-        <div class="px-2 md:px-4 py-1 md:py-2 shrink-0">
+        <div class="pos-total-section px-2 md:px-4 py-1 md:py-2 shrink-0">
             {#if promoSavings > 0}
                 <div
                     class="flex justify-between items-center text-sm font-bold text-success mb-1"
@@ -2746,7 +2782,7 @@
         </div>
 
         <!-- Cart Action Buttons Grid -->
-        <div class="grid grid-cols-3 gap-1 md:gap-2 px-2 md:px-4 pb-2 md:pb-4 shrink-0 auto-rows-[2.5rem] md:auto-rows-[3.5rem]">
+        <div class="pos-action-grid grid grid-cols-3 gap-1 md:gap-2 px-2 md:px-4 pb-2 md:pb-4 shrink-0 auto-rows-[2.5rem] md:auto-rows-[3.5rem]">
             {#each [...cartLayout.slice(0, 2), 'payment', ...cartLayout.slice(2)] as btn}
                 {#if btn === 'payment'}
                     <button
@@ -2844,7 +2880,7 @@
                     <div class="scale-page-tabs">
                         {#each scaleTilePages as page}
                             <button
-                                class:active={page.id === activeScaleTilePageId}
+                                class={page.id === activeScaleTilePageId ? '!border-[var(--scale-page-color)] !bg-[color-mix(in_srgb,var(--scale-page-color)_14%,var(--bg-card))]' : ''}
                                 style="--scale-page-color: {page.color}"
                                 on:click={() => { activeScaleTilePageId = page.id; scalePage = 0; scaleSearch = ""; }}
                             >
@@ -2892,8 +2928,8 @@
                         <small>{selectedScaleProduct ? `${formatMoney(selectedScaleProduct.price)} per kilogram` : "The price stored on a weighable item is its price per kg."}</small>
                     </div>
                     <div class="scale-units">
-                        <button class:active={scaleWeightUnit === "kg"} on:click={() => (scaleWeightUnit = "kg")}>Kilograms</button>
-                        <button class:active={scaleWeightUnit === "g"} on:click={() => (scaleWeightUnit = "g")}>Grams</button>
+                        <button class={scaleWeightUnit === "kg" ? '!border-success !bg-success !text-white' : ''} on:click={() => (scaleWeightUnit = "kg")}>Kilograms</button>
+                        <button class={scaleWeightUnit === "g" ? '!border-success !bg-success !text-white' : ''} on:click={() => (scaleWeightUnit = "g")}>Grams</button>
                     </div>
                     <div class="scale-display">
                         <span>Weight</span>
@@ -3782,7 +3818,6 @@
     .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 38px; padding-bottom: .1rem; }
     .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
-    .scale-page-tabs button.active { border-color: var(--scale-page-color); background: color-mix(in srgb, var(--scale-page-color) 14%, var(--bg-card)); }
     .scale-products .flat-input { padding-top: .65rem; padding-bottom: .65rem; }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 0; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
@@ -3800,7 +3835,6 @@
     .scale-selected small { color: var(--text-muted); }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
     .scale-units button, .scale-clear { padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
-    .scale-units button.active { color: white; border-color: var(--success); background: var(--success); }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
     .scale-numpad { flex: 1; min-height: 190px; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .35rem; }

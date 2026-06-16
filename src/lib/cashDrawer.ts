@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
+import { getReceiptPrinterConfig } from '$lib/printers';
 
 export interface CashDrawerConfig {
     enabled: boolean;
@@ -26,11 +27,17 @@ function numberSetting(settings: Setting[], key: string, fallback: number): numb
 }
 
 export function getCashDrawerConfig(settings: Setting[] = get(settingsDB)): CashDrawerConfig {
-    const host = setting(settings, 'cash_drawer_printer_host');
-    const port = numberSetting(settings, 'cash_drawer_printer_port', 9100);
+    const drawerHost = setting(settings, 'cash_drawer_printer_host');
+    const receiptPrinter = getReceiptPrinterConfig(settings);
+    const receiptHost = receiptPrinter.connection === 'network_escpos' ? receiptPrinter.host : '';
+    const host = drawerHost.trim() ? drawerHost : receiptHost;
+    const port = drawerHost.trim()
+        ? numberSetting(settings, 'cash_drawer_printer_port', 9100)
+        : receiptPrinter.port;
     const pin = Number(setting(settings, 'cash_drawer_pin', '0')) === 1 ? 1 : 0;
+    const drawerAfterPayment = setting(settings, 'receipt_printer_open_drawer_after_payment') === 'true';
     return {
-        enabled: boolSetting(settings, 'cash_drawer_enabled', Boolean(host.trim())),
+        enabled: drawerAfterPayment || boolSetting(settings, 'cash_drawer_enabled', Boolean(host.trim())),
         host,
         port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : 9100,
         pin,

@@ -1,6 +1,7 @@
 mod commerce;
 
 use std::{
+    fs::OpenOptions,
     io::Write,
     net::{TcpStream, ToSocketAddrs},
     time::Duration,
@@ -98,6 +99,181 @@ fn send_cctv_pos_text(
 }
 
 #[tauri::command]
+fn send_raw_printer_data(
+    host: String,
+    port: u16,
+    data: Vec<u8>,
+    timeout_ms: Option<u64>,
+) -> Result<(), String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Printer IP address is required".into());
+    }
+    if port == 0 {
+        return Err("Printer port is required".into());
+    }
+    if data.is_empty() {
+        return Err("Printer data is empty".into());
+    }
+    if data.len() > 256_000 {
+        return Err("Printer data is too large".into());
+    }
+
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_500).clamp(100, 10_000));
+    let address = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Could not resolve printer: {error}"))?
+        .next()
+        .ok_or_else(|| "Could not resolve printer".to_string())?;
+
+    let mut stream = TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| format!("Could not connect to printer: {error}"))?;
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(&data)
+        .map_err(|error| format!("Could not send printer data: {error}"))?;
+    stream.flush().map_err(|error| format!("Could not flush printer data: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn send_device_printer_data(
+    device_path: String,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    let device_path = device_path.trim();
+    if device_path.is_empty() {
+        return Err("Printer device path is required".into());
+    }
+    if data.is_empty() {
+        return Err("Printer data is empty".into());
+    }
+    if data.len() > 256_000 {
+        return Err("Printer data is too large".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    let path = {
+        let upper = device_path.to_ascii_uppercase();
+        if upper.starts_with("COM") && !device_path.starts_with(r"\\.\") {
+            format!(r"\\.\{device_path}")
+        } else {
+            device_path.to_string()
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let path = device_path.to_string();
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("Could not open printer device {device_path}: {error}"))?;
+    file.write_all(&data)
+        .map_err(|error| format!("Could not write printer data: {error}"))?;
+    file.flush()
+        .map_err(|error| format!("Could not flush printer data: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn last_windows_error(context: &str) -> String {
+    use windows_sys::Win32::Foundation::GetLastError;
+    let code = unsafe { GetLastError() };
+    format!("{context} (Windows error {code})")
+}
+
+#[tauri::command]
+#[cfg(target_os = "windows")]
+fn send_system_printer_data(
+    printer_name: String,
+    data: Vec<u8>,
+    document_name: Option<String>,
+) -> Result<(), String> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Graphics::Printing::{
+        ClosePrinter, EndDocPrinter, EndPagePrinter, OpenPrinterW, StartDocPrinterW,
+        StartPagePrinter, WritePrinter, DOC_INFO_1W,
+    };
+
+    let printer_name = printer_name.trim();
+    if printer_name.is_empty() {
+        return Err("Windows printer name is required".into());
+    }
+    if data.is_empty() {
+        return Err("Printer data is empty".into());
+    }
+    if data.len() > 256_000 {
+        return Err("Printer data is too large".into());
+    }
+
+    let mut printer_name_w = wide_null(printer_name);
+    let mut printer = 0;
+    let opened = unsafe {
+        OpenPrinterW(printer_name_w.as_mut_ptr(), &mut printer, std::ptr::null_mut())
+    };
+    if opened == 0 {
+        return Err(last_windows_error("Could not open Windows printer"));
+    }
+
+    let result = (|| {
+        let mut doc_name_w = wide_null(document_name.as_deref().unwrap_or("L&Bj POS print job"));
+        let mut data_type_w = wide_null("RAW");
+        let doc_info = DOC_INFO_1W {
+            pDocName: doc_name_w.as_mut_ptr(),
+            pOutputFile: std::ptr::null_mut(),
+            pDatatype: data_type_w.as_mut_ptr(),
+        };
+
+        let job = unsafe { StartDocPrinterW(printer, 1, &doc_info as *const _ as *const u8) };
+        if job == 0 {
+            return Err(last_windows_error("Could not start raw print job"));
+        }
+
+        let page_started = unsafe { StartPagePrinter(printer) };
+        if page_started == 0 {
+            unsafe { EndDocPrinter(printer) };
+            return Err(last_windows_error("Could not start printer page"));
+        }
+
+        let mut written = 0u32;
+        let wrote = unsafe {
+            WritePrinter(
+                printer,
+                data.as_ptr() as *const c_void,
+                data.len() as u32,
+                &mut written,
+            )
+        };
+        unsafe {
+            EndPagePrinter(printer);
+            EndDocPrinter(printer);
+        }
+        if wrote == 0 || written as usize != data.len() {
+            return Err(last_windows_error("Could not write raw printer data"));
+        }
+        Ok(())
+    })();
+
+    unsafe { ClosePrinter(printer) };
+    result
+}
+
+#[tauri::command]
+#[cfg(not(target_os = "windows"))]
+fn send_system_printer_data(
+    _printer_name: String,
+    _data: Vec<u8>,
+    _document_name: Option<String>,
+) -> Result<(), String> {
+    Err("Raw USB/system printer mode is currently available on Windows only. Use network ESC/POS or serial device path on this machine.".into())
+}
+
+#[tauri::command]
 fn open_cash_drawer(
     host: String,
     port: u16,
@@ -169,6 +345,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             send_cctv_pos_text,
+            send_raw_printer_data,
+            send_device_printer_data,
+            send_system_printer_data,
             open_cash_drawer,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,

@@ -65,6 +65,8 @@
     // Numpad for Price Input
     let showPricePad = false;
     let priceString = "";
+    let productImageInput: HTMLInputElement | null = null;
+    let imageUploadError = "";
 
     $: filteredItems = $productsDB.filter((p) => {
         const matchesStatus = selectedStatus === "all"
@@ -127,6 +129,7 @@
         selectedPluLength = configuredPluLengths[0] || 5;
         isEditing = false;
         originalItem = null;
+        imageUploadError = "";
         showModal = true;
     }
 
@@ -136,6 +139,7 @@
         priceString = item.price.toString();
         selectedPluLength = item.scalePlu?.length || configuredPluLengths[0] || 5;
         isEditing = true;
+        imageUploadError = "";
         showModal = true;
     }
 
@@ -166,6 +170,78 @@
             }
         }
         toast(`No unused ${length}-digit PLU is available`, "error");
+    }
+
+    function blobToDataUrl(blob: Blob): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("Could not read image"));
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    async function compressProductImage(file: File): Promise<string> {
+        if (!file.type.startsWith("image/")) throw new Error("Please choose an image file");
+        if (file.size > 8 * 1024 * 1024) throw new Error("Image is too large. Please choose one below 8MB.");
+
+        const objectUrl = URL.createObjectURL(file);
+        try {
+            const image = new Image();
+            image.decoding = "async";
+            await new Promise<void>((resolve, reject) => {
+                image.onload = () => resolve();
+                image.onerror = () => reject(new Error("Could not load image"));
+                image.src = objectUrl;
+            });
+
+            const maxSide = 420;
+            const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
+            const width = Math.max(1, Math.round(image.width * ratio));
+            const height = Math.max(1, Math.round(image.height * ratio));
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) throw new Error("Image tools are not available on this device");
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            ctx.drawImage(image, 0, 0, width, height);
+
+            const blob = await new Promise<Blob | null>((resolve) => {
+                canvas.toBlob(resolve, "image/webp", 0.72);
+            }) || await new Promise<Blob | null>((resolve) => {
+                canvas.toBlob(resolve, "image/jpeg", 0.76);
+            });
+            if (!blob) throw new Error("Could not prepare image");
+            return blobToDataUrl(blob);
+        } finally {
+            URL.revokeObjectURL(objectUrl);
+        }
+    }
+
+    async function handleProductImageChange(event: Event) {
+        const input = event.currentTarget as HTMLInputElement;
+        const file = input.files?.[0];
+        if (!file) return;
+        imageUploadError = "";
+        try {
+            currentItem.image = await compressProductImage(file);
+            currentItem = { ...currentItem };
+            toast("Image added to item", "success");
+        } catch (error) {
+            imageUploadError = String(error).replace(/^Error:\s*/, "");
+            toast(imageUploadError, "error");
+        } finally {
+            input.value = "";
+        }
+    }
+
+    function removeProductImage() {
+        currentItem.image = "";
+        currentItem = { ...currentItem };
+        imageUploadError = "";
+        toast("Image removed from item", "info");
     }
 
     async function saveItem() {
@@ -471,7 +547,7 @@
         <table class="tbl">
             <thead>
                 <tr>
-                    <th>Color</th>
+                    <th>Tile</th>
                     <th>Name</th>
                     <th>Status</th>
                     <th>SKU</th>
@@ -489,7 +565,14 @@
                 {#each pagedItems as item}
                     <tr>
                         <td>
-                            <div class="swatch" style="background-color: {item.color || '#3b82f6'}"></div>
+                            <div
+                                class="h-11 w-11 overflow-hidden rounded-lg border border-border-flat shadow-sm"
+                                style="background-color: {item.color || '#3b82f6'}"
+                            >
+                                {#if item.image}
+                                    <img class="h-full w-full object-cover" src={item.image} alt={item.name} />
+                                {/if}
+                            </div>
                         </td>
                         <td class="font-semibold">{item.name}</td>
                         <td>
@@ -582,6 +665,58 @@
                         bind:value={currentItem.name}
                         placeholder="e.g. Coca Cola"
                     />
+                </div>
+
+                <div class="field span-2">
+                    <span class="text-sm font-medium text-text-muted">Tile Image</span>
+                    <div class="grid gap-4 rounded-xl border border-border-flat bg-bg-panel p-4 md:grid-cols-[150px_1fr]">
+                        <div
+                            class="relative h-[150px] overflow-hidden rounded-xl border border-border-flat shadow-sm"
+                            style="background-color: {currentItem.color || '#3b82f6'}"
+                        >
+                            {#if currentItem.image}
+                                <img class="h-full w-full object-cover" src={currentItem.image} alt={currentItem.name || 'Item image'} />
+                            {:else}
+                                <div class="flex h-full w-full items-center justify-center px-4 text-center text-sm font-bold text-white/85">
+                                    {currentItem.name || "No image yet"}
+                                </div>
+                            {/if}
+                            <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent p-2 text-right text-sm font-black text-white">
+                                {formatMoney(currentItem.price || 0)}
+                            </div>
+                        </div>
+                        <div class="flex min-w-0 flex-col justify-center gap-3">
+                            <div>
+                                <p class="m-0 font-bold text-text-main">Add a small image for this product tile</p>
+                                <p class="m-0 mt-1 text-sm text-text-muted">
+                                    The app resizes and compresses it before saving, then syncs it through the product record.
+                                </p>
+                            </div>
+                            <div class="flex flex-wrap gap-2">
+                                <input
+                                    class="hidden"
+                                    bind:this={productImageInput}
+                                    type="file"
+                                    accept="image/*"
+                                    on:change={handleProductImageChange}
+                                />
+                                <button type="button" class="btn btn-secondary" on:click={() => productImageInput?.click()}>
+                                    {currentItem.image ? "Change Image" : "Upload Image"}
+                                </button>
+                                {#if currentItem.image}
+                                    <button type="button" class="btn btn-danger" on:click={removeProductImage}>Remove Image</button>
+                                {/if}
+                            </div>
+                            {#if imageUploadError}
+                                <p class="m-0 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-sm font-bold text-danger">
+                                    {imageUploadError}
+                                </p>
+                            {/if}
+                            <p class="m-0 text-xs text-text-muted">
+                                Best result: square product photo. Large photos are reduced to a tile-friendly size.
+                            </p>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="field">

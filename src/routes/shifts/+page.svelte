@@ -203,7 +203,7 @@
                     <td>{getEmployeeName(shift.employeeId)}</td>
                     <td>{new Date(shift.openedAt).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
                     <td>{shift.closedAt ? new Date(shift.closedAt).toLocaleString('en-GB',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '-'}</td>
-                    <td><span class="tag" style="color:{shift.status === 'open' ? 'var(--success)' : 'var(--text-muted)'}">{shift.status}</span></td>
+                    <td><span class="tag {shift.status === 'open' ? 'text-success' : 'text-text-muted'}">{shift.status}</span></td>
                     <td class="money">{formatMoney(shiftSales(shift.id))}</td>
                     <td class:difference-bad={(shift.cashDifference || 0) !== 0}>{shift.status === 'closed' ? formatMoney(shift.cashDifference || 0) : '-'}</td>
                     <td class:difference-bad={(shift.cardDifference || 0) !== 0}>{shift.status === 'closed' ? formatMoney(shift.cardDifference || 0) : '-'}</td>

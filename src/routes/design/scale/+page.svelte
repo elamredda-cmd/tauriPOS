@@ -129,7 +129,7 @@
         <section class="designer-panel">
             <div class="page-tabs">
                 {#each pages as page}
-                    <button class:active={page.id === activePageId} style="--page-color: {page.color}" on:click={() => activePageId = page.id}>
+                    <button class={page.id === activePageId ? '!border-[var(--page-color)] !bg-[color-mix(in_srgb,var(--page-color)_12%,var(--bg-panel))]' : ''} style="--page-color: {page.color}" on:click={() => activePageId = page.id}>
                         <i></i>{page.name}<small>{page.productIds.length}</small>
                     </button>
                 {/each}
@@ -230,7 +230,6 @@
     .page-tabs button { min-height: 46px; padding: 0 1rem; display: flex; align-items: center; gap: .5rem; white-space: nowrap; color: var(--text-main); font-weight: 800; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); }
     .page-tabs button i { width: .65rem; height: .65rem; border-radius: 50%; background: var(--page-color); }
     .page-tabs button small { min-width: 1.35rem; padding: .1rem .35rem; border-radius: 1rem; color: var(--text-muted); background: var(--bg-card); }
-    .page-tabs button.active { border-color: var(--page-color); background: color-mix(in srgb, var(--page-color) 12%, var(--bg-panel)); }
     .page-tabs .add-page { color: var(--success); border-style: dashed; }
     .page-tools { margin-top: .8rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
     .page-tools p { margin: 0; color: var(--text-muted); font-size: .85rem; }

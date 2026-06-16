@@ -1,5 +1,6 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import CustomSelect from '$lib/components/CustomSelect.svelte';
     import Receipt from '$lib/components/Receipt.svelte';
     import { now, settingsDB, storeDB, type Order } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
@@ -7,6 +8,19 @@
     import { defaultReceiptDesign, getReceiptDesign, type ReceiptDesign } from '$lib/receipt';
 
     let design: ReceiptDesign = getReceiptDesign($settingsDB);
+    const paperWidthOptions = [
+        { label: '58mm Thermal', value: '58mm' },
+        { label: '80mm Thermal', value: '80mm' },
+    ];
+    const textSizeOptions = [
+        { label: 'Small', value: 'small' },
+        { label: 'Normal', value: 'normal' },
+        { label: 'Large', value: 'large' },
+    ];
+    const densityOptions = [
+        { label: 'Compact', value: 'compact' },
+        { label: 'Comfortable', value: 'comfortable' },
+    ];
 
     const previewOrder: Order = {
         id: 'preview-order',
@@ -90,26 +104,13 @@
                 <h3 class="settings-section-title">Paper and Text</h3>
                 <div class="form-grid">
                     <div class="field">
-                        <label>Paper Width</label>
-                        <select bind:value={design.paperWidth}>
-                            <option value="58mm">58mm Thermal</option>
-                            <option value="80mm">80mm Thermal</option>
-                        </select>
+                        <CustomSelect label="Paper Width" bind:value={design.paperWidth} options={paperWidthOptions} />
                     </div>
                     <div class="field">
-                        <label>Text Size</label>
-                        <select bind:value={design.textSize}>
-                            <option value="small">Small</option>
-                            <option value="normal">Normal</option>
-                            <option value="large">Large</option>
-                        </select>
+                        <CustomSelect label="Text Size" bind:value={design.textSize} options={textSizeOptions} />
                     </div>
                     <div class="field">
-                        <label>Spacing</label>
-                        <select bind:value={design.density}>
-                            <option value="compact">Compact</option>
-                            <option value="comfortable">Comfortable</option>
-                        </select>
+                        <CustomSelect label="Spacing" bind:value={design.density} options={densityOptions} />
                     </div>
                 </div>
             </section>
@@ -136,14 +137,18 @@
                 <h3 class="settings-section-title">Information to Show</h3>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {#each switches as item}
-                        <label class="flex items-center gap-3 p-3 bg-bg-root border border-border-flat rounded-md cursor-pointer">
-                            <input
-                                type="checkbox"
-                                checked={Boolean(design[item.key])}
-                                on:change={(event) => setBoolean(item.key, event.currentTarget.checked)}
-                            />
-                            <span>{item.label}</span>
-                        </label>
+                        <button
+                            type="button"
+                            class="min-h-[58px] rounded-lg border p-3 text-left font-bold transition-all {design[item.key] ? 'border-accent-primary bg-accent-primary/15 text-accent-primary' : 'border-border-flat bg-bg-root text-text-main hover:border-accent-primary hover:bg-bg-card-hover'}"
+                            role="switch"
+                            aria-checked={Boolean(design[item.key])}
+                            on:click={() => setBoolean(item.key, !design[item.key])}
+                        >
+                            <span class="flex items-center justify-between gap-3">
+                                <span>{item.label}</span>
+                                <b class="text-xs uppercase tracking-[0.12em]">{design[item.key] ? 'On' : 'Off'}</b>
+                            </span>
+                        </button>
                     {/each}
                 </div>
             </section>

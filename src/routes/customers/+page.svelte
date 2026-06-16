@@ -90,7 +90,7 @@
         <tbody>
             {#each filteredCustomers as c}
             <tr>
-                <td style="font-weight:600">{c.name}</td>
+                <td class="font-semibold">{c.name}</td>
                 <td class="mono">{c.postcode || '-'}</td>
                 <td class="mono">{c.loyaltyCode || '-'}</td>
                 <td class="money">{c.loyaltyPoints}</td>

@@ -203,11 +203,11 @@
         return 'Active';
     }
 
-    function promotionStatusColor(d: Discount): string {
+    function promotionStatusClass(d: Discount): string {
         const status = promotionStatus(d);
-        if (status === 'Active') return 'var(--success)';
-        if (status === 'Scheduled') return 'var(--warning)';
-        return 'var(--danger)';
+        if (status === 'Active') return 'text-success';
+        if (status === 'Scheduled') return 'text-warning';
+        return 'text-danger';
     }
 
     // ───── BOGO ─────
@@ -360,13 +360,12 @@
         for (const item of oldItems) {
             if (!productIds.has(item.productId)) await removeSql('promo_group_items', item.id);
         }
-        const newItems: PromoGroupItem[] = Array.from(productIds).map(productId =>
-            existingByProduct.has(productId)
-                ? { ...existingByProduct.get(productId)!, updatedAt: timestamp }
-                : { id: uuid(), groupId, productId, updatedAt: timestamp }
-        );
+        const keptItems = oldItems.filter(item => productIds.has(item.productId));
+        const newItems: PromoGroupItem[] = Array.from(productIds)
+            .filter(productId => !existingByProduct.has(productId))
+            .map(productId => ({ id: uuid(), groupId, productId, updatedAt: timestamp }));
         for (const item of newItems) await upsert('promo_group_items', item);
-        return newItems;
+        return [...keptItems, ...newItems];
     }
 
     function addBundle() {
@@ -588,11 +587,11 @@
             <tbody>
                 {#each bundles as d}
                     <tr>
-                        <td style="font-weight:600">{d.name}</td>
+                        <td class="font-semibold">{d.name}</td>
                         <td>Any {d.bundleQuantity} for {formatMoney(d.bundlePrice)}</td>
                         <td>{bundleItemCount(d)}</td>
                         <td>{bundleWindow(d)}</td>
-                        <td><span class="tag" style="color:{promotionStatusColor(d)}">{promotionStatus(d)}</span></td>
+                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editBundle(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delBundle(d)}>✕</button>
@@ -608,12 +607,12 @@
             <tbody>
                 {#each bogos as d}
                     <tr>
-                        <td style="font-weight:600">{d.name}</td>
+                        <td class="font-semibold">{d.name}</td>
                         <td>Buy {d.minQuantity}, next for {formatMoney(d.secondPrice)}</td>
                         <td>{bundleItemCount(d)}</td>
                         <td>{bundleWindow(d)}</td>
                         <td>{d.maxApplications === null ? 'Unlimited' : `${d.maxApplications} per sale`}</td>
-                        <td><span class="tag" style="color:{promotionStatusColor(d)}">{promotionStatus(d)}</span></td>
+                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editBogo(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delBogo(d)}>✕</button>
@@ -629,11 +628,11 @@
             <tbody>
                 {#each temporaryItems as d}
                     <tr>
-                        <td style="font-weight:600">{d.name}</td>
+                        <td class="font-semibold">{d.name}</td>
                         <td>{temporaryProductName(d)}</td>
                         <td>{temporaryDeal(d)}</td>
                         <td>{bundleWindow(d)}</td>
-                        <td><span class="tag" style="color:{promotionStatusColor(d)}">{promotionStatus(d)}</span></td>
+                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editTemporary(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delTemporary(d)}>✕</button>
@@ -649,10 +648,10 @@
             <tbody>
                 {#each percentages as d}
                     <tr>
-                        <td style="font-weight:600">{d.name}</td>
+                        <td class="font-semibold">{d.name}</td>
                         <td>{d.value}% off</td>
                         <td>Cashier</td>
-                        <td><span class="tag" style="color:{d.isActive?'var(--success)':'var(--danger)'}">{d.isActive?'Active':'Inactive'}</span></td>
+                        <td><span class="tag {d.isActive ? 'text-success' : 'text-danger'}">{d.isActive?'Active':'Inactive'}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editPercent(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delPercent(d)}>✕</button>

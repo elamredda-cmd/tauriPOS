@@ -76,11 +76,11 @@
         <tbody>
             {#each $employeesDB as e}
             <tr>
-                <td style="font-weight:600">{e.name}</td>
+                <td class="font-semibold">{e.name}</td>
                 <td><span class="tag">{e.role}</span></td>
                 <td class="mono">****</td>
                 <td>{e.email || '-'}</td>
-                <td><span class="tag" style="color:{e.isActive?'var(--success)':'var(--danger)'}">{e.isActive?'Active':'Inactive'}</span></td>
+                <td><span class="tag {e.isActive ? 'text-success' : 'text-danger'}">{e.isActive?'Active':'Inactive'}</span></td>
                 <td><div class="act-row">
                     <button class="btn-icon act-btn" on:click={() => edit(e)}>✎</button>
                     <button class="btn-icon act-btn danger" on:click={() => toggle(e.id)}>{e.isActive?'⏸':'▶'}</button>

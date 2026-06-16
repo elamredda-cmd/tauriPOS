@@ -279,10 +279,7 @@
                                         {#if slot.product.image}
                                             <img class="w-full h-full object-cover" src={slot.product.image} alt={slot.product.name} />
                                         {/if}
-                                        <div
-                                            class="absolute bottom-2 right-2 px-2 py-1 rounded-sm font-bold text-[0.9rem]"
-                                            style="background: var(--price-bg); color: var(--price-text);"
-                                        >
+                                        <div class="absolute bottom-2 right-2 rounded-sm bg-[var(--price-bg)] px-2 py-1 text-[0.9rem] font-bold text-[var(--price-text)]">
                                             {formatMoney(slot.product.price)}
                                         </div>
                                     </div>

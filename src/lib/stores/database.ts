@@ -302,6 +302,15 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'cctv_pos_send_items', 'cctv_pos_send_receipts',
     'cash_drawer_enabled', 'cash_drawer_printer_host', 'cash_drawer_printer_port',
     'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
+    'receipt_printer_enabled', 'receipt_printer_connection', 'receipt_printer_host',
+    'receipt_printer_port', 'receipt_printer_name', 'receipt_printer_device_path',
+    'receipt_printer_baud_rate', 'receipt_printer_paper_width',
+    'receipt_printer_auto_print_after_payment', 'receipt_printer_cut_paper',
+    'receipt_printer_open_drawer_after_cash', 'receipt_printer_open_drawer_after_payment',
+    'receipt_printer_encoding',
+    'label_printer_enabled', 'label_printer_connection', 'label_printer_protocol',
+    'label_printer_host', 'label_printer_port', 'label_printer_name',
+    'label_printer_device_path', 'label_printer_baud_rate',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done',
 ]);
@@ -1625,76 +1634,146 @@ import { hydrateTheme } from './theme';
  * SQLite in single mode) and push the results into the Svelte stores
  * that drive the UI. Call this at startup and after every background sync.
  */
-export async function hydrateSvelteStores(): Promise<void> {
-    console.log('database: hydrating Svelte stores…');
+export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<void> {
+    const requested = tables ? new Set(tables) : null;
+    if (requested && requested.size === 0) return;
+    console.log(requested
+        ? `database: hydrating Svelte stores for ${Array.from(requested).join(', ')}…`
+        : 'database: hydrating Svelte stores…');
+
+    const shouldHydrate = (table: string) => !requested || requested.has(table);
 
     // Repair tiles left behind by older builds when their product became unavailable.
-    const unavailableTileIds = await sqlite.getUnavailableProductTileIds();
-    for (const tileId of unavailableTileIds) await deleteTile(tileId);
-
-    const [
-        cats, pages, tiles, prods, taxRates, emps, settings, customers,
-        registers, discounts, promoGroups, promoGroupItems,
-        orders, orderLines, payments, suppliers, productSuppliers,
-        inventoryLog, loyaltyLog, auditLog, shifts, cashMovements
-    ] = await Promise.all([
-        sqlite.getAll('categories'),
-        sqlite.getAll('pos_pages'),
-        sqlite.getAll('pos_tiles'),
-        sqlite.getAll('products'),
-        sqlite.getAll('tax_rates'),
-        sqlite.getAll('employees'),
-        sqlite.getAll('settings'),
-        sqlite.getAll('customers'),
-        sqlite.getAll('registers'),
-        sqlite.getAll('discounts'),
-        sqlite.getAll('promo_groups'),
-        sqlite.getAll('promo_group_items'),
-        sqlite.getAll('orders'),
-        sqlite.getAll('order_lines'),
-        sqlite.getAll('payments'),
-        sqlite.getAll('suppliers'),
-        sqlite.getAll('product_suppliers'),
-        sqlite.getAll('inventory_logs'),
-        sqlite.getAll('loyalty_logs'),
-        sqlite.getAll('audit_logs'),
-        sqlite.getAll('shifts'),
-        sqlite.getAll('cash_movements'),
-    ]);
-
-    categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
-    posPagesDB.set(pages);
-    tilesDB.set(tiles);
-    productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
-        'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
-    ])));
-    taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
-    employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
-    settingsDB.set(settings);
-    hydrateTheme(settings);
-    customersDB.set(customers);
-    registersDB.set(registers.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
-    discountsDB.set(discounts.map(d => sqlite.rehydrateBooleans(d, ['isActive', 'autoApply'])));
-    promoGroupsDB.set(promoGroups.map(g => sqlite.rehydrateBooleans(g, ['isActive'])));
-    promoGroupItemsDB.set(promoGroupItems);
-    ordersDB.set(orders);
-    orderLinesDB.set(orderLines.map(line => sqlite.rehydrateBooleans(line, ['isPriceOverride'])));
-    paymentsDB.set(payments);
-    suppliersDB.set(suppliers);
-    productSuppliersDB.set(productSuppliers);
-    inventoryLogDB.set(inventoryLog);
-    loyaltyLogDB.set(loyaltyLog);
-    auditLogDB.set(auditLog);
-    shiftsDB.set(shifts);
-    cashMovementsDB.set(cashMovements);
-
-    // Restore store info from settings
-    const storeInfo = settings.find((s: any) => s.key === 'store_info');
-    if (storeInfo) {
-        try { storeDB.set(JSON.parse(storeInfo.value)); } catch (e) { /* ignore */ }
+    // This is only relevant when products or tile assignments have changed.
+    if (!requested || requested.has('products') || requested.has('pos_tiles')) {
+        const unavailableTileIds = await sqlite.getUnavailableProductTileIds();
+        for (const tileId of unavailableTileIds) await deleteTile(tileId);
     }
 
-    console.log('database: Svelte stores hydrated ✅');
+    if (!requested) {
+        const [
+            cats, pages, tiles, prods, taxRates, emps, settings, customers,
+            registers, discounts, promoGroups, promoGroupItems,
+            orders, orderLines, payments, suppliers, productSuppliers,
+            inventoryLog, loyaltyLog, auditLog, shifts, cashMovements
+        ] = await Promise.all([
+            sqlite.getAll('categories'),
+            sqlite.getAll('pos_pages'),
+            sqlite.getAll('pos_tiles'),
+            sqlite.getAll('products'),
+            sqlite.getAll('tax_rates'),
+            sqlite.getAll('employees'),
+            sqlite.getAll('settings'),
+            sqlite.getAll('customers'),
+            sqlite.getAll('registers'),
+            sqlite.getAll('discounts'),
+            sqlite.getAll('promo_groups'),
+            sqlite.getAll('promo_group_items'),
+            sqlite.getAll('orders'),
+            sqlite.getAll('order_lines'),
+            sqlite.getAll('payments'),
+            sqlite.getAll('suppliers'),
+            sqlite.getAll('product_suppliers'),
+            sqlite.getAll('inventory_logs'),
+            sqlite.getAll('loyalty_logs'),
+            sqlite.getAll('audit_logs'),
+            sqlite.getAll('shifts'),
+            sqlite.getAll('cash_movements'),
+        ]);
+
+        categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
+        posPagesDB.set(pages);
+        tilesDB.set(tiles);
+        productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
+            'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
+        ])));
+        taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
+        employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
+        settingsDB.set(settings);
+        hydrateTheme(settings);
+        customersDB.set(customers);
+        registersDB.set(registers.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
+        discountsDB.set(discounts.map(d => sqlite.rehydrateBooleans(d, ['isActive', 'autoApply'])));
+        promoGroupsDB.set(promoGroups.map(g => sqlite.rehydrateBooleans(g, ['isActive'])));
+        promoGroupItemsDB.set(promoGroupItems);
+        ordersDB.set(orders);
+        orderLinesDB.set(orderLines.map(line => sqlite.rehydrateBooleans(line, ['isPriceOverride'])));
+        paymentsDB.set(payments);
+        suppliersDB.set(suppliers);
+        productSuppliersDB.set(productSuppliers);
+        inventoryLogDB.set(inventoryLog);
+        loyaltyLogDB.set(loyaltyLog);
+        auditLogDB.set(auditLog);
+        shiftsDB.set(shifts);
+        cashMovementsDB.set(cashMovements);
+
+        const storeInfo = settings.find((s: any) => s.key === 'store_info');
+        if (storeInfo) {
+            try { storeDB.set(JSON.parse(storeInfo.value)); } catch (e) { /* ignore */ }
+        }
+
+        console.log('database: Svelte stores hydrated ✅');
+        return;
+    }
+
+    if (shouldHydrate('categories')) {
+        const rows = await sqlite.getAll('categories');
+        categoriesDB.set(rows.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
+    }
+    if (shouldHydrate('pos_pages')) posPagesDB.set(await sqlite.getAll('pos_pages'));
+    if (shouldHydrate('pos_tiles')) tilesDB.set(await sqlite.getAll('pos_tiles'));
+    if (shouldHydrate('products')) {
+        const rows = await sqlite.getAll('products');
+        productsDB.set(rows.map(p => sqlite.rehydrateBooleans(p, [
+            'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
+        ])));
+    }
+    if (shouldHydrate('tax_rates')) {
+        const rows = await sqlite.getAll('tax_rates');
+        taxRatesDB.set(rows.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
+    }
+    if (shouldHydrate('employees')) {
+        const rows = await sqlite.getAll('employees');
+        employeesDB.set(rows.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
+    }
+    if (shouldHydrate('settings')) {
+        const rows = await sqlite.getAll('settings');
+        settingsDB.set(rows);
+        hydrateTheme(rows);
+        const storeInfo = rows.find((s: any) => s.key === 'store_info');
+        if (storeInfo) {
+            try { storeDB.set(JSON.parse(storeInfo.value)); } catch (e) { /* ignore */ }
+        }
+    }
+    if (shouldHydrate('customers')) customersDB.set(await sqlite.getAll('customers'));
+    if (shouldHydrate('registers')) {
+        const rows = await sqlite.getAll('registers');
+        registersDB.set(rows.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
+    }
+    if (shouldHydrate('discounts')) {
+        const rows = await sqlite.getAll('discounts');
+        discountsDB.set(rows.map(d => sqlite.rehydrateBooleans(d, ['isActive', 'autoApply'])));
+    }
+    if (shouldHydrate('promo_groups')) {
+        const rows = await sqlite.getAll('promo_groups');
+        promoGroupsDB.set(rows.map(g => sqlite.rehydrateBooleans(g, ['isActive'])));
+    }
+    if (shouldHydrate('promo_group_items')) promoGroupItemsDB.set(await sqlite.getAll('promo_group_items'));
+    if (shouldHydrate('orders')) ordersDB.set(await sqlite.getAll('orders'));
+    if (shouldHydrate('order_lines')) {
+        const rows = await sqlite.getAll('order_lines');
+        orderLinesDB.set(rows.map(line => sqlite.rehydrateBooleans(line, ['isPriceOverride'])));
+    }
+    if (shouldHydrate('payments')) paymentsDB.set(await sqlite.getAll('payments'));
+    if (shouldHydrate('suppliers')) suppliersDB.set(await sqlite.getAll('suppliers'));
+    if (shouldHydrate('product_suppliers')) productSuppliersDB.set(await sqlite.getAll('product_suppliers'));
+    if (shouldHydrate('inventory_logs')) inventoryLogDB.set(await sqlite.getAll('inventory_logs'));
+    if (shouldHydrate('loyalty_logs')) loyaltyLogDB.set(await sqlite.getAll('loyalty_logs'));
+    if (shouldHydrate('audit_logs')) auditLogDB.set(await sqlite.getAll('audit_logs'));
+    if (shouldHydrate('shifts')) shiftsDB.set(await sqlite.getAll('shifts'));
+    if (shouldHydrate('cash_movements')) cashMovementsDB.set(await sqlite.getAll('cash_movements'));
+
+    console.log('database: partial Svelte store hydration complete ✅');
 }
 
 // ─── Background Sync (Multi Mode) ──────────────────────────────────────────
@@ -1797,6 +1876,7 @@ export async function runFastSyncCycle(): Promise<void> {
         const newSyncTime = await mysql.mysqlGetServerTime();
 
         let totalChanges = 0;
+        const changedTables = new Set<string>();
 
         for (const table of tablesToPull) {
             // Per-table watermark: only advances when THIS table's pull succeeds,
@@ -1813,6 +1893,7 @@ export async function runFastSyncCycle(): Promise<void> {
                 if (rows.length > 0) {
                     await sqlite.bulkUpsert(table, rows, idKey);
                     totalChanges += rows.length;
+                    changedTables.add(table);
                 }
                 await setTableWatermark(table, newSyncTime);
             } catch (e) {
@@ -1824,9 +1905,9 @@ export async function runFastSyncCycle(): Promise<void> {
         const removed = await applyTombstones(newSyncTime);
 
         // Only rehydrate stores if there were actual changes (avoids unnecessary re-renders)
-        if (totalChanges > 0 || removed > 0 || shouldCatchUpEverything) {
+        if (totalChanges > 0 || removed > 0) {
             console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
-            await hydrateSvelteStores();
+            await hydrateSvelteStores(removed > 0 ? undefined : changedTables);
         }
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
@@ -1856,6 +1937,7 @@ export async function runSyncCycle(): Promise<void> {
         const newSyncTime = await mysql.mysqlGetServerTime();
 
         let totalChanges = 0;
+        const changedTables = new Set<string>();
         for (const table of ALL_SYNC_TABLES) {
             // Per-table watermark: only advances when THIS table's pull succeeds.
             const since = overlapWatermark(table, await getTableWatermark(table));
@@ -1872,6 +1954,7 @@ export async function runSyncCycle(): Promise<void> {
                 if (rows.length > 0) {
                     await sqlite.bulkUpsert(table, rows, idKey);
                     totalChanges += rows.length;
+                    changedTables.add(table);
                     console.log(`database: synced ${rows.length} rows to local cache for ${table}`);
                 }
                 await setTableWatermark(table, newSyncTime);
@@ -1890,7 +1973,7 @@ export async function runSyncCycle(): Promise<void> {
 
         // Rehydrate Svelte stores so the UI reflects latest data
         if (totalChanges > 0 || removed > 0 || transactionPurged) {
-            await hydrateSvelteStores();
+            await hydrateSvelteStores((removed > 0 || transactionPurged) ? undefined : changedTables);
         }
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));

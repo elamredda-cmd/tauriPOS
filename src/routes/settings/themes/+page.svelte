@@ -40,7 +40,7 @@
                 on:click={() => selectTheme(theme.id)}
             >
                 <div class="theme-preview" style="background: {theme.color1}">
-                    <div class="preview-header" style="background: rgba(255,255,255,0.05)"></div>
+                    <div class="preview-header bg-white/5"></div>
                     <div class="preview-content">
                         <div class="preview-item" style="background: {theme.color2}"></div>
                         <div class="preview-item"></div>

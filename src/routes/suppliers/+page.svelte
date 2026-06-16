@@ -33,7 +33,7 @@
         <tbody>
             {#each $suppliersDB as s}
             <tr>
-                <td style="font-weight:600">{s.name}</td>
+                <td class="font-semibold">{s.name}</td>
                 <td>{s.contactName || '-'}</td>
                 <td class="mono">{s.phone || '-'}</td>
                 <td>{s.email || '-'}</td>
