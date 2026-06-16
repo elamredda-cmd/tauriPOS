@@ -997,12 +997,16 @@ export async function mysqlUpdateProductFields(
     const d = await getDb();
     const p = normalizeProductIdentifiers(patch);
     const validCols = await getTableColumns('products');
-    const keys = Object.keys(p).filter((key) => key !== 'id' && key !== 'updatedAt' && validCols.includes(key));
-    if (!p.id || keys.length === 0) throw new Error('mysqlUpdateProductFields: product id and fields are required');
+    const allKeys = Object.keys(p).filter((key) => key !== 'id' && key !== 'updatedAt' && validCols.includes(key));
+    const expectedProduct = expected ? normalizeProductIdentifiers(expected) : null;
+    const keys = expectedProduct
+        ? allKeys.filter((key) => !sameMysqlValue(p[key], expectedProduct[key]))
+        : allKeys;
+    if (!p.id || allKeys.length === 0) throw new Error('mysqlUpdateProductFields: product id and fields are required');
+    if (keys.length === 0) return;
     const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
     const assignments = keys.map((key) => `\`${key}\` = ?`);
     if (validCols.includes('updatedAt')) assignments.push(`\`updatedAt\` = ${timeExpr}`);
-    const expectedProduct = expected ? normalizeProductIdentifiers(expected) : null;
     const expectedKeys = expectedProduct
         ? keys.filter((key) => Object.prototype.hasOwnProperty.call(expectedProduct, key))
         : [];
@@ -1018,6 +1022,12 @@ export async function mysqlUpdateProductFields(
     if (expectedClause && result.rowsAffected === 0) {
         throw new Error('PRODUCT_EDIT_CONFLICT: This item was changed on another device. Refresh the items list and try again.');
     }
+}
+
+function sameMysqlValue(a: any, b: any): boolean {
+    const left = normalizeValue(a);
+    const right = normalizeValue(b);
+    return left === right || String(left ?? '') === String(right ?? '');
 }
 
 async function mysqlSaveProductStrict(product: any): Promise<void> {

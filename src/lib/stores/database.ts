@@ -319,6 +319,33 @@ async function writeOrQueueImmediately(
     }
 }
 
+async function tryImmediateProductWrite(
+    label: string,
+    write: () => Promise<void>,
+): Promise<'done' | 'queue' | 'skipped'> {
+    if (!isMultiMode()) return 'skipped';
+    try {
+        await ensureDatabaseIdentityForSync();
+        await write();
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+        return 'done';
+    } catch (e) {
+        console.warn(`database: immediate ${label} failed:`, e);
+        if (isDatabaseIdentityMismatch(e)) {
+            connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
+            throw e;
+        }
+        if (String(e).includes('PRODUCT_EDIT_CONFLICT')) {
+            throw new Error('This item was changed on another till. Wait for sync, then try again.');
+        }
+        if (isProductIdentifierConflict(e)) {
+            throw friendlyProductIdentifierError(e);
+        }
+        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
+        return 'queue';
+    }
+}
+
 async function queueLocalProductSnapshot(productId: string, fallback?: any): Promise<void> {
     const d = await sqlite.getDb();
     const rows: any[] = await d.select('SELECT * FROM products WHERE id = ? LIMIT 1', [productId]);
@@ -906,33 +933,27 @@ export async function getTileProducts(): Promise<any[]> {
 export async function addProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
+    const remote = await tryImmediateProductWrite('product add', () => mysql.mysqlAddProduct(p));
     try {
         await sqlite.addProduct(p);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    pushWriteInBackground(
-        'product add',
-        () => mysql.mysqlAddProduct(p),
-        () => queueLocalProductSnapshot(p.id, p),
-    );
+    if (remote === 'queue') await queueLocalProductSnapshot(p.id, p);
 }
 
 export async function updateProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
+    const remote = await tryImmediateProductWrite('product update', () => mysql.mysqlUpdateProduct(p));
     try {
         await sqlite.updateProduct(p);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    pushWriteInBackground(
-        'product update',
-        () => mysql.mysqlUpdateProduct(p),
-        () => queueLocalProductSnapshot(p.id, p),
-    );
+    if (remote === 'queue') await queueLocalProductSnapshot(p.id, p);
 }
 
 export async function updateProductFields(
@@ -944,16 +965,16 @@ export async function updateProductFields(
     );
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
+        const remote = await tryImmediateProductWrite(
+            'product field update',
+            () => mysql.mysqlUpdateProductFields(stamped, expected),
+        );
         await sqlite.updateProductFields(stamped);
+        if (remote === 'queue') await queueLocalProductSnapshot(stamped.id, stamped);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    pushWriteInBackground(
-        'product field update',
-        () => mysql.mysqlUpdateProductFields(stamped, expected),
-        () => queueLocalProductSnapshot(stamped.id, stamped),
-    );
 }
 
 async function prepareProductGoodsMenuWrite(product: any): Promise<any> {
@@ -2123,7 +2144,7 @@ async function runHeartbeat(): Promise<void> {
 /** Tables that should appear on other tills quickly (every 5s). */
 const FAST_SYNC_TABLES = [
     'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
-    'pos_pages', 'pos_tiles', 'customers', 'loyalty_logs',
+    'products', 'pos_pages', 'pos_tiles', 'customers', 'loyalty_logs',
     'discounts', 'promo_groups', 'promo_group_items'
 ];
 const TRANSACTION_SYNC_TABLES = new Set([
