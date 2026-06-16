@@ -806,21 +806,44 @@ export async function mysqlSafeOfflineUpsert(table: string, obj: any, idKey: str
     }
 }
 
-async function mysqlInsertIgnoreProductSnapshot(product: any): Promise<void> {
+async function mysqlProductExists(productId: string): Promise<boolean> {
     const d = await getDb();
-    const validCols = await getTableColumns('products');
-    const keys = Object.keys(product).filter(k => validCols.includes(k));
-    if (keys.length === 0) return;
+    const rows: any[] = await d.select(`SELECT id FROM products WHERE id = ? LIMIT 1`, [productId]);
+    return rows.length > 0;
+}
 
-    const columns = keys.map(k => `\`${k}\``).join(', ');
-    const placeholders = keys.map(() => '?').join(', ');
-    const values = keys.map(k => normalizeValue(product[k]));
-    await d.execute(`INSERT IGNORE INTO products (${columns}) VALUES (${placeholders})`, values);
+async function mysqlInsertProductSnapshot(product: any): Promise<void> {
+    if (!product?.id) return;
+    const d = await getDb();
+    if (await mysqlProductExists(product.id)) return;
+
+    try {
+        await mysqlUpsert('products', product);
+    } catch (error) {
+        console.warn('mysql: full product snapshot insert failed, trying minimal promotion product:', error);
+    }
+
+    if (await mysqlProductExists(product.id)) return;
+
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    await d.execute(
+        `INSERT INTO products (
+            id, name, price, costPrice, stockLevel, trackStock,
+            isActive, showInPos, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, 0, 0, 1, 1, ${stamp}, ${stamp})
+        ON DUPLICATE KEY UPDATE id = id`,
+        [
+            product.id,
+            String(product.name || 'Synced promotion item'),
+            Number(product.price || 0),
+            Number(product.costPrice || 0),
+        ],
+    );
 }
 
 export async function mysqlEnsureProductSnapshots(products: any[]): Promise<void> {
     for (const product of products) {
-        await mysqlInsertIgnoreProductSnapshot(product);
+        await mysqlInsertProductSnapshot(product);
     }
 }
 
@@ -835,7 +858,20 @@ export async function mysqlSavePromotionBundle(
     try {
         // Membership rows have product foreign keys. Insert missing product
         // snapshots first without overwriting newer product edits on MariaDB.
-        await mysqlEnsureProductSnapshots(products);
+        const productSnapshots = [...products];
+        const knownProductIds = new Set(productSnapshots.map(product => product?.id).filter(Boolean));
+        for (const item of items) {
+            if (item?.productId && !knownProductIds.has(item.productId)) {
+                productSnapshots.push({
+                    id: item.productId,
+                    name: 'Synced promotion item',
+                    price: 0,
+                    costPrice: 0,
+                });
+                knownProductIds.add(item.productId);
+            }
+        }
+        await mysqlEnsureProductSnapshots(productSnapshots);
 
         await mysqlUpsert('promo_groups', group);
         await mysqlUpsert('discounts', discount);
