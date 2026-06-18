@@ -2324,16 +2324,16 @@
 
         <!-- Product Grid (Fixed 4x3) -->
         <div class="pos-product-workspace flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
-            <div class="pos-product-grid grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1">
+            <div class="pos-product-grid grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
                     {#if slot && slot.product}
                         {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, currentTime)}
                         <div
-                            class="relative overflow-hidden cursor-pointer bg-[var(--tile-bg)] border border-border-flat rounded-md transition-colors hover:brightness-110 flex flex-col"
+                            class="relative h-full min-h-0 overflow-hidden cursor-pointer bg-[var(--tile-bg)] border border-border-flat rounded-md transition-colors hover:brightness-110 flex flex-col"
                             on:click={() => slot.product!.isWeighable ? openScaleForProduct(slot.product!.id) : addToCart(slot.product!)}
                         >
                             <div
-                                class="flex-1 flex items-center justify-center overflow-hidden relative"
+                                class="relative flex-1 min-h-0 overflow-hidden"
                                 style="background-color: {slot.product.color ||
                                     '#3b82f6'}"
                             >
@@ -2341,7 +2341,7 @@
                                     <img
                                         src={slot.product.image}
                                         alt={slot.product.name}
-                                        class="w-full h-full object-cover"
+                                        class="absolute inset-0 h-full w-full object-cover"
                                     />
                                 {/if}
                                 <div

@@ -27,12 +27,33 @@ export interface CartEvaluation {
     totalSavings: number;            // sum of all line savings
 }
 
+interface EngineUnit {
+    key: string;
+    lineIndex: number;
+    price: number;
+    basePrice: number;
+}
+
+interface UnitSaving {
+    key: string;
+    lineIndex: number;
+    saving: number;
+}
+
+interface PromoApplication {
+    promo: Discount;
+    savings: number;
+    perUnit: UnitSaving[];
+    usedKeys: string[];
+}
+
 /**
  * Evaluate a cart against the active auto-apply promotions and return the savings each line earns.
  *
- * Honours promo group membership, time windows, "best for customer" tie-breaking
- * (when two promos qualify on the same group, pick the one giving higher savings),
- * and `maxApplications` per promo per cart.
+ * Honours promo group membership, time windows, "best for customer" tie-breaking,
+ * and `maxApplications` per promo per cart. Promotions are selected globally:
+ * once one physical cart unit is used by a bundle/BOGO/temporary offer, that
+ * same unit cannot be reused by another offer even if the item is in two groups.
  *
  * Manual discounts (`kind: manual_*`) are ignored here — they're applied via the cashier UI.
  *
@@ -74,47 +95,33 @@ export function evaluateCart(
         arr.push(d);
     }
 
-    // For each promo group, expand cart units, pick best discount, apply savings.
+    const applications: PromoApplication[] = [];
+
+    // For each promo group, expand cart units and build all non-stacking promo applications.
     for (const [groupId, promos] of promosByGroup) {
         const productSet = productsByGroup.get(groupId);
         if (!productSet || productSet.size === 0) continue;
 
         // Expand cart lines into units that belong to this group.
-        const units: { lineIndex: number; price: number; basePrice: number }[] = [];
+        const units: EngineUnit[] = [];
         cart.forEach((line, i) => {
             if (!productSet.has(line.id)) return;
             for (let q = 0; q < line.quantity; q++) units.push({
+                key: `${i}:${q}`,
                 lineIndex: i,
                 price: line.price,
                 basePrice: line.basePrice || line.price,
             });
         });
 
-        // Track the best plan across all promos on this group.
-        let bestPlan: { savings: number; perUnit: { lineIndex: number; saving: number }[]; promo: Discount } | null = null;
-
+        const groupApplications: PromoApplication[] = [];
         for (const promo of promos) {
-            const plan = simulate(promo, units);
-            if (!bestPlan || plan.savings > bestPlan.savings ||
-                (plan.savings === bestPlan.savings && promo.priority > bestPlan.promo.priority)) {
-                bestPlan = { ...plan, promo };
-            }
+            groupApplications.push(...simulateApplications(promo, units));
         }
+        applications.push(...groupApplications);
 
-        if (bestPlan && bestPlan.savings > 0) {
-            for (const u of bestPlan.perUnit) {
-                lines[u.lineIndex].savings += u.saving;
-                // Avoid duplicate AppliedPromo entries on the same line.
-                const existing = lines[u.lineIndex].applied.find(a => a.discountId === bestPlan!.promo.id);
-                if (existing) existing.savings += u.saving;
-                else lines[u.lineIndex].applied.push({
-                    discountId: bestPlan.promo.id,
-                    discountName: bestPlan.promo.name,
-                    savings: u.saving,
-                });
-            }
-        } else if (units.length > 0) {
-            // No promo fires yet, but the line *contains* group items — flag as eligible.
+        if (units.length > 0 && groupApplications.length === 0) {
+            // No promo fires yet, but the line contains group items — flag as eligible.
             const eligiblePromos = promos.map(p => ({ discountId: p.id, discountName: p.name }));
             const seenLines = new Set<number>();
             for (const u of units) seenLines.add(u.lineIndex);
@@ -125,6 +132,20 @@ export function evaluateCart(
                     }
                 }
             }
+        }
+    }
+
+    const selectedApplications = chooseNonStackingApplications(applications);
+    for (const application of selectedApplications) {
+        for (const u of application.perUnit) {
+            lines[u.lineIndex].savings += u.saving;
+            const existing = lines[u.lineIndex].applied.find(a => a.discountId === application.promo.id);
+            if (existing) existing.savings += u.saving;
+            else lines[u.lineIndex].applied.push({
+                discountId: application.promo.id,
+                discountName: application.promo.name,
+                savings: u.saving,
+            });
         }
     }
 
@@ -146,22 +167,39 @@ function withinWindow(start: string, end: string, nowIso: string): boolean {
     return true;
 }
 
-interface SimPlan { savings: number; perUnit: { lineIndex: number; saving: number }[]; }
-
 /** Dispatch to the right simulator based on discount kind. */
-function simulate(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
+function simulateApplications(promo: Discount, units: EngineUnit[]): PromoApplication[] {
     if (promo.kind === 'bogo_fixed_price') return simulateBogo(promo, units);
     if (promo.kind === 'bundle_fixed_price') return simulateBundle(promo, units);
     if (promo.kind === 'temporary_item') return simulateTemporaryItem(promo, units);
-    return { savings: 0, perUnit: [] };
+    return [];
+}
+
+function chooseNonStackingApplications(applications: PromoApplication[]): PromoApplication[] {
+    const ordered = applications
+        .filter(application => application.savings > 0 && application.usedKeys.length > 0)
+        .sort((a, b) =>
+            b.savings - a.savings ||
+            (b.promo.priority || 0) - (a.promo.priority || 0) ||
+            a.usedKeys.length - b.usedKeys.length ||
+            a.promo.name.localeCompare(b.promo.name)
+        );
+
+    const used = new Set<string>();
+    const selected: PromoApplication[] = [];
+    for (const application of ordered) {
+        if (application.usedKeys.some(key => used.has(key))) continue;
+        selected.push(application);
+        for (const key of application.usedKeys) used.add(key);
+    }
+    return selected;
 }
 
 /** Temporary item offer: apply a percentage saving or a fixed sale price to every eligible unit. */
-function simulateTemporaryItem(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
-    if (!Number.isFinite(promo.value) || promo.value <= 0) return { savings: 0, perUnit: [] };
-    if (promo.type === 'percentage' && promo.value > 100) return { savings: 0, perUnit: [] };
-    const perUnit: { lineIndex: number; saving: number }[] = [];
-    let total = 0;
+function simulateTemporaryItem(promo: Discount, units: EngineUnit[]): PromoApplication[] {
+    if (!Number.isFinite(promo.value) || promo.value <= 0) return [];
+    if (promo.type === 'percentage' && promo.value > 100) return [];
+    const applications: PromoApplication[] = [];
     for (const unit of units) {
         const temporaryPrice = unit.basePrice > 0
             ? Math.round(promo.value * (unit.price / unit.basePrice))
@@ -171,41 +209,59 @@ function simulateTemporaryItem(promo: Discount, units: { lineIndex: number; pric
             : Math.max(0, unit.price - temporaryPrice);
         const safeSaving = Math.min(unit.price, Math.max(0, saving));
         if (safeSaving > 0) {
-            total += safeSaving;
-            perUnit.push({ lineIndex: unit.lineIndex, saving: safeSaving });
+            applications.push({
+                promo,
+                savings: safeSaving,
+                perUnit: [{ key: unit.key, lineIndex: unit.lineIndex, saving: safeSaving }],
+                usedKeys: [unit.key],
+            });
         }
     }
-    return { savings: total, perUnit };
+    const cap = normaliseApplicationCap(promo.maxApplications);
+    return applications
+        .sort((a, b) => b.savings - a.savings)
+        .slice(0, cap === Infinity ? applications.length : cap);
 }
 
 /**
  * BOGO: for every (minQuantity + 1) units, the cheapest pattern is N full-price + 1 at secondPrice.
  * Best-for-customer: discount the highest-priced units (largest gap to secondPrice).
  */
-function simulateBogo(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
-    if (!Number.isInteger(promo.minQuantity) || promo.minQuantity < 1) return { savings: 0, perUnit: [] };
-    if (!Number.isFinite(promo.secondPrice) || promo.secondPrice < 0) return { savings: 0, perUnit: [] };
+function simulateBogo(promo: Discount, units: EngineUnit[]): PromoApplication[] {
+    if (!Number.isInteger(promo.minQuantity) || promo.minQuantity < 1) return [];
+    if (!Number.isFinite(promo.secondPrice) || promo.secondPrice < 0) return [];
     const setSize = promo.minQuantity + 1;
     const sets = Math.floor(units.length / setSize);
-    if (sets <= 0) return { savings: 0, perUnit: [] };
+    if (sets <= 0) return [];
 
     const cap = normaliseApplicationCap(promo.maxApplications);
     const applications = Math.min(sets, cap);
-    if (applications <= 0) return { savings: 0, perUnit: [] };
+    if (applications <= 0) return [];
 
-    // Sort indexes by price desc; the first `applications` (highest-priced) get the discount price.
-    const sorted = units.map((u, idx) => ({ u, idx })).sort((a, b) => b.u.price - a.u.price);
-    const perUnit: { lineIndex: number; saving: number }[] = [];
-    let total = 0;
-    for (let i = 0; i < applications; i++) {
-        const { u } = sorted[i];
-        const saving = Math.max(0, u.price - promo.secondPrice);
+    const bySaving = units
+        .map((u, idx) => ({ u, idx, saving: Math.max(0, u.price - promo.secondPrice) }))
+        .sort((a, b) => b.saving - a.saving || b.u.price - a.u.price || a.idx - b.idx);
+    const discountedUnits = bySaving.filter(item => item.saving > 0).slice(0, applications);
+    const discountedKeys = new Set(discountedUnits.map(item => item.u.key));
+    const supportPool = bySaving
+        .filter(item => !discountedKeys.has(item.u.key))
+        .sort((a, b) => a.u.price - b.u.price || a.idx - b.idx);
+
+    const result: PromoApplication[] = [];
+    for (const discounted of discountedUnits) {
+        const support = supportPool.splice(0, promo.minQuantity);
+        if (support.length < promo.minQuantity) break;
+        const saving = discounted.saving;
         if (saving > 0) {
-            total += saving;
-            perUnit.push({ lineIndex: u.lineIndex, saving });
+            result.push({
+                promo,
+                savings: saving,
+                perUnit: [{ key: discounted.u.key, lineIndex: discounted.u.lineIndex, saving }],
+                usedKeys: [discounted.u.key, ...support.map(item => item.u.key)],
+            });
         }
     }
-    return { savings: total, perUnit };
+    return result;
 }
 
 /**
@@ -213,20 +269,19 @@ function simulateBogo(promo: Discount, units: { lineIndex: number; price: number
  * Best-for-customer: pick the highest-priced units for each bundle (max savings).
  * Discount is prorated across the units in each bundle.
  */
-function simulateBundle(promo: Discount, units: { lineIndex: number; price: number; basePrice: number }[]): SimPlan {
+function simulateBundle(promo: Discount, units: EngineUnit[]): PromoApplication[] {
     const bq = promo.bundleQuantity;
-    if (!Number.isInteger(bq) || bq < 2) return { savings: 0, perUnit: [] };
-    if (!Number.isFinite(promo.bundlePrice) || promo.bundlePrice <= 0) return { savings: 0, perUnit: [] };
+    if (!Number.isInteger(bq) || bq < 2) return [];
+    if (!Number.isFinite(promo.bundlePrice) || promo.bundlePrice <= 0) return [];
     const bundles = Math.floor(units.length / bq);
-    if (bundles <= 0) return { savings: 0, perUnit: [] };
+    if (bundles <= 0) return [];
 
     const cap = normaliseApplicationCap(promo.maxApplications);
     const applications = Math.min(bundles, cap);
-    if (applications <= 0) return { savings: 0, perUnit: [] };
+    if (applications <= 0) return [];
 
     const sorted = units.map((u, idx) => ({ u, idx })).sort((a, b) => b.u.price - a.u.price);
-    const perUnit: { lineIndex: number; saving: number }[] = [];
-    let total = 0;
+    const result: PromoApplication[] = [];
 
     for (let b = 0; b < applications; b++) {
         const slice = sorted.slice(b * bq, b * bq + bq);
@@ -234,6 +289,7 @@ function simulateBundle(promo: Discount, units: { lineIndex: number; price: numb
         const bundleSaving = sum - promo.bundlePrice;
         if (bundleSaving <= 0) continue;
         // Prorate the savings across the units in this bundle.
+        const perUnit: UnitSaving[] = [];
         let distributed = 0;
         for (let i = 0; i < slice.length; i++) {
             const s = slice[i];
@@ -242,11 +298,16 @@ function simulateBundle(promo: Discount, units: { lineIndex: number; price: numb
                 ? bundleSaving - distributed
                 : Math.floor(bundleSaving * (s.u.price / sum));
             distributed += share;
-            if (share > 0) perUnit.push({ lineIndex: s.u.lineIndex, saving: share });
+            if (share > 0) perUnit.push({ key: s.u.key, lineIndex: s.u.lineIndex, saving: share });
         }
-        total += bundleSaving;
+        result.push({
+            promo,
+            savings: bundleSaving,
+            perUnit,
+            usedKeys: slice.map(item => item.u.key),
+        });
     }
-    return { savings: total, perUnit };
+    return result;
 }
 
 function normaliseApplicationCap(maxApplications: number | null): number {

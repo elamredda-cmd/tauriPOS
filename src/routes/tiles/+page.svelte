@@ -268,16 +268,16 @@
                         {@const absolutePos = currentPageIndex * 12 + i + 1}
                         {#if slot}
                             <div
-                                class="flat-card relative overflow-hidden cursor-pointer flex flex-col hover:!border-accent-primary {!slot.product ? '!border-danger bg-danger/5' : ''}"
+                                class="flat-card relative h-full min-h-0 overflow-hidden cursor-pointer flex flex-col hover:!border-accent-primary {!slot.product ? '!border-danger bg-danger/5' : ''}"
                                 on:click={() => handleAssignedTileClick(slot.tile)}
                             >
                                 {#if slot.product}
                                     <div
-                                        class="relative w-full h-[120px]"
+                                        class="relative w-full h-[120px] shrink-0 overflow-hidden"
                                         style="background-color: {slot.product.color || '#3b82f6'}"
                                     >
                                         {#if slot.product.image}
-                                            <img class="w-full h-full object-cover" src={slot.product.image} alt={slot.product.name} />
+                                            <img class="absolute inset-0 h-full w-full object-cover" src={slot.product.image} alt={slot.product.name} />
                                         {/if}
                                         <div class="absolute bottom-2 right-2 rounded-sm bg-[var(--price-bg)] px-2 py-1 text-[0.9rem] font-bold text-[var(--price-text)]">
                                             {formatMoney(slot.product.price)}

@@ -126,6 +126,65 @@
     }, new Map<string, string>());
     $: productNameById = new Map($productsDB.map((product) => [product.id, product.name]));
 
+    function promotionNamesForProduct(
+        productId: string,
+        currentGroupId: string,
+        groupItems: PromoGroupItem[],
+        discounts: Discount[]
+    ): string[] {
+        const groupIds = new Set(
+            groupItems
+                .filter((item) => item.productId === productId && item.groupId !== currentGroupId)
+                .map((item) => item.groupId)
+        );
+        return uniqueById(discounts.filter((discount) =>
+            groupIds.has(discount.groupId) &&
+            ['bundle_fixed_price', 'bogo_fixed_price', 'temporary_item'].includes(discountKind(discount))
+        )).map((discount) => discount.name);
+    }
+
+    function promotionWarningsForProducts(
+        productIds: string[],
+        currentGroupId: string,
+        productNames: Map<string, string>,
+        groupItems: PromoGroupItem[],
+        discounts: Discount[]
+    ): string[] {
+        const warnings = new Set<string>();
+        for (const productId of productIds) {
+            const productName = productNames.get(productId) || 'Selected item';
+            const promoNames = promotionNamesForProduct(productId, currentGroupId, groupItems, discounts);
+            if (promoNames.length > 0) {
+                warnings.add(`${productName} is also in: ${promoNames.join(', ')}`);
+            }
+        }
+        return Array.from(warnings);
+    }
+
+    $: bundleOverlapWarnings = promotionWarningsForProducts(
+        Array.from(curProductIds),
+        curGroupId,
+        productNameById,
+        $promoGroupItemsDB,
+        $discountsDB
+    );
+    $: bogoOverlapWarnings = promotionWarningsForProducts(
+        Array.from(bogoProductIds),
+        bogoGroupId,
+        productNameById,
+        $promoGroupItemsDB,
+        $discountsDB
+    );
+    $: temporaryOverlapWarnings = temporaryProductId
+        ? promotionWarningsForProducts(
+            [temporaryProductId],
+            temporaryGroupId,
+            productNameById,
+            $promoGroupItemsDB,
+            $discountsDB
+        )
+        : [];
+
     function validatePromotionWindow(startAt: string, endAt: string): boolean {
         if (startAt && Number.isNaN(new Date(startAt).getTime())) {
             toast('Start time is not valid', 'error');
@@ -810,6 +869,15 @@
                     {/each}
                 {/if}
             </div>
+            {#if bundleOverlapWarnings.length > 0}
+                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
+                    <strong class="block text-text-main">Promotion overlap</strong>
+                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
+                    {#each bundleOverlapWarnings as warning}
+                        <div class="mt-1">{warning}</div>
+                    {/each}
+                </div>
+            {/if}
         </div>
 
         <div class="field span-2 mt-2">
@@ -875,6 +943,15 @@
                     {/each}
                 {/if}
             </div>
+            {#if bogoOverlapWarnings.length > 0}
+                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
+                    <strong class="block text-text-main">Promotion overlap</strong>
+                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
+                    {#each bogoOverlapWarnings as warning}
+                        <div class="mt-1">{warning}</div>
+                    {/each}
+                </div>
+            {/if}
         </div>
         <div class="field span-2 mt-2">
             <label>Find Products</label>
@@ -958,6 +1035,15 @@
                     <span class="text-sm text-text-muted">No item selected yet.</span>
                 {/if}
             </div>
+            {#if temporaryOverlapWarnings.length > 0}
+                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
+                    <strong class="block text-text-main">Promotion overlap</strong>
+                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
+                    {#each temporaryOverlapWarnings as warning}
+                        <div class="mt-1">{warning}</div>
+                    {/each}
+                </div>
+            {/if}
         </div>
         <div class="field span-2">
             <label>Find Item *</label>
