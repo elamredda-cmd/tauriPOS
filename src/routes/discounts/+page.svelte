@@ -7,7 +7,7 @@
         uuid, now, formatMoney
     } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql, savePromotionBundle } from '$lib/stores/database';
+    import { upsert, deletePromotionBundle, savePromotionBundle } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
@@ -47,14 +47,84 @@
         return Number.isFinite(parsed) ? parsed : fallback;
     }
 
-    function safeDiscounts(kind: string): Discount[] {
-        return $discountsDB.filter((discount) => discount && discountKind(discount) === kind);
+    function uniqueById<T extends { id: string }>(list: T[]): T[] {
+        const seen = new Set<string>();
+        return list.filter((row) => {
+            if (seen.has(row.id)) return false;
+            seen.add(row.id);
+            return true;
+        });
     }
 
-    $: bundles = safeDiscounts('bundle_fixed_price');
-    $: bogos = safeDiscounts('bogo_fixed_price');
-    $: temporaryItems = safeDiscounts('temporary_item');
-    $: percentages = safeDiscounts('manual_percent');
+    function upsertUniqueById<T extends { id: string }>(list: T[], item: T): T[] {
+        let replaced = false;
+        const seen = new Set<string>();
+        const next: T[] = [];
+        for (const row of list) {
+            if (row.id === item.id) {
+                if (!replaced) {
+                    next.push(item);
+                    replaced = true;
+                    seen.add(item.id);
+                }
+                continue;
+            }
+            if (seen.has(row.id)) continue;
+            seen.add(row.id);
+            next.push(row);
+        }
+        if (!replaced) next.push(item);
+        return next;
+    }
+
+    function promotionSnapshot() {
+        return {
+            discounts: $discountsDB,
+            groups: $promoGroupsDB,
+            items: $promoGroupItemsDB
+        };
+    }
+
+    function restorePromotionSnapshot(snapshot: ReturnType<typeof promotionSnapshot>) {
+        discountsDB.set(snapshot.discounts);
+        promoGroupsDB.set(snapshot.groups);
+        promoGroupItemsDB.set(snapshot.items);
+    }
+
+    function applyPromotionToStores(group: PromoGroup | null, discount: Discount, items: PromoGroupItem[] = []) {
+        discountsDB.update((list) => upsertUniqueById(list, discount));
+        if (!group) return;
+        promoGroupsDB.update((list) => upsertUniqueById(list, group));
+        promoGroupItemsDB.update((list) => {
+            const replacementIds = new Set(items.map((item) => item.id));
+            return uniqueById([
+                ...list.filter((item) => item.groupId !== group.id && !replacementIds.has(item.id)),
+                ...items
+            ]);
+        });
+    }
+
+    let savingPromotion = false;
+    let deletingPromotion = false;
+
+    function safeDiscounts(discounts: Discount[], kind: string): Discount[] {
+        return uniqueById(discounts.filter((discount) => discount && discountKind(discount) === kind));
+    }
+
+    $: bundles = safeDiscounts($discountsDB, 'bundle_fixed_price');
+    $: bogos = safeDiscounts($discountsDB, 'bogo_fixed_price');
+    $: temporaryItems = safeDiscounts($discountsDB, 'temporary_item');
+    $: percentages = safeDiscounts($discountsDB, 'manual_percent');
+    $: promoGroupById = new Map($promoGroupsDB.map((group) => [group.id, group]));
+    $: promoItemCountsByGroup = $promoGroupItemsDB.reduce((counts, item) => {
+        counts.set(item.groupId, (counts.get(item.groupId) || 0) + 1);
+        return counts;
+    }, new Map<string, number>());
+    $: firstPromoProductIdByGroup = $promoGroupItemsDB.reduce((products, item) => {
+        if (!products.has(item.groupId)) products.set(item.groupId, item.productId);
+        return products;
+    }, new Map<string, string>());
+    $: productNameById = new Map($productsDB.map((product) => [product.id, product.name]));
 
     function validatePromotionWindow(startAt: string, endAt: string): boolean {
         if (startAt && Number.isNaN(new Date(startAt).getTime())) {
@@ -156,27 +226,28 @@
             bundlePrice: 0, maxApplications: null, startAt: temporaryStartAt,
             endAt: temporaryEndAt, priority: 0
         };
+        if (savingPromotion) return;
+        savingPromotion = true;
+        const wasEditing = editingTemporary;
+        const snapshot = promotionSnapshot();
         try {
             const items = buildGroupItems(temporaryGroupId, new Set([temporaryProductId]));
-            await savePromotionBundle(group, discount, items);
-            promoGroupsDB.update(list => editingTemporary ? list.map(g => g.id === group.id ? group : g) : [...list, group]);
-            discountsDB.update(list => editingTemporary ? list.map(d => d.id === discount.id ? discount : d) : [...list, discount]);
-            promoGroupItemsDB.update(list => [...list.filter(i => i.groupId !== temporaryGroupId), ...items]);
+            applyPromotionToStores(group, discount, items);
             showTemporary = false;
-            toast(editingTemporary ? 'Temporary discount updated' : 'Temporary discount added');
+            await savePromotionBundle(group, discount, items);
+            toast(wasEditing ? 'Temporary discount updated' : 'Temporary discount added');
         } catch (error) {
+            restorePromotionSnapshot(snapshot);
+            showTemporary = true;
             toast(`Could not save temporary discount: ${error}`, 'error');
+        } finally {
+            savingPromotion = false;
         }
     }
 
     function delTemporary(d: Discount) {
         bundleToDelete = d;
         showDeleteConfirm = true;
-    }
-
-    function temporaryProductName(d: Discount): string {
-        const productId = $promoGroupItemsDB.find(item => item.groupId === d.groupId)?.productId;
-        return $productsDB.find(product => product.id === productId)?.name || 'Unknown item';
     }
 
     function temporaryDeal(d: Discount): string {
@@ -205,8 +276,7 @@
 
     $: selectedTemporaryProduct = $productsDB.find(p => p.id === temporaryProductId);
 
-    function promotionStatus(d: Discount): string {
-        const group = d.groupId ? $promoGroupsDB.find(g => g.id === d.groupId) : null;
+    function promotionStatus(d: Discount, group: PromoGroup | null | undefined): string {
         if (!d.isActive || group?.isActive === false) return 'Inactive';
         const startAt = group?.startAt || d.startAt;
         const endAt = group?.endAt || d.endAt;
@@ -216,8 +286,8 @@
         return 'Active';
     }
 
-    function promotionStatusClass(d: Discount): string {
-        const status = promotionStatus(d);
+    function promotionStatusClass(d: Discount, group: PromoGroup | null | undefined): string {
+        const status = promotionStatus(d, group);
         if (status === 'Active') return 'text-success';
         if (status === 'Scheduled') return 'text-warning';
         return 'text-danger';
@@ -303,16 +373,22 @@
             startAt: bogoStartAt, endAt: bogoEndAt, priority: 0
         };
 
+        if (savingPromotion) return;
+        savingPromotion = true;
+        const wasEditing = editingBogo;
+        const snapshot = promotionSnapshot();
         try {
             const items = buildGroupItems(bogoGroupId, bogoProductIds);
-            await savePromotionBundle(group, discount, items);
-            promoGroupsDB.update(list => editingBogo ? list.map(g => g.id === group.id ? group : g) : [...list, group]);
-            discountsDB.update(list => editingBogo ? list.map(d => d.id === discount.id ? discount : d) : [...list, discount]);
-            promoGroupItemsDB.update(list => [...list.filter(i => i.groupId !== bogoGroupId), ...items]);
+            applyPromotionToStores(group, discount, items);
             showBogo = false;
-            toast(editingBogo ? 'BOGO promotion updated' : 'BOGO promotion added');
+            await savePromotionBundle(group, discount, items);
+            toast(wasEditing ? 'BOGO promotion updated' : 'BOGO promotion added');
         } catch (error) {
+            restorePromotionSnapshot(snapshot);
+            showBogo = true;
             toast(`Could not save BOGO promotion: ${error}`, 'error');
+        } finally {
+            savingPromotion = false;
         }
     }
 
@@ -355,21 +431,32 @@
             groupId: '', minQuantity: 1, secondPrice: 0, bundleQuantity: 0, bundlePrice: 0,
             maxApplications: null, startAt: '', endAt: '', priority: 0
         };
+        if (savingPromotion) return;
+        savingPromotion = true;
+        const wasEditing = editingPercent;
+        const snapshot = promotionSnapshot();
         try {
-            await upsert('discounts', discount);
-            discountsDB.update(list => editingPercent ? list.map(d => d.id === discount.id ? discount : d) : [...list, discount]);
+            applyPromotionToStores(null, discount);
             showPercent = false;
-            toast(editingPercent ? 'Percentage discount updated' : 'Percentage discount added');
+            await upsert('discounts', discount);
+            toast(wasEditing ? 'Percentage discount updated' : 'Percentage discount added');
         } catch (error) {
+            restorePromotionSnapshot(snapshot);
+            showPercent = true;
             toast(`Could not save percentage discount: ${error}`, 'error');
+        } finally {
+            savingPromotion = false;
         }
     }
 
     function buildGroupItems(groupId: string, productIds: Set<string>): PromoGroupItem[] {
         const oldItems = $promoGroupItemsDB.filter(i => i.groupId === groupId);
-        const existingByProduct = new Map(oldItems.map(item => [item.productId, item]));
+        const existingByProduct = new Map<string, PromoGroupItem>();
+        for (const item of oldItems) {
+            if (!existingByProduct.has(item.productId)) existingByProduct.set(item.productId, item);
+        }
         const timestamp = now();
-        const keptItems = oldItems.filter(item => productIds.has(item.productId));
+        const keptItems = Array.from(existingByProduct.values()).filter(item => productIds.has(item.productId));
         const newItems: PromoGroupItem[] = Array.from(productIds)
             .filter(productId => !existingByProduct.has(productId))
             .map(productId => ({ id: uuid(), groupId, productId, updatedAt: timestamp }));
@@ -441,20 +528,22 @@
             maxApplications: null, startAt: curStartAt, endAt: curEndAt, priority: 0
         };
 
+        if (savingPromotion) return;
+        savingPromotion = true;
+        const wasEditing = editingBundle;
+        const snapshot = promotionSnapshot();
         try {
             const items = buildGroupItems(curGroupId, curProductIds);
-            await savePromotionBundle(group, discount, items);
-            promoGroupsDB.update(list => editingBundle
-                ? list.map(g => g.id === group.id ? group : g)
-                : [...list, group]);
-            discountsDB.update(list => editingBundle
-                ? list.map(d => d.id === discount.id ? discount : d)
-                : [...list, discount]);
-            promoGroupItemsDB.update(list => [...list.filter(i => i.groupId !== curGroupId), ...items]);
+            applyPromotionToStores(group, discount, items);
             showBundle = false;
-            toast(editingBundle ? 'Bundle updated' : 'Bundle added');
+            await savePromotionBundle(group, discount, items);
+            toast(wasEditing ? 'Bundle updated' : 'Bundle added');
         } catch (error) {
+            restorePromotionSnapshot(snapshot);
+            showBundle = true;
             toast(`Could not save bundle: ${error}`, 'error');
+        } finally {
+            savingPromotion = false;
         }
     }
 
@@ -473,21 +562,34 @@
         showDeleteConfirm = true;
     }
     async function confirmDelete() {
+        if (deletingPromotion) return;
         const d = bundleToDelete;
         if (!d) { showDeleteConfirm = false; return; }
+        deletingPromotion = true;
+        const snapshot = promotionSnapshot();
         try {
-            const items = $promoGroupItemsDB.filter(i => i.groupId === d.groupId);
-            for (const it of items) await removeSql('promo_group_items', it.id);
-            await removeSql('discounts', d.id);
-            if (d.groupId) await removeSql('promo_groups', d.groupId);
-            discountsDB.update(l => l.filter(x => x.id !== d.id));
-            promoGroupsDB.update(l => l.filter(g => g.id !== d.groupId));
-            promoGroupItemsDB.update(l => l.filter(i => i.groupId !== d.groupId));
+            const groupId = d.groupId || '';
+            const relatedDiscountIds = Array.from(new Set([
+                d.id,
+                ...$discountsDB
+                    .filter(x => x.id === d.id || (groupId && x.groupId === groupId))
+                    .map(x => x.id)
+            ]));
+            showDeleteConfirm = false;
+            bundleToDelete = null;
+            discountsDB.update(l => l.filter(x =>
+                !relatedDiscountIds.includes(x.id) && !(groupId && x.groupId === groupId)
+            ));
+            promoGroupsDB.update(l => groupId ? l.filter(g => g.id !== groupId) : l);
+            promoGroupItemsDB.update(l => groupId ? l.filter(i => i.groupId !== groupId) : l);
+            await deletePromotionBundle(d.id, groupId);
             toast('Promotion deleted', 'info');
         } catch (e) {
+            restorePromotionSnapshot(snapshot);
             console.error('Delete bundle failed:', e);
             toast(`Delete failed: ${(e as Error)?.message || e}`, 'error');
         } finally {
+            deletingPromotion = false;
             showDeleteConfirm = false;
             bundleToDelete = null;
         }
@@ -511,13 +613,9 @@
     })();
     $: selectedBundleProducts = $productsDB.filter(p => curProductIds.has(p.id));
 
-    function bundleItemCount(d: Discount): number {
-        return $promoGroupItemsDB.filter(i => i.groupId === d.groupId).length;
-    }
-    function bundleWindow(d: Discount): string {
-        const g = $promoGroupsDB.find(g => g.id === d.groupId);
-        const s = g?.startAt || d.startAt;
-        const e = g?.endAt || d.endAt;
+    function bundleWindow(d: Discount, group: PromoGroup | null | undefined): string {
+        const s = group?.startAt || d.startAt;
+        const e = group?.endAt || d.endAt;
         if (!s && !e) return 'Always';
         return `${s || '—'} → ${e || '—'}`;
     }
@@ -592,13 +690,14 @@
         <table class="tbl">
             <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-                {#each bundles as d}
+                {#each bundles as d (d.id)}
+                    {@const group = promoGroupById.get(d.groupId)}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
                         <td>Any {numeric(d.bundleQuantity)} for {formatMoney(numeric(d.bundlePrice))}</td>
-                        <td>{bundleItemCount(d)}</td>
-                        <td>{bundleWindow(d)}</td>
-                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
+                        <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
+                        <td>{bundleWindow(d, group)}</td>
+                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editBundle(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delBundle(d)}>✕</button>
@@ -612,14 +711,15 @@
         <table class="tbl">
             <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Limit</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-                {#each bogos as d}
+                {#each bogos as d (d.id)}
+                    {@const group = promoGroupById.get(d.groupId)}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
                         <td>Buy {numeric(d.minQuantity, 1)}, next for {formatMoney(numeric(d.secondPrice))}</td>
-                        <td>{bundleItemCount(d)}</td>
-                        <td>{bundleWindow(d)}</td>
+                        <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
+                        <td>{bundleWindow(d, group)}</td>
                         <td>{d.maxApplications == null ? 'Unlimited' : `${numeric(d.maxApplications)} per sale`}</td>
-                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
+                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editBogo(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delBogo(d)}>✕</button>
@@ -633,13 +733,15 @@
         <table class="tbl">
             <thead><tr><th>Name</th><th>Item</th><th>Temporary Deal</th><th>Window</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-                {#each temporaryItems as d}
+                {#each temporaryItems as d (d.id)}
+                    {@const group = promoGroupById.get(d.groupId)}
+                    {@const productId = firstPromoProductIdByGroup.get(d.groupId) || ''}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
-                        <td>{temporaryProductName(d)}</td>
+                        <td>{productNameById.get(productId) || 'Unknown item'}</td>
                         <td>{temporaryDeal(d)}</td>
-                        <td>{bundleWindow(d)}</td>
-                        <td><span class="tag {promotionStatusClass(d)}">{promotionStatus(d)}</span></td>
+                        <td>{bundleWindow(d, group)}</td>
+                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
                         <td><div class="act-row">
                             <button class="btn-icon act-btn" on:click={() => editTemporary(d)}>✎</button>
                             <button class="btn-icon act-btn danger" on:click={() => delTemporary(d)}>✕</button>
@@ -653,7 +755,7 @@
         <table class="tbl">
             <thead><tr><th>Name</th><th>Discount</th><th>Applied By</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
-                {#each percentages as d}
+                {#each percentages as d (d.id)}
                     <tr>
                         <td class="font-semibold">{d.name}</td>
                         <td>{numeric(d.value)}% off</td>
@@ -740,8 +842,8 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => showBundle=false}>Cancel</button>
-        <button class="btn btn-primary" on:click={saveBundle}>Save</button>
+        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showBundle=false}>Cancel</button>
+        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBundle}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
 
@@ -794,8 +896,8 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => showBogo=false}>Cancel</button>
-        <button class="btn btn-primary" on:click={saveBogo}>Save</button>
+        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showBogo=false}>Cancel</button>
+        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBogo}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
 
@@ -807,8 +909,8 @@
         <div class="span-2 p-3 flat-card text-sm text-text-muted">This discount is selected manually by the cashier from the POS discount button.</div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => showPercent=false}>Cancel</button>
-        <button class="btn btn-primary" on:click={savePercent}>Save</button>
+        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showPercent=false}>Cancel</button>
+        <button class="btn btn-primary" disabled={savingPromotion} on:click={savePercent}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
 
@@ -883,8 +985,8 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => showTemporary=false}>Cancel</button>
-        <button class="btn btn-primary" on:click={saveTemporary}>Save</button>
+        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showTemporary=false}>Cancel</button>
+        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveTemporary}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
 
@@ -893,8 +995,8 @@
         Delete <strong>“{bundleToDelete?.name}”</strong>? This removes the promotion and its product list.
     </p>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => { showDeleteConfirm = false; bundleToDelete = null; }}>Cancel</button>
-        <button class="btn btn-primary" on:click={confirmDelete}>Delete</button>
+        <button class="btn btn-danger" disabled={deletingPromotion} on:click={() => { showDeleteConfirm = false; bundleToDelete = null; }}>Cancel</button>
+        <button class="btn btn-primary" disabled={deletingPromotion} on:click={confirmDelete}>{deletingPromotion ? 'Deleting...' : 'Delete'}</button>
     </svelte:fragment>
 </Modal>
 

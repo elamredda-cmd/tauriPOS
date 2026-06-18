@@ -162,7 +162,7 @@ async function discardLocalConflictingReversal(bundle: any, mysqlDb: any): Promi
 /** Queue a write operation for later sync to MySQL. */
 async function queueOffline(
     tableName: string,
-    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle' | 'promotionBundle',
+    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle' | 'promotionBundle' | 'promotionDelete',
     data: any,
     idKey: string = 'id'
 ): Promise<void> {
@@ -225,6 +225,11 @@ export async function flushOfflineQueue(): Promise<number> {
                     data.discount,
                     Array.isArray(data.items) ? data.items : [],
                     Array.isArray(data.products) ? data.products : [],
+                );
+            } else if (row.operation === 'promotionDelete') {
+                await mysql.mysqlDeletePromotionBundle(
+                    Array.isArray(data.discountIds) ? data.discountIds : [data.discountId].filter(Boolean),
+                    data.groupId || '',
                 );
             }
             await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
@@ -795,6 +800,7 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
     }
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
+        await hydrateSvelteStores([table]);
         await writeOrQueueImmediately(
             `promotion upsert for ${table}`,
             () => table === 'promo_group_items'
@@ -816,6 +822,7 @@ export async function remove(table: string, id: string, idKey: string = 'id'): P
     await sqlite.remove(table, id, idKey);
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
+        await hydrateSvelteStores([table]);
         await writeOrQueueImmediately(
             `promotion remove for ${table}`,
             () => mysql.mysqlRemove(table, id, idKey),
@@ -871,6 +878,7 @@ async function saveLocalPromotionBundle(group: any, discount: any, items: any[])
 
 export async function savePromotionBundle(group: any, discount: any, items: any[]): Promise<void> {
     await saveLocalPromotionBundle(group, discount, items);
+    await hydrateSvelteStores(PROMOTION_SYNC_TABLES);
 
     const products = await getLocalProductsForPromotionItems(items);
     const payload = { group, discount, items, products };
@@ -878,6 +886,50 @@ export async function savePromotionBundle(group: any, discount: any, items: any[
         `promotion bundle ${discount?.id || group?.id || ''}`,
         () => mysql.mysqlSavePromotionBundle(group, discount, items, products),
         () => queueOffline('promotion_bundle', 'promotionBundle', payload),
+    );
+}
+
+async function selectPromotionDeleteTargets(discountId: string, groupId = '') {
+    const d = await sqlite.getDb();
+    const discountRows: any[] = groupId
+        ? await d.select(`SELECT id FROM discounts WHERE id = ? OR groupId = ?`, [discountId, groupId])
+        : await d.select(`SELECT id FROM discounts WHERE id = ?`, [discountId]);
+    const itemRows: any[] = groupId
+        ? await d.select(`SELECT id FROM promo_group_items WHERE groupId = ?`, [groupId])
+        : [];
+    return {
+        discountIds: discountRows.map(row => row.id).filter(Boolean),
+        itemIds: itemRows.map(row => row.id).filter(Boolean),
+        groupId,
+    };
+}
+
+async function deleteLocalPromotionBundle(discountIds: string[], groupId = ''): Promise<void> {
+    const d = await sqlite.getDb();
+    if (groupId) await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [groupId]);
+    if (discountIds.length > 0) {
+        const placeholders = discountIds.map(() => '?').join(', ');
+        await d.execute(`DELETE FROM discounts WHERE id IN (${placeholders})`, discountIds);
+    }
+    if (groupId) await d.execute(`DELETE FROM discounts WHERE groupId = ?`, [groupId]);
+    if (groupId) await d.execute(`DELETE FROM promo_groups WHERE id = ?`, [groupId]);
+}
+
+export async function deletePromotionBundle(discountId: string, groupId = ''): Promise<void> {
+    const targets = await selectPromotionDeleteTargets(discountId, groupId);
+    const discountIds = targets.discountIds.length > 0 ? targets.discountIds : [discountId].filter(Boolean);
+
+    await deleteLocalPromotionBundle(discountIds, groupId);
+
+    for (const itemId of targets.itemIds) await recordTombstone('promo_group_items', itemId);
+    for (const id of discountIds) await recordTombstone('discounts', id);
+    if (groupId) await recordTombstone('promo_groups', groupId);
+    await hydrateSvelteStores(PROMOTION_SYNC_TABLES);
+
+    await writeOrQueueImmediately(
+        `promotion delete ${discountId || groupId}`,
+        () => mysql.mysqlDeletePromotionBundle(discountIds, groupId),
+        () => queueOffline('promotion_delete', 'promotionDelete', { discountIds, groupId }),
     );
 }
 
@@ -2196,6 +2248,18 @@ async function filterRowsNeedingLocalUpsert(table: string, rows: any[], idKey = 
     return changed;
 }
 
+async function filterPendingLocalDeletes(table: string, rows: any[], idKey = 'id'): Promise<any[]> {
+    if (rows.length === 0 || idKey !== 'id') return rows;
+    const d = await sqlite.getDb();
+    const tombstones: any[] = await d.select(
+        `SELECT row_id FROM tombstones WHERE table_name = ?`,
+        [table],
+    );
+    if (tombstones.length === 0) return rows;
+    const deletedIds = new Set(tombstones.map(row => String(row.row_id)));
+    return rows.filter(row => !deletedIds.has(String(row?.[idKey])));
+}
+
 /**
  * Run a fast sync cycle that only pulls transaction-related tables
  * (orders, order_lines, payments, shifts, cash_movements) and rehydrates
@@ -2231,7 +2295,8 @@ export async function runFastSyncCycle(): Promise<void> {
                     : await mysql.mysqlGetAll(table);
                 if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
                 const idKey = table === 'settings' ? 'key' : 'id';
-                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows, idKey);
+                const visibleRows = await filterPendingLocalDeletes(table, pulledRows, idKey);
+                const rows = await filterRowsNeedingLocalUpsert(table, visibleRows, idKey);
 
                 if (rows.length > 0) {
                     await sqlite.bulkUpsert(table, rows, idKey);
@@ -2293,7 +2358,8 @@ export async function runSyncCycle(): Promise<void> {
                 // Never let server settings overwrite device-local config (till_id, creds…).
                 if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
                 const idKey = table === 'settings' ? 'key' : 'id';
-                const rows = await filterRowsNeedingLocalUpsert(table, pulledRows, idKey);
+                const visibleRows = await filterPendingLocalDeletes(table, pulledRows, idKey);
+                const rows = await filterRowsNeedingLocalUpsert(table, visibleRows, idKey);
 
                 if (rows.length > 0) {
                     await sqlite.bulkUpsert(table, rows, idKey);

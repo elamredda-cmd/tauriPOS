@@ -897,6 +897,36 @@ export async function mysqlSavePromotionBundle(
     }
 }
 
+export async function mysqlDeletePromotionBundle(discountIds: string[], groupId = ''): Promise<void> {
+    const d = await getDb();
+    const ids = Array.from(new Set(discountIds.filter(Boolean)));
+    await d.execute('START TRANSACTION');
+    try {
+        if (groupId) {
+            await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [groupId]);
+        }
+        if (ids.length > 0 && groupId) {
+            const placeholders = ids.map(() => '?').join(', ');
+            await d.execute(
+                `DELETE FROM discounts WHERE groupId = ? OR id IN (${placeholders})`,
+                [groupId, ...ids],
+            );
+        } else if (ids.length > 0) {
+            const placeholders = ids.map(() => '?').join(', ');
+            await d.execute(`DELETE FROM discounts WHERE id IN (${placeholders})`, ids);
+        } else if (groupId) {
+            await d.execute(`DELETE FROM discounts WHERE groupId = ?`, [groupId]);
+        }
+        if (groupId) {
+            await d.execute(`DELETE FROM promo_groups WHERE id = ?`, [groupId]);
+        }
+        await d.execute('COMMIT');
+    } catch (error) {
+        await d.execute('ROLLBACK');
+        throw error;
+    }
+}
+
 function isProductIdentifierConflict(error: unknown): boolean {
     const message = String(error).toLowerCase();
     return message.includes('duplicate entry')
