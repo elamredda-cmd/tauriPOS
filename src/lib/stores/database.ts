@@ -9,8 +9,8 @@
  * In SINGLE mode:  every call goes directly to sqlite.ts (no changes).
  * In MULTI mode:
  *   - Reads:  try MySQL first → fall back to SQLite cache
- *   - Writes: write to MySQL AND update SQLite cache
- *   - If MySQL is down: queue writes in SQLite offline table, flush later
+ *   - Writes: update SQLite, create a durable outbox row, then flush to MySQL
+ *   - If MySQL is down: outbox rows stay in SQLite and flush later
  */
 
 import * as sqlite from './sqlite';
@@ -159,13 +159,13 @@ async function discardLocalConflictingReversal(bundle: any, mysqlDb: any): Promi
     }
 }
 
-/** Queue a write operation for later sync to MySQL. */
+/** Create a durable outbox row before attempting to sync a write to MySQL. */
 async function queueOffline(
     tableName: string,
-    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle' | 'promotionBundle' | 'promotionDelete',
+    operation: 'upsert' | 'remove' | 'adjustStock' | 'saleBundle' | 'promotionBundle' | 'promotionDelete' | 'limitGoodsMenuItems',
     data: any,
     idKey: string = 'id'
-): Promise<void> {
+): Promise<string> {
     const d = await sqlite.getDb();
     const id = crypto.randomUUID();
     await d.execute(
@@ -173,102 +173,113 @@ async function queueOffline(
         [id, tableName, operation, JSON.stringify(data), idKey, new Date().toISOString()]
     );
     console.log(`database: queued offline ${operation} for ${tableName}`);
+    return id;
 }
 
-/** Flush all queued offline operations to MySQL. Call when MySQL comes back. */
+let isOfflineQueueFlushing = false;
+
+/** Flush durable outbox operations to MySQL. Call on save, reconnect, and background sync. */
 export async function flushOfflineQueue(): Promise<number> {
-    const mysqlDb = await getMysqlDb();
-    if (!mysqlDb) return 0;
-    await ensureDatabaseIdentityForSync();
+    if (isOfflineQueueFlushing) return 0;
+    isOfflineQueueFlushing = true;
+    try {
+        const mysqlDb = await getMysqlDb();
+        if (!mysqlDb) return 0;
+        await ensureDatabaseIdentityForSync();
 
-    const d = await sqlite.getDb();
-    const purgeRows: any[] = await mysqlDb.select(
-        `SELECT value FROM settings WHERE \`key\` = 'transaction_purge_at' LIMIT 1`
-    );
-    if (purgeRows[0]?.value) {
-        await d.execute(
-            `DELETE FROM _offline_queue
-             WHERE created_at <= ? AND (
-                operation = 'saleBundle' OR
-                table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs')
-             )`,
-            [purgeRows[0].value]
+        const d = await sqlite.getDb();
+        const purgeRows: any[] = await mysqlDb.select(
+            `SELECT value FROM settings WHERE \`key\` = 'transaction_purge_at' LIMIT 1`
         );
-    }
-    const rows: any[] = await d.select(
-        `SELECT * FROM _offline_queue ORDER BY created_at ASC`
-    );
-
-    let flushed = 0;
-    for (const row of rows) {
-        try {
-            const data = JSON.parse(row.data);
-            if (row.operation === 'upsert') {
-                if (row.table_name === 'promo_group_items' && data?.productId) {
-                    const products = await getLocalProductsForPromotionItems([data]);
-                    await mysql.mysqlEnsureProductSnapshots(products);
-                }
-                await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
-            } else if (row.operation === 'remove') {
-                await mysql.mysqlRemove(row.table_name, data.id, row.id_key);
-            } else if (row.operation === 'adjustStock') {
-                // Replay the stock delta on the server (deltas commute, so order
-                // of replay across tills doesn't matter).
-                await mysql.mysqlAdjustStock(data.id, data.delta);
-            } else if (row.operation === 'saleBundle') {
-                const config = get(connectionState).mysqlConfig;
-                if (!config) throw new Error('MariaDB configuration is unavailable');
-                await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle: data });
-            } else if (row.operation === 'promotionBundle') {
-                await mysql.mysqlSavePromotionBundle(
-                    data.group,
-                    data.discount,
-                    Array.isArray(data.items) ? data.items : [],
-                    Array.isArray(data.products) ? data.products : [],
-                );
-            } else if (row.operation === 'promotionDelete') {
-                await mysql.mysqlDeletePromotionBundle(
-                    Array.isArray(data.discountIds) ? data.discountIds : [data.discountId].filter(Boolean),
-                    data.groupId || '',
-                );
-            }
-            await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
-            flushed++;
-        } catch (e) {
-            const data = JSON.parse(row.data);
-            if (String(e).includes('SYNC_CONFLICT') || isReversalConflict(e, data)) {
-                if (row.table_name === 'products') {
-                    const conflict = String(e).toLowerCase();
-                    const product = JSON.parse(row.data);
-                    if (conflict.includes('uq_products_scale_plu')) {
-                        await d.execute(`UPDATE products SET scalePlu = NULL WHERE id = ?`, [product.id]);
-                    } else if (conflict.includes('uq_products_sku')) {
-                        await d.execute(`UPDATE products SET sku = NULL WHERE id = ?`, [product.id]);
-                    } else if (conflict.includes('uq_products_barcode') || conflict.includes('duplicate entry')) {
-                        await d.execute(`UPDATE products SET barcode = NULL WHERE id = ?`, [product.id]);
-                    }
-                }
-                if (isReversalConflict(e, data)) {
-                    await discardLocalConflictingReversal(data, mysqlDb);
-                }
-                await d.execute(
-                    `INSERT INTO _sync_conflicts (id, table_name, operation, data, reason, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?)`,
-                    [row.id, row.table_name, row.operation, row.data, String(e), new Date().toISOString()]
-                );
-                await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
-                console.warn(`database: moved offline conflict ${row.id} aside for review`);
-                continue;
-            }
-            console.warn(`database: failed to flush queue item ${row.id}:`, e);
-            break; // Stop at first failure to maintain order
+        if (purgeRows[0]?.value) {
+            await d.execute(
+                `DELETE FROM _offline_queue
+                 WHERE created_at <= ? AND (
+                    operation = 'saleBundle' OR
+                    table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs')
+                 )`,
+                [purgeRows[0].value]
+            );
         }
-    }
+        const rows: any[] = await d.select(
+            `SELECT * FROM _offline_queue ORDER BY created_at ASC, id ASC`
+        );
 
-    if (flushed > 0) {
-        console.log(`database: flushed ${flushed} offline operations to MySQL`);
+        let flushed = 0;
+        for (const row of rows) {
+            try {
+                const data = JSON.parse(row.data);
+                if (row.operation === 'upsert') {
+                    if (row.table_name === 'promo_group_items' && data?.productId) {
+                        const products = await getLocalProductsForPromotionItems([data]);
+                        await mysql.mysqlEnsureProductSnapshots(products);
+                    }
+                    await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
+                } else if (row.operation === 'remove') {
+                    await mysql.mysqlRemove(row.table_name, data.id, row.id_key);
+                } else if (row.operation === 'adjustStock') {
+                    // Replay the stock delta on the server (deltas commute, so order
+                    // of replay across tills doesn't matter).
+                    await mysql.mysqlAdjustStock(data.id, data.delta);
+                } else if (row.operation === 'saleBundle') {
+                    const config = get(connectionState).mysqlConfig;
+                    if (!config) throw new Error('MariaDB configuration is unavailable');
+                    await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle: data });
+                } else if (row.operation === 'promotionBundle') {
+                    await mysql.mysqlSavePromotionBundle(
+                        data.group,
+                        data.discount,
+                        Array.isArray(data.items) ? data.items : [],
+                        Array.isArray(data.products) ? data.products : [],
+                    );
+                } else if (row.operation === 'promotionDelete') {
+                    await mysql.mysqlDeletePromotionBundle(
+                        Array.isArray(data.discountIds) ? data.discountIds : [data.discountId].filter(Boolean),
+                        data.groupId || '',
+                    );
+                } else if (row.operation === 'limitGoodsMenuItems') {
+                    await mysql.mysqlLimitGoodsMenuItems();
+                }
+                await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+                flushed++;
+            } catch (e) {
+                const data = JSON.parse(row.data);
+                if (String(e).includes('SYNC_CONFLICT') || isReversalConflict(e, data)) {
+                    if (row.table_name === 'products') {
+                        const conflict = String(e).toLowerCase();
+                        const product = JSON.parse(row.data);
+                        if (conflict.includes('uq_products_scale_plu')) {
+                            await d.execute(`UPDATE products SET scalePlu = NULL WHERE id = ?`, [product.id]);
+                        } else if (conflict.includes('uq_products_sku')) {
+                            await d.execute(`UPDATE products SET sku = NULL WHERE id = ?`, [product.id]);
+                        } else if (conflict.includes('uq_products_barcode') || conflict.includes('duplicate entry')) {
+                            await d.execute(`UPDATE products SET barcode = NULL WHERE id = ?`, [product.id]);
+                        }
+                    }
+                    if (isReversalConflict(e, data)) {
+                        await discardLocalConflictingReversal(data, mysqlDb);
+                    }
+                    await d.execute(
+                        `INSERT INTO _sync_conflicts (id, table_name, operation, data, reason, created_at)
+                         VALUES (?, ?, ?, ?, ?, ?)`,
+                        [row.id, row.table_name, row.operation, row.data, String(e), new Date().toISOString()]
+                    );
+                    await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+                    console.warn(`database: moved offline conflict ${row.id} aside for review`);
+                    continue;
+                }
+                console.warn(`database: failed to flush queue item ${row.id}:`, e);
+                break; // Stop at first failure to maintain order
+            }
+        }
+
+        if (flushed > 0) {
+            console.log(`database: flushed ${flushed} offline operations to MySQL`);
+        }
+        return flushed;
+    } finally {
+        isOfflineQueueFlushing = false;
     }
-    return flushed;
 }
 
 async function pendingOfflineQueueCount(): Promise<number> {
@@ -288,48 +299,39 @@ async function pendingPromotionQueueCount(): Promise<number> {
     return Number(rows[0]?.count || 0);
 }
 
-function pushWriteInBackground(
+async function pushWriteInBackground(
     label: string,
-    write: () => Promise<void>,
-    queue: () => Promise<void>,
-): void {
+    _write: () => Promise<void>,
+    queue: () => Promise<unknown>,
+): Promise<void> {
     if (!isMultiMode()) return;
-    void ensureDatabaseIdentityForSync().then(write).catch(async (e) => {
-        console.warn(`database: background ${label} failed, queuing offline:`, e);
-        if (isDatabaseIdentityMismatch(e)) {
-            connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
-            return;
-        }
-        try {
-            await queue();
-        } catch (queueError) {
-            console.warn(`database: failed to queue background ${label}:`, queueError);
-        }
+    await queue();
+    void flushOfflineQueue().then((flushed) => {
+        if (flushed > 0) connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+    }).catch(async (e) => {
+        console.warn(`database: background ${label} outbox flush failed:`, e);
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
     });
 }
 
 async function writeOrQueueImmediately(
     label: string,
-    write: () => Promise<void>,
-    queue: () => Promise<void>,
+    _write: () => Promise<void>,
+    queue: () => Promise<unknown>,
 ): Promise<void> {
     if (!isMultiMode()) return;
+    let queued = false;
     try {
-        await ensureDatabaseIdentityForSync();
-        await write();
-        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+        await queue();
+        queued = true;
+        const flushed = await flushOfflineQueue();
+        if (flushed > 0) connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
     } catch (e) {
-        console.warn(`database: ${label} failed, queuing offline:`, e);
+        if (!queued) throw e;
+        console.warn(`database: ${label} outbox flush failed:`, e);
         if (isDatabaseIdentityMismatch(e)) {
             connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
             throw e;
-        }
-        try {
-            await queue();
-        } catch (queueError) {
-            console.warn(`database: failed to queue ${label}:`, queueError);
-            throw queueError;
         }
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
     }
@@ -362,12 +364,12 @@ async function tryImmediateProductWrite(
     }
 }
 
-async function queueLocalProductSnapshot(productId: string, fallback?: any): Promise<void> {
+async function queueLocalProductSnapshot(productId: string, fallback?: any): Promise<string> {
     const d = await sqlite.getDb();
     const rows: any[] = await d.select('SELECT * FROM products WHERE id = ? LIMIT 1', [productId]);
     const product = rows[0] || fallback;
     if (!product) throw new Error(`Cannot queue product ${productId}; no local snapshot exists`);
-    await queueOffline('products', 'upsert', product);
+    return queueOffline('products', 'upsert', product);
 }
 
 // ─── Helper: try MySQL, fall back to SQLite ─────────────────────────────────
@@ -679,7 +681,7 @@ async function recordTombstone(table: string, id: string): Promise<void> {
         deletedAt: new Date().toISOString(),
     };
     await sqlite.upsert('tombstones', tomb, 'id');
-    pushWriteInBackground(
+    await pushWriteInBackground(
         `tombstone for ${table}/${id}`,
         () => mysql.mysqlUpsert('tombstones', tomb, 'id'),
         () => queueOffline('tombstones', 'upsert', tomb, 'id'),
@@ -822,7 +824,7 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
         return;
     }
 
-    pushWriteInBackground(
+    await pushWriteInBackground(
         `upsert for ${table}`,
         () => mysql.mysqlUpsert(table, obj, idKey),
         () => queueOffline(table, 'upsert', obj, idKey),
@@ -840,7 +842,7 @@ export async function remove(table: string, id: string, idKey: string = 'id'): P
             () => queueOffline(table, 'remove', { id }, idKey),
         );
     } else {
-        pushWriteInBackground(
+        await pushWriteInBackground(
             `remove for ${table}`,
             () => mysql.mysqlRemove(table, id, idKey),
             () => queueOffline(table, 'remove', { id }, idKey),
@@ -1066,27 +1068,31 @@ export async function getTileProducts(): Promise<any[]> {
 export async function addProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
-    const remote = await tryImmediateProductWrite('product add', () => mysql.mysqlAddProduct(p));
     try {
         await sqlite.addProduct(p);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    if (remote === 'queue') await queueLocalProductSnapshot(p.id, p);
+    if (isMultiMode()) {
+        await queueLocalProductSnapshot(p.id, p);
+        void flushOfflineQueue().catch((e) => console.warn('database: product add outbox flush failed:', e));
+    }
 }
 
 export async function updateProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
-    const remote = await tryImmediateProductWrite('product update', () => mysql.mysqlUpdateProduct(p));
     try {
         await sqlite.updateProduct(p);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    if (remote === 'queue') await queueLocalProductSnapshot(p.id, p);
+    if (isMultiMode()) {
+        await queueLocalProductSnapshot(p.id, p);
+        void flushOfflineQueue().catch((e) => console.warn('database: product update outbox flush failed:', e));
+    }
 }
 
 export async function updateProductFields(
@@ -1098,12 +1104,11 @@ export async function updateProductFields(
     );
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
-        const remote = await tryImmediateProductWrite(
-            'product field update',
-            () => mysql.mysqlUpdateProductFields(stamped, expected),
-        );
         await sqlite.updateProductFields(stamped);
-        if (remote === 'queue') await queueLocalProductSnapshot(stamped.id, stamped);
+        if (isMultiMode()) {
+            await queueLocalProductSnapshot(stamped.id, stamped);
+            void flushOfflineQueue().catch((e) => console.warn('database: product field outbox flush failed:', e));
+        }
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
@@ -1178,7 +1183,7 @@ function friendlyProductIdentifierError(error: unknown): Error {
 export async function adjustStock(productId: string, delta: number): Promise<void> {
     if (!delta) return;
     await sqlite.adjustStock(productId, delta);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         `stock delta for ${productId}`,
         () => mysql.mysqlAdjustStock(productId, delta),
         () => queueOffline('products', 'adjustStock', { id: productId, delta }),
@@ -1193,7 +1198,7 @@ export async function setStockLevel(
 ): Promise<void> {
     const stamped = { id: productId, stockLevel, updatedAt: new Date().toISOString() };
     await sqlite.setStockLevel(productId, stockLevel);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         `stock count for ${productId}`,
         () => mysql.mysqlSetStockLevel(productId, stockLevel, expectedStockLevel),
         () => queueLocalProductSnapshot(productId, stamped),
@@ -1256,25 +1261,11 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
     bundle = committed.bundle;
 
     if (isMultiMode()) {
-        const state = get(connectionState);
-        const config = state.mysqlConfig;
-        if (!state.mysqlOnline) {
-            await queueOffline('sale_bundle', 'saleBundle', bundle);
-            return bundle;
-        }
-        if (!config) {
-            await queueOffline('sale_bundle', 'saleBundle', bundle);
-            connectionState.update(s => ({ ...s, mysqlOnline: false }));
-            return bundle;
-        }
-
-        // Keep the cashier flow instant: SQLite already committed the sale,
-        // so the MariaDB write can finish in the background or queue itself.
-        void invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle })
-            .catch(async (e) => {
-                console.warn('database: MariaDB sale transaction failed, queuing bundle:', e);
-                await queueOffline('sale_bundle', 'saleBundle', bundle);
-                connectionState.update(s => ({ ...s, mysqlOnline: false }));
+        await queueOffline('sale_bundle', 'saleBundle', bundle);
+        void flushOfflineQueue()
+            .catch((e) => {
+                console.warn('database: sale outbox flush failed:', e);
+                connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
             });
     }
     return bundle;
@@ -1282,7 +1273,7 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
 
 export async function deleteProduct(id: string): Promise<void> {
     await sqlite.deleteProduct(id);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'product deactivation',
         () => mysql.mysqlDeleteProduct(id),
         () => queueLocalProductSnapshot(id),
@@ -1297,7 +1288,7 @@ export async function removeProductTiles(productId: string): Promise<void> {
 
 export async function bulkAddProducts(products: any[]): Promise<void> {
     await sqlite.bulkAddProducts(products);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'bulk product import',
         () => mysql.mysqlBulkAddProducts(products),
         async () => {
@@ -1311,7 +1302,7 @@ export async function bulkAddProducts(products: any[]): Promise<void> {
 export async function savePosPage(p: any): Promise<void> {
     const stamped = { ...p, updatedAt: new Date().toISOString() };
     await sqlite.savePosPage(stamped);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'POS page save',
         () => mysql.mysqlSavePosPage(stamped),
         () => queueOffline('pos_pages', 'upsert', stamped),
@@ -1320,7 +1311,7 @@ export async function savePosPage(p: any): Promise<void> {
 
 export async function deletePosPage(id: string): Promise<void> {
     await sqlite.deletePosPage(id);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'POS page delete',
         () => mysql.mysqlDeletePosPage(id),
         () => queueOffline('pos_pages', 'remove', { id }),
@@ -1333,7 +1324,7 @@ export async function deletePosPage(id: string): Promise<void> {
 export async function addTile(t: any): Promise<void> {
     const stamped = { ...t, updatedAt: new Date().toISOString() };
     await sqlite.addTile(stamped);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'POS tile save',
         () => mysql.mysqlAddTile(stamped),
         () => queueOffline('pos_tiles', 'upsert', stamped),
@@ -1342,7 +1333,7 @@ export async function addTile(t: any): Promise<void> {
 
 export async function deleteTile(id: string): Promise<void> {
     await sqlite.deleteTile(id);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'POS tile delete',
         () => mysql.mysqlDeleteTile(id),
         () => queueOffline('pos_tiles', 'remove', { id }),
@@ -1355,9 +1346,8 @@ export async function deleteTile(id: string): Promise<void> {
 export async function limitGoodsMenuItems(): Promise<void> {
     await sqlite.limitGoodsMenuItems();
     if (isMultiMode()) {
-        try { await mysql.mysqlLimitGoodsMenuItems(); } catch (e) {
-            console.warn('database: MySQL limitGoodsMenuItems failed:', e);
-        }
+        await queueOffline('products', 'limitGoodsMenuItems', {});
+        void flushOfflineQueue().catch((e) => console.warn('database: goods menu limit outbox flush failed:', e));
     }
 }
 
@@ -1365,7 +1355,7 @@ export async function batchUpdateGoodsMenu(
     changes: { id: string; showInGoods: boolean; goodsSortOrder: number; updatedAt: string }[]
 ): Promise<void> {
     await sqlite.batchUpdateGoodsMenu(changes);
-    pushWriteInBackground(
+    await pushWriteInBackground(
         'goods menu batch update',
         () => mysql.mysqlBatchUpdateGoodsMenu(changes),
         async () => {
@@ -1735,10 +1725,10 @@ export async function closeShiftLocalFirst(shift: any): Promise<void> {
     shiftsDB.update(list => list.map(existing => existing.id === stamped.id ? stamped : existing));
 
     if (!isMultiMode()) return;
-    void mysql.mysqlUpsert('shifts', stamped).catch(async (error) => {
-        console.warn('database: MariaDB shift close failed, queuing offline:', error);
-        await queueOffline('shifts', 'upsert', stamped);
-        connectionState.update(state => ({ ...state, mysqlOnline: false }));
+    await queueOffline('shifts', 'upsert', stamped);
+    void flushOfflineQueue().catch((error) => {
+        console.warn('database: shift close outbox flush failed:', error);
+        connectionState.update(state => ({ ...state, mysqlOnline: false, syncError: String(error) }));
     });
 }
 
