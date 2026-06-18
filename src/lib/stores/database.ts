@@ -277,6 +277,17 @@ async function pendingOfflineQueueCount(): Promise<number> {
     return Number(rows[0]?.count || 0);
 }
 
+async function pendingPromotionQueueCount(): Promise<number> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM _offline_queue
+         WHERE operation IN ('promotionBundle', 'promotionDelete')
+            OR table_name IN ('discounts', 'promo_groups', 'promo_group_items')`
+    );
+    return Number(rows[0]?.count || 0);
+}
+
 function pushWriteInBackground(
     label: string,
     write: () => Promise<void>,
@@ -931,6 +942,76 @@ export async function deletePromotionBundle(discountId: string, groupId = ''): P
         () => mysql.mysqlDeletePromotionBundle(discountIds, groupId),
         () => queueOffline('promotion_delete', 'promotionDelete', { discountIds, groupId }),
     );
+}
+
+function promotionStamp(...values: unknown[]): string {
+    return values
+        .map(value => String(value || ''))
+        .filter(Boolean)
+        .sort()
+        .at(-1) || '';
+}
+
+function productSetSignature(rows: any[]): string {
+    return Array.from(new Set(rows.map(row => String(row?.productId || '')).filter(Boolean)))
+        .sort()
+        .join('|');
+}
+
+async function pushNewerLocalPromotionPackages(): Promise<number> {
+    if (!isMultiMode()) return 0;
+    if (await pendingPromotionQueueCount() > 0) return 0;
+
+    const mysqlDb = await getMysqlDb();
+    if (!mysqlDb) return 0;
+
+    const local = await sqlite.getDb();
+    const discounts: any[] = await local.select(
+        `SELECT * FROM discounts
+         WHERE kind IN ('bundle_fixed_price', 'bogo_fixed_price', 'temporary_item')
+           AND COALESCE(groupId, '') <> ''`
+    );
+
+    let pushed = 0;
+    for (const discount of discounts) {
+        const groupId = discount.groupId;
+        const groupRows: any[] = await local.select(`SELECT * FROM promo_groups WHERE id = ? LIMIT 1`, [groupId]);
+        const group = groupRows[0];
+        if (!group) continue;
+
+        const items: any[] = await local.select(`SELECT * FROM promo_group_items WHERE groupId = ?`, [groupId]);
+        const products = await getLocalProductsForPromotionItems(items);
+
+        const [remoteDiscounts, remoteGroups, remoteItems] = await Promise.all([
+            mysqlDb.select(`SELECT * FROM discounts WHERE id = ? OR groupId = ?`, [discount.id, groupId]) as Promise<any[]>,
+            mysqlDb.select(`SELECT * FROM promo_groups WHERE id = ?`, [groupId]) as Promise<any[]>,
+            mysqlDb.select(`SELECT * FROM promo_group_items WHERE groupId = ?`, [groupId]) as Promise<any[]>,
+        ]);
+
+        const localStamp = promotionStamp(
+            discount.updatedAt,
+            group.updatedAt,
+            ...items.map(item => item.updatedAt),
+        );
+        const remoteStamp = promotionStamp(
+            ...remoteDiscounts.map(row => row.updatedAt),
+            ...remoteGroups.map(row => row.updatedAt),
+            ...remoteItems.map(row => row.updatedAt),
+        );
+        const localProducts = productSetSignature(items);
+        const remoteProducts = productSetSignature(remoteItems);
+        const remoteMissingPackage = remoteDiscounts.length === 0 || remoteGroups.length === 0;
+        const localLooksNewer = localStamp && (!remoteStamp || localStamp > remoteStamp);
+        const sameOrNewerDifferentItems = localProducts !== remoteProducts && (!remoteStamp || !localStamp || localStamp >= remoteStamp);
+
+        if (remoteMissingPackage || localLooksNewer || sameOrNewerDifferentItems) {
+            await mysql.mysqlSavePromotionBundle(group, discount, items, products);
+            pushed++;
+        }
+    }
+
+    if (pushed > 0) console.log(`database: repaired ${pushed} local promotion package(s) to MariaDB`);
+    return pushed;
 }
 
 // ─── Read Operations ────────────────────────────────────────────────────────
@@ -2260,6 +2341,26 @@ async function filterPendingLocalDeletes(table: string, rows: any[], idKey = 'id
     return rows.filter(row => !deletedIds.has(String(row?.[idKey])));
 }
 
+async function pruneLocalPromotionMembershipsToRemote(remoteRows: any[]): Promise<number> {
+    if (remoteRows.length === 0) return 0;
+    if (await pendingPromotionQueueCount() > 0) return 0;
+
+    const groupIds = Array.from(new Set(remoteRows.map(row => row.groupId).filter(Boolean)));
+    const remoteIds = Array.from(new Set(remoteRows.map(row => row.id).filter(Boolean)));
+    if (groupIds.length === 0 || remoteIds.length === 0) return 0;
+
+    const d = await sqlite.getDb();
+    const groupPlaceholders = groupIds.map(() => '?').join(', ');
+    const idPlaceholders = remoteIds.map(() => '?').join(', ');
+    const result: any = await d.execute(
+        `DELETE FROM promo_group_items
+         WHERE groupId IN (${groupPlaceholders})
+           AND id NOT IN (${idPlaceholders})`,
+        [...groupIds, ...remoteIds],
+    );
+    return Number(result?.rowsAffected || 0);
+}
+
 /**
  * Run a fast sync cycle that only pulls transaction-related tables
  * (orders, order_lines, payments, shifts, cash_movements) and rehydrates
@@ -2276,6 +2377,7 @@ export async function runFastSyncCycle(): Promise<void> {
 
         const pendingBeforeFlush = await pendingOfflineQueueCount();
         const flushed = pendingBeforeFlush > 0 ? await flushOfflineQueue() : 0;
+        const repairedPromotions = await pushNewerLocalPromotionPackages();
         const shouldCatchUpEverything = !wasOnline || flushed > 0;
         const tablesToPull = shouldCatchUpEverything ? ALL_SYNC_TABLES : FAST_SYNC_TABLES;
 
@@ -2296,6 +2398,13 @@ export async function runFastSyncCycle(): Promise<void> {
                 if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
                 const idKey = table === 'settings' ? 'key' : 'id';
                 const visibleRows = await filterPendingLocalDeletes(table, pulledRows, idKey);
+                if (table === 'promo_group_items') {
+                    const pruned = await pruneLocalPromotionMembershipsToRemote(visibleRows);
+                    if (pruned > 0) {
+                        totalChanges += pruned;
+                        changedTables.add(table);
+                    }
+                }
                 const rows = await filterRowsNeedingLocalUpsert(table, visibleRows, idKey);
 
                 if (rows.length > 0) {
@@ -2313,9 +2422,9 @@ export async function runFastSyncCycle(): Promise<void> {
         const removed = await applyTombstones(newSyncTime);
 
         // Only rehydrate stores if there were actual changes (avoids unnecessary re-renders)
-        if (totalChanges > 0 || removed > 0) {
+        if (totalChanges > 0 || removed > 0 || repairedPromotions > 0) {
             console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
-            await hydrateSvelteStores(removed > 0 ? undefined : changedTables);
+            await hydrateSvelteStores((removed > 0 || repairedPromotions > 0) ? undefined : changedTables);
         }
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
@@ -2341,6 +2450,7 @@ export async function runSyncCycle(): Promise<void> {
 
         // Flush any queued offline operations first (replays writes made while offline).
         await flushOfflineQueue();
+        const repairedPromotions = await pushNewerLocalPromotionPackages();
 
         // Server clock is the authority for delta sync; read it once per cycle.
         const newSyncTime = await mysql.mysqlGetServerTime();
@@ -2359,6 +2469,13 @@ export async function runSyncCycle(): Promise<void> {
                 if (table === 'settings') pulledRows = pulledRows.filter((r: any) => isSyncableSetting(r.key));
                 const idKey = table === 'settings' ? 'key' : 'id';
                 const visibleRows = await filterPendingLocalDeletes(table, pulledRows, idKey);
+                if (table === 'promo_group_items') {
+                    const pruned = await pruneLocalPromotionMembershipsToRemote(visibleRows);
+                    if (pruned > 0) {
+                        totalChanges += pruned;
+                        changedTables.add(table);
+                    }
+                }
                 const rows = await filterRowsNeedingLocalUpsert(table, visibleRows, idKey);
 
                 if (rows.length > 0) {
@@ -2382,8 +2499,8 @@ export async function runSyncCycle(): Promise<void> {
         if (removed > 0) console.log(`database: applied ${removed} tombstone deletions`);
 
         // Rehydrate Svelte stores so the UI reflects latest data
-        if (totalChanges > 0 || removed > 0 || transactionPurged) {
-            await hydrateSvelteStores((removed > 0 || transactionPurged) ? undefined : changedTables);
+        if (totalChanges > 0 || removed > 0 || transactionPurged || repairedPromotions > 0) {
+            await hydrateSvelteStores((removed > 0 || transactionPurged || repairedPromotions > 0) ? undefined : changedTables);
         }
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
