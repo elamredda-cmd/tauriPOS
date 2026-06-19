@@ -18,9 +18,40 @@ import * as mysql from './mysql';
 import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri } from './connection';
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
+import { currentEmployee } from './session';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+
+const AUDIT_ENTITY_BY_TABLE: Record<string, string> = {
+    products: 'product',
+    categories: 'category',
+    customers: 'customer',
+    employees: 'employee',
+    discounts: 'discount',
+    promo_groups: 'promotion_group',
+    promo_group_items: 'promotion_item',
+    tax_rates: 'tax_rate',
+    suppliers: 'supplier',
+    product_suppliers: 'product_supplier',
+    settings: 'setting',
+    registers: 'till',
+    pos_pages: 'pos_page',
+    pos_tiles: 'pos_tile',
+    shifts: 'shift',
+    cash_movements: 'cash_movement',
+    stock_receipts: 'stock_receipt',
+    stock_receipt_lines: 'stock_receipt_line',
+};
+
+const AUDITED_TABLES = new Set(Object.keys(AUDIT_ENTITY_BY_TABLE));
+const IGNORED_AUDIT_SETTING_KEYS = new Set([
+    'bootstrap_uploaded',
+    'last_fast_sync_time',
+    'last_sync_time',
+    'transaction_purge_applied_at',
+]);
+const IGNORED_AUDIT_SETTING_PREFIXES = ['sync_ts_'];
 
 // ─── Re-exports that never change (always local SQLite) ─────────────────────
 
@@ -174,6 +205,164 @@ async function queueOffline(
     );
     console.log(`database: queued offline ${operation} for ${tableName}`);
     return id;
+}
+
+function safeSqlIdentifier(value: string): string {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+        throw new Error(`Unsafe SQL identifier: ${value}`);
+    }
+    return value;
+}
+
+async function getLocalRow(table: string, idKey: string, id: unknown): Promise<any | null> {
+    if (id === undefined || id === null || id === '') return null;
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT * FROM ${safeSqlIdentifier(table)} WHERE ${safeSqlIdentifier(idKey)} = ? LIMIT 1`,
+        [id],
+    );
+    return rows[0] || null;
+}
+
+function shouldAuditSettingKey(key: string): boolean {
+    if (!key) return false;
+    if (IGNORED_AUDIT_SETTING_KEYS.has(key)) return false;
+    return !IGNORED_AUDIT_SETTING_PREFIXES.some(prefix => key.startsWith(prefix));
+}
+
+function shouldAuditTableMutation(table: string, row: any): boolean {
+    if (!AUDITED_TABLES.has(table)) return false;
+    if (table === 'settings') return shouldAuditSettingKey(String(row?.key || ''));
+    return true;
+}
+
+function isSensitiveAuditKey(key: string, parent?: any): boolean {
+    const lower = key.toLowerCase();
+    if (key === 'value' && parent?.key) {
+        const settingKey = String(parent.key).toLowerCase();
+        return settingKey.includes('mysql')
+            || settingKey.includes('database')
+            || settingKey.includes('password')
+            || settingKey.includes('secret')
+            || settingKey.includes('token');
+    }
+    return lower.includes('pin')
+        || lower.includes('password')
+        || lower.includes('secret')
+        || lower.includes('token')
+        || lower.includes('hash');
+}
+
+function sanitizeAuditValue(value: any, key = '', parent?: any): any {
+    if (isSensitiveAuditKey(key, parent)) return '[redacted]';
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (Array.isArray(value)) return value.map(item => sanitizeAuditValue(item));
+    if (typeof value === 'object') {
+        const result: Record<string, any> = {};
+        for (const [childKey, childValue] of Object.entries(value)) {
+            if (childKey === 'updatedAt') continue;
+            result[childKey] = sanitizeAuditValue(childValue, childKey, value);
+        }
+        return result;
+    }
+    if (typeof value === 'string') {
+        const lower = key.toLowerCase();
+        if (lower === 'image' || lower.endsWith('image') || value.startsWith('data:image/')) {
+            return value ? `[image data ${value.length} chars]` : value;
+        }
+        if (value.length > 1200) return `${value.slice(0, 1200)}... [truncated ${value.length} chars]`;
+    }
+    return value;
+}
+
+function auditJson(value: any): string {
+    if (value === null || value === undefined) return '';
+    return JSON.stringify(sanitizeAuditValue(value));
+}
+
+function comparableAuditValue(value: any): any {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (Array.isArray(value)) return value.map(item => comparableAuditValue(item));
+    if (typeof value === 'object') {
+        const result: Record<string, any> = {};
+        for (const [key, childValue] of Object.entries(value)) {
+            if (key === 'updatedAt') continue;
+            result[key] = comparableAuditValue(childValue);
+        }
+        return result;
+    }
+    return value;
+}
+
+function auditComparable(value: any): string {
+    return JSON.stringify(comparableAuditValue(value));
+}
+
+function currentAuditEmployeeId(): string {
+    try { return get(currentEmployee)?.id || ''; }
+    catch { return ''; }
+}
+
+async function persistAuditLog(row: any): Promise<void> {
+    await sqlite.upsert('audit_logs', row, 'id');
+    if (!isMultiMode()) return;
+    await queueOffline('audit_logs', 'upsert', row, 'id');
+    void flushOfflineQueue().catch((error) => {
+        console.warn('database: audit outbox flush failed:', error);
+        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(error) }));
+    });
+}
+
+export async function recordAuditEvent(
+    action: string,
+    entityType: string,
+    entityId: string,
+    oldData: unknown = null,
+    newData: unknown = null,
+    employeeId: string = currentAuditEmployeeId(),
+): Promise<void> {
+    const stamp = new Date().toISOString();
+    await persistAuditLog({
+        id: crypto.randomUUID(),
+        employeeId,
+        action,
+        entityType,
+        entityId,
+        oldData: auditJson(oldData),
+        newData: auditJson(newData),
+        createdAt: stamp,
+        updatedAt: stamp,
+    });
+}
+
+async function recordTableAudit(
+    table: string,
+    operation: 'created' | 'updated' | 'deleted',
+    idKey: string,
+    oldRow: any,
+    newRow: any,
+): Promise<void> {
+    const entityType = AUDIT_ENTITY_BY_TABLE[table];
+    if (!entityType) return;
+    const source = newRow || oldRow;
+    if (!shouldAuditTableMutation(table, source)) return;
+    if (operation === 'updated' && auditComparable(oldRow) === auditComparable(newRow)) return;
+    const entityId = String(table === 'settings' ? source?.key : source?.[idKey] || '');
+    if (!entityId) return;
+    await recordAuditEvent(
+        `${entityType}_${operation}`,
+        entityType,
+        entityId,
+        oldRow,
+        newRow,
+    );
+}
+
+async function getAuditBefore(table: string, obj: any, idKey: string): Promise<any | null> {
+    if (!shouldAuditTableMutation(table, obj)) return null;
+    return getLocalRow(table, idKey, obj?.[idKey]);
 }
 
 let isOfflineQueueFlushing = false;
@@ -655,9 +844,27 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
     const d = await sqlite.getDb();
     const oldOrder = `(createdAt IS NULL OR createdAt = '' OR createdAt <= ?)`;
     const oldShift = `(openedAt IS NULL OR openedAt = '' OR openedAt <= ?)`;
+    const salesAuditTypes = `'order','shift','cash_movement','report'`;
+    const salesAuditActions = `'sale_completed','order_refunded','order_partially_refunded','order_voided','refund_completed','report_period_closed'`;
 
     await d.execute(`DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
-    await d.execute(`DELETE FROM audit_logs WHERE entityId IN (SELECT id FROM orders WHERE ${oldOrder}) OR ((entityType = 'order' OR action IN ('sale_completed','refund_completed')) AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?))`, [marker, marker]);
+    await d.execute(
+        `DELETE FROM audit_logs
+         WHERE entityId IN (SELECT id FROM orders WHERE ${oldOrder})
+            OR entityId IN (SELECT id FROM shifts WHERE ${oldShift})
+            OR (
+                (entityType IN (${salesAuditTypes}) OR action IN (${salesAuditActions}))
+                AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?)
+            )`,
+        [marker, marker, marker],
+    );
+    await d.execute(
+        `DELETE FROM manager_approvals
+         WHERE entityId IN (SELECT id FROM orders WHERE ${oldOrder})
+            OR ((entityType = 'order' OR action = 'refund_void')
+                AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?))`,
+        [marker, marker],
+    );
     await d.execute(`DELETE FROM payments WHERE orderId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
     await d.execute(`DELETE FROM order_lines WHERE orderId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
     await d.execute(`DELETE FROM cash_movements WHERE shiftId IN (SELECT id FROM shifts WHERE ${oldShift})`, [marker]);
@@ -669,12 +876,12 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
         `DELETE FROM _offline_queue
          WHERE created_at <= ? AND (
             operation = 'saleBundle' OR
-            table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs')
+            table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')
          )`,
         [marker]
     );
     await d.execute(
-        `DELETE FROM tombstones WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs')`
+        `DELETE FROM tombstones WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')`
     );
     await sqlite.upsert('settings', { key: 'transaction_purge_applied_at', value: marker, updatedAt: marker }, 'key');
 }
@@ -828,8 +1035,13 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
     if (table !== 'settings' && !obj.updatedAt) {
         obj = { ...obj, updatedAt: new Date().toISOString() };
     }
+    const auditBefore = await getAuditBefore(table, obj, idKey);
     // Always write to local SQLite (either primary or cache)
     await sqlite.upsert(table, obj, idKey);
+    if (shouldAuditTableMutation(table, obj)) {
+        const auditAfter = await getLocalRow(table, idKey, obj?.[idKey]);
+        await recordTableAudit(table, auditBefore ? 'updated' : 'created', idKey, auditBefore, auditAfter || obj);
+    }
 
     if (table === 'settings' && !isSyncableSetting(obj?.key)) {
         return;
@@ -855,7 +1067,11 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id'): Promise<void> {
+    const auditBefore = AUDITED_TABLES.has(table) ? await getLocalRow(table, idKey, id) : null;
     await sqlite.remove(table, id, idKey);
+    if (auditBefore && shouldAuditTableMutation(table, auditBefore)) {
+        await recordTableAudit(table, 'deleted', idKey, auditBefore, null);
+    }
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
         await hydrateSvelteStores([table]);
@@ -912,8 +1128,37 @@ async function saveLocalPromotionBundle(group: any, discount: any, items: any[])
     }
 }
 
+async function getPromotionAuditSnapshot(discountId = '', groupId = ''): Promise<any> {
+    const d = await sqlite.getDb();
+    const groupRows: any[] = groupId
+        ? await d.select(`SELECT * FROM promo_groups WHERE id = ? LIMIT 1`, [groupId])
+        : [];
+    const discountRows: any[] = groupId
+        ? await d.select(`SELECT * FROM discounts WHERE id = ? OR groupId = ? ORDER BY id`, [discountId, groupId])
+        : discountId
+            ? await d.select(`SELECT * FROM discounts WHERE id = ? ORDER BY id`, [discountId])
+            : [];
+    const itemRows: any[] = groupId
+        ? await d.select(`SELECT * FROM promo_group_items WHERE groupId = ? ORDER BY productId, id`, [groupId])
+        : [];
+    return {
+        group: groupRows[0] || null,
+        discounts: discountRows,
+        items: itemRows,
+    };
+}
+
 export async function savePromotionBundle(group: any, discount: any, items: any[]): Promise<void> {
+    const before = await getPromotionAuditSnapshot(discount?.id || '', group?.id || '');
     await saveLocalPromotionBundle(group, discount, items);
+    const after = await getPromotionAuditSnapshot(discount?.id || '', group?.id || '');
+    await recordAuditEvent(
+        before.group || before.discounts.length ? 'promotion_updated' : 'promotion_created',
+        'promotion',
+        group?.id || discount?.id || '',
+        before,
+        after,
+    );
     await hydrateSvelteStores(PROMOTION_SYNC_TABLES);
 
     const products = await getLocalProductsForPromotionItems(items);
@@ -954,8 +1199,16 @@ async function deleteLocalPromotionBundle(discountIds: string[], groupId = ''): 
 export async function deletePromotionBundle(discountId: string, groupId = ''): Promise<void> {
     const targets = await selectPromotionDeleteTargets(discountId, groupId);
     const discountIds = targets.discountIds.length > 0 ? targets.discountIds : [discountId].filter(Boolean);
+    const before = await getPromotionAuditSnapshot(discountId, groupId);
 
     await deleteLocalPromotionBundle(discountIds, groupId);
+    await recordAuditEvent(
+        'promotion_deleted',
+        'promotion',
+        groupId || discountId,
+        before,
+        null,
+    );
 
     for (const itemId of targets.itemIds) await recordTombstone('promo_group_items', itemId);
     for (const id of discountIds) await recordTombstone('discounts', id);
@@ -1060,6 +1313,87 @@ export async function getAll(table: string): Promise<any[]> {
         }
     }
     return sqlite.getAll(table);
+}
+
+export interface AuditLogPage {
+    rows: any[];
+    total: number;
+    actions: string[];
+    entities: string[];
+}
+
+export async function getAuditLogPage(options: {
+    query?: string;
+    action?: string;
+    entityType?: string;
+    limit?: number;
+    offset?: number;
+} = {}): Promise<AuditLogPage> {
+    const d = await sqlite.getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const where: string[] = [];
+    const params: any[] = [];
+
+    if (options.action) {
+        where.push(`a.action = ?`);
+        params.push(options.action);
+    }
+    if (options.entityType) {
+        where.push(`a.entityType = ?`);
+        params.push(options.entityType);
+    }
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        where.push(`(
+            LOWER(COALESCE(a.action, '')) LIKE ?
+            OR LOWER(COALESCE(a.entityType, '')) LIKE ?
+            OR LOWER(COALESCE(a.entityId, '')) LIKE ?
+            OR LOWER(COALESCE(a.oldData, '')) LIKE ?
+            OR LOWER(COALESCE(a.newData, '')) LIKE ?
+            OR LOWER(COALESCE(e.name, '')) LIKE ?
+        )`);
+        const like = `%${search}%`;
+        params.push(like, like, like, like, like, like);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows: any[] = await d.select(
+        `SELECT a.*
+         FROM audit_logs a
+         LEFT JOIN employees e ON e.id = a.employeeId
+         ${whereSql}
+         ORDER BY COALESCE(a.createdAt, '') DESC, a.id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM audit_logs a
+         LEFT JOIN employees e ON e.id = a.employeeId
+         ${whereSql}`,
+        params,
+    );
+    const [actionRows, entityRows] = await Promise.all([
+        d.select(`SELECT DISTINCT action FROM audit_logs WHERE action IS NOT NULL AND action != '' ORDER BY action`) as Promise<any[]>,
+        d.select(`SELECT DISTINCT entityType FROM audit_logs WHERE entityType IS NOT NULL AND entityType != '' ORDER BY entityType`) as Promise<any[]>,
+    ]);
+    return {
+        rows,
+        total: Number(countRows[0]?.count || 0),
+        actions: actionRows.map(row => String(row.action || '')).filter(Boolean),
+        entities: entityRows.map(row => String(row.entityType || '')).filter(Boolean),
+    };
+}
+
+export async function getRecentManagerApprovals(limit = 25): Promise<any[]> {
+    const d = await sqlite.getDb();
+    return d.select(
+        `SELECT *
+         FROM manager_approvals
+         ORDER BY COALESCE(createdAt, '') DESC, id DESC
+         LIMIT ?`,
+        [Math.max(1, Math.min(100, Number(limit || 25)))],
+    );
 }
 
 export async function getActiveProducts(): Promise<any[]> {
@@ -1205,7 +1539,16 @@ function friendlyProductIdentifierError(error: unknown): Error {
  */
 export async function adjustStock(productId: string, delta: number): Promise<void> {
     if (!delta) return;
+    const before = await getLocalRow('products', 'id', productId);
     await sqlite.adjustStock(productId, delta);
+    const after = await getLocalRow('products', 'id', productId);
+    await recordAuditEvent(
+        'stock_adjusted',
+        'product',
+        productId,
+        before ? { id: before.id, name: before.name, stockLevel: before.stockLevel } : null,
+        after ? { id: after.id, name: after.name, stockLevel: after.stockLevel, delta } : { delta },
+    );
     await pushWriteInBackground(
         `stock delta for ${productId}`,
         () => mysql.mysqlAdjustStock(productId, delta),
@@ -1220,7 +1563,16 @@ export async function setStockLevel(
     expectedStockLevel: number,
 ): Promise<void> {
     const stamped = { id: productId, stockLevel, updatedAt: new Date().toISOString() };
+    const before = await getLocalRow('products', 'id', productId);
     await sqlite.setStockLevel(productId, stockLevel);
+    const after = await getLocalRow('products', 'id', productId);
+    await recordAuditEvent(
+        'stock_counted',
+        'product',
+        productId,
+        before ? { id: before.id, name: before.name, stockLevel: before.stockLevel } : null,
+        after ? { id: after.id, name: after.name, stockLevel: after.stockLevel, expectedStockLevel } : { stockLevel, expectedStockLevel },
+    );
     await pushWriteInBackground(
         `stock count for ${productId}`,
         () => mysql.mysqlSetStockLevel(productId, stockLevel, expectedStockLevel),
@@ -1295,7 +1647,10 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
 }
 
 export async function deleteProduct(id: string): Promise<void> {
+    const before = await getLocalRow('products', 'id', id);
     await sqlite.deleteProduct(id);
+    const after = await getLocalRow('products', 'id', id);
+    await recordAuditEvent('product_deactivated', 'product', id, before, after);
     await pushWriteInBackground(
         'product deactivation',
         () => mysql.mysqlDeleteProduct(id),
@@ -1311,6 +1666,22 @@ export async function removeProductTiles(productId: string): Promise<void> {
 
 export async function bulkAddProducts(products: any[]): Promise<void> {
     await sqlite.bulkAddProducts(products);
+    await recordAuditEvent(
+        'products_imported',
+        'product',
+        'bulk_import',
+        null,
+        {
+            count: products.length,
+            sample: products.slice(0, 10).map(product => ({
+                id: product.id,
+                name: product.name,
+                barcode: product.barcode,
+                sku: product.sku,
+                price: product.price,
+            })),
+        },
+    );
     await pushWriteInBackground(
         'bulk product import',
         () => mysql.mysqlBulkAddProducts(products),
@@ -1324,7 +1695,10 @@ export async function bulkAddProducts(products: any[]): Promise<void> {
 
 export async function savePosPage(p: any): Promise<void> {
     const stamped = { ...p, updatedAt: new Date().toISOString() };
+    const before = await getLocalRow('pos_pages', 'id', stamped.id);
     await sqlite.savePosPage(stamped);
+    const after = await getLocalRow('pos_pages', 'id', stamped.id);
+    await recordTableAudit('pos_pages', before ? 'updated' : 'created', 'id', before, after || stamped);
     await pushWriteInBackground(
         'POS page save',
         () => mysql.mysqlSavePosPage(stamped),
@@ -1333,7 +1707,9 @@ export async function savePosPage(p: any): Promise<void> {
 }
 
 export async function deletePosPage(id: string): Promise<void> {
+    const before = await getLocalRow('pos_pages', 'id', id);
     await sqlite.deletePosPage(id);
+    await recordTableAudit('pos_pages', 'deleted', 'id', before, null);
     await pushWriteInBackground(
         'POS page delete',
         () => mysql.mysqlDeletePosPage(id),
@@ -1346,7 +1722,10 @@ export async function deletePosPage(id: string): Promise<void> {
 
 export async function addTile(t: any): Promise<void> {
     const stamped = { ...t, updatedAt: new Date().toISOString() };
+    const before = await getLocalRow('pos_tiles', 'id', stamped.id);
     await sqlite.addTile(stamped);
+    const after = await getLocalRow('pos_tiles', 'id', stamped.id);
+    await recordTableAudit('pos_tiles', before ? 'updated' : 'created', 'id', before, after || stamped);
     await pushWriteInBackground(
         'POS tile save',
         () => mysql.mysqlAddTile(stamped),
@@ -1355,7 +1734,9 @@ export async function addTile(t: any): Promise<void> {
 }
 
 export async function deleteTile(id: string): Promise<void> {
+    const before = await getLocalRow('pos_tiles', 'id', id);
     await sqlite.deleteTile(id);
+    await recordTableAudit('pos_tiles', 'deleted', 'id', before, null);
     await pushWriteInBackground(
         'POS tile delete',
         () => mysql.mysqlDeleteTile(id),
@@ -1639,6 +2020,20 @@ export async function saveReportMarker(
     extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {}
 ): Promise<any> {
     const row = await sqlite.saveReportMarker(tillNumber, periodStart, periodEnd, extra);
+    await recordAuditEvent(
+        'report_period_closed',
+        'report',
+        row.id,
+        null,
+        {
+            scope: tillNumber ? 'till' : 'system',
+            tillNumber,
+            periodStart,
+            periodEnd,
+            reportTotal: extra.reportTotal || 0,
+        },
+        extra.employeeId || currentAuditEmployeeId(),
+    );
     await pushWriteInBackground(
         `report marker for ${tillNumber || 'system'}`,
         () => mysql.mysqlUpsert('till_report_markers', row, 'id'),
@@ -1653,6 +2048,14 @@ export async function recordManagerApproval(approval: any): Promise<void> {
         updatedAt: approval.updatedAt || new Date().toISOString(),
     };
     await upsert('manager_approvals', stamped, 'id');
+    await recordAuditEvent(
+        'manager_approval_granted',
+        stamped.entityType || 'approval',
+        stamped.entityId || stamped.id,
+        null,
+        stamped,
+        stamped.approvedByEmployeeId || currentAuditEmployeeId(),
+    );
 }
 
 export async function getOrCreateTillId(): Promise<string> {
@@ -2640,7 +3043,19 @@ export async function purgeAllTransactions(): Promise<void> {
             marker = await mysql.mysqlGetServerTime();
 
             await server.execute(`DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders)`);
-            await server.execute(`DELETE FROM audit_logs WHERE entityId IN (SELECT id FROM orders) OR entityType = 'order' OR action IN ('sale_completed','refund_completed')`);
+            await server.execute(
+                `DELETE FROM audit_logs
+                 WHERE entityId IN (SELECT id FROM orders)
+                    OR entityId IN (SELECT id FROM shifts)
+                    OR entityType IN ('order','shift','cash_movement','report')
+                    OR action IN ('sale_completed','order_refunded','order_partially_refunded','order_voided','refund_completed','report_period_closed')`
+            );
+            await server.execute(
+                `DELETE FROM manager_approvals
+                 WHERE entityId IN (SELECT id FROM orders)
+                    OR entityType = 'order'
+                    OR action = 'refund_void'`
+            );
             await server.execute(`DELETE FROM payments`);
             await server.execute(`DELETE FROM order_lines`);
             await server.execute(`DELETE FROM cash_movements`);
@@ -2648,7 +3063,7 @@ export async function purgeAllTransactions(): Promise<void> {
             await server.execute(`DELETE FROM shifts`);
             await server.execute(`DELETE FROM daily_sales_summary`);
             await server.execute(`DELETE FROM till_report_markers`);
-            await server.execute(`DELETE FROM tombstones WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs')`);
+            await server.execute(`DELETE FROM tombstones WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')`);
             await mysql.mysqlUpsert('settings', { key: 'transaction_purge_at', value: marker }, 'key');
         }
 

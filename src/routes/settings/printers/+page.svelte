@@ -16,6 +16,7 @@
     $: receipt = getReceiptPrinterConfig($settingsDB);
     $: label = getLabelPrinterConfig($settingsDB);
     $: drawer = getCashDrawerConfig($settingsDB);
+    $: drawerManualEnabled = ($settingsDB.find((item) => item.key === 'cash_drawer_enabled')?.value ?? (drawer.host.trim() ? 'true' : 'false')) !== 'false';
     $: receiptMode = receiptConnections.find((option) => option.value === receipt.connection);
     $: labelMode = labelConnections.find((option) => option.value === label.connection);
     let receiptTestStatus = '';
@@ -308,12 +309,40 @@
                             <div>
                                 <h4 class="m-0 text-base font-black text-text-main">Cash drawer pulse</h4>
                                 <p class="m-0 mt-1 text-sm text-text-muted">
-                                    The drawer normally plugs into the receipt printer. These settings control the kick pulse.
+                                    The drawer normally plugs into the receipt printer. These settings control the printer and kick pulse.
                                 </p>
                             </div>
-                            <button class="btn btn-secondary" on:click={testDrawer}>Test Drawer</button>
+                            <div class="flex flex-wrap gap-2">
+                                <button
+                                    class="btn {drawerManualEnabled ? 'btn-success' : 'btn-secondary'}"
+                                    on:click={() => updateSetting('cash_drawer_enabled', drawerManualEnabled ? 'false' : 'true')}
+                                >
+                                    Drawer: {drawerManualEnabled ? 'Enabled' : 'Disabled'}
+                                </button>
+                                <button class="btn btn-secondary" on:click={testDrawer}>Test Drawer</button>
+                            </div>
                         </div>
                         <div class="form-grid">
+                            <div class="field">
+                                <label>Drawer Printer IP</label>
+                                <input
+                                    value={drawer.host}
+                                    placeholder="e.g. 192.168.1.50"
+                                    on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
+                                />
+                                <small class="text-text-muted">For network printers this can use the same IP as the receipt printer.</small>
+                            </div>
+                            <div class="field">
+                                <label>Drawer Printer Port</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="65535"
+                                    value={drawer.port}
+                                    on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
+                                />
+                                <small class="text-text-muted">Most network thermal printers use port 9100.</small>
+                            </div>
                             <CustomSelect
                                 label="Drawer Pin"
                                 value={String(drawer.pin)}

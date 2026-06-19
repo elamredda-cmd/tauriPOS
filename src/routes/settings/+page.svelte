@@ -1,49 +1,56 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
-    import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
-    import { toast } from '$lib/stores/toast';
-    import {
-        upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId,
-        createLocalBackup
-    } from '$lib/stores/database';
     import { connectionState } from '$lib/stores/connection';
     import { currentEmployee } from '$lib/stores/session';
-    import { playCartButtonFeedback, playErrorSound, playItemAddedSound, playSuccessSound } from '$lib/sounds';
-    import { getCctvPosConfig, sendCctvPosText } from '$lib/cctvPos';
-    import { getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
+    import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
+    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
+    import { toast } from '$lib/stores/toast';
 
     let store = { ...$storeDB };
+    let editTillName = '';
+    let tillId = '';
+
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
-    $: buttonSoundEnabled = ($settingsDB.find(s => s.key === 'feedback_button_sound_enabled')?.value ?? 'true') !== 'false';
-    $: itemSoundEnabled = ($settingsDB.find(s => s.key === 'feedback_item_sound_enabled')?.value ?? 'true') !== 'false';
-    $: hapticsEnabled = ($settingsDB.find(s => s.key === 'feedback_haptics_enabled')?.value ?? 'true') !== 'false';
-    $: saleSoundEnabled = ($settingsDB.find(s => s.key === 'feedback_sale_sound_enabled')?.value ?? 'true') !== 'false';
-    $: barcodeErrorSound = $settingsDB.find(s => s.key === 'barcode_error_sound')?.value || 'vintage';
     $: loyaltyEnabled = ($settingsDB.find(s => s.key === 'loyalty_enabled')?.value ?? 'true') !== 'false';
     $: cashUpEnabled = ($settingsDB.find(s => s.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
     $: trainingModeEnabled = ($settingsDB.find(s => s.key === 'training_mode_enabled')?.value ?? 'false') === 'true';
-    $: cctvConfig = getCctvPosConfig($settingsDB);
-    $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
-    const drawerPinOptions = [
-        { label: 'Pin 2 / drawer 1', value: '0' },
-        { label: 'Pin 5 / drawer 2', value: '1' },
-    ];
-    const cctvEncodingOptions = [
-        { label: 'Latin-1 / ISO-8859-1', value: 'latin1' },
-        { label: 'UTF-8', value: 'utf8' },
-    ];
-    const switchCardBase = 'relative min-h-[86px] rounded-xl border p-4 pr-16 text-left transition disabled:cursor-not-allowed disabled:opacity-45';
-    const alertCardBase = 'min-h-[78px] rounded-xl border p-3 text-left transition';
+
+    onMount(async () => {
+        editTillName = await getTillName();
+        tillId = await getOrCreateTillId();
+    });
 
     function switchCardClass(active: boolean): string {
-        return `${switchCardBase} ${active ? 'border-success bg-success/10 text-text-main' : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover'}`;
+        return [
+            'relative min-h-[88px] rounded-xl border p-4 pr-16 text-left transition-all duration-150',
+            'disabled:cursor-not-allowed disabled:opacity-45',
+            active
+                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_color-mix(in_srgb,var(--success)_12%,transparent)]'
+                : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
+        ].join(' ');
     }
 
-    function alertCardClass(active: boolean): string {
-        return `${alertCardBase} ${active ? 'border-accent-primary bg-accent-primary/10 text-accent-primary' : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover'}`;
+    async function updateSetting(key: string, value: string) {
+        const row = { key, value, updatedAt: now() };
+        settingsDB.update(settings => {
+            const index = settings.findIndex(item => item.key === key);
+            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
+            return [...settings, row];
+        });
+        await upsert('settings', row, 'key');
+    }
+
+    function getSettingValue(key: string): string {
+        return $settingsDB.find(s => s.key === key)?.value || '';
+    }
+
+    function saveStore() {
+        storeDB.set(store as Store);
+        upsert('settings', { key: 'store_info', value: JSON.stringify(store), updatedAt: now() }, 'key');
+        toast('Store settings saved');
     }
 
     function setStockTracking(enabled: boolean) {
@@ -57,154 +64,117 @@
         toast(enabled ? 'Till cash-up enabled across the shop' : 'Till cash-up disabled across the shop');
     }
 
-    function setFeedbackSetting(key: string, enabled: boolean) {
-        updateSetting(key, enabled ? 'true' : 'false');
-    }
-
-    function selectBarcodeErrorSound(style: string) {
-        updateSetting('barcode_error_sound', style);
-        if (style !== 'silent') setTimeout(playErrorSound, 0);
-    }
-
-    function saveStore() {
-        storeDB.set(store as Store);
-        upsert('settings', { key: 'store_info', value: JSON.stringify(store), updatedAt: now() }, 'key');
-        toast('Store settings saved');
-    }
-
-    function updateSetting(key: string, value: string) {
-        const s = { key, value, updatedAt: now() };
-        settingsDB.update(list => {
-            const idx = list.findIndex(x => x.key === key);
-            if (idx >= 0) { list[idx] = s; }
-            else { list.push(s); }
-            return list;
-        });
-        upsert('settings', s, 'key');
-    }
-
-    function getSettingValue(key: string): string {
-        return $settingsDB.find(s => s.key === key)?.value || '';
-    }
-
-    let editTillName = '';
-    let tillId = '';
-    let backupStatus = '';
-    let cctvTestStatus = '';
-    let drawerTestStatus = '';
-
-    import { onMount } from 'svelte';
-    onMount(async () => {
-        editTillName = await getTillName();
-        tillId = await getOrCreateTillId();
-    });
-
     async function saveTillName() {
         await setTillNameDb(editTillName);
         toast('Till name saved');
     }
-
-    async function handleBackup() {
-        try {
-            backupStatus = 'Creating backup...';
-            backupStatus = `Backup saved: ${await createLocalBackup()}`;
-        } catch (e) {
-            backupStatus = `Backup failed: ${e}`;
-        }
-    }
-
-    async function testCctvPosOverlay() {
-        const config = getCctvPosConfig($settingsDB);
-        if (!config.host.trim()) {
-            toast('Enter the DVR/NVR IP address first', 'error');
-            return;
-        }
-        if (!config.enabled) {
-            toast('Turn CCTV Overlay on before testing automatic sends', 'error');
-            return;
-        }
-        cctvTestStatus = 'Sending test text...';
-        try {
-            await sendCctvPosText([
-                config.posName || 'L&Bj POS',
-                `POS ${config.posNumber || '1'} TEST`,
-                'Item: TEST PRODUCT  1.00',
-                'Total: 1.00',
-            ].join('\r\n'), config);
-            cctvTestStatus = 'Test sent. Check the linked camera live view.';
-            toast('CCTV POS test sent');
-        } catch (error) {
-            cctvTestStatus = `Test failed: ${error}`;
-            toast(`CCTV POS test failed: ${error}`, 'error');
-        }
-    }
-
-    async function testCashDrawer() {
-        const config = getCashDrawerConfig($settingsDB);
-        if (!config.host.trim()) {
-            toast('Enter the receipt printer IP address first', 'error');
-            return;
-        }
-        if (!config.enabled) {
-            toast('Turn Cash Drawer on before testing', 'error');
-            return;
-        }
-        drawerTestStatus = 'Opening drawer...';
-        try {
-            await openCashDrawer(config);
-            drawerTestStatus = 'Drawer pulse sent.';
-            toast('Drawer opened');
-        } catch (error) {
-            drawerTestStatus = `Drawer failed: ${error}`;
-            toast(`Drawer failed: ${error}`, 'error');
-        }
-    }
-
 </script>
 
 <MgmtPage title="Settings">
     <button slot="actions" class="btn btn-primary" on:click={saveStore}>Save Store Information</button>
 
-    <div class="settings-canvas">
-        <section class="settings-hero">
-            <div>
-                <span>Shop control centre</span>
-                <h2>Make L&amp;Bj POS work your way</h2>
-                <p>Design the till, control shop-wide behaviour, and keep every device connected.</p>
+    <div class="flex flex-col gap-5 p-4 lg:p-6">
+        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card via-bg-card to-bg-panel p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_20%,transparent)]">
+            <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                    <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-accent-primary">Shop control centre</p>
+                    <h2 class="m-0 text-2xl font-black text-text-main md:text-3xl">Make L&amp;Bj POS work your way</h2>
+                    <p class="mt-2 max-w-3xl text-sm text-text-muted">
+                        Daily shop behaviour stays here. Hardware, backups, CCTV, and deeper tools now live in their own pages.
+                    </p>
+                </div>
+                <div class="grid gap-3 sm:grid-cols-2 xl:min-w-[430px]">
+                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                        <div class="flex items-center gap-3">
+                            <span class="h-3 w-3 rounded-full {$connectionState.mysqlOnline ? 'bg-success shadow-[0_0_12px_var(--success)]' : 'bg-warning shadow-[0_0_12px_var(--warning)]'}"></span>
+                            <div>
+                                <strong class="block text-text-main">{$connectionState.mysqlOnline ? 'Multi-till online' : 'Local mode'}</strong>
+                                <small class="text-text-muted">{$connectionState.mode === 'multi' ? ($connectionState.mysqlConfig?.host || 'MariaDB configured') : 'SQLite only'}</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                        <strong class="block text-text-main">{stockTrackingEnabled ? 'Stock tracking active' : 'Stock tracking off'}</strong>
+                        <small class="text-text-muted">Till: {editTillName || 'Loading...'}</small>
+                    </div>
+                </div>
             </div>
-            <div class="hero-status {$connectionState.mysqlOnline ? 'online' : ''}">
-                <i></i>
-                <div><strong>{$connectionState.mysqlOnline ? 'Multi-till online' : 'Local mode'}</strong><small>{stockTrackingEnabled ? 'Stock tracking active' : 'Stock tracking off'}</small></div>
-            </div>
+            {#if $connectionState.syncError}
+                <p class="mt-4 rounded-xl border border-danger/50 bg-danger/10 p-3 text-sm text-danger">{$connectionState.syncError}</p>
+            {/if}
         </section>
 
-        <nav class="settings-tile-grid" aria-label="Settings shortcuts">
-            <a href="/settings/themes" class="settings-tile tile-purple">
-                <span>Appearance</span><b>Colour Theme</b><p>Choose the visual style used across the app.</p><strong>Change theme &rarr;</strong>
+        <nav class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Settings shortcuts">
+            <a href="/settings/themes" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Appearance</span>
+                <b class="mt-2 block text-xl">Colour Theme</b>
+                <p class="mt-2 text-sm text-text-muted">Choose the visual style used across the app.</p>
+                <strong class="mt-4 block text-sm text-accent-primary">Change theme &rarr;</strong>
             </a>
-            <a href="/settings/receipt" class="settings-tile tile-amber">
-                <span>Printing</span><b>Receipt Designer</b><p>Control receipt size, content, and messages.</p><strong>Design receipt &rarr;</strong>
+            <a href="/settings/layout" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">POS screen</span>
+                <b class="mt-2 block text-xl">Layout</b>
+                <p class="mt-2 text-sm text-text-muted">Tune cart placement, toolbar controls, and the main selling screen.</p>
+                <strong class="mt-4 block text-sm text-accent-primary">Open layout &rarr;</strong>
             </a>
-            <a href="/settings/printers" class="settings-tile tile-green">
-                <span>Hardware</span><b>Printer Setup</b><p>Configure receipt printers, label printers, and direct ESC/POS test printing.</p><strong>Set printers &rarr;</strong>
+            <a href="/settings/printers" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Hardware</span>
+                <b class="mt-2 block text-xl">Printer Setup</b>
+                <p class="mt-2 text-sm text-text-muted">Receipt printers, label printers, and cash drawer pulse.</p>
+                <strong class="mt-4 block text-sm text-success">Set printers &rarr;</strong>
             </a>
-            <a href="/settings/customer-display" class="settings-tile tile-purple">
-                <span>Checkout</span><b>Customer Screen</b><p>Open the live basket and total on a second monitor.</p><strong>Configure display &rarr;</strong>
+            <a href="/settings/receipt" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-warning hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-warning">Printing</span>
+                <b class="mt-2 block text-xl">Receipt Designer</b>
+                <p class="mt-2 text-sm text-text-muted">Control receipt size, content, and footer messages.</p>
+                <strong class="mt-4 block text-sm text-warning">Design receipt &rarr;</strong>
             </a>
-            <a href="/settings/barcodes" class="settings-tile tile-green">
-                <span>Scales</span><b>Scale Barcode Rules</b><p>Show the POS how your scale builds its barcodes.</p><strong>Configure rules &rarr;</strong>
+            <a href="/settings/labels" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-warning hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-warning">Labels</span>
+                <b class="mt-2 block text-xl">Label Designer</b>
+                <p class="mt-2 text-sm text-text-muted">Create shelf labels and barcode label layouts.</p>
+                <strong class="mt-4 block text-sm text-warning">Design labels &rarr;</strong>
             </a>
-            <a href="/settings/permissions" class="settings-tile tile-blue">
-                <span>Staff</span><b>Role Permissions</b><p>Control what cashiers, managers, and admins can open or approve.</p><strong>Set access &rarr;</strong>
+            <a href="/settings/barcodes" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Scales</span>
+                <b class="mt-2 block text-xl">Scale Barcode Rules</b>
+                <p class="mt-2 text-sm text-text-muted">Show the POS how your scale builds embedded-price barcodes.</p>
+                <strong class="mt-4 block text-sm text-success">Configure rules &rarr;</strong>
+            </a>
+            <a href="/settings/customer-display" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Checkout</span>
+                <b class="mt-2 block text-xl">Customer Screen</b>
+                <p class="mt-2 text-sm text-text-muted">Open the live basket and total on a second monitor.</p>
+                <strong class="mt-4 block text-sm text-accent-primary">Configure display &rarr;</strong>
+            </a>
+            <a href="/settings/feedback" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Operator feedback</span>
+                <b class="mt-2 block text-xl">Sound &amp; Haptics</b>
+                <p class="mt-2 text-sm text-text-muted">Button clicks, item sounds, vibration, and barcode alerts.</p>
+                <strong class="mt-4 block text-sm text-accent-primary">Open feedback &rarr;</strong>
+            </a>
+            <a href="/settings/integrations" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Integrations</span>
+                <b class="mt-2 block text-xl">CCTV POS Overlay</b>
+                <p class="mt-2 text-sm text-text-muted">Send product and receipt text to supported DVR/NVR systems.</p>
+                <strong class="mt-4 block text-sm text-success">Open integrations &rarr;</strong>
+            </a>
+            <a href="/settings/permissions" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Staff</span>
+                <b class="mt-2 block text-xl">Role Permissions</b>
+                <p class="mt-2 text-sm text-text-muted">Control what cashiers, managers, and admins can open or approve.</p>
+                <strong class="mt-4 block text-sm text-accent-primary">Set access &rarr;</strong>
             </a>
             {#if $currentEmployee?.role === 'admin'}
-                <a href="/settings/advanced" class="settings-tile tile-red">
-                    <span>Admin only</span><b>Advanced Maintenance</b><p>Database repair, migration, restore, and risky shop controls.</p><strong>Open carefully &rarr;</strong>
+                <a href="/settings/advanced" class="group rounded-2xl border border-danger/60 bg-danger/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-danger hover:bg-danger/15">
+                    <span class="text-xs font-black uppercase tracking-[0.16em] text-danger">Admin only</span>
+                    <b class="mt-2 block text-xl">Advanced Maintenance</b>
+                    <p class="mt-2 text-sm text-text-muted">Backups, database repair, migration, restore, and risky shop controls.</p>
+                    <strong class="mt-4 block text-sm text-danger">Open carefully &rarr;</strong>
                 </a>
             {/if}
         </nav>
 
-        <!-- Store Info -->
         <section class="settings-section">
             <h3 class="settings-section-title">Store Information</h3>
             <div class="form-grid">
@@ -215,16 +185,17 @@
             </div>
         </section>
 
-        <!-- Loyalty -->
         <section class="settings-section">
-            <h3 class="settings-section-title">Loyalty Program</h3>
-            <p class="text-text-muted text-[0.9rem] mb-4">Choose how customers earn points and how those points become spendable credit.</p>
-            <div class="form-grid">
-                <div class="field span-2">
-                    <button class="btn {loyaltyEnabled ? 'btn-success' : 'btn-secondary'}" on:click={() => updateSetting('loyalty_enabled', loyaltyEnabled ? 'false' : 'true')}>
-                        Loyalty Program: {loyaltyEnabled ? 'Enabled' : 'Disabled'}
-                    </button>
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                    <h3 class="settings-section-title">Loyalty Program</h3>
+                    <p class="mb-4 text-sm text-text-muted">Choose how customers earn points and how those points become spendable credit.</p>
                 </div>
+                <button class="btn {loyaltyEnabled ? 'btn-success' : 'btn-secondary'}" on:click={() => updateSetting('loyalty_enabled', loyaltyEnabled ? 'false' : 'true')}>
+                    Loyalty: {loyaltyEnabled ? 'Enabled' : 'Disabled'}
+                </button>
+            </div>
+            <div class="form-grid">
                 <div class="field"><label>Points per £1 spent</label>
                     <input type="number" min="0" step="1" value={getSettingValue('loyalty_points_per_pound') || '1'} on:change={(e) => updateSetting('loyalty_points_per_pound', e.currentTarget.value)} />
                 </div>
@@ -235,7 +206,7 @@
                     <input type="number" min="1" step="1" value={getSettingValue('loyalty_redemption_value') || '100'} on:change={(e) => updateSetting('loyalty_redemption_value', e.currentTarget.value)} />
                 </div>
                 <div class="field justify-end">
-                    <div class="flat-card p-3 text-text-muted">
+                    <div class="rounded-xl border border-border-flat bg-bg-panel p-3 text-sm text-text-muted">
                         Example: {getSettingValue('loyalty_points_to_redeem') || '100'} points = {Number(getSettingValue('loyalty_redemption_value') || '100') / 100} GBP credit
                     </div>
                 </div>
@@ -244,37 +215,30 @@
 
         <section class="settings-section">
             <h3 class="settings-section-title">Stock Tracking</h3>
-            <p class="text-text-muted text-[0.9rem] mb-4">
+            <p class="mb-4 text-sm text-text-muted">
                 This shop-wide setting synchronizes to every till. Turning it off hides stock controls and stops sales and refunds from changing stock quantities.
             </p>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
-                <button
-                    class="p-4 rounded-md border-2 text-left transition-colors {stockTrackingEnabled ? 'border-accent-primary bg-accent-primary/10' : 'border-border-flat bg-bg-panel'}"
-                    on:click={() => setStockTracking(true)}
-                >
-                    <strong class="block">Track product stock</strong>
-                    <span class="text-xs text-text-muted">Use stock levels and update them after transactions.</span>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button class={switchCardClass(stockTrackingEnabled)} on:click={() => setStockTracking(true)}>
+                    <span class="font-extrabold">Track product stock</span>
+                    <small class="mt-1 block text-text-muted">Use stock levels and update them after transactions.</small>
+                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {stockTrackingEnabled ? 'text-success' : 'text-text-muted'}">{stockTrackingEnabled ? 'On' : 'Off'}</b>
                 </button>
-                <button
-                    class="p-4 rounded-md border-2 text-left transition-colors {!stockTrackingEnabled ? 'border-accent-primary bg-accent-primary/10' : 'border-border-flat bg-bg-panel'}"
-                    on:click={() => setStockTracking(false)}
-                >
-                    <strong class="block">Do not track stock</strong>
-                    <span class="text-xs text-text-muted">Disable stock tracking everywhere without deleting saved levels.</span>
+                <button class={switchCardClass(!stockTrackingEnabled)} on:click={() => setStockTracking(false)}>
+                    <span class="font-extrabold">Do not track stock</span>
+                    <small class="mt-1 block text-text-muted">Disable stock tracking everywhere without deleting saved levels.</small>
+                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {!stockTrackingEnabled ? 'text-success' : 'text-text-muted'}">{!stockTrackingEnabled ? 'On' : 'Off'}</b>
                 </button>
             </div>
         </section>
 
         <section class="settings-section">
-            <div class="section-topline">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                     <h3 class="settings-section-title">Training Mode</h3>
-                    <p>Use this till for practice without saving sales, changing stock, loyalty points, reports, or CCTV/receipt output.</p>
+                    <p class="mb-4 text-sm text-text-muted">Use this till for practice without saving sales, changing stock, loyalty points, reports, or CCTV/receipt output.</p>
                 </div>
-                <button
-                    class="btn {trainingModeEnabled ? 'btn-danger' : 'btn-secondary'}"
-                    on:click={() => updateSetting('training_mode_enabled', trainingModeEnabled ? 'false' : 'true')}
-                >
+                <button class="btn {trainingModeEnabled ? 'btn-danger' : 'btn-secondary'}" on:click={() => updateSetting('training_mode_enabled', trainingModeEnabled ? 'false' : 'true')}>
                     Training: {trainingModeEnabled ? 'On' : 'Off'}
                 </button>
             </div>
@@ -284,96 +248,33 @@
         </section>
 
         <section class="settings-section">
-            <div class="section-topline">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
                     <h3 class="settings-section-title">Till Cash-Up</h3>
-                    <p>Optionally require each cashier to open and reconcile their shift on each till.</p>
+                    <p class="mb-4 text-sm text-text-muted">Optionally require each cashier to open and reconcile their shift on each till.</p>
                 </div>
-                <button
-                    class="btn {cashUpEnabled ? 'btn-success' : 'btn-secondary'}"
-                    on:click={() => setCashUpEnabled(!cashUpEnabled)}
-                >
+                <button class="btn {cashUpEnabled ? 'btn-success' : 'btn-secondary'}" on:click={() => setCashUpEnabled(!cashUpEnabled)}>
                     Cash-Up: {cashUpEnabled ? 'Enabled' : 'Disabled'}
                 </button>
             </div>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button
-                    class={switchCardClass(openingFloatRequired)}
-                    disabled={!cashUpEnabled}
-                    on:click={() => updateSetting('cash_up_require_opening_float', openingFloatRequired ? 'false' : 'true')}
-                >
+                <button class={switchCardClass(openingFloatRequired)} disabled={!cashUpEnabled} on:click={() => updateSetting('cash_up_require_opening_float', openingFloatRequired ? 'false' : 'true')}>
                     <span class="font-extrabold">Opening float</span>
-                    <small class="mt-1 block text-text-muted">Ask the cashier how much cash is in the drawer when opening a new shift.</small>
+                    <small class="mt-1 block text-text-muted">Ask how much cash is in the drawer when opening a new shift.</small>
                     <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {openingFloatRequired ? 'text-success' : 'text-text-muted'}">{openingFloatRequired ? 'On' : 'Off'}</b>
                 </button>
-                <button
-                    class={switchCardClass(cardReconciliationEnabled)}
-                    disabled={!cashUpEnabled}
-                    on:click={() => updateSetting('cash_up_reconcile_card', cardReconciliationEnabled ? 'false' : 'true')}
-                >
+                <button class={switchCardClass(cardReconciliationEnabled)} disabled={!cashUpEnabled} on:click={() => updateSetting('cash_up_reconcile_card', cardReconciliationEnabled ? 'false' : 'true')}>
                     <span class="font-extrabold">Card-machine total</span>
                     <small class="mt-1 block text-text-muted">Ask for the card terminal total and show any difference when closing.</small>
                     <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cardReconciliationEnabled ? 'text-success' : 'text-text-muted'}">{cardReconciliationEnabled ? 'On' : 'Off'}</b>
                 </button>
             </div>
-            <p class="text-text-muted text-[0.82rem] mt-3">
-                This is a shop-wide setting and synchronizes to every till. Each shift remains tied to its cashier and unique till ID.
-            </p>
+            <p class="mt-3 text-sm text-text-muted">This is a shop-wide setting and synchronizes to every till.</p>
         </section>
 
-        <section class="settings-section feedback-section">
-            <div class="section-topline">
-                <div>
-                    <h3 class="settings-section-title">Sound &amp; Haptics</h3>
-                    <p>Control operator feedback across every till. Changes apply immediately.</p>
-                </div>
-                <button class="btn btn-secondary" on:click={playCartButtonFeedback}>Test Button Click</button>
-            </div>
-
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button class={switchCardClass(buttonSoundEnabled)} on:click={() => setFeedbackSetting('feedback_button_sound_enabled', !buttonSoundEnabled)}>
-                    <span class="font-extrabold">Button click sound</span><small class="mt-1 block text-text-muted">Short click on enabled buttons and links.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {buttonSoundEnabled ? 'text-success' : 'text-text-muted'}">{buttonSoundEnabled ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(itemSoundEnabled)} on:click={() => setFeedbackSetting('feedback_item_sound_enabled', !itemSoundEnabled)}>
-                    <span class="font-extrabold">Item-added sound</span><small class="mt-1 block text-text-muted">Fast confirmation after adding an item.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {itemSoundEnabled ? 'text-success' : 'text-text-muted'}">{itemSoundEnabled ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(hapticsEnabled)} on:click={() => setFeedbackSetting('feedback_haptics_enabled', !hapticsEnabled)}>
-                    <span class="font-extrabold">Haptic vibration</span><small class="mt-1 block text-text-muted">Vibration on supported phones and tablets.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {hapticsEnabled ? 'text-success' : 'text-text-muted'}">{hapticsEnabled ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(saleSoundEnabled)} on:click={() => setFeedbackSetting('feedback_sale_sound_enabled', !saleSoundEnabled)}>
-                    <span class="font-extrabold">Sale-completed sound</span><small class="mt-1 block text-text-muted">Confirmation chime when payment finishes.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {saleSoundEnabled ? 'text-success' : 'text-text-muted'}">{saleSoundEnabled ? 'On' : 'Off'}</b>
-                </button>
-            </div>
-
-            <div class="mt-4 border-t border-border-flat pt-4">
-                <div class="flex flex-col gap-1">
-                    <span class="font-extrabold">Failed barcode alert</span>
-                    <small class="text-text-muted">Choose the sound that gets the operator’s attention.</small>
-                </div>
-                <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    {#each [
-                        { id: 'vintage', name: 'Vintage Ring', detail: 'Mechanical telephone bell' },
-                        { id: 'busy', name: 'Busy Line', detail: 'Three telephone pulses' },
-                        { id: 'beep', name: 'Warning Beep', detail: 'Short two-tone warning' },
-                        { id: 'silent', name: 'Silent', detail: 'Visual warning only' },
-                    ] as option}
-                        <button class={alertCardClass(barcodeErrorSound === option.id)} on:click={() => selectBarcodeErrorSound(option.id)}>
-                            <strong class="block">{option.name}</strong><small class="mt-1 block text-text-muted">{option.detail}</small>
-                        </button>
-                    {/each}
-                </div>
-                <div class="mt-3 flex flex-wrap gap-2">
-                    <button class="btn btn-secondary" on:click={playItemAddedSound}>Test Item Added</button>
-                    <button class="btn btn-secondary" on:click={playSuccessSound}>Test Sale Complete</button>
-                    <button class="btn btn-secondary" on:click={playErrorSound} disabled={barcodeErrorSound === 'silent'}>Test Barcode Alert</button>
-                </div>
-            </div>
-        </section>
-
-        <!-- Till Configuration -->
         <section class="settings-section">
             <h3 class="settings-section-title">Till Configuration</h3>
-            <p class="text-text-muted text-[0.9rem] mb-4">Each machine auto-generates a unique identity. Set a display name below.</p>
+            <p class="mb-4 text-sm text-text-muted">Each machine auto-generates a unique identity. Set a display name below.</p>
             <div class="form-grid">
                 <div class="field">
                     <label>Till Display Name</label>
@@ -390,234 +291,17 @@
         </section>
 
         <section class="settings-section">
-            <div class="section-topline">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h3 class="settings-section-title">Cash Drawer</h3>
-                    <p>Open the drawer through the receipt/thermal printer cash-drawer port.</p>
+                    <h3 class="settings-section-title">Database Status</h3>
+                    <p class="mb-0 text-sm text-text-muted">
+                        {$connectionState.mysqlOnline ? 'Connected to the central MariaDB server.' : 'Working from the local SQLite database.'}
+                    </p>
                 </div>
-                <button
-                    class="btn {cashDrawerConfig.enabled ? 'btn-success' : 'btn-secondary'}"
-                    on:click={() => updateSetting('cash_drawer_enabled', cashDrawerConfig.enabled ? 'false' : 'true')}
-                >
-                    Drawer: {cashDrawerConfig.enabled ? 'Enabled' : 'Disabled'}
-                </button>
-            </div>
-            <p class="text-text-muted text-[0.9rem] mb-4">
-                Most cash drawers plug into the receipt printer with an RJ11/RJ12 cable. The POS sends the standard ESC/POS pulse to the printer, and the printer kicks the drawer open.
-            </p>
-            <div class="form-grid">
-                <div class="field">
-                    <label>Receipt Printer IP Address</label>
-                    <input
-                        value={cashDrawerConfig.host}
-                        placeholder="e.g. 192.168.1.50"
-                        on:change={(e) => updateSetting('cash_drawer_printer_host', e.currentTarget.value.trim())}
-                    />
-                </div>
-                <div class="field">
-                    <label>Printer Port</label>
-                    <input
-                        type="number"
-                        min="1"
-                        max="65535"
-                        value={cashDrawerConfig.port}
-                        on:change={(e) => updateSetting('cash_drawer_printer_port', e.currentTarget.value || '9100')}
-                    />
-                    <small class="text-text-muted">Network thermal printers normally use port 9100.</small>
-                </div>
-                <div class="field">
-                    <CustomSelect
-                        label="Drawer Pin"
-                        value={cashDrawerConfig.pin}
-                        options={drawerPinOptions}
-                        on:change={(event) => updateSetting('cash_drawer_pin', event.detail)}
-                    />
-                </div>
-                <div class="field">
-                    <label>Pulse Timing</label>
-                    <div class="grid grid-cols-2 gap-2">
-                        <input
-                            type="number"
-                            min="2"
-                            max="510"
-                            value={cashDrawerConfig.pulseOnMs}
-                            on:change={(e) => updateSetting('cash_drawer_pulse_on_ms', e.currentTarget.value || '50')}
-                            title="Pulse on milliseconds"
-                        />
-                        <input
-                            type="number"
-                            min="2"
-                            max="510"
-                            value={cashDrawerConfig.pulseOffMs}
-                            on:change={(e) => updateSetting('cash_drawer_pulse_off_ms', e.currentTarget.value || '250')}
-                            title="Pulse off milliseconds"
-                        />
-                    </div>
-                    <small class="text-text-muted">50 / 250 works for most Epson-compatible printers.</small>
-                </div>
-            </div>
-            <div class="flex flex-wrap gap-3 items-center mt-4">
-                <button class="btn btn-secondary" on:click={testCashDrawer}>Test Drawer</button>
-                <span class="text-sm text-text-muted">{drawerTestStatus}</span>
-            </div>
-        </section>
-
-        <section class="settings-section">
-            <div class="section-topline">
-                <div>
-                    <h3 class="settings-section-title">CCTV POS Overlay</h3>
-                    <p>Send transaction text to a Hikvision DVR/NVR POS input. These settings are saved on this till only.</p>
-                </div>
-                <button
-                    class="btn {cctvConfig.enabled ? 'btn-success' : 'btn-secondary'}"
-                    on:click={() => updateSetting('cctv_pos_enabled', cctvConfig.enabled ? 'false' : 'true')}
-                >
-                    CCTV Overlay: {cctvConfig.enabled ? 'Enabled' : 'Disabled'}
-                </button>
-            </div>
-            <div class="form-grid">
-                <div class="field">
-                    <label>DVR / NVR IP Address</label>
-                    <input
-                        value={cctvConfig.host}
-                        placeholder="e.g. 192.168.1.104"
-                        on:change={(e) => updateSetting('cctv_pos_host', e.currentTarget.value.trim())}
-                    />
-                </div>
-                <div class="field">
-                    <label>DVR / NVR POS Port</label>
-                    <input
-                        type="number"
-                        min="1"
-                        max="65535"
-                        value={cctvConfig.port}
-                        on:change={(e) => updateSetting('cctv_pos_port', e.currentTarget.value || '10010')}
-                    />
-                </div>
-                <div class="field">
-                    <label>POS Number on DVR</label>
-                    <input
-                        value={cctvConfig.posNumber}
-                        placeholder="e.g. 1"
-                        on:change={(e) => updateSetting('cctv_pos_number', e.currentTarget.value.trim() || '1')}
-                    />
-                </div>
-                <div class="field">
-                    <label>POS Name Sent to CCTV</label>
-                    <input
-                        value={cctvConfig.posName}
-                        placeholder="e.g. POS 1 / Till 1"
-                        on:change={(e) => updateSetting('cctv_pos_name', e.currentTarget.value.trim() || 'POS 1')}
-                    />
-                </div>
-                <div class="field">
-                    <label>This Till IP Address</label>
-                    <input
-                        value={cctvConfig.sourceIp}
-                        placeholder="e.g. 192.168.1.186"
-                        on:change={(e) => updateSetting('cctv_pos_source_ip', e.currentTarget.value.trim())}
-                    />
-                    <small class="text-text-muted">Put this same IP in the DVR “Allowed Remote IP” field.</small>
-                </div>
-                <div class="field">
-                    <CustomSelect
-                        label="Character Encoding"
-                        value={cctvConfig.encoding}
-                        options={cctvEncodingOptions}
-                        on:change={(event) => updateSetting('cctv_pos_encoding', event.detail)}
-                    />
-                </div>
-            </div>
-            <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button class={switchCardClass(cctvConfig.sendItems)} on:click={() => updateSetting('cctv_pos_send_items', cctvConfig.sendItems ? 'false' : 'true')}>
-                    <span class="font-extrabold">Send item scans</span><small class="mt-1 block text-text-muted">Show each item as it is added to the cart.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendItems ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendItems ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(cctvConfig.sendReceipts)} on:click={() => updateSetting('cctv_pos_send_receipts', cctvConfig.sendReceipts ? 'false' : 'true')}>
-                    <span class="font-extrabold">Send final receipt</span><small class="mt-1 block text-text-muted">Show the sale total after payment is completed.</small><b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendReceipts ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendReceipts ? 'On' : 'Off'}</b>
-                </button>
-            </div>
-            <div class="flex flex-wrap gap-3 items-center mt-4">
-                <button class="btn btn-secondary" on:click={testCctvPosOverlay}>Send CCTV Test</button>
-                <span class="text-sm text-text-muted">{cctvTestStatus}</span>
-            </div>
-        </section>
-
-        <!-- Database Connection -->
-        <section class="settings-section" id="database">
-            <h3 class="settings-section-title">Database Connection</h3>
-            <p class="text-text-muted text-[0.9rem] mb-4">Monitor the connection to the central MariaDB server.</p>
-            <div class="p-4 bg-bg-root rounded-md border border-border-flat flex items-center justify-between mb-4">
-                <div class="flex items-center gap-3">
-                    <div class="w-3 h-3 rounded-full {$connectionState.mysqlOnline ? 'bg-success' : 'bg-danger'} shadow-[0_0_8px_currentColor]"></div>
-                    <div>
-                        <div class="font-bold text-[1.1rem]">{$connectionState.mysqlOnline ? 'Connected to MariaDB' : 'Offline / Single Mode'}</div>
-                        {#if $connectionState.mode === 'multi'}
-                            <div class="text-[0.9rem] text-text-muted mt-1">Host: {$connectionState.mysqlConfig?.host || 'Unknown'}</div>
-                            {#if $connectionState.syncError}
-                                <div class="text-[0.8rem] text-danger mt-1 p-2 bg-danger/10 rounded font-mono">{$connectionState.syncError}</div>
-                            {/if}
-                        {:else}
-                            <div class="text-[0.9rem] text-text-muted mt-1">Operating entirely on local SQLite database.</div>
-                        {/if}
-                    </div>
-                </div>
-            </div>
-            {#if $currentEmployee?.role === 'admin'}
-                <div class="flex justify-end mt-2">
+                {#if $currentEmployee?.role === 'admin'}
                     <a href="/settings/advanced" class="btn btn-secondary">Advanced Maintenance</a>
-                </div>
-            {/if}
-        </section>
-
-        <section class="settings-section">
-            <h3 class="settings-section-title">Create Backup</h3>
-            <p class="text-text-muted text-[0.9rem] mb-4">Create a safe local database backup before upgrades or important changes. Restoring is available in Advanced Maintenance.</p>
-            <div class="flex flex-wrap gap-3">
-                <button class="btn btn-primary" on:click={handleBackup}>Create Backup</button>
+                {/if}
             </div>
-            {#if backupStatus}<p class="text-sm text-text-muted mt-3 break-all">{backupStatus}</p>{/if}
         </section>
     </div>
 </MgmtPage>
-
-<style>
-    :global(.settings-canvas .settings-section) {
-        border-radius: 1rem;
-        background:
-            linear-gradient(145deg, color-mix(in srgb, var(--bg-card) 95%, var(--accent-primary) 5%), var(--bg-card));
-        box-shadow: 0 14px 38px color-mix(in srgb, var(--shadow) 24%, transparent);
-    }
-    .settings-canvas { padding: 1.25rem; display: flex; flex-direction: column; gap: 1.25rem; background: radial-gradient(circle at 95% 0%, color-mix(in srgb, var(--accent-primary) 12%, transparent), transparent 26%); }
-    .settings-hero { padding: 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid var(--border-flat); border-radius: 1.1rem; background: linear-gradient(120deg, color-mix(in srgb, var(--accent-primary) 20%, var(--bg-panel)), var(--bg-card)); }
-    .settings-hero span, .settings-tile span { color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
-    .settings-hero h2 { margin: .25rem 0 .35rem; font-size: clamp(1.5rem, 3vw, 2.3rem); }
-    .settings-hero p { margin: 0; color: var(--text-muted); }
-    .hero-status { min-width: 180px; padding: .8rem 1rem; display: flex; align-items: center; gap: .65rem; border: 1px solid var(--border-flat); border-radius: .8rem; background: color-mix(in srgb, var(--bg-card) 85%, transparent); }
-    .hero-status i { width: .7rem; height: .7rem; border-radius: 100%; background: var(--warning); box-shadow: 0 0 12px var(--warning); }
-    .hero-status.online i { background: var(--success); box-shadow: 0 0 12px var(--success); }
-    .hero-status div { display: flex; flex-direction: column; }
-    .hero-status small { color: var(--text-muted); }
-    .settings-tile-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(150px, auto); gap: .8rem; }
-    .settings-tile { position: relative; overflow: hidden; padding: 1.15rem; display: flex; flex-direction: column; gap: .35rem; color: var(--text-main); text-decoration: none; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-card); transition: transform .16s ease, border-color .16s ease; }
-    .settings-tile::after { content: ""; position: absolute; width: 120px; height: 120px; right: -45px; top: -48px; border-radius: 100%; background: color-mix(in srgb, var(--tile-accent) 20%, transparent); }
-    .settings-tile:hover { transform: translateY(-3px); border-color: var(--tile-accent); }
-    .settings-tile b { font-size: 1.2rem; }
-    .settings-tile p { margin: 0; max-width: 420px; color: var(--text-muted); font-size: .85rem; }
-    .settings-tile strong { margin-top: auto; color: var(--tile-accent); font-size: .8rem; }
-    .settings-tile span { color: var(--tile-accent); }
-    .tile-large { grid-column: span 2; grid-row: span 2; min-height: 250px; }
-    .tile-large b { font-size: 1.7rem; }
-    .tile-wide { grid-column: span 2; }
-    .tile-blue { --tile-accent: var(--accent-primary); }
-    .tile-purple { --tile-accent: #a78bfa; }
-    .tile-amber { --tile-accent: var(--warning); }
-    .tile-green { --tile-accent: var(--success); }
-    .tile-red { --tile-accent: var(--danger); }
-    .section-topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
-    .section-topline p { margin: -.6rem 0 1rem; color: var(--text-muted); font-size: .85rem; }
-    @media (max-width: 850px) {
-        .settings-hero { align-items: stretch; flex-direction: column; }
-        .settings-tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .tile-large, .tile-wide { grid-column: span 2; }
-    }
-</style>

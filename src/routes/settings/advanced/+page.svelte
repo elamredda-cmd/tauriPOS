@@ -13,6 +13,7 @@
         dismissSyncConflict,
         getSyncConflicts,
         getLatestLocalBackup,
+        createLocalBackup,
         migrateLocalDataToServer,
         purgeAllTransactions,
         restoreLatestLocalBackup,
@@ -28,6 +29,7 @@
     let syncStatus = '';
     let wipeStatus = '';
     let pushStatus = '';
+    let backupStatus = '';
     let restoreStatus = '';
     let purgeStatus = '';
     let purgeResponsibilityAccepted = false;
@@ -180,6 +182,18 @@
         }
     }
 
+    async function createBackup() {
+        busy = true;
+        backupStatus = 'Creating local backup...';
+        try {
+            backupStatus = `Backup saved: ${await createLocalBackup()}`;
+        } catch (error) {
+            backupStatus = `Backup failed: ${error}`;
+        } finally {
+            busy = false;
+        }
+    }
+
     async function purgeTransactions() {
         if (!purgeResponsibilityAccepted) {
             purgeStatus = 'Confirm that you understand this action permanently deletes database history.';
@@ -303,7 +317,7 @@
         <section class="settings-section danger-card">
             <h3 class="settings-section-title !text-danger">Delete Database</h3>
             <p class="text-text-muted mb-3">
-                Permanently deletes orders, payments, till shifts, cash movements, sales reports, and order-linked logs.
+                Permanently deletes orders, payments, till shifts, cash movements, sales reports, sales audit logs, and refund approvals.
                 Products, current stock levels, customers, loyalty balances and loyalty history, employees, settings, and tills are kept.
             </p>
             {#if $connectionState.mode === 'multi' && !$connectionState.mysqlOnline}
@@ -340,9 +354,15 @@
         </section>
 
         <section class="settings-section danger-card">
-            <h3 class="settings-section-title !text-danger">Restore Local Backup</h3>
-            <p class="text-text-muted mb-4">Replace this till’s local database with its latest backup. The app reloads after restoration.</p>
-            <button class="btn btn-danger" disabled={busy} on:click={restoreBackup}>Restore Latest Backup</button>
+            <h3 class="settings-section-title !text-danger">Local Backups</h3>
+            <p class="text-text-muted mb-4">
+                Create a safe local database backup before upgrades or risky repair tools. Restore replaces this till’s local database with its latest backup and reloads the app.
+            </p>
+            <div class="button-row">
+                <button class="btn btn-primary" disabled={busy} on:click={createBackup}>Create Local Backup</button>
+                <button class="btn btn-danger" disabled={busy} on:click={restoreBackup}>Restore Latest Backup</button>
+            </div>
+            {#if backupStatus}<p class="status-text break-all">{backupStatus}</p>{/if}
             {#if restoreStatus}<p class="status-text">{restoreStatus}</p>{/if}
         </section>
     </div>

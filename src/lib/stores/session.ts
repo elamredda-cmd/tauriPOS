@@ -4,6 +4,20 @@ import { employeesDB, type Employee } from './db';
 export const currentEmployee = writable<Employee | null>(null);
 export const currentShiftId = writable<string>('');
 
+function writeSessionAudit(action: 'employee_login' | 'employee_logout', employee: Employee | null): void {
+    if (!employee) return;
+    void import('./database')
+        .then(({ recordAuditEvent }) => recordAuditEvent(
+            action,
+            'employee',
+            employee.id,
+            null,
+            { id: employee.id, name: employee.name, role: employee.role },
+            employee.id,
+        ))
+        .catch((error) => console.warn(`session: could not audit ${action}:`, error));
+}
+
 export async function hashPin(pin: string): Promise<string> {
     const bytes = new TextEncoder().encode(`pos-pin-v1:${pin}`);
     const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -45,10 +59,13 @@ async function finishAuthentication(employee: Employee | null, hash: string): Pr
         await upsert('employees', employee);
     }
     currentEmployee.set(employee);
+    writeSessionAudit('employee_login', employee);
     return employee;
 }
 
 export function logout(): void {
+    const employee = get(currentEmployee);
+    writeSessionAudit('employee_logout', employee);
     currentEmployee.set(null);
     currentShiftId.set('');
 }
