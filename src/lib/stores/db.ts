@@ -326,6 +326,54 @@ export interface Setting {
     updatedAt: string;
 }
 
+export interface TillReportMarker {
+    id: string;
+    tillNumber: string;
+    type: string;
+    markerTime: string;
+    periodStart: string;
+    periodEnd: string;
+    employeeId: string;
+    reportText: string;
+    reportTotal: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface ManagerApproval {
+    id: string;
+    requestedByEmployeeId: string;
+    approvedByEmployeeId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    notes: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface StockReceipt {
+    id: string;
+    supplierId: string;
+    employeeId: string;
+    reference: string;
+    notes: string;
+    totalCost: number;
+    status: 'received' | 'voided';
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface StockReceiptLine {
+    id: string;
+    receiptId: string;
+    productId: string;
+    quantity: number;
+    unitCost: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
 
 // ─────────────────────────────────────────────
 // STORES — Transitioning to SQLite
@@ -423,6 +471,8 @@ const seedSettings: Setting[] = [
     { key: 'cash_up_enabled', value: 'false', updatedAt: now() },
     { key: 'cash_up_require_opening_float', value: 'true', updatedAt: now() },
     { key: 'cash_up_reconcile_card', value: 'true', updatedAt: now() },
+    { key: 'role_permissions', value: '', updatedAt: now() },
+    { key: 'training_mode_enabled', value: 'false', updatedAt: now() },
 ];
 
 

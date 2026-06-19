@@ -389,7 +389,56 @@ export async function initDb() {
             markerTime TEXT NOT NULL,
             periodStart TEXT NOT NULL,
             periodEnd TEXT NOT NULL,
-            createdAt TEXT
+            employeeId TEXT,
+            reportText TEXT,
+            reportTotal INTEGER DEFAULT 0,
+            createdAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
+    // 26. Manager Approvals
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS manager_approvals (
+            id TEXT PRIMARY KEY,
+            requestedByEmployeeId TEXT,
+            approvedByEmployeeId TEXT,
+            action TEXT NOT NULL,
+            entityType TEXT,
+            entityId TEXT,
+            notes TEXT,
+            createdAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
+    // 27. Stock Receipts
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS stock_receipts (
+            id TEXT PRIMARY KEY,
+            supplierId TEXT,
+            employeeId TEXT,
+            reference TEXT,
+            notes TEXT,
+            totalCost INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'received',
+            createdAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
+    // 28. Stock Receipt Lines
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS stock_receipt_lines (
+            id TEXT PRIMARY KEY,
+            receiptId TEXT NOT NULL,
+            productId TEXT NOT NULL,
+            quantity INTEGER DEFAULT 0,
+            unitCost INTEGER DEFAULT 0,
+            createdAt TEXT,
+            updatedAt TEXT,
+            FOREIGN KEY(receiptId) REFERENCES stock_receipts(id) ON DELETE CASCADE,
+            FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
         )
     `);
 
@@ -446,6 +495,9 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_manager_approvals_action ON manager_approvals(action)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_stock_receipts_created ON stock_receipts(createdAt)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`);
 
     // Apply incremental migrations to existing tables (safe to re-run).
     await runMigrations();
@@ -557,13 +609,20 @@ async function runMigrations() {
     await addColumnIfMissing('shifts', 'expectedCard', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('shifts', 'actualCard', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('shifts', 'cardDifference', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('till_report_markers', 'periodStart', "TEXT DEFAULT ''");
+    await addColumnIfMissing('till_report_markers', 'periodEnd', "TEXT DEFAULT ''");
+    await addColumnIfMissing('till_report_markers', 'employeeId', "TEXT DEFAULT ''");
+    await addColumnIfMissing('till_report_markers', 'reportText', "TEXT DEFAULT ''");
+    await addColumnIfMissing('till_report_markers', 'reportTotal', 'INTEGER DEFAULT 0');
+    await addColumnIfMissing('till_report_markers', 'updatedAt', 'TEXT');
 
     // updatedAt on every remaining synced table so delta sync works for all.
     for (const t of [
         'categories', 'pos_pages', 'pos_tiles', 'tax_rates', 'customers',
         'employees', 'registers', 'suppliers', 'product_suppliers',
         'inventory_logs', 'promo_groups', 'promo_group_items',
-        'shifts', 'cash_movements', 'loyalty_logs', 'audit_logs'
+        'shifts', 'cash_movements', 'loyalty_logs', 'audit_logs',
+        'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
     ]) {
         await addColumnIfMissing(t, 'updatedAt', 'TEXT');
     }
@@ -1382,14 +1441,29 @@ export async function getLastReportMarker(tillNumber: string): Promise<string | 
 }
 
 /** Save a report marker for a till. */
-export async function saveReportMarker(tillNumber: string, periodStart: string, periodEnd: string): Promise<void> {
+export async function saveReportMarker(
+    tillNumber: string,
+    periodStart: string,
+    periodEnd: string,
+    extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {}
+): Promise<any> {
     const d = await getDb();
-    const id = crypto.randomUUID();
-    await d.execute(
-        `INSERT INTO till_report_markers (id, tillNumber, type, markerTime, periodStart, periodEnd, createdAt)
-         VALUES (?, ?, 'period', ?, ?, ?, ?)`,
-        [id, tillNumber, periodEnd, periodStart, periodEnd, new Date().toISOString()]
-    );
+    const stamp = new Date().toISOString();
+    const row = {
+        id: crypto.randomUUID(),
+        tillNumber,
+        type: 'period',
+        markerTime: periodEnd,
+        periodStart,
+        periodEnd,
+        employeeId: extra.employeeId || '',
+        reportText: extra.reportText || '',
+        reportTotal: extra.reportTotal || 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+    };
+    await upsert('till_report_markers', row);
+    return row;
 }
 
 /** Get a unique till identifier for this machine, auto-generating if needed. */
@@ -1616,6 +1690,8 @@ export async function getTillPeriodReport(
     endTime: string
 ): Promise<{ overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] }> {
     const d = await getDb();
+    const tillFilter = tillNumber ? `AND o.tillNumber = ?` : '';
+    const periodParams = tillNumber ? [tillNumber, startTime, endTime] : [startTime, endTime];
 
     // Overview
     const revRows: any[] = await d.select(
@@ -1627,8 +1703,8 @@ export async function getTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const itemRows: any[] = await d.select(
         `SELECT COALESCE(SUM(ol.quantity), 0) as totalItems
@@ -1636,8 +1712,8 @@ export async function getTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const rev = revRows[0] || {};
     const items = itemRows[0] || {};
@@ -1682,8 +1758,8 @@ export async function getTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
@@ -1713,12 +1789,12 @@ export async function getTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?
          GROUP BY ol.productId, ol.productName, pr.sku
          HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY qtySold DESC
          LIMIT 10`,
-        [tillNumber, startTime, endTime]
+        periodParams
     );
     const topProducts: TopProduct[] = tpRows.map(r => ({
         name: r.name || 'Unknown',

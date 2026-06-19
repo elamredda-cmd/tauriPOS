@@ -50,6 +50,7 @@
         findOpenShiftForRegister,
         retireOpenShiftsBefore,
         ensureTillReceiptSequence,
+        recordManagerApproval,
         type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
@@ -58,7 +59,7 @@
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
     import { getReceiptDesign } from "$lib/receipt";
-    import { authenticateEmployeePin, canManage, currentEmployee, currentShiftId, logout } from "$lib/stores/session";
+    import { authenticateEmployeePin, canManage, currentEmployee, currentShiftId, logout, verifyEmployeePin } from "$lib/stores/session";
     import { connectionState } from "$lib/stores/connection";
     import { getBarcodeRules, parseScaleBarcode } from "$lib/barcodeRules";
     import { getScaleSaleDisplay } from "$lib/scaleSale";
@@ -69,6 +70,7 @@
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
     import { getReceiptPrinterConfig, sendEscposReceipt } from "$lib/printers";
+    import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
 
     let activePageId = "";
     let currentPageIndex = 0;
@@ -161,7 +163,7 @@
     let showClearConfirm = false;
     let showReversalConfirm = false;
     let showPartialRefundPad = false;
-    let pendingReversal: { orderId: string; partial: boolean; voiding: boolean } | null = null;
+    let pendingReversal: { orderId: string; partial: boolean; voiding: boolean; approved?: boolean } | null = null;
     let partialRefundInput = "";
     let isReversingOrder = false;
     let isCompletingSale = false;
@@ -172,6 +174,16 @@
     let selectedLoginEmployeeId = "";
     let loginPin = "";
     let loginError = "";
+    let showManagerApprovalModal = false;
+    let managerApprovalPermission: PermissionKey = "price_override";
+    let managerApprovalTitle = "";
+    let managerApprovalEntityType = "";
+    let managerApprovalEntityId = "";
+    let managerApprovalNotes = "";
+    let managerApprovalEmployeeId = "";
+    let managerApprovalPin = "";
+    let managerApprovalError = "";
+    let managerApprovalAction: (() => Promise<void> | void) | null = null;
     let pendingShiftEmployee: Employee | null = null;
     let openingFloatString = "0";
     let lastRevokedEmployeeId = "";
@@ -179,6 +191,12 @@
         .filter((employee) => employee.isActive)
         .sort((a, b) => a.name.localeCompare(b.name));
     $: selectedLoginEmployee = activeLoginEmployees.find((employee) => employee.id === selectedLoginEmployeeId) || null;
+    $: managerApprovers = $employeesDB
+        .filter((employee) => employee.isActive && hasPermission(employee, managerApprovalPermission, $settingsDB))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    $: if (showManagerApprovalModal && (!managerApprovalEmployeeId || !managerApprovers.some((employee) => employee.id === managerApprovalEmployeeId))) {
+        managerApprovalEmployeeId = managerApprovers[0]?.id || "";
+    }
     $: {
         const sessionEmployee = $currentEmployee;
         if (sessionEmployee) {
@@ -242,6 +260,7 @@
     $: cartLayout = parsePosLayout($settingsDB.find(s => s.key === 'pos_cart_layout')?.value, cartLayoutDefault, allowedCartLayoutKeys);
     $: toolbarLayout = parsePosLayout($settingsDB.find(s => s.key === 'pos_toolbar_layout')?.value, toolbarLayoutDefault, allowedToolbarLayoutKeys);
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
+    $: trainingModeEnabled = ($settingsDB.find(s => s.key === 'training_mode_enabled')?.value ?? 'false') === 'true';
     $: scaleTilePages = (() => {
         try {
             const pageValue = $settingsDB.find(s => s.key === "scale_tile_pages")?.value;
@@ -510,7 +529,62 @@
             toast("Add an item before applying a discount", "error");
             return;
         }
-        showDiscountModal = true;
+        void requirePermission("manual_discount", "Apply manual discount", () => {
+            showDiscountModal = true;
+        });
+    }
+
+    async function requirePermission(
+        permission: PermissionKey,
+        title: string,
+        action: () => Promise<void> | void,
+        entityType = "",
+        entityId = "",
+        notes = "",
+    ) {
+        if (hasPermission($currentEmployee, permission, $settingsDB)) {
+            await action();
+            return;
+        }
+        managerApprovalPermission = permission;
+        managerApprovalTitle = title;
+        managerApprovalEntityType = entityType;
+        managerApprovalEntityId = entityId;
+        managerApprovalNotes = notes;
+        managerApprovalPin = "";
+        managerApprovalError = "";
+        managerApprovalAction = action;
+        showManagerApprovalModal = true;
+    }
+
+    async function approveManagerAction() {
+        if (!managerApprovalEmployeeId) {
+            managerApprovalError = "Choose a manager or admin";
+            return;
+        }
+        const approver = await verifyEmployeePin(managerApprovalEmployeeId, managerApprovalPin);
+        if (!approver || !hasPermission(approver, managerApprovalPermission, $settingsDB)) {
+            managerApprovalError = "PIN does not approve this action";
+            managerApprovalPin = "";
+            return;
+        }
+        const action = managerApprovalAction;
+        showManagerApprovalModal = false;
+        managerApprovalPin = "";
+        managerApprovalError = "";
+        managerApprovalAction = null;
+        await recordManagerApproval({
+            id: uuid(),
+            requestedByEmployeeId: $currentEmployee?.id || "",
+            approvedByEmployeeId: approver.id,
+            action: managerApprovalPermission,
+            entityType: managerApprovalEntityType,
+            entityId: managerApprovalEntityId,
+            notes: managerApprovalNotes || managerApprovalTitle,
+            createdAt: now(),
+            updatedAt: now(),
+        });
+        await action?.();
     }
 
     function selectManualDiscount(id: string) {
@@ -1145,14 +1219,26 @@
     function openChangePrice() {
         if (cart[selectedCartIndex]) {
             const product = $productsDB.find((item) => item.id === cart[selectedCartIndex].id);
-            if (!product?.allowPriceOverride && !canManage($currentEmployee)) {
-                toast("Manager permission required to override this item price", "error");
+            if (!product?.allowPriceOverride && !hasPermission($currentEmployee, "price_override", $settingsDB)) {
+                void requirePermission(
+                    "price_override",
+                    "Override item price",
+                    () => showChangePricePadForSelected(),
+                    "product",
+                    product?.id || cart[selectedCartIndex].id,
+                    `Temporary price override for ${cart[selectedCartIndex].name}`,
+                );
                 return;
             }
-            changePriceString = cart[selectedCartIndex].price.toString();
-            hasStartedTypingPrice = false;
-            showChangePricePad = true;
+            showChangePricePadForSelected();
         }
+    }
+
+    function showChangePricePadForSelected() {
+        if (!cart[selectedCartIndex]) return;
+        changePriceString = cart[selectedCartIndex].price.toString();
+        hasStartedTypingPrice = false;
+        showChangePricePad = true;
     }
 
     function handleChangePriceKey(key: string) {
@@ -1193,8 +1279,19 @@
     }
 
     async function changePricePermanently() {
-        if (!canManage($currentEmployee)) {
-            toast("Manager permission required", "error");
+        await performPermanentPriceChange(false);
+    }
+
+    async function performPermanentPriceChange(approvedByManager: boolean) {
+        if (!approvedByManager && !hasPermission($currentEmployee, "price_override", $settingsDB)) {
+            await requirePermission(
+                "price_override",
+                "Change item price permanently",
+                () => performPermanentPriceChange(true),
+                "product",
+                cart[selectedCartIndex]?.id || "",
+                `Permanent price change for ${cart[selectedCartIndex]?.name || "item"}`,
+            );
             return;
         }
         const newPence = parseInt(changePriceString) || 0;
@@ -1285,8 +1382,25 @@
             goto("/setup");
             return;
         }
-        if (!canManage($currentEmployee) && !['/orders', '/shifts'].includes(path)) {
-            toast("Manager permission required", "error");
+        const permissionByPath: Record<string, PermissionKey> = {
+            "/design": "open_design",
+            "/tiles": "open_design",
+            "/items": "open_items",
+            "/categories": "open_items",
+            "/customers": "open_items",
+            "/suppliers": "open_items",
+            "/tax-rates": "open_items",
+            "/discounts": "open_discounts",
+            "/employees": "open_employees",
+            "/reports": "open_reports",
+            "/settings": "open_settings",
+            "/sync": "open_sync",
+            "/audit": "open_audit",
+            "/stock-receiving": "open_stock_receiving",
+        };
+        const permission = permissionByPath[path];
+        if (permission && !hasPermission($currentEmployee, permission, $settingsDB)) {
+            void requirePermission(permission, `Open ${permissionLabels[permission]}`, () => goto(path), "page", path);
             showMenu = false;
             return;
         }
@@ -1427,10 +1541,16 @@
         }
     }
 
-    async function reverseOrder(orderId: string, partial: boolean, voiding: boolean) {
+    async function reverseOrder(orderId: string, partial: boolean, voiding: boolean, approvedByManager = false) {
         if (isReversingOrder) return;
-        if (!canManage($currentEmployee)) {
-            toast("Manager permission required", "error");
+        if (!approvedByManager && !hasPermission($currentEmployee, "refund_void", $settingsDB)) {
+            await requirePermission(
+                "refund_void",
+                voiding ? "Void sale" : partial ? "Partial refund" : "Refund sale",
+                () => reverseOrder(orderId, partial, voiding, true),
+                "order",
+                orderId,
+            );
             return;
         }
         const original = get(ordersDB).find((o) => o.id === orderId);
@@ -1593,11 +1713,21 @@
     }
 
     function requestReversal(orderId: string, partial: boolean, voiding: boolean) {
-        if (!canManage($currentEmployee)) {
-            toast("Manager permission required", "error");
+        if (!hasPermission($currentEmployee, "refund_void", $settingsDB)) {
+            void requirePermission(
+                "refund_void",
+                voiding ? "Void sale" : partial ? "Partial refund" : "Refund sale",
+                () => beginReversal(orderId, partial, voiding, true),
+                "order",
+                orderId,
+            );
             return;
         }
-        pendingReversal = { orderId, partial, voiding };
+        beginReversal(orderId, partial, voiding, false);
+    }
+
+    function beginReversal(orderId: string, partial: boolean, voiding: boolean, approved = false) {
+        pendingReversal = { orderId, partial, voiding, approved };
         partialRefundInput = "";
         if (partial) showPartialRefundPad = true;
         else showReversalConfirm = true;
@@ -1625,7 +1755,7 @@
 
     async function confirmPendingReversal() {
         if (!pendingReversal) return;
-        await reverseOrder(pendingReversal.orderId, pendingReversal.partial, pendingReversal.voiding);
+        await reverseOrder(pendingReversal.orderId, pendingReversal.partial, pendingReversal.voiding, pendingReversal.approved);
     }
 
     let nextPoundAmount: number | null = null;
@@ -2001,6 +2131,23 @@
                 }] : []),
             ] : [];
 
+            if (trainingModeEnabled) {
+                cart = [];
+                selectedCartIndex = 0;
+                showPaymentModal = false;
+                customerDisplayChange = paymentMethod === "cash" ? Math.max(0, change) : 0;
+                customerDisplayCompleteUntil = Date.now() + 8000;
+                setTimeout(() => {
+                    customerDisplayCompleteUntil = 0;
+                    customerDisplayChange = 0;
+                }, 8000);
+                selectedCustomerId = "";
+                useLoyaltyCredit = false;
+                playSuccessSound();
+                toast("Training sale completed. Nothing was saved.", "success", true);
+                return;
+            }
+
             const committedSale = await commitSale({ order: newOrder, lines, payment, stockChanges, loyaltyChanges, audit });
             applyCompletedSaleToStores(committedSale);
             void openDrawerAfterSuccessfulPayment();
@@ -2239,8 +2386,29 @@
                                 class="menu-link {isMenuDisabled
                                     ? 'menu-link-disabled'
                                     : ''}"
+                                on:click={() => handleMenuClick("/stock-receiving")}
+                                >📥 Stock Receiving</button
+                            >
+                            <button
+                                class="menu-link {isMenuDisabled
+                                    ? 'menu-link-disabled'
+                                    : ''}"
                                 on:click={() => handleMenuClick("/reports")}
                                 >📊 Reports</button
+                            >
+                            <button
+                                class="menu-link {isMenuDisabled
+                                    ? 'menu-link-disabled'
+                                    : ''}"
+                                on:click={() => handleMenuClick("/sync")}
+                                >🔄 Sync Dashboard</button
+                            >
+                            <button
+                                class="menu-link {isMenuDisabled
+                                    ? 'menu-link-disabled'
+                                    : ''}"
+                                on:click={() => handleMenuClick("/audit")}
+                                >🧾 Audit Log</button
                             >
                             <button
                                 class="menu-link {isMenuDisabled
@@ -2303,6 +2471,12 @@
                 {syncLabel}
             </div>
         </header>
+
+        {#if trainingModeEnabled}
+            <div class="mb-3 rounded-xl border border-warning/50 bg-warning/15 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.18em] text-warning">
+                Training Mode: sales are not saved
+            </div>
+        {/if}
 
         <!-- POS Pages -->
         <div class="pos-page-tabs flex gap-3 overflow-x-auto pb-3 mb-5">
@@ -3548,7 +3722,7 @@
                                     disabled={isReversingOrder}
                                     on:click={printReceipt}>Print Receipt</button
                                 >
-                            {#if canManage($currentEmployee) && selectedOrder.type !== "return" && ["completed", "partially_refunded"].includes(selectedOrder.status)}
+                            {#if selectedOrder.type !== "return" && ["completed", "partially_refunded"].includes(selectedOrder.status)}
                                 <div class="flex gap-2">
                                     <button
                                         class="btn flex-1 !text-warning"
@@ -3728,6 +3902,53 @@
                 on:click={saveQuickProduct}
             >
                 Save & Add to Cart
+            </button>
+        </div>
+    </div>
+{/if}
+
+{#if showManagerApprovalModal}
+    <div class="modal-overlay">
+        <div
+            class="w-[520px] max-w-[95vw] max-h-[95vh] overflow-y-auto rounded-md border border-border-flat bg-bg-card p-5 flex flex-col gap-4"
+            on:click|stopPropagation
+        >
+            <div>
+                <h2 class="m-0 text-xl">Manager Approval</h2>
+                <p class="mt-1 text-sm text-text-muted">
+                    {managerApprovalTitle || permissionLabels[managerApprovalPermission]} needs approval before continuing.
+                </p>
+            </div>
+            {#if managerApprovers.length === 0}
+                <div class="rounded-xl border border-danger/40 bg-danger/10 p-4 text-danger">
+                    No active manager or admin has this permission. Update Role Permissions in Settings.
+                </div>
+            {:else}
+                <CustomSelect
+                    label="Approving manager"
+                    bind:value={managerApprovalEmployeeId}
+                    options={managerApprovers.map((employee) => ({ label: `${employee.name} (${employee.role})`, value: employee.id }))}
+                />
+                <TouchDigitPad
+                    bind:value={managerApprovalPin}
+                    masked={true}
+                    maxLength={8}
+                    submitLabel="Approve"
+                    submitDisabled={managerApprovalPin.length < 4}
+                    onSubmit={approveManagerAction}
+                />
+                <p class="min-h-5 text-sm font-semibold text-danger">{managerApprovalError}</p>
+            {/if}
+            <button
+                class="btn btn-secondary"
+                on:click={() => {
+                    showManagerApprovalModal = false;
+                    managerApprovalPin = "";
+                    managerApprovalError = "";
+                    managerApprovalAction = null;
+                }}
+            >
+                Cancel
             </button>
         </div>
     </div>

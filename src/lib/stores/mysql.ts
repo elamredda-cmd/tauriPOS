@@ -391,11 +391,60 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             markerTime TEXT NOT NULL,
             periodStart TEXT NOT NULL,
             periodEnd TEXT NOT NULL,
-            createdAt TEXT
+            employeeId VARCHAR(36),
+            reportText TEXT,
+            reportTotal INT DEFAULT 0,
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
-    // 23. Product Suppliers
+    // 23. Manager Approvals
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS manager_approvals (
+            id VARCHAR(36) PRIMARY KEY,
+            requestedByEmployeeId VARCHAR(36),
+            approvedByEmployeeId VARCHAR(36),
+            action TEXT NOT NULL,
+            entityType TEXT,
+            entityId VARCHAR(36),
+            notes TEXT,
+            createdAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
+    // 24. Stock Receipts
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS stock_receipts (
+            id VARCHAR(36) PRIMARY KEY,
+            supplierId VARCHAR(36),
+            employeeId VARCHAR(36),
+            reference TEXT,
+            notes TEXT,
+            totalCost INT DEFAULT 0,
+            status TEXT DEFAULT 'received',
+            createdAt TEXT,
+            updatedAt TEXT
+        )
+    `);
+
+    // 25. Stock Receipt Lines
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS stock_receipt_lines (
+            id VARCHAR(36) PRIMARY KEY,
+            receiptId VARCHAR(36) NOT NULL,
+            productId VARCHAR(36) NOT NULL,
+            quantity INT DEFAULT 0,
+            unitCost INT DEFAULT 0,
+            createdAt TEXT,
+            updatedAt TEXT,
+            FOREIGN KEY(receiptId) REFERENCES stock_receipts(id) ON DELETE CASCADE,
+            FOREIGN KEY(productId) REFERENCES products(id) ON DELETE CASCADE
+        )
+    `);
+
+    // 26. Product Suppliers
     await d.execute(`
         CREATE TABLE IF NOT EXISTS product_suppliers (
             id VARCHAR(36) PRIMARY KEY,
@@ -407,7 +456,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
-    // 24. Inventory Logs
+    // 27. Inventory Logs
     await d.execute(`
         CREATE TABLE IF NOT EXISTS inventory_logs (
             id VARCHAR(36) PRIMARY KEY,
@@ -421,7 +470,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
-    // 25. Tombstones — records deleted rows so deletions propagate to other tills
+    // 28. Tombstones — records deleted rows so deletions propagate to other tills
     await d.execute(`
         CREATE TABLE IF NOT EXISTS tombstones (
             id VARCHAR(150) PRIMARY KEY,
@@ -432,7 +481,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
-    // 26. App / shop identity — never merge data between different shops
+    // 29. App / shop identity — never merge data between different shops
     await d.execute(`
         CREATE TABLE IF NOT EXISTS app_identity (
             id VARCHAR(36) PRIMARY KEY,
@@ -530,9 +579,18 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS cardDifference INT DEFAULT 0`,
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS openRegisterId VARCHAR(36)
             AS (CASE WHEN status = 'open' THEN registerId ELSE NULL END) PERSISTENT`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS periodStart TEXT`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS periodEnd TEXT`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS employeeId VARCHAR(36)`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS reportText TEXT`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS reportTotal INT DEFAULT 0`,
+        `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
-        `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`
+        `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE manager_approvals ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE stock_receipt_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`
     ];
     const migrationFailures: string[] = [];
     for (const sql of migrations) {
@@ -578,6 +636,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method(255))`,
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
         `CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`,
+        `CREATE INDEX IF NOT EXISTS idx_manager_approvals_action ON manager_approvals(action(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_stock_receipts_created ON stock_receipts(createdAt(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber(255))`,
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(openRegisterId)`,
@@ -597,6 +658,8 @@ const TIMESTAMP_SYNC_TABLES = [
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines',
     'tombstones',
 ];
 
@@ -627,6 +690,8 @@ const DELETE_SYNC_TABLES = [
     'employees', 'customers', 'registers', 'suppliers', 'product_suppliers',
     'inventory_logs', 'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines',
 ];
 
 /** Make deletes performed by Android or another MariaDB client visible to tills. */
@@ -1483,15 +1548,28 @@ export async function mysqlGetLastReportMarker(tillNumber: string): Promise<stri
 }
 
 export async function mysqlSaveReportMarker(
-    tillNumber: string, periodStart: string, periodEnd: string
-): Promise<void> {
+    tillNumber: string,
+    periodStart: string,
+    periodEnd: string,
+    extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {}
+): Promise<any> {
     const d = await getDb();
-    const id = crypto.randomUUID();
-    await d.execute(
-        `INSERT INTO till_report_markers (id, tillNumber, type, markerTime, periodStart, periodEnd, createdAt)
-         VALUES (?, ?, 'period', ?, ?, ?, ?)`,
-        [id, tillNumber, periodEnd, periodStart, periodEnd, new Date().toISOString()]
-    );
+    const stamp = new Date().toISOString();
+    const row = {
+        id: crypto.randomUUID(),
+        tillNumber,
+        type: 'period',
+        markerTime: periodEnd,
+        periodStart,
+        periodEnd,
+        employeeId: extra.employeeId || '',
+        reportText: extra.reportText || '',
+        reportTotal: extra.reportTotal || 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+    };
+    await mysqlUpsert('till_report_markers', row, 'id');
+    return row;
 }
 
 export async function mysqlGetOrCreateTillId(): Promise<string> {
@@ -1680,6 +1758,8 @@ export async function mysqlGetTillPeriodReport(
     endTime: string
 ): Promise<{ overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] }> {
     const d = await getDb();
+    const tillFilter = tillNumber ? `AND o.tillNumber = ?` : '';
+    const periodParams = tillNumber ? [tillNumber, startTime, endTime] : [startTime, endTime];
 
     // Overview
     const revRows: any[] = await d.select(
@@ -1691,8 +1771,8 @@ export async function mysqlGetTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const itemRows: any[] = await d.select(
         `SELECT CAST(COALESCE(SUM(ol.quantity), 0) AS SIGNED) as totalItems
@@ -1700,8 +1780,8 @@ export async function mysqlGetTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const rev = revRows[0] || {};
     const items = itemRows[0] || {};
@@ -1747,8 +1827,8 @@ export async function mysqlGetTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?`,
-        [tillNumber, startTime, endTime]
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
+        periodParams
     );
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
@@ -1778,12 +1858,12 @@ export async function mysqlGetTillPeriodReport(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.tillNumber = ? AND o.completedAt >= ? AND o.completedAt < ?
+           ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?
          GROUP BY ol.productId, ol.productName, pr.sku
          HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
          ORDER BY qtySold DESC
          LIMIT 10`,
-        [tillNumber, startTime, endTime]
+        periodParams
     );
     const topProducts: TopProduct[] = tpRows.map(r => ({
         name: r.name || 'Unknown',

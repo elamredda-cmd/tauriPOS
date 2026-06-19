@@ -28,6 +28,15 @@ export async function authenticateEmployeePin(employeeId: string, pin: string): 
     return finishAuthentication(employee, hash);
 }
 
+export async function verifyEmployeePin(employeeId: string, pin: string): Promise<Employee | null> {
+    const hash = await hashPin(pin);
+    return get(employeesDB).find((e) =>
+        e.id === employeeId &&
+        e.isActive &&
+        ((e.pinHash && e.pinHash === hash) || (!e.pinHash && e.pin === pin))
+    ) || null;
+}
+
 async function finishAuthentication(employee: Employee | null, hash: string): Promise<Employee | null> {
     if (employee && !employee.pinHash) {
         employee = { ...employee, pinHash: hash, pin: '' };

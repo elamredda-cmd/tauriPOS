@@ -2,8 +2,10 @@
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { formatMoney } from '$lib/stores/db';
+    import { formatMoney, settingsDB } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
+    import { currentEmployee } from '$lib/stores/session';
+    import { hasPermission } from '$lib/permissions';
     import {
         getReportSnapshot,
         getLastReportMarker,
@@ -75,6 +77,14 @@
     let showTillReport = false;
     let tillReportData: { overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] } | null = null;
     let tillReportPeriod = '';
+    let tillReportTitle = '';
+    let closeReportTillNumber = '';
+    let closeReportStart = '';
+    let closeReportEnd = '';
+    let closeReportText = '';
+    let closeReportCanEnd = false;
+    let closeReportConfirming = false;
+    let closeReportSaving = false;
 
     async function loadData() {
         const sequence = ++loadSequence;
@@ -204,39 +214,99 @@
         return result;
     }
 
-    async function runTillDayReport() {
+    function buildCloseReportText(
+        title: string,
+        period: string,
+        data: { overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] },
+    ) {
+        const lines = [
+            'L&Bj POS',
+            title,
+            period,
+            ''.padEnd(32, '-'),
+            `Net sales: ${formatMoney(data.overview.totalRevenue)}`,
+            `Transactions: ${data.overview.totalTransactions}`,
+            `Refunds: ${data.overview.refundTransactions}`,
+            `Items sold: ${data.overview.totalItemsSold}`,
+            `Avg sale: ${formatMoney(data.overview.avgTransactionValue)}`,
+            ''.padEnd(32, '-'),
+            `Cash: ${formatMoney(data.breakdown.totalCash)}`,
+            `Card: ${formatMoney(data.breakdown.totalCard)}`,
+            `Loyalty: ${formatMoney(data.breakdown.totalLoyalty)}`,
+        ];
+        lines.push(''.padEnd(32, '-'), `Printed: ${new Date().toLocaleString('en-GB')}`);
+        return lines.join('\n');
+    }
+
+    async function previewPeriodReport(scope: 'till' | 'system', closePeriod: boolean) {
         try {
-            // Use tillId (the UUID stored on orders) for queries, tillName for display
-            const lastMarker = await getLastReportMarker(tillId);
+            const markerTill = scope === 'system' ? '' : tillId;
+            const title = scope === 'system' ? 'Whole System End-of-Day Report' : `${tillName} End-of-Day Report`;
+            const lastMarker = await getLastReportMarker(markerTill);
             const nowStr = new Date().toISOString();
             const periodStart = lastMarker || '2000-01-01T00:00:00.000Z';
 
-            tillReportData = await getTillPeriodReport(tillId, periodStart, nowStr);
-            tillReportPeriod = lastMarker
+            const data = await getTillPeriodReport(markerTill, periodStart, nowStr);
+            const period = lastMarker
                 ? `${new Date(lastMarker).toLocaleString('en-GB')} → ${new Date(nowStr).toLocaleString('en-GB')}`
                 : `All time → ${new Date(nowStr).toLocaleString('en-GB')}`;
-
-            // Save marker so next time picks up from here
-            await saveReportMarker(tillId, periodStart, nowStr);
-
+            tillReportData = data;
+            tillReportTitle = title;
+            tillReportPeriod = period;
+            closeReportTillNumber = markerTill;
+            closeReportStart = periodStart;
+            closeReportEnd = nowStr;
+            closeReportText = buildCloseReportText(title, period, data);
+            closeReportCanEnd = closePeriod;
+            closeReportConfirming = false;
             showTillReport = true;
         } catch (e) {
             console.error(e);
-            toast('Failed to generate till report', 'error');
+            toast('Failed to generate report', 'error');
         }
     }
 
+    async function runTillDayReport() {
+        await previewPeriodReport('till', true);
+    }
+
+    async function runSystemDayReport() {
+        await previewPeriodReport('system', true);
+    }
+
     async function runTillFullReport() {
+        await previewPeriodReport('till', false);
+    }
+
+    function requestEndReportPeriod() {
+        if (!tillReportData || !closeReportCanEnd || closeReportSaving) return;
+        if (!hasPermission($currentEmployee, 'end_day_close', $settingsDB)) {
+            toast('Manager permission required to end the reporting period', 'error');
+            return;
+        }
+        closeReportConfirming = true;
+    }
+
+    async function confirmEndReportPeriod() {
+        if (!tillReportData || !closeReportCanEnd || closeReportSaving) return;
+        if (!hasPermission($currentEmployee, 'end_day_close', $settingsDB)) {
+            toast('Manager permission required to end the reporting period', 'error');
+            return;
+        }
+        closeReportSaving = true;
         try {
-            const nowStr = new Date().toISOString();
-
-            tillReportData = await getTillPeriodReport(tillId, '2000-01-01T00:00:00.000Z', nowStr);
-            tillReportPeriod = `All time → ${new Date(nowStr).toLocaleString('en-GB')}`;
-
-            showTillReport = true;
-        } catch (e) {
-            console.error(e);
-            toast('Failed to generate full till report', 'error');
+            await saveReportMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
+                employeeId: $currentEmployee?.id || '',
+                reportText: closeReportText,
+                reportTotal: tillReportData.overview.totalRevenue,
+            });
+            closeReportCanEnd = false;
+            closeReportConfirming = false;
+            toast('Report period ended', 'success');
+        } catch (error) {
+            toast(`Could not end report period: ${error}`, 'error');
+        } finally {
+            closeReportSaving = false;
         }
     }
 
@@ -582,20 +652,23 @@
             {/if}
         </section>
 
-        <!-- Per-Till Reports -->
+        <!-- Close Reports -->
         <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">🖥️ This Till: {tillName}</h3>
-            <div class="flex gap-4">
-                <button class="btn btn-primary" on:click={runTillDayReport}>
-                    📋 Report of the Day
+            <h3 class="text-[1.15rem] mb-4 text-accent-primary">End-of-Day / Z Reports</h3>
+            <div class="flex flex-wrap gap-4">
+                <button class="btn btn-primary" disabled={!tillId} on:click={runTillDayReport}>
+                    End Period: This Till
                 </button>
-                <button class="btn btn-secondary" on:click={runTillFullReport}>
-                    📊 Full Till Report
+                <button class="btn btn-primary" on:click={runSystemDayReport}>
+                    End Period: Whole System
+                </button>
+                <button class="btn btn-secondary" disabled={!tillId} on:click={runTillFullReport}>
+                    Preview This Till All-Time
                 </button>
             </div>
             <p class="text-text-muted text-sm mt-2">
-                "Report of the Day" shows data from the last time this button was pressed until now.
-                First use shows all-time data.
+                End Period uses the time from the last close to now. It does not mean midnight to midnight.
+                Use the whole-system close when the shop day is finished for every till.
             </p>
         </section>
     </div>
@@ -604,93 +677,103 @@
 <!-- Till Report Modal -->
 {#if showTillReport && tillReportData}
     <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)]" on:click={() => showTillReport = false}>
-        <div class="w-[700px] max-w-[calc(100vw-2rem)] max-h-[85vh] overflow-y-auto p-4 md:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5" on:click|stopPropagation>
+        <div class="w-[760px] max-w-[calc(100vw-1.5rem)] max-h-[calc(100vh-1.5rem)] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3" on:click|stopPropagation>
             <div class="flex justify-between items-center">
-                <h3>Till Report: {tillName}</h3>
+                <h3 class="text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
                 <button class="bg-transparent text-text-muted text-[1.2rem]" on:click={() => showTillReport = false}>✕</button>
             </div>
-            <div class="text-sm text-text-muted">{tillReportPeriod}</div>
+            <div class="text-xs text-text-muted">{tillReportPeriod}</div>
+            {#if closeReportCanEnd}
+                <div class="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                    This is only a preview. Press <strong>End Period</strong> to close this report period and make the next report start from now.
+                </div>
+                {#if !hasPermission($currentEmployee, 'end_day_close', $settingsDB)}
+                    <div class="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                        Your current role can preview this report, but manager permission is required to close the period.
+                    </div>
+                {/if}
+            {/if}
 
             <!-- Mini overview cards -->
-            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
-                <div class="bg-bg-card border border-border-flat rounded-lg p-3 px-4 flex flex-col gap-1">
-                    <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Revenue</div>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+                <div class="bg-bg-card border border-border-flat rounded-lg p-3 flex flex-col gap-1">
+                    <div class="text-[0.65rem] font-semibold text-text-muted uppercase tracking-wider">Net Sales</div>
                     <div class="text-lg font-extrabold font-serif leading-tight text-success">{formatMoney(tillReportData.overview.totalRevenue)}</div>
                 </div>
-                <div class="bg-bg-card border border-border-flat rounded-lg p-3 px-4 flex flex-col gap-1">
-                    <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Transactions</div>
+                <div class="bg-bg-card border border-border-flat rounded-lg p-3 flex flex-col gap-1">
+                    <div class="text-[0.65rem] font-semibold text-text-muted uppercase tracking-wider">Transactions</div>
                     <div class="text-lg font-extrabold font-serif leading-tight text-accent-primary">{tillReportData.overview.totalTransactions}</div>
                 </div>
-                <div class="bg-bg-card border border-border-flat rounded-lg p-3 px-4 flex flex-col gap-1">
-                    <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Refund Tx</div>
+                <div class="bg-bg-card border border-border-flat rounded-lg p-3 flex flex-col gap-1">
+                    <div class="text-[0.65rem] font-semibold text-text-muted uppercase tracking-wider">Refunds</div>
                     <div class="text-lg font-extrabold font-serif leading-tight text-danger">{tillReportData.overview.refundTransactions}</div>
                 </div>
-                <div class="bg-bg-card border border-border-flat rounded-lg p-3 px-4 flex flex-col gap-1">
-                    <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Avg Value</div>
+                <div class="bg-bg-card border border-border-flat rounded-lg p-3 flex flex-col gap-1">
+                    <div class="text-[0.65rem] font-semibold text-text-muted uppercase tracking-wider">Avg Sale</div>
                     <div class="text-lg font-extrabold font-serif leading-tight text-warning">{formatMoney(tillReportData.overview.avgTransactionValue)}</div>
                 </div>
-                <div class="bg-bg-card border border-border-flat rounded-lg p-3 px-4 flex flex-col gap-1">
-                    <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Items</div>
+                <div class="bg-bg-card border border-border-flat rounded-lg p-3 flex flex-col gap-1">
+                    <div class="text-[0.65rem] font-semibold text-text-muted uppercase tracking-wider">Items Sold</div>
                     <div class="text-lg font-extrabold font-serif leading-tight text-text-main">{tillReportData.overview.totalItemsSold}</div>
                 </div>
             </div>
 
             <!-- Payment breakdown -->
-            <div class="grid grid-cols-2 gap-3">
-                <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                    <div class="text-xs font-semibold text-text-muted">💵 Cash</div>
-                    <div class="text-[1.3rem] font-extrabold font-serif text-success">{formatMoney(tillReportData.breakdown.totalCash)}</div>
-                    <div class="text-[0.75rem] text-text-muted">{tillReportData.breakdown.cashTxCount} tx</div>
+            <div class="grid grid-cols-3 gap-2">
+                <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
+                    <div class="text-xs font-semibold text-text-muted">Cash</div>
+                    <div class="text-lg font-extrabold font-serif text-success">{formatMoney(tillReportData.breakdown.totalCash)}</div>
+                    <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.cashTxCount} tx</div>
                 </div>
-                <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                    <div class="text-xs font-semibold text-text-muted">💳 Card</div>
-                    <div class="text-[1.3rem] font-extrabold font-serif text-accent-primary">{formatMoney(tillReportData.breakdown.totalCard)}</div>
-                    <div class="text-[0.75rem] text-text-muted">{tillReportData.breakdown.cardTxCount} tx</div>
+                <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
+                    <div class="text-xs font-semibold text-text-muted">Card</div>
+                    <div class="text-lg font-extrabold font-serif text-accent-primary">{formatMoney(tillReportData.breakdown.totalCard)}</div>
+                    <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.cardTxCount} tx</div>
                 </div>
-                {#if tillReportData.breakdown.totalLoyalty !== 0}
-                    <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5 col-span-2">
-                        <div class="text-xs font-semibold text-text-muted">Loyalty Credit</div>
-                        <div class="text-[1.3rem] font-extrabold font-serif text-accent-primary">{formatMoney(tillReportData.breakdown.totalLoyalty)}</div>
-                        <div class="text-[0.75rem] text-text-muted">{tillReportData.breakdown.loyaltyTxCount} tx</div>
-                    </div>
-                {/if}
+                <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
+                    <div class="text-xs font-semibold text-text-muted">Loyalty</div>
+                    <div class="text-lg font-extrabold font-serif text-accent-primary">{formatMoney(tillReportData.breakdown.totalLoyalty)}</div>
+                    <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.loyaltyTxCount} tx</div>
+                </div>
                 {#if tillReportData.breakdown.unrecordedAmount !== 0}
-                    <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5 col-span-2">
-                        <div class="text-xs font-semibold text-text-muted">❓ Unrecorded</div>
-                        <div class="text-[1.3rem] font-extrabold font-serif text-text-muted">{formatMoney(tillReportData.breakdown.unrecordedAmount)}</div>
-                        <div class="text-[0.75rem] text-text-muted">{tillReportData.breakdown.unrecordedTxCount} tx (missing payment records)</div>
+                    <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5 col-span-3">
+                        <div class="text-xs font-semibold text-text-muted">Unrecorded</div>
+                        <div class="text-lg font-extrabold font-serif text-text-muted">{formatMoney(tillReportData.breakdown.unrecordedAmount)}</div>
+                        <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.unrecordedTxCount} tx (missing payment records)</div>
                     </div>
                 {/if}
             </div>
 
-            <!-- Top products mini table -->
-            {#if tillReportData.topProducts.length > 0}
-                <h4 class="text-text-muted font-semibold mt-2 mb-0">Top Products</h4>
-                <table class="w-full border-collapse text-left">
-                    <thead>
-                        <tr>
-                            <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">#</th>
-                            <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Product</th>
-                            <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Qty</th>
-                            <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Revenue</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {#each tillReportData.topProducts as p, i}
-                            <tr class="hover:bg-bg-card-hover">
-                                <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold text-accent-primary">{i + 1}</td>
-                                <td class="px-3 py-3 border-b border-border-flat text-[0.9rem]">{p.name}</td>
-                                <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold">{p.qtySold}</td>
-                                <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold text-success">{formatMoney(p.totalRevenue)}</td>
-                            </tr>
-                        {/each}
-                    </tbody>
-                </table>
-            {:else}
-                <div class="p-12 text-center text-text-muted text-base">No sales in this period.</div>
+            <div class="rounded-xl border border-border-flat bg-bg-panel p-3">
+                <div class="mb-1.5 text-[0.65rem] font-black uppercase tracking-[0.14em] text-text-muted">Receipt report text</div>
+                <pre class="whitespace-pre-wrap rounded-lg bg-bg-card p-2 font-mono text-xs leading-relaxed">{closeReportText}</pre>
+            </div>
+
+            {#if closeReportConfirming}
+                <div class="rounded-xl border border-danger/50 bg-danger/10 p-3">
+                    <div class="font-bold text-danger">Confirm end of period</div>
+                    <p class="mt-1 text-sm text-text-muted">
+                        This will close the current report period for {closeReportTillNumber ? tillName : 'the whole system'}.
+                        The next end report will start from this close time.
+                    </p>
+                    <div class="mt-3 flex justify-end gap-3">
+                        <button class="btn btn-secondary" disabled={closeReportSaving} on:click={() => closeReportConfirming = false}>
+                            Cancel
+                        </button>
+                        <button class="btn btn-danger" disabled={closeReportSaving} on:click={confirmEndReportPeriod}>
+                            {closeReportSaving ? 'Ending...' : 'Yes, End Period'}
+                        </button>
+                    </div>
+                </div>
             {/if}
 
-            <div class="flex justify-end gap-3 mt-2.5">
+            <div class="flex justify-end gap-3">
+                {#if closeReportCanEnd && !closeReportConfirming}
+                    <button class="btn btn-danger" disabled={closeReportSaving} on:click={requestEndReportPeriod}>
+                        {closeReportSaving ? 'Ending...' : 'End Period'}
+                    </button>
+                {/if}
+                <button class="btn btn-secondary" on:click={() => window.print()}>Print</button>
                 <button class="btn btn-primary" on:click={() => showTillReport = false}>Close</button>
             </div>
         </div>

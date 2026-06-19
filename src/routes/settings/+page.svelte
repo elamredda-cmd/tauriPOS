@@ -24,6 +24,7 @@
     $: cashUpEnabled = ($settingsDB.find(s => s.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
+    $: trainingModeEnabled = ($settingsDB.find(s => s.key === 'training_mode_enabled')?.value ?? 'false') === 'true';
     $: cctvConfig = getCctvPosConfig($settingsDB);
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
     const drawerPinOptions = [
@@ -193,6 +194,9 @@
             <a href="/settings/barcodes" class="settings-tile tile-green">
                 <span>Scales</span><b>Scale Barcode Rules</b><p>Show the POS how your scale builds its barcodes.</p><strong>Configure rules &rarr;</strong>
             </a>
+            <a href="/settings/permissions" class="settings-tile tile-blue">
+                <span>Staff</span><b>Role Permissions</b><p>Control what cashiers, managers, and admins can open or approve.</p><strong>Set access &rarr;</strong>
+            </a>
             {#if $currentEmployee?.role === 'admin'}
                 <a href="/settings/advanced" class="settings-tile tile-red">
                     <span>Admin only</span><b>Advanced Maintenance</b><p>Database repair, migration, restore, and risky shop controls.</p><strong>Open carefully &rarr;</strong>
@@ -258,6 +262,24 @@
                     <strong class="block">Do not track stock</strong>
                     <span class="text-xs text-text-muted">Disable stock tracking everywhere without deleting saved levels.</span>
                 </button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <div class="section-topline">
+                <div>
+                    <h3 class="settings-section-title">Training Mode</h3>
+                    <p>Use this till for practice without saving sales, changing stock, loyalty points, reports, or CCTV/receipt output.</p>
+                </div>
+                <button
+                    class="btn {trainingModeEnabled ? 'btn-danger' : 'btn-secondary'}"
+                    on:click={() => updateSetting('training_mode_enabled', trainingModeEnabled ? 'false' : 'true')}
+                >
+                    Training: {trainingModeEnabled ? 'On' : 'Off'}
+                </button>
+            </div>
+            <div class="rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-text-main">
+                This setting is saved only on this machine. It is useful for staff practice, but it should stay off during real trading.
             </div>
         </section>
 

@@ -288,6 +288,26 @@ async function pendingOfflineQueueCount(): Promise<number> {
     return Number(rows[0]?.count || 0);
 }
 
+export interface OfflineQueueStats {
+    pending: number;
+    conflicts: number;
+    oldestPendingAt: string;
+}
+
+export async function getOfflineQueueStats(): Promise<OfflineQueueStats> {
+    const d = await sqlite.getDb();
+    const [pendingRows, conflictRows, oldestRows] = await Promise.all([
+        d.select(`SELECT COUNT(*) AS count FROM _offline_queue`) as Promise<any[]>,
+        d.select(`SELECT COUNT(*) AS count FROM _sync_conflicts`) as Promise<any[]>,
+        d.select(`SELECT MIN(created_at) AS oldest FROM _offline_queue`) as Promise<any[]>,
+    ]);
+    return {
+        pending: Number(pendingRows[0]?.count || 0),
+        conflicts: Number(conflictRows[0]?.count || 0),
+        oldestPendingAt: String(oldestRows[0]?.oldest || ''),
+    };
+}
+
 async function pendingPromotionQueueCount(): Promise<number> {
     const d = await sqlite.getDb();
     const rows: any[] = await d.select(
@@ -387,6 +407,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_seq',
     'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
     'transaction_purge_applied_at',
+    'training_mode_enabled',
     'cctv_pos_enabled', 'cctv_pos_host', 'cctv_pos_port', 'cctv_pos_number',
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
     'cctv_pos_send_items', 'cctv_pos_send_receipts',
@@ -740,7 +761,9 @@ const PUSH_TABLES = [
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
-    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines'
 ];
 
 /** Push every local table to MariaDB (skips device-local settings keys). */
@@ -1591,11 +1614,45 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
 // ─── Till / Marker Queries ──────────────────────────────────────────────────
 
 export async function getLastReportMarker(tillNumber: string): Promise<string | null> {
-    return sqlite.getLastReportMarker(tillNumber);
+    const localMarker = await sqlite.getLastReportMarker(tillNumber);
+    if (isMultiMode()) {
+        try {
+            await flushOfflineQueue();
+            const mysqlDb = await getMysqlDb();
+            if (mysqlDb) {
+                const remoteMarker = await mysql.mysqlGetLastReportMarker(tillNumber);
+                if (!localMarker) return remoteMarker;
+                if (!remoteMarker) return localMarker;
+                return remoteMarker > localMarker ? remoteMarker : localMarker;
+            }
+        } catch (e) {
+            console.warn('database: live report marker failed, using local SQLite:', e);
+        }
+    }
+    return localMarker;
 }
 
-export async function saveReportMarker(tillNumber: string, periodStart: string, periodEnd: string): Promise<void> {
-    await sqlite.saveReportMarker(tillNumber, periodStart, periodEnd);
+export async function saveReportMarker(
+    tillNumber: string,
+    periodStart: string,
+    periodEnd: string,
+    extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {}
+): Promise<any> {
+    const row = await sqlite.saveReportMarker(tillNumber, periodStart, periodEnd, extra);
+    await pushWriteInBackground(
+        `report marker for ${tillNumber || 'system'}`,
+        () => mysql.mysqlUpsert('till_report_markers', row, 'id'),
+        () => queueOffline('till_report_markers', 'upsert', row, 'id'),
+    );
+    return row;
+}
+
+export async function recordManagerApproval(approval: any): Promise<void> {
+    const stamped = {
+        ...approval,
+        updatedAt: approval.updatedAt || new Date().toISOString(),
+    };
+    await upsert('manager_approvals', stamped, 'id');
 }
 
 export async function getOrCreateTillId(): Promise<string> {
@@ -1966,6 +2023,10 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
     inventory_logs: ['id', 'productId', 'quantityChange', 'referenceId', 'updatedAt'],
     audit_logs: ['id', 'employeeId', 'action', 'entityId', 'updatedAt'],
     shifts: ['id', 'registerId', 'employeeId', 'status', 'updatedAt'],
+    till_report_markers: ['id', 'tillNumber', 'periodStart', 'periodEnd', 'reportText', 'updatedAt'],
+    manager_approvals: ['id', 'requestedByEmployeeId', 'approvedByEmployeeId', 'action', 'updatedAt'],
+    stock_receipts: ['id', 'employeeId', 'totalCost', 'status', 'updatedAt'],
+    stock_receipt_lines: ['id', 'receiptId', 'productId', 'quantity', 'unitCost', 'updatedAt'],
     tombstones: ['id', 'table_name', 'row_id', 'updatedAt'],
     app_identity: ['id', 'shopId', 'shopName', 'licenseId', 'updatedAt'],
 };
@@ -2268,7 +2329,8 @@ async function runHeartbeat(): Promise<void> {
 const FAST_SYNC_TABLES = [
     'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
     'products', 'pos_pages', 'pos_tiles', 'customers', 'loyalty_logs',
-    'discounts', 'promo_groups', 'promo_group_items'
+    'discounts', 'promo_groups', 'promo_group_items',
+    'till_report_markers', 'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
 ];
 const TRANSACTION_SYNC_TABLES = new Set([
     'orders', 'order_lines', 'payments', 'inventory_logs',
@@ -2287,7 +2349,9 @@ const ALL_SYNC_TABLES = [
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
-    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines'
 ];
 
 function overlapWatermark(table: string, since: string | null): string | null {
@@ -2683,7 +2747,9 @@ export async function wipeAndPullFromServer(): Promise<void> {
             'employees', 'customers', 'registers',
             'suppliers', 'product_suppliers', 'inventory_logs',
             'orders', 'order_lines', 'payments',
-            'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements'
+            'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+            'till_report_markers', 'manager_approvals',
+            'stock_receipts', 'stock_receipt_lines'
         ];
 
         for (const table of tablesToWipe) {
