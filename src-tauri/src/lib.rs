@@ -6,6 +6,7 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     time::Duration,
 };
+use serde::Serialize;
 use tauri::Manager;
 
 #[cfg(target_os = "windows")]
@@ -43,6 +44,134 @@ impl Drop for WindowsKeepAwake {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemPrinterInfo {
+    name: String,
+    driver_name: String,
+    port_name: String,
+}
+
+#[cfg(target_os = "windows")]
+fn wide_ptr_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
+    use windows_sys::Win32::Graphics::Printing::{
+        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_5W,
+    };
+
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let mut needed = 0u32;
+    let mut returned = 0u32;
+
+    unsafe {
+        EnumPrintersW(
+            flags,
+            std::ptr::null_mut(),
+            5,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+            &mut returned,
+        );
+    }
+
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut buffer = vec![0u8; needed as usize];
+    let ok = unsafe {
+        EnumPrintersW(
+            flags,
+            std::ptr::null_mut(),
+            5,
+            buffer.as_mut_ptr(),
+            needed,
+            &mut needed,
+            &mut returned,
+        )
+    };
+    if ok == 0 {
+        return Err(last_windows_error("Could not list Windows printers"));
+    }
+
+    let rows = unsafe {
+        std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_5W, returned as usize)
+    };
+    let mut printers: Vec<SystemPrinterInfo> = rows
+        .iter()
+        .filter_map(|row| {
+            let name = wide_ptr_to_string(row.pPrinterName);
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some(SystemPrinterInfo {
+                name,
+                driver_name: String::new(),
+                port_name: wide_ptr_to_string(row.pPortName),
+            })
+        })
+        .collect();
+
+    printers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    printers.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    Ok(printers)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
+    use std::process::Command;
+
+    let output = Command::new("lpstat")
+        .arg("-v")
+        .output()
+        .map_err(|error| format!("Could not ask the system for printers: {error}"))?;
+
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut printers: Vec<SystemPrinterInfo> = text
+        .lines()
+        .filter_map(|line| {
+            let value = line.trim().strip_prefix("device for ")?;
+            let (name, device) = value.split_once(':')?;
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            Some(SystemPrinterInfo {
+                name,
+                driver_name: String::new(),
+                port_name: device.trim().to_string(),
+            })
+        })
+        .collect();
+
+    printers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    printers.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    Ok(printers)
+}
+
+#[tauri::command]
+fn list_system_printers() -> Result<Vec<SystemPrinterInfo>, String> {
+    platform_printers()
 }
 
 fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {
@@ -359,6 +488,7 @@ pub fn run() {
             send_raw_printer_data,
             send_device_printer_data,
             send_system_printer_data,
+            list_system_printers,
             open_cash_drawer,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,

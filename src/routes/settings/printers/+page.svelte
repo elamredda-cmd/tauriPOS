@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { invoke } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { now, settingsDB } from '$lib/stores/db';
@@ -11,17 +12,29 @@
         sendReceiptPrinterTest,
         type PrinterConnectionType,
     } from '$lib/printers';
-    import { getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
+    import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
 
     $: receipt = getReceiptPrinterConfig($settingsDB);
     $: label = getLabelPrinterConfig($settingsDB);
     $: drawer = getCashDrawerConfig($settingsDB);
-    $: drawerManualEnabled = ($settingsDB.find((item) => item.key === 'cash_drawer_enabled')?.value ?? (drawer.host.trim() ? 'true' : 'false')) !== 'false';
+    $: drawerTarget = cashDrawerTargetLabel(drawer);
+    $: drawerManualEnabled = ($settingsDB.find((item) => item.key === 'cash_drawer_enabled')?.value ?? (drawerTarget ? 'true' : 'false')) !== 'false';
     $: receiptMode = receiptConnections.find((option) => option.value === receipt.connection);
     $: labelMode = labelConnections.find((option) => option.value === label.connection);
+    $: receiptPrinterOptions = printerOptionsFor(receipt.printerName);
+    $: labelPrinterOptions = printerOptionsFor(label.printerName);
     let receiptTestStatus = '';
     let labelTestStatus = '';
     let drawerTestStatus = '';
+    let printerFinderStatus = '';
+    let findingPrinters = false;
+    let foundPrinters: SystemPrinterInfo[] = [];
+
+    type SystemPrinterInfo = {
+        name: string;
+        driverName?: string;
+        portName?: string;
+    };
 
     async function updateSetting(key: string, value: string) {
         const row = { key, value, updatedAt: now() };
@@ -66,6 +79,51 @@
         } catch (error) {
             drawerTestStatus = `Drawer failed: ${error}`;
             toast(`Drawer failed: ${error}`, 'error');
+        }
+    }
+
+    function isLikelyThermalPrinter(printer: SystemPrinterInfo): boolean {
+        return /xprinter|receipt|thermal|pos|epson|star|bixolon|citizen|tm-|zebra|tsc/i.test(
+            `${printer.name} ${printer.driverName || ''} ${printer.portName || ''}`
+        );
+    }
+
+    function printerLabel(printer: SystemPrinterInfo): string {
+        const details = [printer.driverName, printer.portName].filter(Boolean).join(' / ');
+        const suggested = isLikelyThermalPrinter(printer) ? ' (suggested)' : '';
+        return `${printer.name}${suggested}${details ? ` - ${details}` : ''}`;
+    }
+
+    function printerOptionsFor(currentName: string) {
+        const options = foundPrinters.map((printer) => ({
+            label: printerLabel(printer),
+            value: printer.name,
+        }));
+        if (currentName.trim() && !options.some((option) => option.value === currentName.trim())) {
+            options.unshift({ label: `${currentName.trim()} (current)`, value: currentName.trim() });
+        }
+        return options;
+    }
+
+    async function findSystemPrinters() {
+        findingPrinters = true;
+        printerFinderStatus = 'Finding installed printers...';
+        try {
+            const printers = await invoke<SystemPrinterInfo[]>('list_system_printers');
+            foundPrinters = printers;
+            if (printers.length === 0) {
+                printerFinderStatus = 'No installed printers were found on this machine.';
+                return;
+            }
+            const suggested = printers.find(isLikelyThermalPrinter);
+            printerFinderStatus = suggested
+                ? `Found ${printers.length} printer${printers.length === 1 ? '' : 's'}. Suggested: ${suggested.name}.`
+                : `Found ${printers.length} printer${printers.length === 1 ? '' : 's'}. Choose the one that matches your printer.`;
+        } catch (error) {
+            printerFinderStatus = `Could not find printers: ${error}`;
+            toast(`Could not find printers: ${error}`, 'error');
+        } finally {
+            findingPrinters = false;
         }
     }
 
@@ -242,13 +300,28 @@
                                 </div>
                             {:else if receipt.connection === 'usb_raw'}
                                 <div class="field span-2">
-                                    <label>Windows Printer Name</label>
-                                    <input
-                                        value={receipt.printerName}
-                                        placeholder="e.g. EPSON TM-T88VII Receipt"
-                                        on:change={(event) => updateSetting('receipt_printer_name', event.currentTarget.value.trim())}
-                                    />
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <label>Windows Printer Name</label>
+                                        <button type="button" class="btn btn-secondary" on:click={findSystemPrinters} disabled={findingPrinters}>
+                                            {findingPrinters ? 'Finding...' : 'Find printers'}
+                                        </button>
+                                    </div>
+                                    {#if receiptPrinterOptions.length > 0}
+                                        <CustomSelect
+                                            value={receipt.printerName}
+                                            options={receiptPrinterOptions}
+                                            placeholder="Choose printer..."
+                                            on:change={(event) => updateSetting('receipt_printer_name', String(event.detail))}
+                                        />
+                                    {:else}
+                                        <input
+                                            value={receipt.printerName}
+                                            placeholder="e.g. Xprinter USB"
+                                            on:change={(event) => updateSetting('receipt_printer_name', event.currentTarget.value.trim())}
+                                        />
+                                    {/if}
                                     <small class="text-text-muted">Use the exact installed Windows printer name. This is the best mode for silent USB printing on Windows.</small>
+                                    {#if printerFinderStatus}<small class="text-text-muted">{printerFinderStatus}</small>{/if}
                                 </div>
                             {:else}
                                 <div class="field span-2">
@@ -337,26 +410,35 @@
                             </div>
                         </div>
                         <div class="form-grid">
-                            <div class="field">
-                                <label>Drawer Printer IP</label>
-                                <input
-                                    value={drawer.host}
-                                    placeholder="e.g. 192.168.1.50"
-                                    on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
-                                />
-                                <small class="text-text-muted">For network printers this can use the same IP as the receipt printer.</small>
-                            </div>
-                            <div class="field">
-                                <label>Drawer Printer Port</label>
-                                <input
-                                    type="number"
-                                    min="1"
-                                    max="65535"
-                                    value={drawer.port}
-                                    on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
-                                />
-                                <small class="text-text-muted">Most network thermal printers use port 9100.</small>
-                            </div>
+                            {#if drawer.connection === 'network_escpos'}
+                                <div class="field">
+                                    <label>Drawer Printer IP</label>
+                                    <input
+                                        value={drawer.host}
+                                        placeholder="e.g. 192.168.1.50"
+                                        on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
+                                    />
+                                    <small class="text-text-muted">For network printers this can use the same IP as the receipt printer.</small>
+                                </div>
+                                <div class="field">
+                                    <label>Drawer Printer Port</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="65535"
+                                        value={drawer.port}
+                                        on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
+                                    />
+                                    <small class="text-text-muted">Most network thermal printers use port 9100.</small>
+                                </div>
+                            {:else}
+                                <div class="span-2 rounded-xl border border-border-flat bg-bg-card p-4">
+                                    <b class="text-text-main">Using receipt printer</b>
+                                    <p class="m-0 mt-1 text-sm text-text-muted">
+                                        {drawerTarget || 'Set the receipt printer to USB raw, Network, Serial, or Bluetooth first.'}
+                                    </p>
+                                </div>
+                            {/if}
                             <CustomSelect
                                 label="Drawer Pin"
                                 value={String(drawer.pin)}
@@ -437,6 +519,19 @@
                             <span class="text-sm text-text-muted">For Xprinter and ESC/POS printers with a cutter.</span>
                             <b class="mt-auto text-xs uppercase tracking-[0.12em] {label.cutPaper ? 'text-success' : 'text-text-muted'}">{label.cutPaper ? 'On' : 'Off'}</b>
                         </button>
+                        <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                            <label class="font-black text-text-main" for="label-gap-lines">Label gap / feed</label>
+                            <input
+                                id="label-gap-lines"
+                                class="mt-2"
+                                type="number"
+                                min="0"
+                                max="12"
+                                value={label.gapLines}
+                                on:change={(event) => updateSetting('label_printer_gap_lines', event.currentTarget.value || '0')}
+                            />
+                            <small class="mt-2 block text-sm text-text-muted">Use 0 or 1 for a smaller Xprinter gap.</small>
+                        </div>
                     </div>
 
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
@@ -477,13 +572,28 @@
                                 </div>
                             {:else if label.connection === 'usb_raw'}
                                 <div class="field">
-                                    <label>Windows Printer Name</label>
-                                    <input
-                                        value={label.printerName}
-                                        placeholder="e.g. Zebra ZD220"
-                                        on:change={(event) => updateSetting('label_printer_name', event.currentTarget.value.trim())}
-                                    />
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <label>Windows Printer Name</label>
+                                        <button type="button" class="btn btn-secondary" on:click={findSystemPrinters} disabled={findingPrinters}>
+                                            {findingPrinters ? 'Finding...' : 'Find printers'}
+                                        </button>
+                                    </div>
+                                    {#if labelPrinterOptions.length > 0}
+                                        <CustomSelect
+                                            value={label.printerName}
+                                            options={labelPrinterOptions}
+                                            placeholder="Choose printer..."
+                                            on:change={(event) => updateSetting('label_printer_name', String(event.detail))}
+                                        />
+                                    {:else}
+                                        <input
+                                            value={label.printerName}
+                                            placeholder="e.g. Xprinter USB"
+                                            on:change={(event) => updateSetting('label_printer_name', event.currentTarget.value.trim())}
+                                        />
+                                    {/if}
                                     <small class="text-text-muted">For USB raw mode, use the exact Windows printer name.</small>
+                                    {#if printerFinderStatus}<small class="text-text-muted">{printerFinderStatus}</small>{/if}
                                 </div>
                             {:else}
                                 <div class="field">

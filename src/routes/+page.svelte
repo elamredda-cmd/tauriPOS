@@ -68,7 +68,7 @@
     import { broadcastCustomerDisplay, type CustomerDisplayState } from "$lib/customerDisplay";
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
-    import { getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
+    import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
     import { getReceiptPrinterConfig, printEscposReceipt, sendEscposReceipt } from "$lib/printers";
     import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
 
@@ -225,6 +225,7 @@
             : "sync-pill-neutral";
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
     $: receiptPrinterConfig = getReceiptPrinterConfig($settingsDB);
+    $: cashDrawerTarget = cashDrawerTargetLabel(cashDrawerConfig);
 
     let goodsSearchQuery = "";
     $: filteredGoods = $activeProducts
@@ -1545,8 +1546,8 @@
 
     async function handleOpenCashDrawer() {
         if (drawerBusy) return;
-        if (!cashDrawerConfig.host.trim()) {
-            toast("Set the drawer receipt-printer IP in Settings first", "error");
+        if (!cashDrawerTarget) {
+            toast("Set the receipt printer in Settings first", "error");
             return;
         }
         drawerBusy = true;

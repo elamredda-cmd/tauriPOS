@@ -35,6 +35,7 @@ export interface LabelPrinterConfig {
     devicePath: string;
     baudRate: number;
     cutPaper: boolean;
+    gapLines: number;
 }
 
 function setting(settings: Setting[], key: string, fallback = ''): string {
@@ -147,6 +148,7 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         devicePath: labelDevicePath || (canInheritReceiptDetails ? receipt.devicePath : ''),
         baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
         cutPaper: boolSetting(settings, 'label_printer_cut_paper', true),
+        gapLines: intSetting(settings, 'label_printer_gap_lines', 1, 0, 12),
     };
 }
 
@@ -421,7 +423,7 @@ function escposTextSize(design: LabelDesign, kind: 'normal' | 'price'): number[]
 }
 
 function escposCut(cutPaper: boolean): number[] {
-    return cutPaper ? [0x0a, 0x0a, 0x1d, 0x56, 0x00] : [];
+    return cutPaper ? [0x1d, 0x56, 0x00] : [];
 }
 
 function zplEscape(value: string): string {
@@ -471,7 +473,7 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
     return Array.from(new TextEncoder().encode(lines.join('\n')));
 }
 
-function buildTsplProductLabel(payload: ProductLabelPayload): number[] {
+function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): number[] {
     const { product, store, design } = payload;
     const width = mmToDots(design.widthMm);
     const height = mmToDots(design.heightMm);
@@ -480,7 +482,7 @@ function buildTsplProductLabel(payload: ProductLabelPayload): number[] {
     let y = 10;
     const lines = [
         `SIZE ${Math.max(15, Number(design.widthMm) || 50)} mm,${Math.max(15, Number(design.heightMm) || 30)} mm`,
-        'GAP 2 mm,0',
+        `GAP ${Math.max(0, Math.min(12, gapLines))} mm,0`,
         'DIRECTION 1',
         'CLS',
     ];
@@ -522,7 +524,7 @@ function escposCode39(value: string): number[] {
     ];
 }
 
-function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolean): number[] {
+function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolean, gapLines: number): number[] {
     const { product, store, design } = payload;
     const centerOn = [0x1b, 0x61, 0x01];
     const leftOn = [0x1b, 0x61, 0x00];
@@ -542,16 +544,16 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
         if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
         if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
         if (footer.length > 0) bytes.push(...line(labelText(footer.join('  '), 32), 'latin1'));
-        bytes.push(...leftOn, ...line('', 'latin1'), ...line('', 'latin1'));
+        bytes.push(...leftOn, ...feedLines(gapLines));
     }
     bytes.push(...escposCut(cutPaper));
     return bytes;
 }
 
 export function buildProductLabel(payload: ProductLabelPayload, config = getLabelPrinterConfig()): number[] {
-    if (config.protocol === 'tspl') return buildTsplProductLabel(payload);
+    if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines);
     if (config.protocol === 'zpl') return buildZplProductLabel(payload);
-    return buildEscposProductLabels(payload, config.cutPaper);
+    return buildEscposProductLabels(payload, config.cutPaper, config.gapLines);
 }
 
 export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
@@ -583,8 +585,7 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
             0x1d, 0x21, 0x00,
             ...escposCode39('123456789012'),
             ...line('123456789012', 'latin1'),
-            ...line('', 'latin1'),
-            ...line('', 'latin1'),
+            ...feedLines(config.gapLines),
             ...escposCut(config.cutPaper),
         ];
     }
@@ -592,7 +593,7 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
     const body = protocol === 'tspl'
         ? [
             'SIZE 50 mm,30 mm',
-            'GAP 2 mm,0',
+            `GAP ${Math.max(0, Math.min(12, config.gapLines))} mm,0`,
             'CLS',
             'TEXT 20,20,"3",0,1,1,"L&Bj POS"',
             'TEXT 20,55,"2",0,1,1,"Label printer test"',

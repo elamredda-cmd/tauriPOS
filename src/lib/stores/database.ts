@@ -606,6 +606,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
     'cctv_pos_send_items', 'cctv_pos_send_receipts',
     'cash_drawer_enabled', 'cash_drawer_printer_host', 'cash_drawer_printer_port',
+    'cash_drawer_printer_name', 'cash_drawer_printer_device_path',
     'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
     'receipt_printer_enabled', 'receipt_printer_connection', 'receipt_printer_host',
     'receipt_printer_port', 'receipt_printer_name', 'receipt_printer_device_path',
@@ -617,6 +618,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'label_printer_enabled', 'label_printer_connection', 'label_printer_protocol',
     'label_printer_host', 'label_printer_port', 'label_printer_name',
     'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
+    'label_printer_gap_lines',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done',
 ]);
