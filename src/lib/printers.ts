@@ -1,12 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
-import { settingsDB, type Order, type OrderLine, type Setting, type Store } from '$lib/stores/db';
+import { settingsDB, type Order, type OrderLine, type Product, type Setting, type Store } from '$lib/stores/db';
 import type { ReceiptDesign } from '$lib/receipt';
+import type { LabelDesign } from '$lib/labels';
 import { getScaleSaleDisplay } from '$lib/scaleSale';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
 export type ReceiptPaperWidth = '58mm' | '80mm';
-export type LabelPrinterProtocol = 'system' | 'zpl' | 'tspl';
+export type LabelPrinterProtocol = 'system' | 'escpos' | 'zpl' | 'tspl';
 
 export interface ReceiptPrinterConfig {
     enabled: boolean;
@@ -19,6 +20,7 @@ export interface ReceiptPrinterConfig {
     paperWidth: ReceiptPaperWidth;
     autoPrintAfterPayment: boolean;
     cutPaper: boolean;
+    cutFeedLines: number;
     openDrawerAfterPayment: boolean;
     encoding: 'latin1' | 'utf8';
 }
@@ -32,10 +34,15 @@ export interface LabelPrinterConfig {
     printerName: string;
     devicePath: string;
     baudRate: number;
+    cutPaper: boolean;
 }
 
 function setting(settings: Setting[], key: string, fallback = ''): string {
     return settings.find((item) => item.key === key)?.value || fallback;
+}
+
+function hasSetting(settings: Setting[], key: string): boolean {
+    return settings.some((item) => item.key === key);
 }
 
 function boolSetting(settings: Setting[], key: string, fallback: boolean): boolean {
@@ -45,6 +52,12 @@ function boolSetting(settings: Setting[], key: string, fallback: boolean): boole
 function portSetting(settings: Setting[], key: string, fallback: number): number {
     const value = Number(setting(settings, key, String(fallback)));
     return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
+}
+
+function intSetting(settings: Setting[], key: string, fallback: number, min: number, max: number): number {
+    const value = Number(setting(settings, key, String(fallback)));
+    if (!Number.isInteger(value)) return fallback;
+    return Math.min(max, Math.max(min, value));
 }
 
 const DIRECT_CONNECTIONS = new Set<PrinterConnectionType>(['network_escpos', 'usb_raw', 'serial', 'bluetooth']);
@@ -60,21 +73,32 @@ function normalizePrinterConnection(value: string, fallback: PrinterConnectionTy
 
 export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): ReceiptPrinterConfig {
     const host = setting(settings, 'receipt_printer_host');
+    const printerName = setting(settings, 'receipt_printer_name');
+    const devicePath = setting(settings, 'receipt_printer_device_path');
+    const fallbackConnection = host.trim()
+        ? 'network_escpos'
+        : printerName.trim()
+            ? 'usb_raw'
+            : devicePath.trim()
+                ? 'serial'
+                : 'system';
+    const configuredConnection = setting(settings, 'receipt_printer_connection', fallbackConnection);
     const connection = normalizePrinterConnection(
-        setting(settings, 'receipt_printer_connection', host.trim() ? 'network_escpos' : 'system'),
-        host.trim() ? 'network_escpos' : 'system'
+        configuredConnection === 'system' && fallbackConnection !== 'system' ? fallbackConnection : configuredConnection,
+        fallbackConnection
     );
     return {
         enabled: boolSetting(settings, 'receipt_printer_enabled', true),
         connection,
         host,
         port: portSetting(settings, 'receipt_printer_port', 9100),
-        printerName: setting(settings, 'receipt_printer_name'),
-        devicePath: setting(settings, 'receipt_printer_device_path'),
+        printerName,
+        devicePath,
         baudRate: portSetting(settings, 'receipt_printer_baud_rate', 9600),
         paperWidth: setting(settings, 'receipt_printer_paper_width', '80mm') === '58mm' ? '58mm' : '80mm',
         autoPrintAfterPayment: boolSetting(settings, 'receipt_printer_auto_print_after_payment', false),
         cutPaper: boolSetting(settings, 'receipt_printer_cut_paper', true),
+        cutFeedLines: intSetting(settings, 'receipt_printer_cut_feed_lines', 8, 0, 20),
         openDrawerAfterPayment: boolSetting(
             settings,
             'receipt_printer_open_drawer_after_payment',
@@ -85,19 +109,44 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
 }
 
 export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): LabelPrinterConfig {
-    const host = setting(settings, 'label_printer_host');
-    const connection = normalizePrinterConnection(setting(settings, 'label_printer_connection', 'system'), 'system');
-    const protocolRaw = setting(settings, 'label_printer_protocol', 'system');
-    const directProtocol = protocolRaw === 'zpl' || protocolRaw === 'tspl' ? protocolRaw : 'zpl';
+    const receipt = getReceiptPrinterConfig(settings);
+    const hasOwnConnection = hasSetting(settings, 'label_printer_connection');
+    const labelHost = setting(settings, 'label_printer_host');
+    const labelPrinterName = setting(settings, 'label_printer_name');
+    const labelDevicePath = setting(settings, 'label_printer_device_path');
+    const configuredConnection = setting(settings, 'label_printer_connection', '');
+    const shouldInheritReceipt = isDirectConnection(receipt.connection)
+        && (!hasOwnConnection || (configuredConnection === 'system' && !labelHost.trim() && !labelPrinterName.trim() && !labelDevicePath.trim()));
+    const fallbackConnection = shouldInheritReceipt
+        ? receipt.connection
+        : labelHost.trim()
+            ? 'network_escpos'
+            : labelPrinterName.trim()
+                ? 'usb_raw'
+                : labelDevicePath.trim()
+                    ? 'serial'
+                    : 'system';
+    const connection = normalizePrinterConnection(
+        shouldInheritReceipt ? fallbackConnection : setting(settings, 'label_printer_connection', fallbackConnection),
+        fallbackConnection
+    );
+    const canInheritReceiptDetails = isDirectConnection(receipt.connection) && connection === receipt.connection;
+    const protocolRaw = setting(settings, 'label_printer_protocol', canInheritReceiptDetails ? 'escpos' : 'system');
+    const directProtocol = protocolRaw === 'escpos' || protocolRaw === 'zpl' || protocolRaw === 'tspl'
+        ? protocolRaw
+        : canInheritReceiptDetails
+            ? 'escpos'
+            : 'zpl';
     return {
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
         protocol: DIRECT_CONNECTIONS.has(connection) ? directProtocol : 'system',
-        host,
-        port: portSetting(settings, 'label_printer_port', 9100),
-        printerName: setting(settings, 'label_printer_name'),
-        devicePath: setting(settings, 'label_printer_device_path'),
-        baudRate: portSetting(settings, 'label_printer_baud_rate', 9600),
+        host: labelHost || (canInheritReceiptDetails ? receipt.host : ''),
+        port: portSetting(settings, 'label_printer_port', receipt.port || 9100),
+        printerName: labelPrinterName || (canInheritReceiptDetails ? receipt.printerName : ''),
+        devicePath: labelDevicePath || (canInheritReceiptDetails ? receipt.devicePath : ''),
+        baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
+        cutPaper: boolSetting(settings, 'label_printer_cut_paper', true),
     };
 }
 
@@ -111,6 +160,14 @@ function encodeText(text: string, encoding: 'latin1' | 'utf8'): number[] {
 
 function line(text = '', encoding: 'latin1' | 'utf8' = 'latin1'): number[] {
     return [...encodeText(text, encoding), 0x0a];
+}
+
+function feedLines(count: number): number[] {
+    return Array(Math.max(0, Math.min(20, Math.floor(count || 0)))).fill(0x0a);
+}
+
+function receiptCut(config: ReceiptPrinterConfig): number[] {
+    return config.cutPaper ? [...feedLines(config.cutFeedLines), 0x1d, 0x56, 0x00] : [];
 }
 
 function money(pence: number): string {
@@ -139,8 +196,10 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
     const leftOn = [0x1b, 0x61, 0x00];
     const boldOn = [0x1b, 0x45, 0x01];
     const boldOff = [0x1b, 0x45, 0x00];
+    const receiptFontSelect = [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
     const bytes = [
         0x1b, 0x40,
+        ...receiptFontSelect,
         ...centerOn,
         ...boldOn,
         ...line('L&Bj POS', config.encoding),
@@ -162,7 +221,7 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
         ...line('', config.encoding),
         ...line('', config.encoding),
     ];
-    if (config.cutPaper) bytes.push(0x1d, 0x56, 0x00);
+    bytes.push(...receiptCut(config));
     return bytes;
 }
 
@@ -209,14 +268,16 @@ async function sendDirectPrinterData(args: {
     throw new Error('Direct printing is not available for System printer mode');
 }
 
-export function buildEscposReceipt(payload: {
+type ReceiptPayload = {
     store: Store;
     order: Order;
     lines: OrderLine[];
     cashierName: string;
     tillName: string;
     design: ReceiptDesign;
-}, config = getReceiptPrinterConfig()): number[] {
+};
+
+export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptPrinterConfig()): number[] {
     const width = config.paperWidth === '58mm' ? 32 : 42;
     const divider = '-'.repeat(width);
     const centerOn = [0x1b, 0x61, 0x01];
@@ -256,7 +317,6 @@ export function buildEscposReceipt(payload: {
         bytes.push(...line(textRow('Subtotal', money(payload.order.subtotal), width), config.encoding));
         bytes.push(...line(textRow('Discount', `-${money(payload.order.discountAmount)}`, width), config.encoding));
     }
-    if (payload.design.showTax) bytes.push(...line(textRow('Tax', money(payload.order.taxTotal), width), config.encoding));
     bytes.push(...boldOn, ...line(textRow('TOTAL', money(payload.order.total), width), config.encoding), ...boldOff);
     if (payload.design.showPayment) {
         bytes.push(...line(textRow((payload.order.paymentMethod || 'cash').toUpperCase(), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
@@ -267,8 +327,7 @@ export function buildEscposReceipt(payload: {
 
     bytes.push(...line(divider, config.encoding), ...centerOn);
     bytes.push(...line(payload.design.footerText || payload.store.receiptFooter || 'Thank you', config.encoding));
-    bytes.push(...line('', config.encoding), ...line('', config.encoding));
-    if (config.cutPaper) bytes.push(0x1d, 0x56, 0x00);
+    bytes.push(...receiptCut(config));
     return bytes;
 }
 
@@ -290,10 +349,8 @@ export async function sendReceiptPrinterTest(config = getReceiptPrinterConfig())
     });
 }
 
-export async function sendEscposReceipt(payload: Parameters<typeof buildEscposReceipt>[0], config = getReceiptPrinterConfig()): Promise<void> {
-    if (!config.enabled) throw new Error('Receipt printer is disabled');
-    if (!config.autoPrintAfterPayment) return;
-    if (!isDirectConnection(config.connection)) throw new Error('Automatic silent printing needs Network, USB raw, Serial, or Bluetooth direct mode');
+async function printReceiptPayload(payload: ReceiptPayload, config: ReceiptPrinterConfig): Promise<void> {
+    if (!isDirectConnection(config.connection)) throw new Error('Printing needs Network, USB raw, Serial, or Bluetooth direct mode');
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
@@ -305,7 +362,232 @@ export async function sendEscposReceipt(payload: Parameters<typeof buildEscposRe
     });
 }
 
+export async function printEscposReceipt(payload: ReceiptPayload, config = getReceiptPrinterConfig()): Promise<void> {
+    if (!config.enabled) throw new Error('Receipt printer is disabled');
+    await printReceiptPayload(payload, config);
+}
+
+export async function sendEscposReceipt(payload: ReceiptPayload, config = getReceiptPrinterConfig()): Promise<void> {
+    if (!config.enabled) throw new Error('Receipt printer is disabled');
+    if (!config.autoPrintAfterPayment) return;
+    await printReceiptPayload(payload, config);
+}
+
+type ProductLabelPayload = {
+    product: Product;
+    store: Store;
+    design: LabelDesign;
+    quantity: number;
+};
+
+function labelCopies(quantity: number): number {
+    return Math.max(1, Math.min(500, Math.floor(Number(quantity) || 1)));
+}
+
+function labelBarcodeValue(product: Product): string {
+    return cleanReceiptText(product.barcode || product.sku || product.scalePlu || product.id.slice(0, 12), 48);
+}
+
+function labelText(value: string, max = 36): string {
+    return String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function labelPrice(product: Product): string {
+    return `GBP ${money(product.price)}`;
+}
+
+function labelScale(design: LabelDesign): number {
+    return design.textScale === 'small' ? 0.86 : design.textScale === 'large' ? 1.18 : 1;
+}
+
+function zplFont(size: number, design: LabelDesign): string {
+    const scaled = Math.max(12, Math.round(size * labelScale(design)));
+    return `^A0N,${scaled},${Math.max(10, Math.round(scaled * 0.86))}`;
+}
+
+function tsplScale(design: LabelDesign): number {
+    return design.textScale === 'large' ? 2 : 1;
+}
+
+function escposFontSelect(design: LabelDesign): number[] {
+    return [0x1b, 0x4d, design.fontFamily === 'condensed' ? 0x01 : 0x00];
+}
+
+function escposTextSize(design: LabelDesign, kind: 'normal' | 'price'): number[] {
+    if (kind === 'price') {
+        return [0x1d, 0x21, design.textScale === 'small' ? 0x10 : design.textScale === 'large' ? 0x22 : 0x11];
+    }
+    return [0x1d, 0x21, design.textScale === 'large' ? 0x01 : 0x00];
+}
+
+function escposCut(cutPaper: boolean): number[] {
+    return cutPaper ? [0x0a, 0x0a, 0x1d, 0x56, 0x00] : [];
+}
+
+function zplEscape(value: string): string {
+    return labelText(value, 80).replace(/[\^~]/g, ' ');
+}
+
+function tsplEscape(value: string): string {
+    return labelText(value, 80).replace(/"/g, "'");
+}
+
+function mmToDots(mm: number): number {
+    return Math.max(80, Math.round(Number(mm || 1) * 8));
+}
+
+function buildZplProductLabel(payload: ProductLabelPayload): number[] {
+    const { product, store, design } = payload;
+    const width = mmToDots(design.widthMm);
+    const height = mmToDots(design.heightMm);
+    const margin = Math.max(12, Math.round(width * 0.05));
+    let y = 10;
+    const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0'];
+    if (design.showStore && store.name) {
+        lines.push(`^FO${margin},${y}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(store.name)}^FS`);
+        y += Math.round(24 * labelScale(design));
+    }
+    if (design.showName) {
+        lines.push(`^FO${margin},${y}${zplFont(28, design)}^FB${width - margin * 2},2,2,C^FD${zplEscape(product.name)}^FS`);
+        y += Math.round((design.heightMm >= 40 ? 58 : 42) * labelScale(design));
+    }
+    if (design.showPrice) {
+        lines.push(`^FO${margin},${y}${zplFont(44, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(labelPrice(product))}^FS`);
+        y += Math.round(48 * labelScale(design));
+    }
+    const barcode = labelBarcodeValue(product);
+    const barcodeHeight = Math.max(35, Math.min(90, height - y - 32));
+    if (barcode && barcodeHeight >= 28) {
+        lines.push(`^BY2,2,${barcodeHeight}`);
+        lines.push(`^FO${margin},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
+    }
+    const footer: string[] = [];
+    if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
+    if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
+    if (footer.length > 0) {
+        lines.push(`^FO${margin},${height - 24}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(footer.join('  '))}^FS`);
+    }
+    lines.push(`^PQ${labelCopies(payload.quantity)},0,1,N`, '^XZ', '');
+    return Array.from(new TextEncoder().encode(lines.join('\n')));
+}
+
+function buildTsplProductLabel(payload: ProductLabelPayload): number[] {
+    const { product, store, design } = payload;
+    const width = mmToDots(design.widthMm);
+    const height = mmToDots(design.heightMm);
+    const margin = Math.max(12, Math.round(width * 0.05));
+    const scale = tsplScale(design);
+    let y = 10;
+    const lines = [
+        `SIZE ${Math.max(15, Number(design.widthMm) || 50)} mm,${Math.max(15, Number(design.heightMm) || 30)} mm`,
+        'GAP 2 mm,0',
+        'DIRECTION 1',
+        'CLS',
+    ];
+    if (design.showStore && store.name) {
+        lines.push(`TEXT ${margin},${y},"2",0,${scale},${scale},"${tsplEscape(store.name)}"`);
+        y += 26 * scale;
+    }
+    if (design.showName) {
+        lines.push(`TEXT ${margin},${y},"3",0,${scale},${scale},"${tsplEscape(product.name)}"`);
+        y += (design.heightMm >= 40 ? 46 : 34) * scale;
+    }
+    if (design.showPrice) {
+        lines.push(`TEXT ${margin},${y},"4",0,${scale},${scale},"${tsplEscape(labelPrice(product))}"`);
+        y += 50 * scale;
+    }
+    const barcode = labelBarcodeValue(product);
+    const barcodeHeight = Math.max(35, Math.min(90, height - y - 24));
+    if (barcode && barcodeHeight >= 28) {
+        lines.push(`BARCODE ${margin},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,2,2,"${tsplEscape(barcode)}"`);
+    }
+    const footer: string[] = [];
+    if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
+    if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
+    if (footer.length > 0) lines.push(`TEXT ${margin},${height - 24},"1",0,${scale},${scale},"${tsplEscape(footer.join('  '))}"`);
+    lines.push(`PRINT ${labelCopies(payload.quantity)}`, '');
+    return Array.from(new TextEncoder().encode(lines.join('\r\n')));
+}
+
+function escposCode39(value: string): number[] {
+    const safe = value.toUpperCase().replace(/[^0-9A-Z $%+\-.\/:]/g, '').slice(0, 48);
+    if (!safe) return [];
+    return [
+        0x1d, 0x48, 0x02,
+        0x1d, 0x68, 0x45,
+        0x1d, 0x77, 0x02,
+        0x1d, 0x6b, 0x45,
+        safe.length,
+        ...encodeText(safe, 'latin1'),
+    ];
+}
+
+function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolean): number[] {
+    const { product, store, design } = payload;
+    const centerOn = [0x1b, 0x61, 0x01];
+    const leftOn = [0x1b, 0x61, 0x00];
+    const boldOn = [0x1b, 0x45, 0x01];
+    const boldOff = [0x1b, 0x45, 0x00];
+    const normalSize = [0x1d, 0x21, 0x00];
+    const barcode = labelBarcodeValue(product);
+    const bytes: number[] = [];
+    for (let copy = 0; copy < labelCopies(payload.quantity); copy += 1) {
+        bytes.push(0x1b, 0x40, ...centerOn, ...escposFontSelect(design), ...escposTextSize(design, 'normal'));
+        if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, 32), 'latin1'), ...boldOff);
+        if (design.showName) bytes.push(...line(labelText(product.name, 32), 'latin1'));
+        if (design.showPrice) bytes.push(...escposTextSize(design, 'price'), ...boldOn, ...line(labelPrice(product), 'latin1'), ...boldOff, ...normalSize, ...escposTextSize(design, 'normal'));
+        if (barcode) bytes.push(...escposCode39(barcode), ...line('', 'latin1'));
+        if (design.showBarcodeText && barcode) bytes.push(...line(barcode, 'latin1'));
+        const footer: string[] = [];
+        if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
+        if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
+        if (footer.length > 0) bytes.push(...line(labelText(footer.join('  '), 32), 'latin1'));
+        bytes.push(...leftOn, ...line('', 'latin1'), ...line('', 'latin1'));
+    }
+    bytes.push(...escposCut(cutPaper));
+    return bytes;
+}
+
+export function buildProductLabel(payload: ProductLabelPayload, config = getLabelPrinterConfig()): number[] {
+    if (config.protocol === 'tspl') return buildTsplProductLabel(payload);
+    if (config.protocol === 'zpl') return buildZplProductLabel(payload);
+    return buildEscposProductLabels(payload, config.cutPaper);
+}
+
+export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
+    if (!config.enabled) throw new Error('Label printer is disabled');
+    if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
+    if (config.protocol === 'system') throw new Error('Choose ESC/POS, TSPL, or ZPL for direct label printing');
+    await sendDirectPrinterData({
+        connection: config.connection,
+        host: config.host,
+        port: config.port,
+        printerName: config.printerName,
+        devicePath: config.devicePath,
+        data: buildProductLabel(payload, config),
+        documentName: `Label ${labelText(payload.product.name, 24)}`.trim(),
+    });
+}
+
 export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
+    if (config.protocol === 'escpos') {
+        return [
+            0x1b, 0x40,
+            0x1b, 0x61, 0x01,
+            0x1b, 0x45, 0x01,
+            ...line('L&Bj POS', 'latin1'),
+            0x1b, 0x45, 0x00,
+            ...line('Label printer test', 'latin1'),
+            0x1d, 0x21, 0x11,
+            ...line('GBP 1.00', 'latin1'),
+            0x1d, 0x21, 0x00,
+            ...escposCode39('123456789012'),
+            ...line('123456789012', 'latin1'),
+            ...line('', 'latin1'),
+            ...line('', 'latin1'),
+            ...escposCut(config.cutPaper),
+        ];
+    }
     const protocol = config.protocol === 'tspl' ? 'tspl' : 'zpl';
     const body = protocol === 'tspl'
         ? [
@@ -335,7 +617,7 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
 export async function sendLabelPrinterTest(config = getLabelPrinterConfig()): Promise<void> {
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose Network, USB raw, Serial, or Bluetooth for direct label test printing');
-    if (config.protocol === 'system') throw new Error('Choose ZPL or TSPL for direct label test printing');
+    if (config.protocol === 'system') throw new Error('Choose ESC/POS, ZPL, or TSPL for direct label test printing');
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,

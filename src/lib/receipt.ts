@@ -1,9 +1,12 @@
 import type { Setting } from '$lib/stores/db';
 
+export type ReceiptFontFamily = 'mono' | 'standard' | 'condensed';
+
 export interface ReceiptDesign {
     paperWidth: '58mm' | '80mm';
     textSize: 'small' | 'normal' | 'large';
     density: 'compact' | 'comfortable';
+    fontFamily: ReceiptFontFamily;
     headerText: string;
     footerText: string;
     customMessage: string;
@@ -24,6 +27,7 @@ export const defaultReceiptDesign: ReceiptDesign = {
     paperWidth: '80mm',
     textSize: 'normal',
     density: 'comfortable',
+    fontFamily: 'mono',
     headerText: '',
     footerText: 'Thank you for your visit!',
     customMessage: '',
@@ -35,17 +39,17 @@ export const defaultReceiptDesign: ReceiptDesign = {
     showCashier: true,
     showTill: true,
     showSku: false,
-    showTax: true,
+    showTax: false,
     showPayment: true,
     showBarcode: true,
 };
 
 export function getReceiptDesign(settings: Setting[]): ReceiptDesign {
     const raw = settings.find((setting) => setting.key === 'receipt_design')?.value;
-    if (!raw) return { ...defaultReceiptDesign };
+    if (!raw) return { ...defaultReceiptDesign, showTax: false };
     try {
-        return { ...defaultReceiptDesign, ...JSON.parse(raw) };
+        return { ...defaultReceiptDesign, ...JSON.parse(raw), showTax: false };
     } catch {
-        return { ...defaultReceiptDesign };
+        return { ...defaultReceiptDesign, showTax: false };
     }
 }

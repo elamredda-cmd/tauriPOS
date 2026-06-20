@@ -69,7 +69,7 @@
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
-    import { getReceiptPrinterConfig, sendEscposReceipt } from "$lib/printers";
+    import { getReceiptPrinterConfig, printEscposReceipt, sendEscposReceipt } from "$lib/printers";
     import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
 
     let activePageId = "";
@@ -1489,12 +1489,58 @@
         }
     }
 
-    function printReceipt() {
+    async function printReceipt() {
         if (!selectedRecentOrderId || !recentOrders.some((order) => order.id === selectedRecentOrderId)) {
             toast("Select a receipt before printing", "error");
             return;
         }
-        window.print();
+        const selectedOrder = recentOrders.find((order) => order.id === selectedRecentOrderId);
+        if (!selectedOrder) return;
+        if (receiptPrinterConfig.connection === "system") {
+            toast("Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first", "error");
+            return;
+        }
+        try {
+            await printEscposReceipt({
+                store: $storeDB,
+                order: selectedOrder,
+                lines: $orderLinesDB
+                    .filter((line) => line.orderId === selectedRecentOrderId)
+                    .map((line) => ({
+                        ...line,
+                        sku: productById.get(line.productId)?.sku || "",
+                    })),
+                cashierName: employeeById.get(selectedOrder.employeeId)?.name || "",
+                tillName: registerById.get(selectedOrder.tillNumber)?.name || tillName,
+                design: receiptDesign,
+            }, receiptPrinterConfig);
+            toast("Receipt sent to printer", "success");
+        } catch (error) {
+            toast(`Receipt did not print: ${error}`, "error");
+        }
+    }
+
+    async function printCompletedSaleReceipt(bundle: SaleBundle) {
+        if (receiptPrinterConfig.connection === "system") {
+            toast("Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first", "error");
+            return;
+        }
+        try {
+            await printEscposReceipt({
+                store: $storeDB,
+                order: bundle.order,
+                lines: bundle.lines.map((line) => ({
+                    ...line,
+                    sku: line.sku || productById.get(line.productId)?.sku || "",
+                })),
+                cashierName: employeeById.get(bundle.order.employeeId)?.name || $currentEmployee?.name || "",
+                tillName: registerById.get(bundle.order.tillNumber)?.name || tillName,
+                design: receiptDesign,
+            }, receiptPrinterConfig);
+            toast("Receipt sent to printer", "success");
+        } catch (error) {
+            toast(`Receipt did not print: ${error}`, "error");
+        }
     }
 
     async function handleOpenCashDrawer() {
@@ -2144,7 +2190,7 @@
                 selectedCustomerId = "";
                 useLoyaltyCredit = false;
                 playSuccessSound();
-                toast("Training sale completed. Nothing was saved.", "success", true);
+                toast("Training sale completed. Nothing was saved.", "success");
                 return;
             }
 
@@ -2187,11 +2233,12 @@
                     : "Sale completed successfully",
                 "success",
                 true,
+                () => printCompletedSaleReceipt(committedSale),
             );
             triggerSync();
         } catch (e) {
             console.error(e);
-            toast(`Sale was not completed: ${e}`, "error", true);
+            toast(`Sale was not completed: ${e}`, "error");
         } finally {
             isCompletingSale = false;
         }

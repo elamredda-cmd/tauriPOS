@@ -5,11 +5,14 @@
     import { productsDB, settingsDB, storeDB, formatMoney, type Product } from '$lib/stores/db';
     import { getLabelDesign } from '$lib/labels';
     import { toast } from '$lib/stores/toast';
+    import { getLabelPrinterConfig, printProductLabels } from '$lib/printers';
 
     let search = '';
     let searchInput: HTMLInputElement;
     let selected = new Map<string, number>();
+    let printingLabels = false;
     $: design = getLabelDesign($settingsDB);
+    $: labelPrinter = getLabelPrinterConfig($settingsDB);
     $: matches = search.trim()
         ? $productsDB.filter(product => product.isActive && (
             product.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -55,16 +58,36 @@
         else toast('No matching item found', 'error');
     }
 
-    function printLabels() {
+    async function printLabels() {
         if (totalLabels === 0) { toast('Select at least one item', 'error'); return; }
-        window.print();
+        if (printingLabels) return;
+        if (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system') {
+            toast('Set Label Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            return;
+        }
+        printingLabels = true;
+        try {
+            for (const item of selectedProducts) {
+                await printProductLabels({
+                    product: item.product,
+                    store: $storeDB,
+                    design,
+                    quantity: item.quantity,
+                }, labelPrinter);
+            }
+            toast(`${totalLabels} label${totalLabels === 1 ? '' : 's'} sent to printer`, 'success');
+        } catch (error) {
+            toast(`Labels did not print: ${error}`, 'error');
+        } finally {
+            printingLabels = false;
+        }
     }
 </script>
 
 <MgmtPage title="Quick Label Print">
     <div slot="actions" class="flex gap-3">
         <button class="btn btn-danger" disabled={selected.size === 0} on:click={() => selected = new Map()}>Clear</button>
-        <button class="btn btn-primary" disabled={totalLabels === 0} on:click={printLabels}>Print {totalLabels} Label{totalLabels === 1 ? '' : 's'}</button>
+        <button class="btn btn-primary" disabled={totalLabels === 0 || printingLabels} on:click={printLabels}>{printingLabels ? 'Printing...' : `Print ${totalLabels} Label${totalLabels === 1 ? '' : 's'}`}</button>
     </div>
     <div class="grid h-full min-h-0 grid-cols-[minmax(300px,0.9fr)_minmax(380px,1.1fr)] gap-4 p-4 max-[850px]:grid-cols-1 max-[850px]:overflow-y-auto">
         <section class="settings-section flex min-h-0 flex-col max-[850px]:min-h-[420px]">

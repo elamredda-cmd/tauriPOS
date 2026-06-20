@@ -1,6 +1,14 @@
 <script lang="ts">
-    import { toasts, removeToast } from '$lib/stores/toast';
+    import { toasts, removeToast, type ToastItem } from '$lib/stores/toast';
     $: items = $toasts;
+
+    async function handlePrint(t: ToastItem) {
+        try {
+            await t.onPrint?.();
+        } finally {
+            removeToast(t.id);
+        }
+    }
 </script>
 
 {#if items.length > 0}
@@ -22,10 +30,10 @@
                     class="flex-1 p-4 text-[1.4rem] font-bold rounded-sm cursor-pointer border border-border-flat bg-bg-card text-text-main transition-colors hover:bg-bg-card-hover"
                     on:click={() => removeToast(t.id)}
                 >OK</button>
-                {#if t.showPrint}
+                {#if t.showPrint && t.onPrint}
                     <button
                         class="flex-1 p-4 text-[1.4rem] font-bold rounded-sm cursor-pointer border border-accent-primary bg-accent-primary text-white transition-colors hover:bg-accent-primary-hover"
-                        on:click={() => { console.log('Print receipt'); removeToast(t.id); }}
+                        on:click={() => handlePrint(t)}
                     >Print Receipt</button>
                 {/if}
             </div>

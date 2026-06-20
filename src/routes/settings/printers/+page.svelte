@@ -96,7 +96,7 @@
     ];
 
     const labelConnections: Array<{ value: PrinterConnectionType; label: string; note: string; enabled: boolean }> = [
-        { value: 'system', label: 'System / driver print', note: 'Best first option for normal USB label printers.', enabled: true },
+        { value: 'system', label: 'System / driver print', note: 'Uses the normal Windows/macOS print dialog.', enabled: true },
         { value: 'network_escpos', label: 'Network label printer', note: 'Direct ZPL/TSPL label printing by IP address.', enabled: true },
         { value: 'usb_raw', label: 'Windows USB raw', note: 'Silent Windows USB label printing by exact installed printer name.', enabled: true },
         { value: 'serial', label: 'Serial / COM', note: 'Direct serial/COM device path.', enabled: true },
@@ -120,6 +120,7 @@
 
     const labelProtocolOptions = [
         { label: 'System printer / driver', value: 'system' },
+        { label: 'ESC/POS / Xprinter receipt roll', value: 'escpos' },
         { label: 'ZPL / Zebra style', value: 'zpl' },
         { label: 'TSPL / TSC style', value: 'tspl' },
     ];
@@ -285,7 +286,7 @@
                                 Auto print: {receipt.autoPrintAfterPayment ? 'On' : 'Off'}
                             </span>
                         </div>
-                        <div class="mt-4 grid gap-3 lg:grid-cols-3">
+                        <div class="mt-4 grid gap-3 lg:grid-cols-4">
                             <button class={switchCardClass(receipt.autoPrintAfterPayment)} on:click={() => updateSetting('receipt_printer_auto_print_after_payment', receipt.autoPrintAfterPayment ? 'false' : 'true')}>
                                 <span class="font-black text-text-main">Auto print after payment</span>
                                 <small class="text-sm text-text-muted">Print automatically after successful payment using direct modes.</small>
@@ -296,6 +297,19 @@
                                 <small class="text-sm text-text-muted">Send paper-cut command after receipt.</small>
                                 <b class="mt-auto text-sm text-success">{receipt.cutPaper ? 'On' : 'Off'}</b>
                             </button>
+                            <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                                <label class="font-black text-text-main" for="receipt-cut-feed-lines">Feed before cut</label>
+                                <input
+                                    id="receipt-cut-feed-lines"
+                                    class="mt-2"
+                                    type="number"
+                                    min="0"
+                                    max="20"
+                                    value={receipt.cutFeedLines}
+                                    on:change={(event) => updateSetting('receipt_printer_cut_feed_lines', event.currentTarget.value || '8')}
+                                />
+                                <small class="mt-2 block text-sm text-text-muted">More lines keeps the footer above the cutter.</small>
+                            </div>
                             <button class={switchCardClass(receipt.openDrawerAfterPayment)} on:click={() => updateSetting('receipt_printer_open_drawer_after_payment', receipt.openDrawerAfterPayment ? 'false' : 'true')}>
                                 <span class="font-black text-text-main">Drawer after payment</span>
                                 <small class="text-sm text-text-muted">Open the cash drawer after every successful payment.</small>
@@ -381,7 +395,7 @@
                             <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Label printer</p>
                             <h3 class="m-0 text-xl font-black text-text-main">Shelf labels and barcode labels</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
-                                Use system mode for normal driver printing, or direct ZPL/TSPL for supported label printers.
+                                Use USB raw with ESC/POS for Xprinter receipt-roll labels, or ZPL/TSPL for dedicated label printers.
                             </p>
                         </div>
                         <button
@@ -417,10 +431,18 @@
                         <p class="m-0 mt-2 text-sm text-text-muted">{labelMode?.note}</p>
                     </div>
 
+                    <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <button class={switchCardClass(label.cutPaper)} on:click={() => updateSetting('label_printer_cut_paper', label.cutPaper ? 'false' : 'true')}>
+                            <span class="text-base font-black text-text-main">Cut after label</span>
+                            <span class="text-sm text-text-muted">For Xprinter and ESC/POS printers with a cutter.</span>
+                            <b class="mt-auto text-xs uppercase tracking-[0.12em] {label.cutPaper ? 'text-success' : 'text-text-muted'}">{label.cutPaper ? 'On' : 'Off'}</b>
+                        </button>
+                    </div>
+
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
                         <div class="mb-4">
                             <h4 class="m-0 text-base font-black">Label connection details</h4>
-                            <p class="m-0 mt-1 text-sm text-text-muted">Protocol and connection settings for direct label printing.</p>
+                            <p class="m-0 mt-1 text-sm text-text-muted">Use ESC/POS for Xprinter receipt printers. Use TSPL or ZPL for dedicated label printers.</p>
                         </div>
                         <div class="form-grid">
                             <CustomSelect
@@ -432,7 +454,7 @@
                             {#if label.connection === 'system'}
                                 <div class="rounded-xl border border-dashed border-border-flat bg-bg-card p-4">
                                     <b class="text-text-main">System printer mode</b>
-                                    <p class="m-0 mt-1 text-sm text-text-muted">Use the normal print dialog from Label Design & Print. Direct test printing is not needed in this mode.</p>
+                                    <p class="m-0 mt-1 text-sm text-text-muted">This opens the normal print dialog. For thermal printing without A4, choose USB raw, Network, Serial, or Bluetooth.</p>
                                 </div>
                             {:else if label.connection === 'network_escpos'}
                                 <div class="field">

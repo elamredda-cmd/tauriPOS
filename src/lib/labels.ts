@@ -1,11 +1,15 @@
 import type { Setting } from '$lib/stores/db';
 
 export type LabelTemplate = 'compact' | 'standard' | 'barcode' | 'shelf';
+export type LabelFontFamily = 'standard' | 'condensed' | 'serif';
+export type LabelTextScale = 'small' | 'normal' | 'large';
 
 export interface LabelDesign {
     widthMm: number;
     heightMm: number;
     template: LabelTemplate;
+    fontFamily: LabelFontFamily;
+    textScale: LabelTextScale;
     showStore: boolean;
     showName: boolean;
     showPrice: boolean;
@@ -30,6 +34,8 @@ export const defaultLabelDesign: LabelDesign = {
     widthMm: 50,
     heightMm: 30,
     template: 'standard',
+    fontFamily: 'standard',
+    textScale: 'normal',
     showStore: false,
     showName: true,
     showPrice: true,

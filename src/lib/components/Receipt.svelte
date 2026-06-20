@@ -24,13 +24,18 @@
     $: width = design.paperWidth === '58mm' ? '58mm' : '80mm';
     $: textSize = design.textSize === 'small' ? '10px' : design.textSize === 'large' ? '14px' : '12px';
     $: lineGap = design.density === 'compact' ? '2px' : '5px';
+    $: receiptFont = design.fontFamily === 'standard'
+        ? 'Arial, Helvetica, sans-serif'
+        : design.fontFamily === 'condensed'
+            ? 'Arial Narrow, Helvetica Condensed, Arial, sans-serif'
+            : 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
     $: divider = design.paperWidth === '58mm' ? '------------------------' : '--------------------------------';
 </script>
 
 <div
     class="receipt-document"
     class:receipt-preview={preview}
-    style="--receipt-width:{width}; --receipt-text-size:{textSize}; --receipt-line-gap:{lineGap};"
+    style="--receipt-width:{width}; --receipt-text-size:{textSize}; --receipt-line-gap:{lineGap}; --receipt-font:{receiptFont};"
 >
     <div class="receipt-center">
         <h3>{design.headerText || store.name}</h3>
@@ -77,7 +82,6 @@
             <div><span>Subtotal</span><span>{formatMoney(order.subtotal || 0)}</span></div>
             <div><span>Discount</span><span>{formatMoney(-(order.discountAmount || 0))}</span></div>
         {/if}
-        {#if design.showTax}<div><span>Tax</span><span>{formatMoney(order.taxTotal || 0)}</span></div>{/if}
         <div class="receipt-total"><span>Total</span><span>{formatMoney(order.total || 0)}</span></div>
         {#if design.showPayment}
             <div><span>{(order.paymentMethod || 'cash').toUpperCase()}</span><span>{formatMoney(order.amountTendered || order.total || 0)}</span></div>
@@ -102,7 +106,7 @@
         padding: 5mm;
         background: white;
         color: black;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-family: var(--receipt-font);
         font-size: var(--receipt-text-size);
         line-height: 1.3;
     }

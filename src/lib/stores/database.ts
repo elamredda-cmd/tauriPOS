@@ -611,11 +611,12 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'receipt_printer_port', 'receipt_printer_name', 'receipt_printer_device_path',
     'receipt_printer_baud_rate', 'receipt_printer_paper_width',
     'receipt_printer_auto_print_after_payment', 'receipt_printer_cut_paper',
+    'receipt_printer_cut_feed_lines',
     'receipt_printer_open_drawer_after_cash', 'receipt_printer_open_drawer_after_payment',
     'receipt_printer_encoding',
     'label_printer_enabled', 'label_printer_connection', 'label_printer_protocol',
     'label_printer_host', 'label_printer_port', 'label_printer_name',
-    'label_printer_device_path', 'label_printer_baud_rate',
+    'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done',
 ]);

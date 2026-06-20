@@ -21,6 +21,11 @@
         { label: 'Compact', value: 'compact' },
         { label: 'Comfortable', value: 'comfortable' },
     ];
+    const fontOptions = [
+        { label: 'Mono / receipt style', value: 'mono' },
+        { label: 'Standard', value: 'standard' },
+        { label: 'Condensed', value: 'condensed' },
+    ];
 
     const previewOrder: Order = {
         id: 'preview-order',
@@ -85,7 +90,6 @@
         { key: 'showCashier', label: 'Cashier name' },
         { key: 'showTill', label: 'Till name' },
         { key: 'showSku', label: 'Product SKU' },
-        { key: 'showTax', label: 'Tax total' },
         { key: 'showPayment', label: 'Payment and change' },
         { key: 'showBarcode', label: 'Receipt barcode' },
     ];
@@ -108,6 +112,9 @@
                     </div>
                     <div class="field">
                         <CustomSelect label="Text Size" bind:value={design.textSize} options={textSizeOptions} />
+                    </div>
+                    <div class="field">
+                        <CustomSelect label="Font" bind:value={design.fontFamily} options={fontOptions} />
                     </div>
                     <div class="field">
                         <CustomSelect label="Spacing" bind:value={design.density} options={densityOptions} />

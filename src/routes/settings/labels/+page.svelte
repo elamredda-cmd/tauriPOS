@@ -1,15 +1,19 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
+    import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { now, productsDB, settingsDB, storeDB, type Product } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { defaultLabelDesign, getLabelDesign, labelSizePresets, type LabelDesign, type LabelTemplate } from '$lib/labels';
+    import { getLabelPrinterConfig, printProductLabels } from '$lib/printers';
 
     let design: LabelDesign = getLabelDesign($settingsDB);
     let search = '';
     let selectedProductId = '';
     let quantity = 1;
+    let printingLabels = false;
+    $: labelPrinter = getLabelPrinterConfig($settingsDB);
     $: filteredProducts = $productsDB.filter(product => product.isActive && (
         !search.trim() ||
         product.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -25,6 +29,16 @@
         { id: 'standard', name: 'Standard Product', description: 'Balanced name, price, and barcode.' },
         { id: 'barcode', name: 'Barcode Focus', description: 'Large barcode for fast scanning.' },
         { id: 'shelf', name: 'Shelf Label', description: 'Large price and product name.' },
+    ];
+    const fontOptions = [
+        { label: 'Standard', value: 'standard' },
+        { label: 'Condensed', value: 'condensed' },
+        { label: 'Serif', value: 'serif' },
+    ];
+    const textScaleOptions = [
+        { label: 'Small', value: 'small' },
+        { label: 'Normal', value: 'normal' },
+        { label: 'Large', value: 'large' },
     ];
 
     function usePreset(width: number, height: number) {
@@ -47,9 +61,27 @@
         toast('Label design saved', 'success');
     }
 
-    function printLabels() {
+    async function printLabels() {
         if (!selectedProduct) { toast('Select an item to print', 'error'); return; }
-        window.print();
+        if (printingLabels) return;
+        if (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system') {
+            toast('Set Label Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            return;
+        }
+        printingLabels = true;
+        try {
+            await printProductLabels({
+                product: selectedProduct,
+                store: $storeDB,
+                design,
+                quantity,
+            }, labelPrinter);
+            toast('Label sent to printer', 'success');
+        } catch (error) {
+            toast(`Label did not print: ${error}`, 'error');
+        } finally {
+            printingLabels = false;
+        }
     }
 </script>
 
@@ -57,7 +89,7 @@
     <div slot="actions" class="flex gap-3">
         <button class="btn btn-secondary" on:click={() => design = { ...defaultLabelDesign }}>Reset</button>
         <button class="btn btn-secondary" on:click={saveDesign}>Save Design</button>
-        <button class="btn btn-primary" on:click={printLabels}>Print Labels</button>
+        <button class="btn btn-primary" on:click={printLabels} disabled={printingLabels}>{printingLabels ? 'Printing...' : 'Print Labels'}</button>
     </div>
     <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(340px,0.8fr)] gap-6 p-6 max-[950px]:grid-cols-1 max-[950px]:p-3">
         <section class="flex flex-col gap-4">
@@ -136,6 +168,18 @@
                             </span>
                         </button>
                     {/each}
+                </div>
+                <div class="form-grid mt-4">
+                    <CustomSelect
+                        label="Font"
+                        bind:value={design.fontFamily}
+                        options={fontOptions}
+                    />
+                    <CustomSelect
+                        label="Text Size"
+                        bind:value={design.textScale}
+                        options={textScaleOptions}
+                    />
                 </div>
             </div>
         </section>

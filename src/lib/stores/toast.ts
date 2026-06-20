@@ -1,13 +1,24 @@
 import { writable } from 'svelte/store';
 
-interface ToastItem { id: number; message: string; type: 'success' | 'error' | 'info'; showPrint?: boolean; }
+export interface ToastItem {
+    id: number;
+    message: string;
+    type: 'success' | 'error' | 'info';
+    showPrint?: boolean;
+    onPrint?: () => void | Promise<void>;
+}
 
 export const toasts = writable<ToastItem[]>([]);
 let counter = 0;
 
-export function toast(message: string, type: 'success' | 'error' | 'info' = 'success', showPrint: boolean = false) {
+export function toast(
+    message: string,
+    type: 'success' | 'error' | 'info' = 'success',
+    showPrint: boolean = false,
+    onPrint?: ToastItem['onPrint'],
+) {
     const id = ++counter;
-    toasts.update(t => [...t, { id, message, type, showPrint }]);
+    toasts.update(t => [...t, { id, message, type, showPrint, onPrint }]);
     setTimeout(() => removeToast(id), 15000);
 }
 
