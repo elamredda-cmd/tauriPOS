@@ -34,35 +34,35 @@
         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as key}
             <button
                 type="button"
-                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
                 on:click={() => press(key)}
             >{key}</button>
         {/each}
         <button
             type="button"
-            class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[.8rem] font-black text-danger shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+            class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[.8rem] font-black text-danger shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
             on:click={() => press("clear")}
         >Clear</button>
         <button
             type="button"
-            class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+            class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
             on:click={() => press("0")}
         >0</button>
         {#if allowDecimal}
             <button
                 type="button"
-                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
                 on:click={() => !value.includes(".") && press(".")}
             >.</button>
             <button
                 type="button"
-                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
                 on:click={() => press("backspace")}
             >⌫</button>
         {:else}
             <button
                 type="button"
-                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
                 on:click={() => press("backspace")}
             >⌫</button>
         {/if}

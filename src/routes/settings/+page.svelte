@@ -28,7 +28,7 @@
             'relative min-h-[88px] rounded-xl border p-4 pr-16 text-left transition-all duration-150',
             'disabled:cursor-not-allowed disabled:opacity-45',
             active
-                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_color-mix(in_srgb,var(--success)_12%,transparent)]'
+                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_var(--shadow)]'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
         ].join(' ');
     }
@@ -74,7 +74,7 @@
     <button slot="actions" class="btn btn-primary" on:click={saveStore}>Save Store Information</button>
 
     <div class="flex flex-col gap-5 p-4 lg:p-6">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card via-bg-card to-bg-panel p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_20%,transparent)]">
+        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card via-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
             <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div>
                     <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-accent-primary">Shop control centre</p>

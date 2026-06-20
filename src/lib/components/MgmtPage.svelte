@@ -19,7 +19,7 @@
             <slot name="actions" />
         </div>
     </header>
-    <div class="management-content flex-1 rounded-xl bg-bg-panel border border-border-flat shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_24%,transparent)]">
+    <div class="management-content flex-1 rounded-xl bg-bg-panel border border-border-flat shadow-[0_18px_45px_var(--shadow)]">
         <slot />
     </div>
 </div>

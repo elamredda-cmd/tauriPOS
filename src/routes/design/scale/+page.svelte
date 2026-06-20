@@ -129,7 +129,7 @@
         <section class="designer-panel">
             <div class="page-tabs">
                 {#each pages as page}
-                    <button class={page.id === activePageId ? '!border-[var(--page-color)] !bg-[color-mix(in_srgb,var(--page-color)_12%,var(--bg-panel))]' : ''} style="--page-color: {page.color}" on:click={() => activePageId = page.id}>
+                    <button class={page.id === activePageId ? '!border-[var(--page-color)] !bg-bg-card' : ''} style="--page-color: {page.color}" on:click={() => activePageId = page.id}>
                         <i></i>{page.name}<small>{page.productIds.length}</small>
                     </button>
                 {/each}
@@ -218,13 +218,13 @@
 {/if}
 
 <style>
-    .scale-designer { padding: 1rem; display: flex; flex-direction: column; gap: 1rem; background: radial-gradient(circle at top right, color-mix(in srgb, var(--success) 12%, transparent), transparent 32%); }
-    .designer-intro, .designer-panel { border: 1px solid var(--border-flat); border-radius: 1rem; background: color-mix(in srgb, var(--bg-card) 94%, transparent); }
+    .scale-designer { padding: 1rem; display: flex; flex-direction: column; gap: 1rem; background: var(--bg-base); }
+    .designer-intro, .designer-panel { border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-card); }
     .designer-intro { padding: 1.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
     .designer-intro span, .section-heading span { color: var(--success); text-transform: uppercase; letter-spacing: .12em; font-size: .7rem; font-weight: 900; }
     .designer-intro h2 { margin: .25rem 0 .35rem; }
     .designer-intro p, .section-heading small { color: var(--text-muted); margin: 0; }
-    .designer-intro strong { padding: .7rem 1rem; border-radius: 2rem; color: var(--success); background: color-mix(in srgb, var(--success) 14%, var(--bg-panel)); white-space: nowrap; }
+    .designer-intro strong { padding: .7rem 1rem; border-radius: 2rem; color: var(--success); background: rgba(16, 185, 129, .14); white-space: nowrap; }
     .designer-panel { padding: 1.25rem; }
     .page-tabs { display: flex; gap: .55rem; overflow-x: auto; padding-bottom: .35rem; }
     .page-tabs button { min-height: 46px; padding: 0 1rem; display: flex; align-items: center; gap: .5rem; white-space: nowrap; color: var(--text-main); font-weight: 800; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); }

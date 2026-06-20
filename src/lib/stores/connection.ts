@@ -45,6 +45,10 @@ export const connectionState = writable<PosConnectionState>({
 
 /** Cached MySQL Database instance — reused across calls. */
 let mysqlDbInstance: Database | null = null;
+let mysqlDbUri = '';
+let mysqlOpenPromise: Promise<Database | null> | null = null;
+let mysqlOpenUri = '';
+let mysqlConnectionGeneration = 0;
 const HEARTBEAT_TIMEOUT_MS = 3000;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
@@ -130,7 +134,7 @@ export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<voi
 
     // Always reconnect after saving setup choices so a changed host, database,
     // or credential set can never reuse the previous cached connection.
-    mysqlDbInstance = null;
+    resetMysqlConnection();
 
     connectionState.set({
         mode,
@@ -154,14 +158,19 @@ export function buildMysqlUri(config: MysqlConfig): string {
  * Does **not** cache the connection — this is a one-shot probe.
  */
 export async function testMysqlConnection(config: MysqlConfig): Promise<boolean> {
+    let testDb: Database | null = null;
     try {
-        const testDb = await Database.load(buildMysqlUri(config));
+        testDb = await Database.load(buildMysqlUri(config));
         // Run a trivial query to confirm the connection is alive
         await testDb.select('SELECT 1');
         return true;
     } catch (e) {
         console.warn('connection: MySQL test failed:', e);
         return false;
+    } finally {
+        if (testDb) {
+            await closeDatabase(testDb);
+        }
     }
 }
 
@@ -171,23 +180,19 @@ export async function testMysqlConnection(config: MysqlConfig): Promise<boolean>
  * or if the connection fails.
  */
 export async function getMysqlDb(): Promise<Database | null> {
-    if (mysqlDbInstance) return mysqlDbInstance;
-
     const { mysqlConfig } = get(connectionState);
     if (!mysqlConfig) return null;
+    const uri = buildMysqlUri(mysqlConfig);
 
-    try {
-        mysqlDbInstance = await Database.load(buildMysqlUri(mysqlConfig));
-        // Confirm liveness
-        await mysqlDbInstance.select('SELECT 1');
-        connectionState.update(s => ({ ...s, mysqlOnline: true }));
-        return mysqlDbInstance;
-    } catch (e) {
-        console.warn('connection: could not open MySQL connection:', e);
-        mysqlDbInstance = null;
-        connectionState.update(s => ({ ...s, mysqlOnline: false }));
-        return null;
-    }
+    if (mysqlDbInstance && mysqlDbUri === uri) return mysqlDbInstance;
+    if (mysqlDbInstance && mysqlDbUri !== uri) resetMysqlConnection();
+    if (mysqlOpenPromise && mysqlOpenUri === uri) return mysqlOpenPromise;
+    if (mysqlOpenPromise && mysqlOpenUri !== uri) resetMysqlConnection();
+
+    const generation = mysqlConnectionGeneration;
+    mysqlOpenUri = uri;
+    mysqlOpenPromise = openMysqlConnection(uri, generation);
+    return mysqlOpenPromise;
 }
 
 /**
@@ -196,7 +201,13 @@ export async function getMysqlDb(): Promise<Database | null> {
  * (server restart, Wi-Fi blip, IP change) can recover automatically.
  */
 export function resetMysqlConnection(): void {
+    mysqlConnectionGeneration += 1;
+    const old = mysqlDbInstance;
     mysqlDbInstance = null;
+    mysqlDbUri = '';
+    mysqlOpenPromise = null;
+    mysqlOpenUri = '';
+    void closeDatabase(old);
 }
 
 /**
@@ -207,17 +218,67 @@ export function resetMysqlConnection(): void {
 export async function pingMysql(): Promise<boolean> {
     if (!isMultiMode()) return false;
     try {
-        const db = await withTimeout(getMysqlDb(), HEARTBEAT_TIMEOUT_MS);
+        const db = await getMysqlDb();
         if (!db) return false;
         await withTimeout(db.select('SELECT 1'), HEARTBEAT_TIMEOUT_MS);
         connectionState.update(s => ({ ...s, mysqlOnline: true }));
         return true;
     } catch (e) {
         console.warn('connection: heartbeat ping failed:', e);
-        mysqlDbInstance = null;
+        resetMysqlConnection();
         connectionState.update(s => ({ ...s, mysqlOnline: false }));
         return false;
     }
+}
+
+async function openMysqlConnection(uri: string, generation: number): Promise<Database | null> {
+    let opened: Database | null = null;
+    try {
+        opened = await Database.load(uri);
+        if (generation !== mysqlConnectionGeneration || currentMysqlUri() !== uri) {
+            await closeDatabase(opened);
+            return null;
+        }
+
+        await opened.select('SELECT 1');
+        if (generation !== mysqlConnectionGeneration || currentMysqlUri() !== uri) {
+            await closeDatabase(opened);
+            return null;
+        }
+
+        mysqlDbInstance = opened;
+        mysqlDbUri = uri;
+        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        return opened;
+    } catch (e) {
+        console.warn('connection: could not open MySQL connection:', e);
+        await closeDatabase(opened);
+        if (generation === mysqlConnectionGeneration) {
+            mysqlDbInstance = null;
+            mysqlDbUri = '';
+            connectionState.update(s => ({ ...s, mysqlOnline: false }));
+        }
+        return null;
+    } finally {
+        if (generation === mysqlConnectionGeneration) {
+            mysqlOpenPromise = null;
+            mysqlOpenUri = '';
+        }
+    }
+}
+
+async function closeDatabase(database: Database | null): Promise<void> {
+    if (!database) return;
+    try {
+        await database.close(database.path);
+    } catch (error) {
+        console.warn('connection: failed to close MySQL connection:', error);
+    }
+}
+
+function currentMysqlUri(): string | null {
+    const config = get(connectionState).mysqlConfig;
+    return config ? buildMysqlUri(config) : null;
 }
 
 /**

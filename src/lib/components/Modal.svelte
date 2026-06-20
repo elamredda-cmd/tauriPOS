@@ -15,7 +15,7 @@
 
 {#if show}
 <div
-    class="fixed inset-0 bg-[var(--overlay)] flex items-center justify-center z-[100] p-5 backdrop-blur-sm"
+    class="fixed inset-0 bg-[var(--overlay)] flex items-center justify-center z-[100] p-5"
     role="presentation"
     on:click={handleBackdropClick}
     on:keydown={handleKeydown}
@@ -27,14 +27,14 @@
         aria-modal="true"
         aria-label={title}
     >
-        <div class="app-modal-header flex justify-between items-center border-b border-border-flat px-6 py-4 bg-bg-panel/70">
+        <div class="app-modal-header flex justify-between items-center border-b border-border-flat px-6 py-4 bg-bg-panel">
             <h2 class="m-0 text-xl font-bold text-text-main">{title}</h2>
             <button aria-label="Close dialog" class="btn-icon !w-10 !h-10 !shadow-none" on:click={() => show = false}>✕</button>
         </div>
         <div class="app-modal-content flex-1 overflow-y-auto p-6">
             <slot />
         </div>
-        <div class="app-modal-footer flex justify-end gap-3 px-6 py-4 border-t border-border-flat bg-bg-panel/80">
+        <div class="app-modal-footer flex justify-end gap-3 px-6 py-4 border-t border-border-flat bg-bg-panel">
             <slot name="footer" />
         </div>
     </div>

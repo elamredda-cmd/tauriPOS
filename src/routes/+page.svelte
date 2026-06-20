@@ -219,10 +219,10 @@
             ? ($connectionState.mysqlOnline ? ($connectionState.syncError ? "Sync issue" : "Synced") : "Offline")
             : "Setup";
     $: syncStyle = syncLabel === "Synced"
-        ? "text-success border-success/40 bg-success/10"
+        ? "sync-pill-ok"
         : syncLabel === "Offline" || syncLabel === "Sync issue"
-            ? "text-danger border-danger/40 bg-danger/10"
-            : "text-text-muted border-border-flat bg-bg-card";
+            ? "sync-pill-danger"
+            : "sync-pill-neutral";
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
     $: receiptPrinterConfig = getReceiptPrinterConfig($settingsDB);
 
@@ -2464,10 +2464,10 @@
                 {$storeDB.name}
             </h1>
             <div
-                class="justify-self-end flex items-center gap-2 px-2.5 py-1.5 rounded-full border text-[11px] font-bold {syncStyle}"
+                class="sync-pill justify-self-end {syncStyle}"
                 title={$connectionState.syncError || syncLabel}
             >
-                <span class="w-2 h-2 rounded-full bg-current"></span>
+                <span></span>
                 {syncLabel}
             </div>
         </header>
@@ -2619,7 +2619,7 @@
 
     <!-- Cart / Trolly -->
     <aside
-        class="pos-cart flex flex-col w-64 md:w-72 lg:w-80 xl:w-96 2xl:w-[420px] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
+        class="pos-cart flex flex-col w-[clamp(310px,32vw,460px)] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
     >
         <!-- Compact Trolly Header (Order info + Search + Clear) -->
         <div
@@ -2715,10 +2715,7 @@
                 {@const scaleDisplay = getScaleSaleDisplay(item.note, item.quantity, item.price, item.originalPrice)}
                 <div
                     bind:this={cartItemEls[i]}
-                    class="flex items-start gap-2.5 p-1.5 md:p-2.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex ===
-                    i
-                        ? 'border-accent-primary bg-accent-primary/5 shadow-sm'
-                        : 'border-border-flat bg-bg-card hover:bg-bg-card-hover'}"
+                    class="cart-line flex items-center gap-2 p-1.5 md:p-2 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'}"
                     on:click={() => (selectedCartIndex = i)}
                 >
                     <div
@@ -2728,7 +2725,8 @@
                     </div>
                     <div class="flex-1 min-w-0">
                         <h4
-                            class="m-0 text-[11px] md:text-sm font-bold text-text-main truncate leading-tight"
+                            class="m-0 text-xs md:text-[0.9rem] font-black text-text-main truncate leading-tight"
+                            title={item.name}
                         >
                             {item.name}
                         </h4>
@@ -2743,76 +2741,38 @@
                         {/if}
                         {#if cartEval.lines[i]?.applied?.length}
                             {#each cartEval.lines[i].applied as ap}
-                                {@const d = $discountsDB.find(
-                                    (x) => x.id === ap.discountId,
-                                )}
                                 <div
-                                    class="mt-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold inline-flex items-center gap-1 bg-success/10 text-success border border-success/20 leading-tight"
+                                    class="cart-promo-badge cart-promo-badge-applied"
+                                    title={`${ap.discountName} -${formatMoney(ap.savings)}`}
                                 >
-                                    🟢 {ap.discountName} −{formatMoney(
-                                        ap.savings,
-                                    )}
-                                    {#if d}
-                                        <small class="opacity-70 font-normal text-[8px]">
-                                            {#if d.kind === "bundle_fixed_price"}
-                                                (Any {d.bundleQuantity} for {formatMoney(
-                                                    d.bundlePrice,
-                                                )})
-                                            {:else if d.kind === "bogo_fixed_price"}
-                                                (Buy {d.minQuantity}, 2nd at {formatMoney(
-                                                    d.secondPrice,
-                                                )})
-                                            {:else if d.kind === "temporary_item"}
-                                                ({d.type === "percentage" ? `${d.value}% off` : `${formatMoney(d.value)} sale price`})
-                                            {/if}
-                                        </small>
-                                    {/if}
+                                    <span class="cart-promo-dot"></span>
+                                    <span class="truncate">{ap.discountName}</span>
+                                    <strong>−{formatMoney(ap.savings)}</strong>
                                 </div>
                             {/each}
                         {:else if cartEval.lines[i]?.eligibleFor?.length}
                             <div
-                                class="mt-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold inline-flex items-center gap-1 bg-warning/10 text-warning border border-warning/20 leading-tight"
+                                class="cart-promo-badge cart-promo-badge-eligible"
+                                title={cartEval.lines[i].eligibleFor.map((el) => el.discountName).join(", ")}
                             >
-                                🟡 Eligible:
-                                {#each cartEval.lines[i].eligibleFor as el, idx}
-                                    {@const d = $discountsDB.find(
-                                        (x) => x.id === el.discountId,
-                                    )}
-                                    {el.discountName}{idx <
-                                    cartEval.lines[i].eligibleFor.length - 1
-                                        ? ", "
-                                        : ""}
-                                    {#if d}
-                                        <small
-                                            class="opacity-70 font-normal ml-1 text-[8px]"
-                                        >
-                                            {#if d.kind === "bundle_fixed_price"}
-                                                (Any {d.bundleQuantity} for {formatMoney(
-                                                    d.bundlePrice,
-                                                )})
-                                            {:else if d.kind === "bogo_fixed_price"}
-                                                (Buy {d.minQuantity}, 2nd at {formatMoney(
-                                                    d.secondPrice,
-                                                )})
-                                            {:else if d.kind === "temporary_item"}
-                                                ({d.type === "percentage" ? `${d.value}% off` : `${formatMoney(d.value)} sale price`})
-                                            {/if}
-                                        </small>
-                                    {/if}
-                                {/each}
+                                <span class="cart-promo-dot"></span>
+                                <span class="truncate">Eligible: {cartEval.lines[i].eligibleFor[0].discountName}</span>
+                                {#if cartEval.lines[i].eligibleFor.length > 1}
+                                    <strong>+{cartEval.lines[i].eligibleFor.length - 1}</strong>
+                                {/if}
                             </div>
                         {/if}
                     </div>
-                    <div class="text-right shrink-0 pt-0.5">
-                        <div class="text-[9px] md:text-xs text-text-muted font-medium leading-tight">
+                    <div class="w-[72px] md:w-[82px] text-right shrink-0">
+                        <div class="text-[10px] md:text-xs text-text-muted font-semibold leading-tight truncate">
                             {formatMoney(item.price)}
                         </div>
-                        <div class="text-[10px] md:text-sm font-bold text-text-main leading-tight mt-0.5">
+                        <div class="text-xs md:text-[0.95rem] font-black text-text-main leading-tight mt-0.5 truncate">
                             {formatMoney(item.price * item.quantity)}
                         </div>
                     </div>
                     <button
-                        class="w-7 h-7 mt-0.5 flex items-center justify-center text-text-muted hover:text-danger opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                        class="w-7 h-7 flex items-center justify-center text-text-muted hover:text-danger opacity-60 group-hover:opacity-100 transition-all shrink-0"
                         on:click|stopPropagation={() => deleteItem(i)}
                     >
                         <svg
@@ -3054,7 +3014,7 @@
                     <div class="scale-page-tabs">
                         {#each scaleTilePages as page}
                             <button
-                                class={page.id === activeScaleTilePageId ? '!border-[var(--scale-page-color)] !bg-[color-mix(in_srgb,var(--scale-page-color)_14%,var(--bg-card))]' : ''}
+                                class={page.id === activeScaleTilePageId ? '!border-[var(--scale-page-color)] !bg-bg-card' : ''}
                                 style="--scale-page-color: {page.color}"
                                 on:click={() => { activeScaleTilePageId = page.id; scalePage = 0; scaleSearch = ""; }}
                             >
@@ -3302,11 +3262,11 @@
 {#if showPaymentModal}
     <div class="modal-overlay" on:click={closePayment}>
         <div
-            class="w-[980px] max-w-[97vw] max-h-[95vh] overflow-y-auto p-3 md:p-5 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
+            class="payment-modal w-[940px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
             on:click|stopPropagation
         >
             <div
-                class="flex justify-between items-center border-b border-border-flat pb-4"
+                class="payment-modal-header flex justify-between items-center border-b border-border-flat pb-3"
             >
                 <h2 class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
                 <button
@@ -3317,12 +3277,12 @@
             </div>
 
             {#if loyaltyConfig.enabled}
-                <section class="grid grid-cols-1 md:grid-cols-[1fr_1.1fr] gap-3 p-3 rounded-md border border-border-flat bg-bg-panel">
+                <section class="payment-loyalty grid grid-cols-1 md:grid-cols-[1fr_1.1fr] gap-2 p-2.5 rounded-md border border-border-flat bg-bg-panel">
                     <div class="relative">
                         <label class="block text-xs font-bold text-text-muted mb-1">Scan loyalty barcode or search customer</label>
                         <input
                             bind:this={customerSearchInput}
-                            class="flat-input w-full"
+                            class="flat-input payment-customer-input w-full"
                             bind:value={customerSearch}
                             on:keydown={handleCustomerSearchKeydown}
                             data-touch-keyboard="manual"
@@ -3360,15 +3320,15 @@
                 </section>
             {/if}
 
-            <div class="flex flex-col md:flex-row gap-4 md:gap-6">
-                <div class="flex-1 flex flex-col gap-5">
+            <div class="payment-body flex flex-col md:flex-row gap-3 md:gap-4 min-h-0">
+                <div class="payment-summary flex-1 flex flex-col gap-3 min-h-0">
                     <div
-                        class="flex justify-between items-center p-5 bg-bg-panel rounded-sm border border-border-flat"
+                        class="payment-total-card flex justify-between items-center p-3 md:p-4 bg-bg-panel rounded-sm border border-border-flat"
                     >
-                        <span class="text-base md:text-[1.2rem] text-text-muted"
+                        <span class="text-sm md:text-base text-text-muted"
                             >Total to Pay</span
                         >
-                        <span class="text-3xl md:text-[2.2rem] font-bold text-success"
+                        <span class="text-2xl md:text-[2rem] font-black text-success"
                             >{formatMoney(paymentDue)}</span
                         >
                     </div>
@@ -3379,9 +3339,9 @@
                         </div>
                     {/if}
 
-                    <div class="flex gap-3">
+                    <div class="payment-methods flex gap-2">
                         <button
-                            class="flat-card flex-1 p-3 md:p-5 text-base md:text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-3 text-base md:text-lg font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'cash'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -3389,7 +3349,7 @@
                             >Cash</button
                         >
                         <button
-                            class="flat-card flex-1 p-3 md:p-5 text-base md:text-[1.2rem] font-semibold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-3 text-base md:text-lg font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'card'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -3398,13 +3358,11 @@
                         >
                     </div>
 
-                    <div class="flex-1"></div>
-
-                    <div class="flex flex-col gap-3 mt-auto">
+                    <div class="payment-result-actions flex flex-col gap-2 mt-auto">
                         {#if paymentMethod === "cash"}
                             {#if paymentInputAmount >= paymentDue}
                                 <div
-                                    class="min-h-[64px] flex items-center justify-center text-center text-xl md:text-[1.5rem] font-bold text-warning p-2 md:p-3 bg-bg-panel rounded-sm"
+                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-lg md:text-xl font-black text-warning p-2 bg-bg-panel rounded-sm"
                                 >
                                     Change: {formatMoney(
                                         paymentInputAmount - paymentDue,
@@ -3412,7 +3370,7 @@
                                 </div>
                             {:else if paymentInputAmount > 0}
                                 <div
-                                    class="min-h-[64px] flex items-center justify-center text-center text-xl md:text-[1.5rem] font-bold text-danger p-2 md:p-3 bg-bg-panel rounded-sm"
+                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-lg md:text-xl font-black text-danger p-2 bg-bg-panel rounded-sm"
                                 >
                                     Remaining: {formatMoney(
                                         paymentDue - paymentInputAmount,
@@ -3420,14 +3378,14 @@
                                 </div>
                             {:else}
                                 <div
-                                    class="min-h-[64px] flex items-center justify-center text-center text-[1.5rem] font-bold text-warning p-3 bg-bg-panel rounded-sm invisible"
+                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm invisible"
                                 >
                                     Change: £0.00
                                 </div>
                             {/if}
                         {:else if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
                             <div
-                                class="min-h-[64px] flex items-center justify-center text-center text-[1.5rem] font-bold text-warning p-3 bg-bg-panel rounded-sm"
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm"
                             >
                                 Card remaining: {formatMoney(
                                     paymentDue - paymentInputAmount,
@@ -3435,19 +3393,19 @@
                             </div>
                         {:else if cardCashPartInvalid}
                             <div
-                                class="min-h-[64px] flex items-center justify-center text-center text-[1.2rem] font-bold text-danger p-3 bg-bg-panel rounded-sm"
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-base md:text-lg font-black text-danger p-2 bg-bg-panel rounded-sm"
                             >
                                 Cash part must be less than total
                             </div>
                         {:else}
                             <div
-                                class="min-h-[64px] flex items-center justify-center text-center text-[1.5rem] font-bold text-warning p-3 bg-bg-panel rounded-sm invisible"
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm invisible"
                             >
                                 Change: £0.00
                             </div>
                         {/if}
                         <button
-                            class="btn btn-success w-full p-3 md:p-5 text-lg md:text-[1.4rem] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
+                            class="payment-complete-btn btn btn-success w-full p-3 text-lg md:text-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
                             disabled={paymentCompleteDisabled}
                             on:click={completeSale}
                         >
@@ -3457,21 +3415,21 @@
                 </div>
 
                 <div
-                    class="w-full md:w-[340px] flex flex-col bg-bg-panel p-3 md:p-4 rounded-md"
+                    class="payment-pad w-full md:w-[320px] flex flex-col bg-bg-panel p-2.5 md:p-3 rounded-md"
                 >
-                    <div class="flex gap-3 mb-3">
-                        <div class="np-display flex-1 !h-12 md:!h-[60px] !text-2xl md:!text-[2rem]">
+                    <div class="flex gap-2 mb-2">
+                        <div class="np-display payment-display flex-1 !h-11 md:!h-12 !text-xl md:!text-2xl">
                             {formatMoney(paymentInputAmount)}
                         </div>
                         <button
-                            class="np-btn np-clear w-[50px] md:w-[60px] !h-12 md:!h-[60px]"
+                            class="np-btn np-clear w-[48px] md:w-[52px] !h-11 md:!h-12"
                             on:click={clearPaymentInput}>C</button
                         >
                     </div>
-                    <div class="np-grid {paymentMethod === 'card' ? 'opacity-35 pointer-events-none' : ''}">
+                    <div class="np-grid payment-np-grid {paymentMethod === 'card' ? 'opacity-35 pointer-events-none' : ''}">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                             <button
-                                class="np-btn !h-10 md:!h-[60px] !text-lg md:!text-[1.5rem] {key === '⌫'
+                                class="np-btn payment-np-button !h-10 md:!h-[48px] !text-lg md:!text-xl {key === '⌫'
                                     ? '!text-warning'
                                     : ''}"
                                 on:click={() => handlePaymentPadKey(key)}
@@ -3481,25 +3439,25 @@
                         {/each}
                     </div>
                     <div
-                        class="grid grid-cols-3 gap-3 mt-3 {paymentMethod ===
+                        class="payment-quick-grid grid grid-cols-3 gap-2 mt-2 {paymentMethod ===
                         'cash'
                             ? 'visible'
                             : 'invisible'}"
                     >
                         <button
-                            class="flat-card flex flex-col items-center justify-center gap-1 p-3 cursor-pointer"
+                            class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer"
                             on:click={() => setAmountAndComplete(paymentDue)}
                         >
-                            <div class="text-base font-bold">Pay Full</div>
+                            <div class="text-sm font-black">Pay Full</div>
                             <div class="text-xs text-text-muted">(Exact)</div>
                         </button>
                         {#if nextPoundAmount !== null}
                             <button
-                                class="flat-card flex flex-col items-center justify-center gap-1 p-3 cursor-pointer !border-success"
+                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success"
                                 on:click={() =>
                                     setAmountAndComplete(nextPoundAmount!)}
                             >
-                                <div class="text-base font-bold text-success">
+                                <div class="text-sm font-black text-success">
                                     {formatMoney(nextPoundAmount)}
                                 </div>
                                 <div class="text-[0.7rem] text-text-muted">
@@ -3509,16 +3467,16 @@
                         {/if}
                         {#each fixedQuickAmounts as amt}
                             <button
-                                class="flat-card flex flex-col items-center justify-center gap-1 p-3 cursor-pointer"
+                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer"
                                 on:click={() => addQuickAmount(amt)}
                             >
-                                <div class="text-base font-bold">
+                                <div class="text-sm font-black">
                                     + {formatMoney(amt)}
                                 </div>
                             </button>
                         {/each}
                     </div>
-                    <div class="mt-3 h-[52px] text-xs text-text-muted leading-snug {paymentMethod === 'card' ? '' : 'invisible'}">
+                    <div class="payment-card-note mt-2 min-h-[42px] text-xs text-text-muted leading-snug {paymentMethod === 'card' ? '' : 'invisible'}">
                         {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
                             <p>Cash part locked: {formatMoney(paymentInputAmount)}. Card will take {formatMoney(paymentDue - paymentInputAmount)}.</p>
                             <button class="mt-1 underline text-accent-primary font-bold" on:click={() => selectPaymentMethod("cash")}>Edit cash part</button>
@@ -4029,7 +3987,7 @@
         .login-person p:not(.login-error) { display: none; }
     }
     .scale-workspace { width: min(1180px, 98vw); height: min(760px, 96vh); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
-    .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: color-mix(in srgb, var(--bg-card) 94%, transparent); }
+    .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: var(--bg-card); }
     .scale-header h2 { margin: .1rem 0; font-size: 1.55rem; }
     .scale-header p { margin: 0; color: var(--text-muted); font-size: .85rem; }
     .scale-kicker { color: var(--success); font-size: .65rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
@@ -4045,7 +4003,7 @@
     .scale-product i { position: absolute; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
     .scale-product strong { margin-top: auto; }
     .scale-product span, .scale-product small { color: var(--text-muted); font-size: .75rem; }
-    .scale-product.selected { border-color: var(--success); background: color-mix(in srgb, var(--success) 10%, var(--bg-card)); }
+    .scale-product.selected { border-color: var(--success); background: rgba(16, 185, 129, .10); }
     .scale-pagination { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-muted); font-size: .72rem; }
     .scale-pagination div { display: flex; align-items: center; gap: .4rem; }
     .scale-pagination button { min-height: 34px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }

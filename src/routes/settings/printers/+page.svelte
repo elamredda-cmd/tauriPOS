@@ -74,7 +74,7 @@
             'group min-h-[122px] rounded-xl border p-4 text-left transition-all duration-150',
             'flex flex-col gap-2 bg-bg-panel hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card',
             'focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent-primary',
-            active ? 'border-accent-primary bg-bg-card shadow-[0_16px_40px_color-mix(in_srgb,var(--accent-primary)_16%,transparent)]' : 'border-border-flat',
+            active ? 'border-accent-primary bg-bg-card shadow-[0_16px_40px_var(--shadow)]' : 'border-border-flat',
             enabled ? '' : 'cursor-not-allowed opacity-45 grayscale',
         ].join(' ');
     }
@@ -83,7 +83,7 @@
         return [
             'min-h-[96px] rounded-xl border p-4 text-left transition-all duration-150',
             'flex flex-col gap-2 bg-bg-panel hover:border-accent-primary hover:bg-bg-card',
-            active ? 'border-success bg-[color-mix(in_srgb,var(--success)_10%,var(--bg-panel))]' : 'border-border-flat',
+            active ? 'border-success bg-success/10' : 'border-border-flat',
         ].join(' ');
     }
 
@@ -132,7 +132,7 @@
     </div>
 
     <div class="p-4 lg:p-6 space-y-5">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_22%,transparent)]">
+        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                     <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-text-muted">Hardware setup</p>
@@ -162,7 +162,7 @@
 
         <div class="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
             <div class="flex flex-col gap-5">
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_18%,transparent)]">
+                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
                     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                         <div>
                             <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Receipt printer</p>
@@ -172,7 +172,7 @@
                             </p>
                         </div>
                         <button
-                            class="rounded-full border px-4 py-2 text-sm font-black transition-all {receipt.enabled ? 'border-success bg-[color-mix(in_srgb,var(--success)_14%,transparent)] text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
+                            class="rounded-full border px-4 py-2 text-sm font-black transition-all {receipt.enabled ? 'border-success bg-success/10 text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
                             on:click={() => updateSetting('receipt_printer_enabled', receipt.enabled ? 'false' : 'true')}
                         >
                             Receipt {receipt.enabled ? 'Enabled' : 'Disabled'}
@@ -190,13 +190,13 @@
                                 <span class="text-base font-black text-text-main">{option.label}</span>
                                 <span class="text-sm leading-snug text-text-muted">{option.note}</span>
                                 {#if receipt.connection === option.value}
-                                    <span class="mt-auto w-max rounded-full bg-[color-mix(in_srgb,var(--success)_16%,transparent)] px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
+                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
                                 {/if}
                             </button>
                         {/each}
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-accent-primary bg-[color-mix(in_srgb,var(--accent-primary)_9%,var(--bg-panel))] p-4">
+                    <div class="mt-5 rounded-xl border border-accent-primary bg-accent-primary/10 p-4">
                         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                             <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Selected mode</span>
                             <strong class="text-lg text-text-main">{receiptMode?.label || receipt.connection}</strong>
@@ -275,13 +275,13 @@
                         </div>
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-success bg-[color-mix(in_srgb,var(--success)_8%,var(--bg-panel))] p-4">
+                    <div class="mt-5 rounded-xl border border-success bg-success/10 p-4">
                         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                             <div>
                                 <h4 class="m-0 text-base font-black text-text-main">After payment</h4>
                                 <p class="m-0 mt-1 text-sm text-text-muted">Control what happens after the sale is saved.</p>
                             </div>
-                            <span class="w-max rounded-full bg-[color-mix(in_srgb,var(--success)_14%,transparent)] px-3 py-1 text-sm font-black text-success">
+                            <span class="w-max rounded-full bg-success/10 px-3 py-1 text-sm font-black text-success">
                                 Auto print: {receipt.autoPrintAfterPayment ? 'On' : 'Off'}
                             </span>
                         </div>
@@ -375,7 +375,7 @@
                     </div>
                 </section>
 
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_18%,transparent)]">
+                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
                     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                         <div>
                             <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Label printer</p>
@@ -385,7 +385,7 @@
                             </p>
                         </div>
                         <button
-                            class="rounded-full border px-4 py-2 text-sm font-black transition-all {label.enabled ? 'border-success bg-[color-mix(in_srgb,var(--success)_14%,transparent)] text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
+                            class="rounded-full border px-4 py-2 text-sm font-black transition-all {label.enabled ? 'border-success bg-success/10 text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
                             on:click={() => updateSetting('label_printer_enabled', label.enabled ? 'false' : 'true')}
                         >
                             Label {label.enabled ? 'Enabled' : 'Disabled'}
@@ -403,13 +403,13 @@
                                 <span class="text-base font-black text-text-main">{option.label}</span>
                                 <span class="text-sm leading-snug text-text-muted">{option.note}</span>
                                 {#if label.connection === option.value}
-                                    <span class="mt-auto w-max rounded-full bg-[color-mix(in_srgb,var(--success)_16%,transparent)] px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
+                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
                                 {/if}
                             </button>
                         {/each}
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-accent-primary bg-[color-mix(in_srgb,var(--accent-primary)_9%,var(--bg-panel))] p-4">
+                    <div class="mt-5 rounded-xl border border-accent-primary bg-accent-primary/10 p-4">
                         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                             <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Selected mode</span>
                             <strong class="text-lg text-text-main">{labelMode?.label || label.connection}</strong>
@@ -478,7 +478,7 @@
                 </section>
             </div>
 
-            <aside class="self-start rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_18%,transparent)] 2xl:sticky 2xl:top-4">
+            <aside class="self-start rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)] 2xl:sticky 2xl:top-4">
                 <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Quick guide</p>
                 <h3 class="m-0 text-xl font-black text-text-main">What to choose</h3>
                 <div class="mt-5 flex flex-col gap-3">

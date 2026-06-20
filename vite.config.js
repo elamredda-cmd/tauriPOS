@@ -30,4 +30,8 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    target: "chrome100",
+    cssTarget: "chrome100",
+  },
 }));

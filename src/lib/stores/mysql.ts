@@ -19,6 +19,10 @@ import { get } from 'svelte/store';
 
 let db: Database | null = null;
 let currentDatabase: string = '';
+let currentUri: string = '';
+let openingPromise: Promise<Database> | null = null;
+let openingUri = '';
+let connectionGeneration = 0;
 
 function buildMysqlUri(config: MysqlConfig): string {
     const { user, password, host, port, database } = config;
@@ -28,16 +32,65 @@ function buildMysqlUri(config: MysqlConfig): string {
 export async function getDb(config?: MysqlConfig): Promise<Database> {
     const cfg = config || get(connectionState).mysqlConfig;
 
-    if (db && cfg && cfg.database === currentDatabase) return db;
+    if (db && cfg && buildMysqlUri(cfg) === currentUri) return db;
 
     if (!cfg) {
         if (!db) throw new Error('MySQL no config provided and no cached connection');
         return db;
     }
 
-    db = await Database.load(buildMysqlUri(cfg));
-    currentDatabase = cfg.database;
-    return db;
+    const uri = buildMysqlUri(cfg);
+    if (db && uri !== currentUri) resetCachedConnection();
+    if (openingPromise && openingUri === uri) return openingPromise;
+    if (openingPromise && openingUri !== uri) resetCachedConnection();
+
+    const generation = connectionGeneration;
+    openingUri = uri;
+    openingPromise = openConnection(uri, cfg.database, generation);
+    return openingPromise;
+}
+
+export function resetCachedConnection(): void {
+    connectionGeneration += 1;
+    const old = db;
+    db = null;
+    currentDatabase = '';
+    currentUri = '';
+    openingPromise = null;
+    openingUri = '';
+    void closeDatabase(old);
+}
+
+async function openConnection(uri: string, database: string, generation: number): Promise<Database> {
+    let opened: Database | null = null;
+    try {
+        opened = await Database.load(uri);
+        if (generation !== connectionGeneration || openingUri !== uri) {
+            await closeDatabase(opened);
+            throw new Error('MariaDB connection was reset while opening');
+        }
+        db = opened;
+        currentDatabase = database;
+        currentUri = uri;
+        return opened;
+    } catch (error) {
+        await closeDatabase(opened);
+        throw error;
+    } finally {
+        if (generation === connectionGeneration) {
+            openingPromise = null;
+            openingUri = '';
+        }
+    }
+}
+
+async function closeDatabase(database: Database | null): Promise<void> {
+    if (!database) return;
+    try {
+        await database.close(database.path);
+    } catch (error) {
+        console.warn('mysql: failed to close cached MariaDB connection:', error);
+    }
 }
 
 // ─── Schema Initialisation ──────────────────────────────────────────────────

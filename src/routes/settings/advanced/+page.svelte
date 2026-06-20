@@ -371,7 +371,7 @@
 
 <style>
     .advanced-canvas { padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
-    .warning-banner { padding: 1rem 1.2rem; border: 1px solid var(--warning); border-radius: .8rem; background: color-mix(in srgb, var(--warning) 10%, var(--bg-card)); }
+    .warning-banner { padding: 1rem 1.2rem; border: 1px solid var(--warning); border-radius: .8rem; background: rgba(245, 158, 11, .10); }
     .warning-banner strong { color: var(--warning); }
     .warning-banner p, .status-text { margin: .3rem 0 0; color: var(--text-muted); }
     .status-card { margin-bottom: 1rem; padding: 1rem; display: flex; align-items: center; gap: .8rem; border: 1px solid var(--border-flat); border-radius: .7rem; background: var(--bg-panel); }
@@ -389,8 +389,8 @@
     .conflict-list article div:first-child { min-width: 0; }
     .conflict-list span { display: block; color: var(--text-muted); font-size: .78rem; }
     .conflict-list p { margin: .3rem 0 0; color: var(--danger); overflow-wrap: anywhere; }
-    .danger-card { border-color: color-mix(in srgb, var(--danger) 55%, var(--border-flat)) !important; }
-    .purge-disclaimer { max-width: 760px; margin-bottom: .8rem; padding: .9rem 1rem; border: 1px solid var(--danger); border-radius: .7rem; background: color-mix(in srgb, var(--danger) 8%, var(--bg-panel)); }
+    .danger-card { border-color: rgba(239, 68, 68, .55) !important; }
+    .purge-disclaimer { max-width: 760px; margin-bottom: .8rem; padding: .9rem 1rem; border: 1px solid var(--danger); border-radius: .7rem; background: rgba(239, 68, 68, .08); }
     .purge-disclaimer strong { color: var(--danger); }
     .purge-disclaimer p { margin: .3rem 0 0; color: var(--text-muted); }
     .purge-warning { color: var(--danger); }

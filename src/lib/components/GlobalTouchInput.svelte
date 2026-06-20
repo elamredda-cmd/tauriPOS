@@ -20,7 +20,7 @@
         "!border-accent-primary",
         "!bg-bg-card",
         "!outline-4",
-        "!outline-accent-primary/40",
+        "!outline-accent-primary",
         "!outline-offset-2",
     ];
 
@@ -163,12 +163,12 @@
 
 {#if visible}
     <div
-        class="fixed inset-0 z-[1900] bg-[color-mix(in_srgb,var(--overlay)_55%,transparent)]"
+        class="touch-input-backdrop fixed inset-0 z-[1900]"
         on:click={done}
     ></div>
     {#if targetRectStyle}
         <div
-            class="pointer-events-none fixed z-[1901] flex items-center overflow-hidden rounded-xl border-2 border-accent-primary bg-bg-card px-4 font-bold text-text-main shadow-[0_18px_45px_var(--shadow)] ring-[5px] ring-[color-mix(in_srgb,var(--accent-primary)_24%,transparent)]"
+            class="touch-input-lifted pointer-events-none fixed z-[1901] flex items-center overflow-hidden rounded-xl border-2 border-accent-primary bg-bg-card px-4 font-bold text-text-main shadow-[0_18px_45px_var(--shadow)]"
             style={targetRectStyle}
             aria-hidden="true"
         >

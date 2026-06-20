@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
-    import { connectionState, loadSavedMode } from '$lib/stores/connection';
+    import { connectionState, loadSavedMode, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
@@ -22,8 +22,58 @@
 
     let dbReady = false;
     let dbError = '';
+    let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
+    let syncStartupRunning = false;
+    const SYNC_STARTUP_RETRY_MS = 30 * 1000;
 
     primeSoundEngine();
+
+    function clearSyncStartupRetry() {
+        if (syncStartupRetry) {
+            clearInterval(syncStartupRetry);
+            syncStartupRetry = null;
+        }
+    }
+
+    function isDatabaseIdentityMismatch(error: unknown): boolean {
+        return String(error).includes('DATABASE_IDENTITY_MISMATCH');
+    }
+
+    async function startMultiTillSyncWhenReady(config: MysqlConfig) {
+        if (syncStartupRunning) return;
+        syncStartupRunning = true;
+        try {
+            await initMysqlDb(config);
+            await ensureDatabaseIdentityForSync();
+            clearSyncStartupRetry();
+            await startBackgroundSync();
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: true,
+                syncError: null,
+            }));
+        } catch (error) {
+            console.warn('POS: MariaDB sync blocked/deferred:', error);
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: false,
+                syncError: String(error),
+            }));
+
+            if (isDatabaseIdentityMismatch(error)) {
+                clearSyncStartupRetry();
+                return;
+            }
+
+            if (!syncStartupRetry) {
+                syncStartupRetry = setInterval(() => {
+                    void startMultiTillSyncWhenReady(config);
+                }, SYNC_STARTUP_RETRY_MS);
+            }
+        } finally {
+            syncStartupRunning = false;
+        }
+    }
 
     function handleGlobalButtonFeedback(event: PointerEvent) {
         const control = (event.target as HTMLElement | null)?.closest('button, a[href], [role="button"]') as HTMLElement | null;
@@ -65,17 +115,7 @@
                 // responsive when the server is offline, then start sync.
                 const config = get(connectionState).mysqlConfig;
                 if (config) {
-                    initMysqlDb(config)
-                        .then(() => ensureDatabaseIdentityForSync())
-                        .then(() => startBackgroundSync())
-                        .catch((error) => {
-                            console.warn('POS: MariaDB sync blocked/deferred:', error);
-                            connectionState.update((state) => ({
-                                ...state,
-                                mysqlOnline: false,
-                                syncError: String(error),
-                            }));
-                        });
+                    void startMultiTillSyncWhenReady(config);
                 } else {
                     startBackgroundSync();
                 }

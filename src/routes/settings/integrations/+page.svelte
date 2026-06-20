@@ -19,7 +19,7 @@
         return [
             'relative min-h-[96px] rounded-xl border p-4 pr-16 text-left transition-all duration-150',
             active
-                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_color-mix(in_srgb,var(--success)_12%,transparent)]'
+                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_var(--shadow)]'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
         ].join(' ');
     }
@@ -63,7 +63,7 @@
     </div>
 
     <div class="flex flex-col gap-5 p-4 lg:p-6">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_color-mix(in_srgb,var(--shadow)_20%,transparent)]">
+        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
             <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-success">Integrations</p>
             <h2 class="m-0 text-2xl font-black text-text-main">CCTV POS overlay</h2>
             <p class="mt-2 max-w-3xl text-sm text-text-muted">

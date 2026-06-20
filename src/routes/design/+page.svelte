@@ -80,10 +80,7 @@
         padding: clamp(1rem, 2vw, 1.75rem);
         overflow-y: auto;
         color: var(--text-main);
-        background:
-            radial-gradient(circle at 8% 8%, color-mix(in srgb, var(--accent-primary) 20%, transparent), transparent 34%),
-            radial-gradient(circle at 90% 78%, color-mix(in srgb, var(--success) 16%, transparent), transparent 32%),
-            var(--bg-base);
+        background: var(--bg-base);
     }
     .studio-header { max-width: 1100px; margin: 0 auto 1rem; display: flex; align-items: flex-start; gap: 1rem; }
     .studio-heading { min-width: 0; }
@@ -91,17 +88,17 @@
     .studio-header p { max-width: 620px; margin: 0; color: var(--text-muted); font-size: .9rem; }
     .studio-kicker, .studio-eyebrow { color: var(--accent-primary); font-size: .72rem; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; }
     .studio-grid { max-width: 1100px; margin: 0 auto; padding-bottom: 1rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
-    .studio-card { min-height: 150px; padding: 1rem; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-main); text-decoration: none; border: 1px solid var(--border-flat); border-radius: .85rem; background: color-mix(in srgb, var(--bg-card) 92%, transparent); box-shadow: 0 10px 28px color-mix(in srgb, var(--shadow) 32%, transparent); transition: transform .18s ease, border-color .18s ease; }
+    .studio-card { min-height: 150px; padding: 1rem; display: flex; flex-direction: column; justify-content: space-between; color: var(--text-main); text-decoration: none; border: 1px solid var(--border-flat); border-radius: .85rem; background: var(--bg-card); box-shadow: 0 10px 28px var(--shadow); transition: transform .18s ease, border-color .18s ease; }
     .studio-card:hover { transform: translateY(-4px); border-color: var(--accent-primary); }
     .studio-card-wide { grid-column: span 2; min-height: 175px; }
     .studio-card-top { display: flex; align-items: center; justify-content: space-between; }
-    .studio-mark { width: 2.7rem; height: 2.7rem; border-radius: .75rem; display: grid; place-items: center; background: color-mix(in srgb, var(--accent-primary) 18%, var(--bg-panel)); color: var(--accent-primary); font-size: .82rem; font-weight: 900; }
-    .studio-card-green .studio-mark { background: color-mix(in srgb, var(--success) 18%, var(--bg-panel)); color: var(--success); }
-    .studio-card-amber .studio-mark { background: color-mix(in srgb, var(--warning) 18%, var(--bg-panel)); color: var(--warning); }
+    .studio-mark { width: 2.7rem; height: 2.7rem; border-radius: .75rem; display: grid; place-items: center; background: var(--bg-panel); color: var(--accent-primary); font-size: .82rem; font-weight: 900; }
+    .studio-card-green .studio-mark { color: var(--success); }
+    .studio-card-amber .studio-mark { color: var(--warning); }
     .studio-arrow { font-size: 1.35rem; color: var(--text-muted); }
     .studio-card h2 { margin: .2rem 0 .25rem; font-size: 1.25rem; }
     .studio-card p, .studio-note p { color: var(--text-muted); margin: 0; font-size: .82rem; }
-    .studio-note { padding: .85rem 1rem; border: 1px dashed var(--border-flat); border-radius: .8rem; background: color-mix(in srgb, var(--bg-panel) 80%, transparent); }
+    .studio-note { padding: .85rem 1rem; border: 1px dashed var(--border-flat); border-radius: .8rem; background: var(--bg-panel); }
     .studio-note strong { display: block; margin-bottom: .35rem; }
     @media (max-width: 720px) {
         .studio-grid { grid-template-columns: 1fr; }

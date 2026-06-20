@@ -245,15 +245,15 @@
 </MgmtPage>
 
 <style>
-    .cash-up-panel { margin: 1rem; padding: 1.2rem; border: 1px solid color-mix(in srgb, var(--accent-primary) 55%, var(--border-flat)); border-radius: 1rem; background: linear-gradient(145deg, color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card)), var(--bg-card)); box-shadow: 0 16px 35px color-mix(in srgb, var(--shadow) 22%, transparent); }
+    .cash-up-panel { margin: 1rem; padding: 1.2rem; border: 1px solid var(--accent-primary); border-radius: 1rem; background: var(--bg-card); box-shadow: 0 16px 35px var(--shadow); }
     .cash-up-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
     .eyebrow { color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
     .cash-up-heading h2 { margin: .2rem 0; font-size: 1.35rem; }
     .cash-up-heading p { margin: 0; color: var(--text-muted); font-size: .85rem; }
-    .open-badge { padding: .55rem .8rem; display: flex; align-items: center; gap: .5rem; color: var(--success); font-size: .78rem; font-weight: 900; border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border-flat)); border-radius: 999px; background: color-mix(in srgb, var(--success) 9%, var(--bg-panel)); }
+    .open-badge { padding: .55rem .8rem; display: flex; align-items: center; gap: .5rem; color: var(--success); font-size: .78rem; font-weight: 900; border: 1px solid rgba(16, 185, 129, .45); border-radius: 999px; background: rgba(16, 185, 129, .09); }
     .open-badge i { width: .55rem; height: .55rem; border-radius: 100%; background: var(--success); box-shadow: 0 0 8px var(--success); }
     .shift-snapshot { margin-top: 1rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .65rem; }
-    .shift-snapshot article { min-width: 0; padding: .85rem; display: flex; flex-direction: column; gap: .15rem; border: 1px solid var(--border-flat); border-radius: .75rem; background: color-mix(in srgb, var(--bg-panel) 88%, transparent); }
+    .shift-snapshot article { min-width: 0; padding: .85rem; display: flex; flex-direction: column; gap: .15rem; border: 1px solid var(--border-flat); border-radius: .75rem; background: var(--bg-panel); }
     .shift-snapshot span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; }
     .shift-snapshot strong { overflow: hidden; font-size: clamp(1rem, 2vw, 1.35rem); text-overflow: ellipsis; white-space: nowrap; }
     .shift-snapshot small { color: var(--text-muted); font-size: .68rem; }

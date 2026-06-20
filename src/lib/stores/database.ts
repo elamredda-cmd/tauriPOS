@@ -15,13 +15,18 @@
 
 import * as sqlite from './sqlite';
 import * as mysql from './mysql';
-import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri } from './connection';
+import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection } from './connection';
 import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { currentEmployee } from './session';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+
+function resetRemoteConnections(): void {
+    resetMysqlConnection();
+    mysql.resetCachedConnection();
+}
 
 const AUDIT_ENTITY_BY_TABLE: Record<string, string> = {
     products: 'product',
@@ -2709,6 +2714,10 @@ let heartbeatInterval: any = null;
 
 let isSyncRunning = false;
 let isFastSyncRunning = false;
+let isHeartbeatRunning = false;
+const OFFLINE_RECONNECT_CHECK_MS = 30 * 1000;
+const FAST_SYNC_INTERVAL_MS = 5000;
+const FULL_SYNC_INTERVAL_MS = 10000;
 
 /**
  * Heartbeat: actively ping MariaDB to keep the online/offline indicator
@@ -2718,13 +2727,22 @@ let isFastSyncRunning = false;
  * offline queue and pull a fresh full sync so the till catches up.
  */
 async function runHeartbeat(): Promise<void> {
-    if (!isMultiMode()) return;
-    const wasOnline = get(connectionState).mysqlOnline;
-    const online = await pingMysql();
-    if (online && !wasOnline) {
-        console.log('database: connection restored — flushing offline queue and resyncing…');
-        try { await flushOfflineQueue(); } catch (e) { console.warn('database: flush on reconnect failed:', e); }
-        runSyncCycle().catch(console.error);
+    if (!isMultiMode() || isHeartbeatRunning) return;
+    isHeartbeatRunning = true;
+    try {
+        const wasOnline = get(connectionState).mysqlOnline;
+        const online = await pingMysql();
+        if (!online) {
+            resetRemoteConnections();
+            return;
+        }
+        if (online && !wasOnline) {
+            console.log('database: connection restored — flushing offline queue and resyncing…');
+            try { await flushOfflineQueue(); } catch (e) { console.warn('database: flush on reconnect failed:', e); }
+            runSyncCycle().catch(console.error);
+        }
+    } finally {
+        isHeartbeatRunning = false;
     }
 }
 
@@ -2825,11 +2843,15 @@ async function pruneLocalPromotionMembershipsToRemote(remoteRows: any[]): Promis
  */
 export async function runFastSyncCycle(): Promise<void> {
     if (!isMultiMode() || isFastSyncRunning || isSyncRunning) return;
+    if (!get(connectionState).mysqlOnline) return;
     isFastSyncRunning = true;
     try {
         const wasOnline = get(connectionState).mysqlOnline;
         const mysqlDb = await getMysqlDb();
-        if (!mysqlDb) return;
+        if (!mysqlDb) {
+            resetRemoteConnections();
+            return;
+        }
         await ensureDatabaseIdentityForSync();
 
         const pendingBeforeFlush = await pendingOfflineQueueCount();
@@ -2887,6 +2909,7 @@ export async function runFastSyncCycle(): Promise<void> {
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
     } catch (e: any) {
         console.warn('database: fast sync failed:', e);
+        resetRemoteConnections();
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
     } finally {
         isFastSyncRunning = false;
@@ -2899,10 +2922,14 @@ export async function runFastSyncCycle(): Promise<void> {
  */
 export async function runSyncCycle(): Promise<void> {
     if (!isMultiMode() || isSyncRunning || isFastSyncRunning) return;
+    if (!get(connectionState).mysqlOnline) return;
     isSyncRunning = true;
     try {
         const mysqlDb = await getMysqlDb();
-        if (!mysqlDb) return;
+        if (!mysqlDb) {
+            resetRemoteConnections();
+            return;
+        }
         await ensureDatabaseIdentityForSync();
 
         // Flush any queued offline operations first (replays writes made while offline).
@@ -2967,6 +2994,7 @@ export async function runSyncCycle(): Promise<void> {
         }
     } catch (e: any) {
         console.warn('database: background sync failed:', e);
+        resetRemoteConnections();
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
     } finally {
         isSyncRunning = false;
@@ -2985,27 +3013,27 @@ export async function triggerSync(): Promise<void> {
 
 /**
  * Start periodic background sync from MySQL → SQLite cache → Svelte stores.
- * Runs an immediate full sync first, then:
- *  - Fast sync (transaction tables only) every 5 seconds
- *  - Full sync (all tables) every 10 seconds
+ * Runs quietly in the background:
+ *  - Online: fast sync every 5 seconds and full sync every 10 seconds
+ *  - Offline: no full/fast sync attempts; only a short reconnect probe every 30 seconds
  */
-export async function startBackgroundSync(intervalMs: number = 5000): Promise<void> {
+export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVAL_MS): Promise<void> {
     if (syncInterval) clearInterval(syncInterval);
     if (fastSyncInterval) clearInterval(fastSyncInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
 
-    // Run an immediate full sync in the background so the UI is not blocked
-    runSyncCycle().catch(console.error);
+    // Do not block the POS. A heartbeat confirms the connection first; once
+    // online it flushes queued writes and starts a full catch-up sync.
     runHeartbeat().catch(console.error);
 
-    // Fast sync: pull transaction-related tables every 5 seconds
+    // Fast sync: pull important tables quickly while the server is online.
     fastSyncInterval = setInterval(() => runFastSyncCycle(), intervalMs);
 
-    // Full sync: pull ALL tables every 10 seconds (products, categories, settings, etc.)
-    syncInterval = setInterval(() => runSyncCycle(), 10000);
+    // Full sync: pull ALL tables while online (products, categories, settings, etc.).
+    syncInterval = setInterval(() => runSyncCycle(), FULL_SYNC_INTERVAL_MS);
 
-    // Heartbeat: keep online/offline state accurate and auto-recover the link.
-    heartbeatInterval = setInterval(() => runHeartbeat(), 10000);
+    // Offline reconnect check: slow and short so the till never freezes.
+    heartbeatInterval = setInterval(() => runHeartbeat(), OFFLINE_RECONNECT_CHECK_MS);
 }
 
 /** Stop background sync. */

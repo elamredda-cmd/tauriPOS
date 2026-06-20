@@ -24,6 +24,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "windows": {
+      "minimumWebview2Version": "125.0.2535.41",
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

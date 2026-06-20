@@ -22,7 +22,7 @@
 <div class="relative w-full flex flex-col gap-1.5" use:clickOutside={() => isOpen = false}>
     {#if label}<span class="text-[0.8rem] text-text-muted font-black uppercase tracking-[0.045em]">{label}</span>{/if}
     <button 
-        class="w-full h-12 px-4 flex items-center justify-between gap-3 bg-bg-panel border rounded-lg text-text-main text-base cursor-pointer text-left transition-all duration-150 shadow-[0_8px_18px_color-mix(in_srgb,var(--shadow)_18%,transparent)] {isOpen ? 'border-accent-primary bg-bg-card' : 'border-border-flat hover:border-accent-primary hover:bg-bg-card'}" 
+        class="w-full h-12 px-4 flex items-center justify-between gap-3 bg-bg-panel border rounded-lg text-text-main text-base cursor-pointer text-left transition-all duration-150 shadow-[0_8px_18px_var(--shadow)] {isOpen ? 'border-accent-primary bg-bg-card' : 'border-border-flat hover:border-accent-primary hover:bg-bg-card'}" 
         aria-expanded={isOpen}
         aria-haspopup="listbox"
         on:click={() => isOpen = !isOpen}

@@ -42,7 +42,7 @@
 </script>
 
 {#if visible}
-    <section class="touch-keyboard shrink-0 border-t border-border-flat bg-[color-mix(in_srgb,var(--bg-panel)_94%,var(--accent-primary)_6%)] p-[.65rem]" aria-label={title}>
+    <section class="touch-keyboard shrink-0 border-t border-border-flat bg-bg-panel p-[.65rem]" aria-label={title}>
         <div class="mb-2 flex items-center justify-between gap-[.7rem] [@media(max-height:720px)]:mb-[.3rem]">
             <div class="flex min-w-0 flex-col gap-[.1rem]">
                 <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">{title}</span>
@@ -50,7 +50,7 @@
             </div>
             <button
                 type="button"
-                class="!min-w-[90px] rounded-[.45rem] border border-success bg-success text-white h-[43px] px-4 font-extrabold shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                class="!min-w-[90px] rounded-[.45rem] border border-success bg-success text-white h-[43px] px-4 font-extrabold shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                 on:click={finish}
             >Done</button>
         </div>
@@ -61,21 +61,21 @@
                     {#if rowIndex === 2 && !symbols}
                         <button
                             type="button"
-                            class="grid h-[43px] min-w-0 flex-[1.7_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.72rem] font-extrabold text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9 {shift ? 'border-accent-primary bg-accent-primary text-white' : ''}"
+                            class="grid h-[43px] min-w-0 flex-[1.7_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.72rem] font-extrabold text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9 {shift ? 'border-accent-primary bg-accent-primary text-white' : ''}"
                             on:click={() => press("shift")}
                         >Shift</button>
                     {/if}
                     {#each row as key}
                         <button
                             type="button"
-                            class="grid h-[43px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                            class="grid h-[43px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                             on:click={() => press(key)}
                         >{!symbols && shift ? key.toUpperCase() : key}</button>
                     {/each}
                     {#if rowIndex === 2}
                         <button
                             type="button"
-                            class="grid h-[43px] min-w-0 flex-[1.7_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.72rem] font-extrabold text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                            class="grid h-[43px] min-w-0 flex-[1.7_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.72rem] font-extrabold text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                             on:click={() => press("backspace")}
                         >⌫</button>
                     {/if}
@@ -84,22 +84,22 @@
             <div class="flex justify-center gap-[.3rem]">
                 <button
                     type="button"
-                    class="grid h-[43px] max-w-[100px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-accent-primary shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                    class="grid h-[43px] max-w-[100px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-accent-primary shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                     on:click={() => symbols = !symbols}
                 >{symbols ? "ABC" : "123 &"}</button>
                 <button
                     type="button"
-                    class="grid h-[43px] max-w-[100px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-danger shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                    class="grid h-[43px] max-w-[100px] min-w-0 flex-1 place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-danger shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                     on:click={() => press("clear")}
                 >Clear</button>
                 <button
                     type="button"
-                    class="grid h-[43px] min-w-0 flex-[5_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-text-main shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                    class="grid h-[43px] min-w-0 flex-[5_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.95rem] font-extrabold text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                     on:click={() => press("space")}
                 >Space</button>
                 <button
                     type="button"
-                    class="!min-w-[90px] rounded-[.45rem] border border-success bg-success text-white h-[43px] px-4 font-extrabold shadow-[0_2px_0_color-mix(in_srgb,var(--border-flat)_75%,transparent)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
+                    class="!min-w-[90px] rounded-[.45rem] border border-success bg-success text-white h-[43px] px-4 font-extrabold shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"
                     on:click={finish}
                 >Done</button>
             </div>

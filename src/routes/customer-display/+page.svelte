@@ -81,7 +81,7 @@
 </main>
 
 <style>
-    .customer-display { width: 100vw; height: 100vh; min-width: 0; overflow: hidden; padding: clamp(.75rem, 2.5vmin, 3rem); display: flex; flex-direction: column; gap: clamp(.65rem, 1.8vmin, 2rem); color: var(--text-main); background: radial-gradient(circle at top right, color-mix(in srgb, var(--accent-primary) 24%, transparent), transparent 38%), var(--bg-base); }
+    .customer-display { width: 100vw; height: 100vh; min-width: 0; overflow: hidden; padding: clamp(.75rem, 2.5vmin, 3rem); display: flex; flex-direction: column; gap: clamp(.65rem, 1.8vmin, 2rem); color: var(--text-main); background: var(--bg-base); }
     header { min-width: 0; min-height: clamp(4rem, 11vh, 7rem); display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-bottom: clamp(.55rem, 1.5vmin, 1rem); border-bottom: 1px solid var(--border-flat); }
     .store-heading { min-width: 0; }
     header span { color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .14em; }

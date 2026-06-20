@@ -196,7 +196,8 @@
   }
   input::placeholder,
   textarea::placeholder {
-    color: color-mix(in srgb, var(--text-muted) 72%, transparent);
+    color: var(--text-muted);
+    opacity: .72;
   }
   input[type="number"]::-webkit-outer-spin-button,
   input[type="number"]::-webkit-inner-spin-button {
@@ -256,7 +257,7 @@
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-6 py-3 rounded-lg font-bold text-base whitespace-nowrap border border-transparent transition-all duration-150;
     min-height: 48px;
-    box-shadow: 0 8px 20px color-mix(in srgb, var(--shadow) 35%, transparent);
+    box-shadow: 0 8px 20px var(--shadow);
   }
   .btn:hover { transform: translateY(-1px); }
   .btn:active { transform: translateY(0); }
@@ -266,7 +267,7 @@
   .field select:focus-visible,
   .field textarea:focus-visible,
   .flat-input:focus-visible {
-    outline: 3px solid color-mix(in srgb, var(--accent-primary) 35%, transparent);
+    outline: 3px solid rgba(59, 130, 246, .35);
     outline-offset: 2px;
   }
   .btn:disabled,
@@ -283,7 +284,7 @@
   .btn-danger   { @apply bg-bg-card text-danger border-border-flat hover:bg-danger hover:text-white hover:border-danger; }
   .btn-icon     {
     @apply flex items-center justify-center w-11 h-11 bg-bg-card border border-border-flat text-text-main rounded-lg hover:bg-bg-card-hover hover:border-accent-primary transition-all duration-150;
-    box-shadow: 0 8px 18px color-mix(in srgb, var(--shadow) 28%, transparent);
+    box-shadow: 0 8px 18px var(--shadow);
   }
 
   /* Tables */
@@ -298,7 +299,7 @@
   .field label { @apply text-[0.8rem] text-text-muted font-black uppercase tracking-[0.045em]; min-height: 20px; }
   .field input, .field select, .field textarea {
     @apply bg-bg-panel border border-border-flat text-text-main px-4 py-2.5 rounded-lg text-[0.98rem] outline-none font-sans w-full transition-all duration-150;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent), 0 8px 18px color-mix(in srgb, var(--shadow) 18%, transparent);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05), 0 8px 18px var(--shadow);
   }
   .settings-section input:not(.hidden):not([type="checkbox"]):not([type="radio"]):not([type="color"]),
   .settings-section select,
@@ -392,7 +393,7 @@
   /* Settings-style cards (used by /settings and any future config page) */
   .settings-section {
     @apply bg-bg-card border border-border-flat rounded-xl p-6;
-    box-shadow: var(--card-shadow), 0 18px 45px color-mix(in srgb, var(--shadow) 18%, transparent);
+    box-shadow: var(--card-shadow), 0 18px 45px var(--shadow);
   }
   .settings-section-title { @apply mb-4 text-[1.1rem] text-accent-primary; }
   .settings-section p { @apply text-text-muted; }
@@ -444,7 +445,7 @@
   /* Standalone flat input (outside .field grids) */
   .flat-input {
     @apply bg-bg-panel border border-border-flat text-text-main px-4 py-3 rounded-lg text-base outline-none focus:border-accent-primary transition-all duration-150;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent), 0 8px 18px color-mix(in srgb, var(--shadow) 18%, transparent);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05), 0 8px 18px var(--shadow);
   }
   .input-group       { @apply flex flex-col gap-2; }
   .input-group label { @apply text-[0.9rem] font-semibold text-text-muted; }
@@ -498,8 +499,233 @@
     white-space: nowrap;
 }
 
+.sync-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    min-height: 32px;
+    padding: .35rem .65rem;
+    border: 1px solid;
+    border-radius: 999px;
+    font-size: .72rem;
+    font-weight: 900;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.sync-pill > span {
+    width: .5rem;
+    height: .5rem;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.sync-pill-ok {
+    color: #047857 !important;
+    background: rgba(16, 185, 129, .16) !important;
+    border-color: rgba(16, 185, 129, .46) !important;
+}
+
+.sync-pill-danger {
+    color: #b91c1c !important;
+    background: rgba(239, 68, 68, .16) !important;
+    border-color: rgba(239, 68, 68, .46) !important;
+}
+
+.sync-pill-neutral {
+    color: var(--text-muted) !important;
+    background: var(--bg-card) !important;
+    border-color: var(--border-flat) !important;
+}
+
+.cart-line {
+    min-height: 48px;
+}
+
+.cart-line-selected {
+    color: var(--text-main) !important;
+    background: rgba(59, 130, 246, .13) !important;
+    border-color: var(--accent-primary) !important;
+    box-shadow: 0 1px 0 rgba(59, 130, 246, .20);
+}
+
+.cart-line-normal {
+    background: var(--bg-card) !important;
+    border-color: var(--border-flat) !important;
+}
+
+.cart-line-normal:hover {
+    background: var(--bg-card-hover) !important;
+}
+
+.cart-promo-badge {
+    max-width: min(100%, 230px);
+    margin-top: .25rem;
+    padding: .18rem .5rem;
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    border-radius: 999px;
+    font-size: .66rem;
+    font-weight: 900;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.cart-promo-badge > span.truncate {
+    min-width: 0;
+    max-width: 145px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cart-promo-badge strong {
+    flex: 0 0 auto;
+    font-size: .62rem;
+}
+
+.cart-promo-badge-applied {
+    color: var(--success);
+    background: rgba(16, 185, 129, .14);
+    border: 1px solid rgba(16, 185, 129, .34);
+}
+
+.cart-promo-badge-eligible {
+    color: var(--warning);
+    background: rgba(245, 158, 11, .14);
+    border: 1px solid rgba(245, 158, 11, .34);
+}
+
+.cart-promo-dot {
+    width: .45rem;
+    height: .45rem;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, .14);
+}
+
+.touch-input-backdrop {
+    background: rgba(0, 0, 0, .45);
+}
+
+.touch-input-lifted {
+    box-shadow: 0 18px 45px var(--shadow), 0 0 0 5px rgba(59, 130, 246, .24);
+}
+
+/* Fallbacks for older WebView2 builds used by some Windows POS tills.
+   Tailwind opacity utilities compile to modern color functions; these
+   direct rules keep important badges/buttons readable in the EXE. */
+.bg-black\/30 { background-color: rgba(0, 0, 0, .30) !important; }
+.bg-white\/5 { background-color: rgba(255, 255, 255, .05) !important; }
+.bg-bg-panel\/70 { background-color: rgba(16, 27, 51, .70) !important; }
+.bg-bg-panel\/80 { background-color: rgba(16, 27, 51, .80) !important; }
+.bg-bg-card\/30 { background-color: rgba(26, 42, 75, .30) !important; }
+.bg-danger\/5 { background-color: rgba(239, 68, 68, .05) !important; }
+.bg-danger\/10 { background-color: rgba(239, 68, 68, .10) !important; }
+.bg-danger\/15 { background-color: rgba(239, 68, 68, .15) !important; }
+.bg-danger\/20 { background-color: rgba(239, 68, 68, .20) !important; }
+.bg-success\/10 { background-color: rgba(16, 185, 129, .10) !important; }
+.bg-success\/15 { background-color: rgba(16, 185, 129, .15) !important; }
+.bg-success\/20 { background-color: rgba(16, 185, 129, .20) !important; }
+.bg-warning\/10 { background-color: rgba(245, 158, 11, .10) !important; }
+.bg-warning\/15 { background-color: rgba(245, 158, 11, .15) !important; }
+.bg-warning\/20 { background-color: rgba(245, 158, 11, .20) !important; }
+.bg-accent-primary\/5 { background-color: rgba(59, 130, 246, .05) !important; }
+.bg-accent-primary\/10 { background-color: rgba(59, 130, 246, .10) !important; }
+.bg-accent-primary\/15 { background-color: rgba(59, 130, 246, .15) !important; }
+.hover\:bg-danger\/5:hover { background-color: rgba(239, 68, 68, .05) !important; }
+.hover\:bg-danger\/10:hover { background-color: rgba(239, 68, 68, .10) !important; }
+.hover\:bg-danger\/15:hover { background-color: rgba(239, 68, 68, .15) !important; }
+.hover\:bg-accent-primary\/5:hover { background-color: rgba(59, 130, 246, .05) !important; }
+.text-white\/85 { color: rgba(255, 255, 255, .85) !important; }
+.text-text-muted\/50 { color: rgba(148, 163, 184, .50) !important; }
+.border-white\/10 { border-color: rgba(255, 255, 255, .10) !important; }
+.border-danger\/30 { border-color: rgba(239, 68, 68, .30) !important; }
+.border-danger\/35 { border-color: rgba(239, 68, 68, .35) !important; }
+.border-danger\/40 { border-color: rgba(239, 68, 68, .40) !important; }
+.border-danger\/50 { border-color: rgba(239, 68, 68, .50) !important; }
+.border-danger\/60 { border-color: rgba(239, 68, 68, .60) !important; }
+.border-success\/20 { border-color: rgba(16, 185, 129, .20) !important; }
+.border-success\/40 { border-color: rgba(16, 185, 129, .40) !important; }
+.border-success\/50 { border-color: rgba(16, 185, 129, .50) !important; }
+.border-warning\/20 { border-color: rgba(245, 158, 11, .20) !important; }
+.border-warning\/30 { border-color: rgba(245, 158, 11, .30) !important; }
+.border-warning\/40 { border-color: rgba(245, 158, 11, .40) !important; }
+.border-warning\/50 { border-color: rgba(245, 158, 11, .50) !important; }
+.border-accent-primary\/40 { border-color: rgba(59, 130, 246, .40) !important; }
+.border-accent-primary\/50 { border-color: rgba(59, 130, 246, .50) !important; }
+.border-border-flat\/30 { border-color: rgba(38, 59, 105, .30) !important; }
+.hover\:border-accent-primary\/50:hover { border-color: rgba(59, 130, 246, .50) !important; }
+.ring-accent-primary\/25,
+.focus\:ring-accent-primary\/25:focus {
+    --tw-ring-color: rgba(59, 130, 246, .25) !important;
+}
+.outline-accent-primary\/40 {
+    outline-color: rgba(59, 130, 246, .40) !important;
+}
+.shadow-accent-primary\/10 {
+    --tw-shadow-color: rgba(59, 130, 246, .10) !important;
+}
+.from-black\/70 {
+    --tw-gradient-from: rgba(0, 0, 0, .70) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgba(0, 0, 0, 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+.from-black\/80 {
+    --tw-gradient-from: rgba(0, 0, 0, .80) var(--tw-gradient-from-position) !important;
+    --tw-gradient-to: rgba(0, 0, 0, 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
+}
+.via-black\/40 {
+    --tw-gradient-via: rgba(0, 0, 0, .40) var(--tw-gradient-via-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via), var(--tw-gradient-to) !important;
+}
+
+.payment-modal {
+    width: min(940px, 96vw);
+    max-height: min(94vh, 710px);
+    box-shadow: 0 24px 80px var(--shadow);
+}
+
+.payment-body,
+.payment-summary,
+.payment-pad {
+    min-height: 0;
+}
+
+.payment-loyalty {
+    flex: 0 0 auto;
+}
+
+.payment-customer-input {
+    min-height: 42px;
+    padding: .55rem .75rem !important;
+}
+
+.payment-np-grid {
+    gap: .45rem;
+}
+
+.payment-quick-button {
+    min-height: 46px;
+}
+
+.payment-card-note p {
+    margin: 0;
+}
+
+@media (min-width: 760px) {
+    .payment-body {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+    }
+}
+
 @media (max-width: 900px) {
-    .pos-cart { width: clamp(238px, 32vw, 270px) !important; }
+    .pos-cart { width: clamp(285px, 39vw, 340px) !important; }
     .pos-products { padding: .45rem !important; }
     .pos-checkout-shell .payment-action { font-size: .72rem; letter-spacing: .02em; }
     .management-page { padding: .75rem !important; }
@@ -525,6 +751,103 @@
     .pos-checkout-shell .payment-action { font-size: .7rem; }
     .app-modal-content { padding-block: .75rem !important; }
     .app-modal-header, .app-modal-footer { min-height: 56px; padding-block: .65rem !important; }
+}
+
+@media (max-height: 760px) {
+    .payment-modal {
+        max-height: calc(100vh - 1rem);
+        padding: .65rem !important;
+        gap: .5rem !important;
+    }
+
+    .payment-modal-header {
+        padding-bottom: .5rem !important;
+    }
+
+    .payment-modal-header h2 {
+        font-size: 1.1rem !important;
+    }
+
+    .payment-loyalty {
+        padding: .5rem !important;
+        gap: .45rem !important;
+    }
+
+    .payment-loyalty label {
+        display: none;
+    }
+
+    .payment-customer-input {
+        min-height: 38px;
+        padding: .45rem .65rem !important;
+        font-size: .82rem !important;
+    }
+
+    .payment-total-card {
+        padding: .65rem !important;
+    }
+
+    .payment-total-card > span:last-child {
+        font-size: 1.55rem !important;
+    }
+
+    .payment-methods .flat-card {
+        min-height: 44px;
+        padding: .55rem !important;
+        font-size: .95rem !important;
+    }
+
+    .payment-status-line {
+        min-height: 42px !important;
+        font-size: 1rem !important;
+    }
+
+    .payment-complete-btn {
+        min-height: 48px !important;
+        padding: .6rem !important;
+        font-size: 1rem !important;
+    }
+
+    .payment-pad {
+        padding: .5rem !important;
+    }
+
+    .payment-display,
+    .payment-pad .np-clear {
+        height: 40px !important;
+        min-height: 40px !important;
+        font-size: 1.15rem !important;
+    }
+
+    .payment-np-grid {
+        gap: .35rem !important;
+    }
+
+    .payment-np-button {
+        height: 38px !important;
+        min-height: 38px !important;
+        font-size: 1rem !important;
+    }
+
+    .payment-quick-grid {
+        gap: .35rem !important;
+        margin-top: .35rem !important;
+    }
+
+    .payment-quick-button {
+        min-height: 38px;
+        padding: .3rem !important;
+    }
+
+    .payment-quick-button .text-xs,
+    .payment-quick-button .text-\[0\.7rem\] {
+        display: none;
+    }
+
+    .payment-card-note {
+        min-height: 32px !important;
+        font-size: .68rem !important;
+    }
 }
 
 @media (min-width: 1800px) {
@@ -591,7 +914,7 @@
         }
 
         .pos-cart {
-            @apply !w-[300px];
+            @apply !w-[345px];
         }
 
         .pos-cart-header {
