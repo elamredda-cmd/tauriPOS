@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount, tick } from "svelte";
+    import { onDestroy, onMount, tick } from "svelte";
     import { get } from "svelte/store";
     import { goto } from "$app/navigation";
     import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -70,6 +70,7 @@
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
     import { getReceiptPrinterConfig, printEscposReceipt, sendEscposReceipt } from "$lib/printers";
+    import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
 
     let activePageId = "";
@@ -152,6 +153,10 @@
     let scaleSearch = "";
     let scalePage = 0;
     let activeScaleTilePageId = "";
+    let scaleReadBusy = false;
+    let scaleReadStatus = "";
+    let scalePollTimer: ReturnType<typeof setInterval> | undefined;
+    let scalePollingSignature = "";
     const SCALE_PRODUCTS_PER_PAGE = 9;
     const MAX_SCALE_WEIGHT_DIGITS = 6;
     const MAX_ORDER_TOTAL_PENCE = 999_999_999;
@@ -225,6 +230,7 @@
             : "sync-pill-neutral";
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
     $: receiptPrinterConfig = getReceiptPrinterConfig($settingsDB);
+    $: scaleHardwareConfig = getScaleHardwareConfig($settingsDB);
     $: cashDrawerTarget = cashDrawerTargetLabel(cashDrawerConfig);
 
     let goodsSearchQuery = "";
@@ -294,6 +300,17 @@
         ? (parseFloat(scaleWeightInput) || 0) / 1000
         : parseFloat(scaleWeightInput) || 0;
     $: scaleLinePrice = Math.round(scaleWeightKg * (selectedScaleProduct?.price || 0));
+    $: scaleHardwareReady = scaleHardwareConfig.enabled && Boolean(scaleHardwareConfig.devicePath.trim());
+    $: {
+        const nextSignature = showScaleModal && scaleHardwareReady
+            ? `${scaleHardwareConfig.devicePath.trim()}|${scaleHardwareConfig.baudRate}|${scaleHardwareConfig.pollMs}`
+            : "";
+        if (nextSignature !== scalePollingSignature) {
+            stopScalePolling();
+            scalePollingSignature = nextSignature;
+            if (nextSignature) startScalePolling();
+        }
+    }
 
     function showTrolleyFeedback(
         msg: string,
@@ -651,6 +668,10 @@
         };
     });
 
+    onDestroy(() => {
+        stopScalePolling();
+    });
+
     let tillId = '';
     let tillName = 'Till 1';
 
@@ -864,12 +885,67 @@
         sendCctvCartProductName({ name: product.name, price: product.price });
     }
 
+    function scaleInputFromReading(reading: ScaleWeightReading): string {
+        if (reading.unit === "g") {
+            return String(Math.max(0, Math.round(reading.weight)));
+        }
+        return Math.max(0, reading.weight).toFixed(3).replace(/\.?0+$/, "") || "0";
+    }
+
+    function applyScaleReading(reading: ScaleWeightReading) {
+        if (!Number.isFinite(reading.weight)) return;
+        scaleWeightUnit = reading.unit;
+        scaleWeightInput = scaleInputFromReading(reading);
+        scaleReadStatus = `Live scale: ${formatScaleReading(reading)}`;
+    }
+
+    async function readScaleNow(showErrors = true) {
+        if (!scaleHardwareReady) {
+            const message = "Set the scale port in Printer Setup first";
+            scaleReadStatus = message;
+            if (showErrors) toast(message, "error");
+            return;
+        }
+        if (scaleReadBusy) return;
+        scaleReadBusy = true;
+        try {
+            const reading = await readScaleWeight(scaleHardwareConfig);
+            applyScaleReading(reading);
+        } catch (error) {
+            const message = `Scale did not read: ${error}`;
+            scaleReadStatus = message;
+            if (showErrors) toast(message, "error");
+        } finally {
+            scaleReadBusy = false;
+        }
+    }
+
+    function startScalePolling() {
+        if (scalePollTimer) return;
+        void readScaleNow(false);
+        scalePollTimer = setInterval(() => void readScaleNow(false), scaleHardwareConfig.pollMs);
+    }
+
+    function stopScalePolling() {
+        if (scalePollTimer) {
+            clearInterval(scalePollTimer);
+            scalePollTimer = undefined;
+        }
+    }
+
+    function closeScaleModal() {
+        showScaleModal = false;
+        stopScalePolling();
+        scalePollingSignature = "";
+    }
+
     function openScale() {
         selectedScaleProductId = "";
         scaleWeightInput = "";
         scaleWeightUnit = "kg";
         scaleSearch = "";
         scalePage = 0;
+        scaleReadStatus = "";
         activeScaleTilePageId = scaleTilePages[0]?.id || "";
         showScaleModal = true;
     }
@@ -879,6 +955,7 @@
         scaleWeightUnit = "kg";
         scaleSearch = "";
         scalePage = 0;
+        scaleReadStatus = "";
         activeScaleTilePageId = scaleTilePages.find((page) => page.productIds.includes(productId))?.id || scaleTilePages[0]?.id || "";
         selectedScaleProductId = productId;
         showScaleModal = true;
@@ -922,7 +999,7 @@
             skipStockAdjustment: true,
             note: `Manual scale: ${grams} g at ${formatMoney(selectedScaleProduct.price)}/kg`,
         });
-        showScaleModal = false;
+        closeScaleModal();
         toast(`${selectedScaleProduct.name} added from scale`, "success");
     }
 
@@ -3046,7 +3123,7 @@
 {/if}
 
 {#if showScaleModal}
-    <div class="modal-overlay" on:click={() => (showScaleModal = false)}>
+    <div class="modal-overlay" on:click={closeScaleModal}>
         <div class="scale-workspace" on:click|stopPropagation>
             <header class="scale-header">
                 <div>
@@ -3054,7 +3131,7 @@
                     <h2>Scale</h2>
                     <p>Select a product, enter its weight, then add the calculated total.</p>
                 </div>
-                <button class="modal-close scale-close" on:click={() => (showScaleModal = false)}>✕</button>
+                <button class="modal-close scale-close" on:click={closeScaleModal}>✕</button>
             </header>
 
             <div class="scale-layout">
@@ -3116,6 +3193,15 @@
                     <div class="scale-display">
                         <span>Weight</span>
                         <strong>{scaleWeightInput || "0"} <small>{scaleWeightUnit}</small></strong>
+                    </div>
+                    <div class="scale-live">
+                        <div>
+                            <span>{scaleHardwareReady ? `Scale port ${scaleHardwareConfig.devicePath}` : "Scale not connected"}</span>
+                            <small>{scaleReadStatus || (scaleHardwareReady ? "Waiting for live weight..." : "Use Printer Setup to choose the scale port.")}</small>
+                        </div>
+                        <button class="btn btn-secondary" disabled={!scaleHardwareReady || scaleReadBusy} on:click={() => readScaleNow(true)}>
+                            {scaleReadBusy ? "Reading..." : "Read Scale"}
+                        </button>
                     </div>
                     <div class="scale-numpad">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"] as key}
@@ -4057,13 +4143,17 @@
     .scale-pagination button { min-height: 34px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }
     .scale-pagination button:disabled { opacity: .3; }
     .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .45rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .scale-selected, .scale-display, .scale-total { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .1rem; border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-card); }
-    .scale-selected span, .scale-display span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+    .scale-selected, .scale-display, .scale-live, .scale-total { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .1rem; border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-card); }
+    .scale-selected span, .scale-display span, .scale-live span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
     .scale-selected small { color: var(--text-muted); }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
     .scale-units button, .scale-clear { padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
+    .scale-live { min-height: 76px; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
+    .scale-live div { min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
+    .scale-live small { color: var(--text-muted); font-size: .74rem; line-height: 1.2; word-break: break-word; }
+    .scale-live button { min-height: 38px; padding: 0 .7rem; white-space: nowrap; }
     .scale-numpad { flex: 1; min-height: 190px; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .35rem; }
     .scale-numpad button { min-height: 0; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.05rem; font-weight: 800; }
     .scale-total { margin-top: auto; flex-direction: row; align-items: center; justify-content: space-between; }

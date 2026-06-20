@@ -123,6 +123,12 @@
                 <p class="mt-2 text-sm text-text-muted">Receipt printers, label printers, and cash drawer pulse.</p>
                 <strong class="mt-4 block text-sm text-success">Set printers &rarr;</strong>
             </a>
+            <a href="/settings/scale" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Hardware</span>
+                <b class="mt-2 block text-xl">Scale Setup</b>
+                <p class="mt-2 text-sm text-text-muted">Find the scale port and connect the live weighing scale.</p>
+                <strong class="mt-4 block text-sm text-success">Connect scale &rarr;</strong>
+            </a>
             <a href="/settings/receipt" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-warning hover:bg-bg-card-hover">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-warning">Printing</span>
                 <b class="mt-2 block text-xl">Receipt Designer</b>

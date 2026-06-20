@@ -188,6 +188,7 @@
     <div slot="actions" class="flex flex-wrap gap-3">
         <a class="btn btn-secondary" href="/settings/receipt">Receipt Design</a>
         <a class="btn btn-secondary" href="/settings/labels">Label Design</a>
+        <a class="btn btn-secondary" href="/settings/scale">Scale Setup</a>
     </div>
 
     <div class="p-4 lg:p-6 space-y-5">

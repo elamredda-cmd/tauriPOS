@@ -4,7 +4,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     net::{TcpStream, ToSocketAddrs},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use serde::Serialize;
 use tauri::Manager;
@@ -52,6 +52,14 @@ struct SystemPrinterInfo {
     name: String,
     driver_name: String,
     port_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerialPortInfo {
+    path: String,
+    label: String,
+    kind: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -172,6 +180,438 @@ fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
 #[tauri::command]
 fn list_system_printers() -> Result<Vec<SystemPrinterInfo>, String> {
     platform_printers()
+}
+
+#[cfg(target_os = "windows")]
+fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    use windows_sys::Win32::Devices::Communication::GetCommPorts;
+
+    let mut ports = vec![0u32; 256];
+    let mut found = 0u32;
+    let status = unsafe { GetCommPorts(ports.as_mut_ptr(), ports.len() as u32, &mut found) };
+    if status != 0 {
+        return Err(format!("Could not list serial ports (Windows error {status})"));
+    }
+
+    ports.truncate(found as usize);
+    ports.sort_unstable();
+    ports.dedup();
+
+    Ok(ports
+        .into_iter()
+        .map(|port| {
+            let path = format!("COM{port}");
+            SerialPortInfo {
+                label: format!("{path} - serial scale/printer port"),
+                path,
+                kind: "serial".into(),
+            }
+        })
+        .collect())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    fn add_matching_ports(ports: &mut Vec<SerialPortInfo>, dir: &str, prefixes: &[&str], kind: &str) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+                continue;
+            }
+            let path = format!("{}/{}", dir.trim_end_matches('/'), name);
+            ports.push(SerialPortInfo {
+                label: format!("{path} - {kind}"),
+                path,
+                kind: kind.into(),
+            });
+        }
+    }
+
+    let mut ports = Vec::new();
+    if cfg!(target_os = "macos") {
+        add_matching_ports(
+            &mut ports,
+            "/dev",
+            &[
+                "cu.usb",
+                "tty.usb",
+                "cu.SLAB",
+                "tty.SLAB",
+                "cu.wchusb",
+                "tty.wchusb",
+                "cu.Bluetooth",
+                "tty.Bluetooth",
+            ],
+            "macOS serial port",
+        );
+    } else {
+        add_matching_ports(
+            &mut ports,
+            "/dev",
+            &["ttyUSB", "ttyACM", "ttyS"],
+            "Linux serial port",
+        );
+        add_matching_ports(
+            &mut ports,
+            "/dev/serial/by-id",
+            &["usb-", "pci-"],
+            "Linux serial adapter",
+        );
+    }
+
+    ports.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    ports.dedup_by(|a, b| a.path == b.path);
+    Ok(ports)
+}
+
+#[tauri::command]
+fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    platform_serial_ports()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScaleWeightReading {
+    weight: f64,
+    unit: String,
+    raw: String,
+}
+
+#[derive(Clone, Copy)]
+struct NumberCandidate {
+    start: usize,
+    end: usize,
+    value: f64,
+}
+
+fn clean_scale_raw(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn number_candidates(text: &str) -> Vec<NumberCandidate> {
+    let mut candidates = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut end = 0usize;
+    let mut has_digit = false;
+
+    for (index, ch) in text.char_indices() {
+        let is_part = ch.is_ascii_digit() || ch == '.' || ch == ',' || ch == '-' || ch == '+';
+        if is_part {
+            if start.is_none() {
+                start = Some(index);
+                has_digit = false;
+            }
+            if ch.is_ascii_digit() {
+                has_digit = true;
+            }
+            end = index + ch.len_utf8();
+        } else if let Some(candidate_start) = start.take() {
+            if has_digit {
+                let token = text[candidate_start..end].replace(',', ".");
+                if let Ok(value) = token.parse::<f64>() {
+                    candidates.push(NumberCandidate {
+                        start: candidate_start,
+                        end,
+                        value,
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(candidate_start) = start {
+        if has_digit {
+            let token = text[candidate_start..end].replace(',', ".");
+            if let Ok(value) = token.parse::<f64>() {
+                candidates.push(NumberCandidate {
+                    start: candidate_start,
+                    end,
+                    value,
+                });
+            }
+        }
+    }
+
+    candidates
+}
+
+fn gram_unit_index(text: &str) -> Option<usize> {
+    let chars = text.char_indices().collect::<Vec<_>>();
+    for (position, (index, ch)) in chars.iter().enumerate() {
+        if *ch != 'g' {
+            continue;
+        }
+        if position > 0 && chars[position - 1].1 == 'k' {
+            continue;
+        }
+        if let Some((_, next)) = chars.get(position + 1) {
+            if next.is_ascii_alphabetic() {
+                continue;
+            }
+        }
+        return Some(*index);
+    }
+    None
+}
+
+fn closest_number_before(numbers: &[NumberCandidate], unit_index: usize) -> Option<f64> {
+    numbers
+        .iter()
+        .filter(|candidate| candidate.end <= unit_index && candidate.value.is_finite())
+        .min_by_key(|candidate| unit_index.saturating_sub(candidate.end))
+        .map(|candidate| candidate.value)
+}
+
+fn closest_number_after(numbers: &[NumberCandidate], unit_index: usize) -> Option<f64> {
+    numbers
+        .iter()
+        .filter(|candidate| candidate.start >= unit_index && candidate.value.is_finite())
+        .min_by_key(|candidate| candidate.start.saturating_sub(unit_index))
+        .map(|candidate| candidate.value)
+}
+
+fn parse_scale_weight(raw: &str) -> Option<ScaleWeightReading> {
+    let cleaned = clean_scale_raw(raw);
+    let text = cleaned.to_ascii_lowercase();
+    let numbers = number_candidates(&text);
+    if numbers.is_empty() {
+        return None;
+    }
+
+    if let Some(unit_index) = text.find("kg") {
+        let weight = closest_number_before(&numbers, unit_index)
+            .or_else(|| closest_number_after(&numbers, unit_index))?;
+        return Some(ScaleWeightReading {
+            weight,
+            unit: "kg".into(),
+            raw: cleaned,
+        });
+    }
+
+    if let Some(unit_index) = gram_unit_index(&text) {
+        let weight = closest_number_before(&numbers, unit_index)
+            .or_else(|| closest_number_after(&numbers, unit_index))?;
+        return Some(ScaleWeightReading {
+            weight,
+            unit: "g".into(),
+            raw: cleaned,
+        });
+    }
+
+    let weight = numbers
+        .iter()
+        .find(|candidate| candidate.value.is_finite())
+        .map(|candidate| candidate.value)?;
+    Some(ScaleWeightReading {
+        weight,
+        unit: "kg".into(),
+        raw: cleaned,
+    })
+}
+
+#[tauri::command]
+fn read_scale_weight(
+    device_path: String,
+    baud_rate: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<ScaleWeightReading, String> {
+    platform_read_scale_weight(device_path, baud_rate, timeout_ms)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_read_scale_weight(
+    device_path: String,
+    baud_rate: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<ScaleWeightReading, String> {
+    use windows_sys::Win32::Devices::Communication::{
+        GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT,
+    };
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    };
+
+    let device_path = device_path.trim();
+    if device_path.is_empty() {
+        return Err("Scale port is required".into());
+    }
+
+    let path = {
+        let upper = device_path.to_ascii_uppercase();
+        if upper.starts_with("COM") && !device_path.starts_with(r"\\.\") {
+            format!(r"\\.\{device_path}")
+        } else {
+            device_path.to_string()
+        }
+    };
+
+    let mut path_w = wide_null(&path);
+    let handle = unsafe {
+        CreateFileW(
+            path_w.as_mut_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(last_windows_error("Could not open scale port"));
+    }
+
+    let result = (|| {
+        let baud = baud_rate.unwrap_or(9_600).clamp(1_200, 115_200);
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_200).clamp(200, 5_000));
+
+        let mut dcb: DCB = unsafe { std::mem::zeroed() };
+        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+        if unsafe { GetCommState(handle, &mut dcb) } == 0 {
+            return Err(last_windows_error("Could not read scale port settings"));
+        }
+        dcb.BaudRate = baud;
+        dcb.ByteSize = 8;
+        dcb.Parity = NOPARITY;
+        dcb.StopBits = ONESTOPBIT;
+        if unsafe { SetCommState(handle, &dcb) } == 0 {
+            return Err(last_windows_error("Could not set scale port speed"));
+        }
+
+        let timeouts = COMMTIMEOUTS {
+            ReadIntervalTimeout: 50,
+            ReadTotalTimeoutMultiplier: 10,
+            ReadTotalTimeoutConstant: timeout.as_millis() as u32,
+            WriteTotalTimeoutMultiplier: 0,
+            WriteTotalTimeoutConstant: timeout.as_millis() as u32,
+        };
+        if unsafe { SetCommTimeouts(handle, &timeouts) } == 0 {
+            return Err(last_windows_error("Could not set scale read timeout"));
+        }
+
+        let started = Instant::now();
+        let mut raw = Vec::new();
+        while started.elapsed() < timeout && raw.len() < 4_096 {
+            let mut buffer = [0u8; 256];
+            let mut read = 0u32;
+            let ok = unsafe {
+                ReadFile(
+                    handle,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    &mut read,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(last_windows_error("Could not read from scale port"));
+            }
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buffer[..read as usize]);
+            if raw.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
+                break;
+            }
+        }
+
+        if raw.is_empty() {
+            return Err("No scale data received. Press PRINT on the scale, or enable continuous RS-232 output on the scale.".into());
+        }
+
+        let text = String::from_utf8_lossy(&raw);
+        parse_scale_weight(&text).ok_or_else(|| {
+            format!(
+                "Could not find a weight in the scale data: {}",
+                clean_scale_raw(&text)
+            )
+        })
+    })();
+
+    unsafe {
+        CloseHandle(handle);
+    }
+    result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_read_scale_weight(
+    device_path: String,
+    baud_rate: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<ScaleWeightReading, String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::Command;
+    use std::thread;
+
+    #[cfg(target_os = "macos")]
+    const NONBLOCK_FLAG: i32 = 0x0004;
+    #[cfg(not(target_os = "macos"))]
+    const NONBLOCK_FLAG: i32 = 0o4000;
+
+    let device_path = device_path.trim();
+    if device_path.is_empty() {
+        return Err("Scale device path is required".into());
+    }
+
+    let baud = baud_rate.unwrap_or(9_600).clamp(1_200, 115_200);
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_200).clamp(200, 5_000));
+    let stty_device_flag = if cfg!(target_os = "macos") { "-f" } else { "-F" };
+    let _ = Command::new("stty")
+        .arg(stty_device_flag)
+        .arg(device_path)
+        .arg(baud.to_string())
+        .args(["cs8", "-cstopb", "-parenb", "-ixon", "-ixoff", "raw"])
+        .status();
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(NONBLOCK_FLAG)
+        .open(device_path)
+        .map_err(|error| format!("Could not open scale device {device_path}: {error}"))?;
+
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    while started.elapsed() < timeout && raw.len() < 4_096 {
+        let mut buffer = [0u8; 256];
+        match file.read(&mut buffer) {
+            Ok(0) => thread::sleep(Duration::from_millis(40)),
+            Ok(read) => {
+                raw.extend_from_slice(&buffer[..read]);
+                if raw.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(40));
+            }
+            Err(error) => return Err(format!("Could not read from scale device: {error}")),
+        }
+    }
+
+    if raw.is_empty() {
+        return Err("No scale data received. Press PRINT on the scale, or enable continuous RS-232 output on the scale.".into());
+    }
+
+    let text = String::from_utf8_lossy(&raw);
+    parse_scale_weight(&text).ok_or_else(|| {
+        format!(
+            "Could not find a weight in the scale data: {}",
+            clean_scale_raw(&text)
+        )
+    })
 }
 
 fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {
@@ -489,6 +929,8 @@ pub fn run() {
             send_device_printer_data,
             send_system_printer_data,
             list_system_printers,
+            list_serial_ports,
+            read_scale_weight,
             open_cash_drawer,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,

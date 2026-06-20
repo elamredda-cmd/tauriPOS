@@ -2,10 +2,11 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import Receipt from '$lib/components/Receipt.svelte';
-    import { now, settingsDB, storeDB, type Order } from '$lib/stores/db';
+    import { now, settingsDB, storeDB, type Order, type OrderLine } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { defaultReceiptDesign, getReceiptDesign, type ReceiptDesign } from '$lib/receipt';
+    import { getReceiptPrinterConfig, printEscposReceipt } from '$lib/printers';
 
     let design: ReceiptDesign = getReceiptDesign($settingsDB);
     const paperWidthOptions = [
@@ -51,9 +52,45 @@
         updatedAt: new Date().toISOString(),
     };
 
-    const previewLines = [
-        { productName: 'Coffee', sku: 'DRINK-COFFEE', quantity: 2, unitPrice: 350 },
-        { productName: 'Sandwich', sku: 'FOOD-SANDWICH', quantity: 1, unitPrice: 650 },
+    let testPrintBusy = false;
+
+    const previewLines: OrderLine[] = [
+        {
+            id: 'preview-line-1',
+            orderId: previewOrder.id,
+            productId: 'DRINK-COFFEE',
+            productName: 'Coffee',
+            quantity: 2,
+            unitPrice: 350,
+            costPrice: 0,
+            discountId: '',
+            discountAmount: 0,
+            taxRate: 0,
+            taxAmount: 0,
+            lineTotal: 700,
+            isPriceOverride: false,
+            originalPrice: 350,
+            notes: '',
+            updatedAt: new Date().toISOString(),
+        },
+        {
+            id: 'preview-line-2',
+            orderId: previewOrder.id,
+            productId: 'FOOD-SANDWICH',
+            productName: 'Sandwich',
+            quantity: 1,
+            unitPrice: 650,
+            costPrice: 0,
+            discountId: '',
+            discountAmount: 0,
+            taxRate: 0,
+            taxAmount: 0,
+            lineTotal: 650,
+            isPriceOverride: false,
+            originalPrice: 650,
+            notes: '',
+            updatedAt: new Date().toISOString(),
+        },
     ];
 
     function setBoolean(key: keyof ReceiptDesign, checked: boolean) {
@@ -77,8 +114,28 @@
         toast('Receipt design reset. Save to keep it.', 'info');
     }
 
-    function testPrint() {
-        window.print();
+    async function testPrint() {
+        const config = getReceiptPrinterConfig($settingsDB);
+        if (config.connection === 'system') {
+            toast('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            return;
+        }
+        testPrintBusy = true;
+        try {
+            await printEscposReceipt({
+                store: $storeDB,
+                order: previewOrder,
+                lines: previewLines,
+                cashierName: 'Alex',
+                tillName: 'Till 1',
+                design,
+            }, config);
+            toast('Receipt test sent to thermal printer', 'success');
+        } catch (error) {
+            toast(`Receipt test did not print: ${error}`, 'error');
+        } finally {
+            testPrintBusy = false;
+        }
     }
 
     const switches: Array<{ key: keyof ReceiptDesign; label: string }> = [
@@ -98,7 +155,7 @@
 <MgmtPage title="Receipt Designer" backFallback="/settings">
     <div slot="actions" class="flex gap-3">
         <button class="btn btn-secondary" on:click={resetDesign}>Reset</button>
-        <button class="btn btn-secondary" on:click={testPrint}>Test Print</button>
+        <button class="btn btn-secondary" on:click={testPrint} disabled={testPrintBusy}>{testPrintBusy ? 'Printing...' : 'Test Print'}</button>
         <button class="btn btn-primary" on:click={saveDesign}>Save Design</button>
     </div>
 
@@ -180,7 +237,7 @@
                 </div>
             </div>
             <p class="text-xs text-text-muted text-center">
-                Printer selection and paper settings are chosen in the system print dialog on each till.
+                Test Print uses the thermal receipt printer selected in Printer Setup.
             </p>
         </aside>
     </div>

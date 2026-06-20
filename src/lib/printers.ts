@@ -198,7 +198,7 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
     const leftOn = [0x1b, 0x61, 0x00];
     const boldOn = [0x1b, 0x45, 0x01];
     const boldOff = [0x1b, 0x45, 0x00];
-    const receiptFontSelect = [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
+    const receiptFontSelect = [0x1b, 0x4d, 0x00];
     const bytes = [
         0x1b, 0x40,
         ...receiptFontSelect,
@@ -286,8 +286,10 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
     const leftOn = [0x1b, 0x61, 0x00];
     const boldOn = [0x1b, 0x45, 0x01];
     const boldOff = [0x1b, 0x45, 0x00];
+    const receiptFontSelect = [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
     const bytes = [
         0x1b, 0x40,
+        ...receiptFontSelect,
         ...centerOn,
         ...boldOn,
         ...line(payload.design.headerText || payload.store.name || 'L&Bj POS', config.encoding),

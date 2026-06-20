@@ -619,6 +619,8 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'label_printer_host', 'label_printer_port', 'label_printer_name',
     'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
     'label_printer_gap_lines',
+    'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
+    'scale_hardware_poll_ms',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done',
 ]);
