@@ -2,6 +2,7 @@
     import { formatMoney, type Order, type Store } from '$lib/stores/db';
     import { defaultReceiptDesign, type ReceiptDesign } from '$lib/receipt';
     import { getScaleSaleDisplay } from '$lib/scaleSale';
+    import Code39Barcode from './Code39Barcode.svelte';
 
     interface ReceiptLine {
         productName: string;
@@ -23,6 +24,7 @@
 
     $: width = design.paperWidth === '58mm' ? '58mm' : '80mm';
     $: textSize = design.textSize === 'small' ? '10px' : design.textSize === 'large' ? '14px' : '12px';
+    $: titleSize = design.titleTextSize === 'small' ? '1.05em' : design.titleTextSize === 'large' ? '1.55em' : '1.25em';
     $: lineGap = design.density === 'compact' ? '2px' : '5px';
     $: receiptFont = design.fontFamily === 'standard'
         ? 'Arial, Helvetica, sans-serif'
@@ -30,12 +32,16 @@
             ? 'Arial Narrow, Helvetica Condensed, Arial, sans-serif'
             : 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
     $: divider = design.paperWidth === '58mm' ? '------------------------' : '--------------------------------';
+    $: receiptBarcodeValue = String(order.orderNumber || order.receiptKey || order.id || '')
+        .toUpperCase()
+        .replace(/[^0-9A-Z. $/+%-]/g, '')
+        .slice(0, 32);
 </script>
 
 <div
     class="receipt-document"
     class:receipt-preview={preview}
-    style="--receipt-width:{width}; --receipt-text-size:{textSize}; --receipt-line-gap:{lineGap}; --receipt-font:{receiptFont};"
+    style="--receipt-width:{width}; --receipt-text-size:{textSize}; --receipt-title-size:{titleSize}; --receipt-line-gap:{lineGap}; --receipt-font:{receiptFont};"
 >
     <div class="receipt-center">
         <h3>{design.headerText || store.name}</h3>
@@ -94,7 +100,11 @@
     <div class="receipt-divider">{divider}</div>
     <div class="receipt-center">
         <p>{design.footerText || store.receiptFooter}</p>
-        {#if design.showBarcode}<div class="receipt-barcode">||| |||| | || |||</div>{/if}
+        {#if design.showBarcode && receiptBarcodeValue}
+            <div class="receipt-barcode">
+                <Code39Barcode value={receiptBarcodeValue} height={design.paperWidth === '58mm' ? 34 : 42} />
+            </div>
+        {/if}
     </div>
 </div>
 
@@ -112,7 +122,7 @@
     }
     .receipt-preview { box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25); }
     .receipt-center { text-align: center; }
-    h3 { margin: 0 0 4px; font-size: 1.25em; }
+    h3 { margin: 0 0 4px; font-size: var(--receipt-title-size); }
     .receipt-reversal-title { margin: 5px 0 2px; font-size: 1.1em; letter-spacing: .08em; }
     p { margin: 1px 0; white-space: pre-line; }
     .receipt-message { margin-top: 5px; }
@@ -125,7 +135,9 @@
     .receipt-line > span:last-child { text-align: right; }
     small { display: block; opacity: 0.7; }
     .receipt-total { font-size: 1.15em; font-weight: 800; }
-    .receipt-barcode { margin-top: 6px; font-size: 1.5em; letter-spacing: 2px; }
+    .receipt-barcode { margin-top: 6px; }
+    .receipt-barcode :global(.loyalty-barcode) { padding: 2px 0 0; border-radius: 0; }
+    .receipt-barcode :global(strong) { margin-top: 2px; font-size: .72em; letter-spacing: .12em; }
 
     @media print {
         :global(body *) { visibility: hidden !important; }

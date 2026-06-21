@@ -2,6 +2,11 @@ import { emitTo } from '@tauri-apps/api/event';
 import { availableMonitors, PhysicalPosition } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
+const CUSTOMER_DISPLAY_MONITOR_KEY = 'customer_display_monitor';
+const CUSTOMER_DISPLAY_AUTO_OPEN_KEY = 'customer_display_auto_open';
+
+let autoOpenStop: (() => void) | null = null;
+
 export interface CustomerDisplayLine {
     name: string;
     quantity: number;
@@ -44,11 +49,60 @@ export async function getDisplayMonitors(): Promise<DisplayMonitor[]> {
 }
 
 export function getSavedCustomerDisplayMonitor(): number {
-    return Number(localStorage.getItem('customer_display_monitor') || '1');
+    return Number(localStorage.getItem(CUSTOMER_DISPLAY_MONITOR_KEY) || '1');
 }
 
 export function saveCustomerDisplayMonitor(index: number) {
-    localStorage.setItem('customer_display_monitor', String(index));
+    localStorage.setItem(CUSTOMER_DISPLAY_MONITOR_KEY, String(index));
+}
+
+export function getCustomerDisplayAutoOpen(): boolean {
+    return localStorage.getItem(CUSTOMER_DISPLAY_AUTO_OPEN_KEY) !== 'false';
+}
+
+export function saveCustomerDisplayAutoOpen(enabled: boolean) {
+    localStorage.setItem(CUSTOMER_DISPLAY_AUTO_OPEN_KEY, enabled ? 'true' : 'false');
+}
+
+export async function openCustomerDisplayOnSecondScreen(): Promise<boolean> {
+    if (!getCustomerDisplayAutoOpen()) return false;
+    const monitors = await availableMonitors();
+    if (monitors.length < 2) return false;
+    const savedIndex = getSavedCustomerDisplayMonitor();
+    const monitorIndex = savedIndex > 0 && monitors[savedIndex] ? savedIndex : 1;
+    await openCustomerDisplay(monitorIndex);
+    return true;
+}
+
+export function startCustomerDisplayAutoOpenWatcher(): () => void {
+    autoOpenStop?.();
+    let attempts = 0;
+    let stopped = false;
+    const maxAttempts = 15;
+    let timer: ReturnType<typeof setInterval>;
+
+    const stop = () => {
+        stopped = true;
+        if (timer) clearInterval(timer);
+        if (autoOpenStop === stop) autoOpenStop = null;
+    };
+
+    const attempt = async () => {
+        if (stopped) return;
+        attempts += 1;
+        try {
+            const opened = await openCustomerDisplayOnSecondScreen();
+            if (opened || attempts >= maxAttempts || !getCustomerDisplayAutoOpen()) stop();
+        } catch (error) {
+            console.warn('customer display: auto-open failed:', error);
+            if (attempts >= maxAttempts) stop();
+        }
+    };
+
+    timer = setInterval(() => void attempt(), 4000);
+    autoOpenStop = stop;
+    void attempt();
+    return stop;
 }
 
 export async function openCustomerDisplay(monitorIndex = getSavedCustomerDisplayMonitor()): Promise<void> {

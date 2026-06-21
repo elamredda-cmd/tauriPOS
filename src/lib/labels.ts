@@ -10,6 +10,8 @@ export interface LabelDesign {
     template: LabelTemplate;
     fontFamily: LabelFontFamily;
     textScale: LabelTextScale;
+    nameTextScale: LabelTextScale;
+    priceTextScale: LabelTextScale;
     showStore: boolean;
     showName: boolean;
     showPrice: boolean;
@@ -36,6 +38,8 @@ export const defaultLabelDesign: LabelDesign = {
     template: 'standard',
     fontFamily: 'standard',
     textScale: 'normal',
+    nameTextScale: 'normal',
+    priceTextScale: 'normal',
     showStore: false,
     showName: true,
     showPrice: true,
@@ -48,7 +52,14 @@ export function getLabelDesign(settings: Setting[]): LabelDesign {
     const raw = settings.find((setting) => setting.key === 'label_design')?.value;
     if (!raw) return { ...defaultLabelDesign };
     try {
-        return { ...defaultLabelDesign, ...JSON.parse(raw) };
+        const parsed = JSON.parse(raw);
+        const legacyTextScale = parsed.textScale || defaultLabelDesign.textScale;
+        return {
+            ...defaultLabelDesign,
+            ...parsed,
+            nameTextScale: parsed.nameTextScale || legacyTextScale,
+            priceTextScale: parsed.priceTextScale || legacyTextScale,
+        };
     } catch {
         return { ...defaultLabelDesign };
     }

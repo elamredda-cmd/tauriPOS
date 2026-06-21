@@ -176,7 +176,17 @@
                         options={fontOptions}
                     />
                     <CustomSelect
-                        label="Text Size"
+                        label="Item Name Size"
+                        bind:value={design.nameTextScale}
+                        options={textScaleOptions}
+                    />
+                    <CustomSelect
+                        label="Price Size"
+                        bind:value={design.priceTextScale}
+                        options={textScaleOptions}
+                    />
+                    <CustomSelect
+                        label="Small Text Size"
                         bind:value={design.textScale}
                         options={textScaleOptions}
                     />

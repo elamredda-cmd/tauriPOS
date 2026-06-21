@@ -148,7 +148,7 @@
         { key: 'showTill', label: 'Till name' },
         { key: 'showSku', label: 'Product SKU' },
         { key: 'showPayment', label: 'Payment and change' },
-        { key: 'showBarcode', label: 'Receipt barcode' },
+        { key: 'showBarcode', label: 'Receipt number barcode' },
     ];
 </script>
 
@@ -169,6 +169,9 @@
                     </div>
                     <div class="field">
                         <CustomSelect label="Text Size" bind:value={design.textSize} options={textSizeOptions} />
+                    </div>
+                    <div class="field">
+                        <CustomSelect label="Title Size" bind:value={design.titleTextSize} options={textSizeOptions} />
                     </div>
                     <div class="field">
                         <CustomSelect label="Font" bind:value={design.fontFamily} options={fontOptions} />

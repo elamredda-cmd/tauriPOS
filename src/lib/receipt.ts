@@ -1,10 +1,12 @@
 import type { Setting } from '$lib/stores/db';
 
 export type ReceiptFontFamily = 'mono' | 'standard' | 'condensed';
+export type ReceiptTextSize = 'small' | 'normal' | 'large';
 
 export interface ReceiptDesign {
     paperWidth: '58mm' | '80mm';
-    textSize: 'small' | 'normal' | 'large';
+    textSize: ReceiptTextSize;
+    titleTextSize: ReceiptTextSize;
     density: 'compact' | 'comfortable';
     fontFamily: ReceiptFontFamily;
     headerText: string;
@@ -26,6 +28,7 @@ export interface ReceiptDesign {
 export const defaultReceiptDesign: ReceiptDesign = {
     paperWidth: '80mm',
     textSize: 'normal',
+    titleTextSize: 'normal',
     density: 'comfortable',
     fontFamily: 'mono',
     headerText: '',

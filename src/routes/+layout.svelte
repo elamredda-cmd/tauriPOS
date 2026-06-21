@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import { goto } from '$app/navigation';
     import { connectionState, loadSavedMode, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
@@ -19,11 +19,13 @@
     import { canManage, currentEmployee } from '$lib/stores/session';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
+    import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
 
     let dbReady = false;
     let dbError = '';
     let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
     let syncStartupRunning = false;
+    let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     const SYNC_STARTUP_RETRY_MS = 30 * 1000;
 
     primeSoundEngine();
@@ -123,13 +125,20 @@
 
             // Remove legacy app data while preserving device-only preferences.
             const customerDisplayMonitor = localStorage.getItem('customer_display_monitor');
+            const customerDisplayAutoOpen = localStorage.getItem('customer_display_auto_open');
             localStorage.clear();
             if (customerDisplayMonitor !== null) {
                 localStorage.setItem('customer_display_monitor', customerDisplayMonitor);
             }
+            if (customerDisplayAutoOpen !== null) {
+                localStorage.setItem('customer_display_auto_open', customerDisplayAutoOpen);
+            }
 
             console.log("POS initialized ✅");
             dbReady = true;
+            if (window.location.pathname !== '/customer-display') {
+                stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
+            }
 
             // A shop without an active administrator cannot be managed yet. Always send it
             // to setup so the first administrator can choose their own PIN.
@@ -143,6 +152,11 @@
             console.error("Failed to initialize:", err);
             dbError = String(err);
         }
+    });
+
+    onDestroy(() => {
+        stopCustomerDisplayAutoOpen?.();
+        clearSyncStartupRetry();
     });
 
     // Reactive theme application via store subscription.

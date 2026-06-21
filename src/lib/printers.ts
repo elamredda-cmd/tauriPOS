@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { settingsDB, type Order, type OrderLine, type Product, type Setting, type Store } from '$lib/stores/db';
 import type { ReceiptDesign } from '$lib/receipt';
-import type { LabelDesign } from '$lib/labels';
+import type { LabelDesign, LabelTextScale } from '$lib/labels';
 import { getScaleSaleDisplay } from '$lib/scaleSale';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
@@ -286,14 +286,25 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
     const leftOn = [0x1b, 0x61, 0x00];
     const boldOn = [0x1b, 0x45, 0x01];
     const boldOff = [0x1b, 0x45, 0x00];
+    const normalSize = [0x1d, 0x21, 0x00];
     const receiptFontSelect = [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
+    const titleSize = payload.design.titleTextSize === 'large' ? [0x1d, 0x21, 0x11] : normalSize;
+    const titleFontSelect = payload.design.titleTextSize === 'small' ? [0x1b, 0x4d, 0x01] : receiptFontSelect;
+    const receiptBarcode = String(payload.order.orderNumber || payload.order.receiptKey || payload.order.id || '')
+        .toUpperCase()
+        .replace(/[^0-9A-Z. $/+%-]/g, '')
+        .slice(0, 32);
     const bytes = [
         0x1b, 0x40,
         ...receiptFontSelect,
         ...centerOn,
+        ...titleFontSelect,
+        ...titleSize,
         ...boldOn,
         ...line(payload.design.headerText || payload.store.name || 'L&Bj POS', config.encoding),
         ...boldOff,
+        ...normalSize,
+        ...receiptFontSelect,
     ];
 
     if (payload.design.showAddress && payload.store.address) bytes.push(...line(payload.store.address, config.encoding));
@@ -331,6 +342,9 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
 
     bytes.push(...line(divider, config.encoding), ...centerOn);
     bytes.push(...line(payload.design.footerText || payload.store.receiptFooter || 'Thank you', config.encoding));
+    if (payload.design.showBarcode && receiptBarcode) {
+        bytes.push(...escposCode39(receiptBarcode), ...line('', config.encoding));
+    }
     bytes.push(...receiptCut(config));
     return bytes;
 }
@@ -400,12 +414,24 @@ function labelPrice(product: Product): string {
     return `GBP ${money(product.price)}`;
 }
 
-function labelScale(design: LabelDesign): number {
-    return design.textScale === 'small' ? 0.86 : design.textScale === 'large' ? 1.18 : 1;
+function labelScaleValue(scale: LabelTextScale | undefined): number {
+    return scale === 'small' ? 0.86 : scale === 'large' ? 1.18 : 1;
 }
 
-function zplFont(size: number, design: LabelDesign): string {
-    const scaled = Math.max(12, Math.round(size * labelScale(design)));
+function labelScale(design: LabelDesign): number {
+    return labelScaleValue(design.textScale);
+}
+
+function labelNameScale(design: LabelDesign): number {
+    return labelScaleValue(design.nameTextScale || design.textScale);
+}
+
+function labelPriceScale(design: LabelDesign): number {
+    return labelScaleValue(design.priceTextScale || design.textScale);
+}
+
+function zplFont(size: number, design: LabelDesign, scale = labelScale(design)): string {
+    const scaled = Math.max(12, Math.round(size * scale));
     return `^A0N,${scaled},${Math.max(10, Math.round(scaled * 0.86))}`;
 }
 
@@ -413,15 +439,32 @@ function tsplScale(design: LabelDesign): number {
     return design.textScale === 'large' ? 2 : 1;
 }
 
+function tsplSizeScale(scale: LabelTextScale | undefined): number {
+    return scale === 'large' ? 2 : 1;
+}
+
+function tsplNameFont(design: LabelDesign): string {
+    return design.nameTextScale === 'small' ? '2' : design.nameTextScale === 'large' ? '4' : '3';
+}
+
+function tsplPriceFont(design: LabelDesign): string {
+    return design.priceTextScale === 'small' ? '3' : '4';
+}
+
 function escposFontSelect(design: LabelDesign): number[] {
     return [0x1b, 0x4d, design.fontFamily === 'condensed' ? 0x01 : 0x00];
 }
 
-function escposTextSize(design: LabelDesign, kind: 'normal' | 'price'): number[] {
+function escposTextSize(design: LabelDesign, kind: 'normal' | 'name' | 'price'): number[] {
+    const scale = kind === 'price'
+        ? design.priceTextScale || design.textScale
+        : kind === 'name'
+            ? design.nameTextScale || design.textScale
+            : design.textScale;
     if (kind === 'price') {
-        return [0x1d, 0x21, design.textScale === 'small' ? 0x10 : design.textScale === 'large' ? 0x22 : 0x11];
+        return [0x1d, 0x21, scale === 'small' ? 0x10 : scale === 'large' ? 0x22 : 0x11];
     }
-    return [0x1d, 0x21, design.textScale === 'large' ? 0x01 : 0x00];
+    return [0x1d, 0x21, scale === 'large' ? 0x01 : 0x00];
 }
 
 function escposCut(cutPaper: boolean): number[] {
@@ -452,12 +495,12 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
         y += Math.round(24 * labelScale(design));
     }
     if (design.showName) {
-        lines.push(`^FO${margin},${y}${zplFont(28, design)}^FB${width - margin * 2},2,2,C^FD${zplEscape(product.name)}^FS`);
-        y += Math.round((design.heightMm >= 40 ? 58 : 42) * labelScale(design));
+        lines.push(`^FO${margin},${y}${zplFont(28, design, labelNameScale(design))}^FB${width - margin * 2},2,2,C^FD${zplEscape(product.name)}^FS`);
+        y += Math.round((design.heightMm >= 40 ? 58 : 42) * labelNameScale(design));
     }
     if (design.showPrice) {
-        lines.push(`^FO${margin},${y}${zplFont(44, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(labelPrice(product))}^FS`);
-        y += Math.round(48 * labelScale(design));
+        lines.push(`^FO${margin},${y}${zplFont(44, design, labelPriceScale(design))}^FB${width - margin * 2},1,0,C^FD${zplEscape(labelPrice(product))}^FS`);
+        y += Math.round(48 * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
     const barcodeHeight = Math.max(35, Math.min(90, height - y - 32));
@@ -493,12 +536,14 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): 
         y += 26 * scale;
     }
     if (design.showName) {
-        lines.push(`TEXT ${margin},${y},"3",0,${scale},${scale},"${tsplEscape(product.name)}"`);
-        y += (design.heightMm >= 40 ? 46 : 34) * scale;
+        const nameScale = tsplSizeScale(design.nameTextScale || design.textScale);
+        lines.push(`TEXT ${margin},${y},"${tsplNameFont(design)}",0,${nameScale},${nameScale},"${tsplEscape(product.name)}"`);
+        y += Math.round((design.heightMm >= 40 ? 46 : 34) * labelNameScale(design));
     }
     if (design.showPrice) {
-        lines.push(`TEXT ${margin},${y},"4",0,${scale},${scale},"${tsplEscape(labelPrice(product))}"`);
-        y += 50 * scale;
+        const priceScale = tsplSizeScale(design.priceTextScale || design.textScale);
+        lines.push(`TEXT ${margin},${y},"${tsplPriceFont(design)}",0,${priceScale},${priceScale},"${tsplEscape(labelPrice(product))}"`);
+        y += Math.round(50 * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
     const barcodeHeight = Math.max(35, Math.min(90, height - y - 24));
@@ -538,7 +583,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
     for (let copy = 0; copy < labelCopies(payload.quantity); copy += 1) {
         bytes.push(0x1b, 0x40, ...centerOn, ...escposFontSelect(design), ...escposTextSize(design, 'normal'));
         if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, 32), 'latin1'), ...boldOff);
-        if (design.showName) bytes.push(...line(labelText(product.name, 32), 'latin1'));
+        if (design.showName) bytes.push(...escposTextSize(design, 'name'), ...line(labelText(product.name, 32), 'latin1'), ...normalSize, ...escposTextSize(design, 'normal'));
         if (design.showPrice) bytes.push(...escposTextSize(design, 'price'), ...boldOn, ...line(labelPrice(product), 'latin1'), ...boldOff, ...normalSize, ...escposTextSize(design, 'normal'));
         if (barcode) bytes.push(...escposCode39(barcode), ...line('', 'latin1'));
         if (design.showBarcodeText && barcode) bytes.push(...line(barcode, 'latin1'));

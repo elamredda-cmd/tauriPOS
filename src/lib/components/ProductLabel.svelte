@@ -16,12 +16,14 @@
             ? 'Arial Narrow, Helvetica Condensed, Arial, sans-serif'
             : 'Arial, Helvetica, sans-serif';
     $: textScale = design.textScale === 'small' ? 0.86 : design.textScale === 'large' ? 1.18 : 1;
+    $: nameScale = design.nameTextScale === 'small' ? 0.86 : design.nameTextScale === 'large' ? 1.18 : 1;
+    $: priceScale = design.priceTextScale === 'small' ? 0.86 : design.priceTextScale === 'large' ? 1.18 : 1;
 </script>
 
 <article
     class="product-label template-{design.template}"
     class:preview
-    style="--label-width:{design.widthMm}mm;--label-height:{design.heightMm}mm;--label-font:{labelFont};--label-text-scale:{textScale};"
+    style="--label-width:{design.widthMm}mm;--label-height:{design.heightMm}mm;--label-font:{labelFont};--label-text-scale:{textScale};--label-name-scale:{nameScale};--label-price-scale:{priceScale};"
 >
     {#if design.showStore}<small class="store">{store.name}</small>{/if}
     {#if design.showName}<h2>{product.name}</h2>{/if}
@@ -38,8 +40,8 @@
     .product-label { width: var(--label-width); height: var(--label-height); padding: 2mm; overflow: hidden; display: grid; grid-template-rows: auto auto 1fr auto; align-content: start; color: #000; border: .25mm solid #000; background: #fff; font-family: var(--label-font); page-break-after: always; break-after: page; }
     .product-label.preview { max-width: 100%; transform-origin: top center; }
     .store { overflow: hidden; font-size: calc(2.4mm * var(--label-text-scale)); font-weight: 800; text-align: center; text-transform: uppercase; white-space: nowrap; }
-    h2 { margin: .4mm 0; overflow: hidden; font-family: var(--label-font); font-size: clamp(8px, calc(3.3mm * var(--label-text-scale)), 22px); line-height: 1.05; text-align: center; white-space: nowrap; text-overflow: ellipsis; }
-    .price { margin: .2mm 0; font-size: clamp(13px, calc(6mm * var(--label-text-scale)), 44px); line-height: 1; text-align: center; }
+    h2 { margin: .4mm 0; overflow: hidden; font-family: var(--label-font); font-size: clamp(8px, calc(3.3mm * var(--label-name-scale)), 22px); line-height: 1.05; text-align: center; white-space: nowrap; text-overflow: ellipsis; }
+    .price { margin: .2mm 0; font-size: clamp(13px, calc(6mm * var(--label-price-scale)), 44px); line-height: 1; text-align: center; }
     .barcode { min-height: 0; overflow: hidden; display: flex; align-items: stretch; justify-content: center; }
     .barcode :global(.loyalty-barcode) { width: 100%; padding: .5mm; border-radius: 0; }
     .barcode :global(strong) { display: none; }
@@ -49,10 +51,10 @@
     .template-compact .price { grid-column: 2; grid-row: 1 / span 2; align-self: center; padding-left: 1mm; }
     .template-compact .barcode { grid-column: 1; }
     .template-compact footer { grid-column: 1 / -1; }
-    .template-barcode .price { font-size: 4mm; }
+    .template-barcode .price { font-size: calc(4mm * var(--label-price-scale)); }
     .template-shelf { grid-template-columns: 1fr auto; grid-template-rows: auto auto 1fr; }
     .template-shelf h2 { text-align: left; white-space: normal; }
-    .template-shelf .price { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: clamp(18px, 9mm, 54px); }
+    .template-shelf .price { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: clamp(18px, calc(9mm * var(--label-price-scale)), 54px); }
     .template-shelf .barcode, .template-shelf footer { grid-column: 1 / -1; }
     @media print {
         .product-label { margin: 0; border: none; }
