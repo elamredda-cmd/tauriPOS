@@ -3157,14 +3157,20 @@
                             {#each pagedScaleProducts as product}
                                 {#if product}
                                     <button
-                                        class="scale-product {selectedScaleProductId === product.id ? 'selected' : ''}"
+                                        class="scale-product {product.image ? 'with-image' : ''} {selectedScaleProductId === product.id ? 'selected' : ''}"
                                         style="--scale-color: {product.color || '#3b82f6'}"
                                         on:click={() => (selectedScaleProductId = product.id)}
                                     >
                                         <i></i>
-                                        <strong>{product.name}</strong>
-                                        <span>{formatMoney(product.price)} / kg</span>
-                                        {#if product.scalePlu}<small>PLU {product.scalePlu}</small>{/if}
+                                        {#if product.image}
+                                            <img class="scale-product-photo" src={product.image} alt={product.name} />
+                                            <span class="scale-product-shade"></span>
+                                        {/if}
+                                        <div class="scale-product-content">
+                                            <strong>{product.name}</strong>
+                                            <span>{formatMoney(product.price)} / kg</span>
+                                            {#if product.scalePlu}<small>PLU {product.scalePlu}</small>{/if}
+                                        </div>
                                     </button>
                                 {/if}
                             {/each}
@@ -4141,10 +4147,14 @@
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
     .scale-products .flat-input { padding-top: .65rem; padding-bottom: .65rem; }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); gap: .55rem; }
-    .scale-product { position: relative; min-height: 0; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
-    .scale-product i { position: absolute; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
-    .scale-product strong { margin-top: auto; }
+    .scale-product { position: relative; min-height: 0; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
+    .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
+    .scale-product-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .scale-product-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgba(15, 23, 42, .82), rgba(15, 23, 42, .25), rgba(15, 23, 42, .05)); }
+    .scale-product-content { position: relative; z-index: 1; display: flex; min-width: 0; flex-direction: column; gap: .12rem; }
+    .scale-product strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
     .scale-product span, .scale-product small { color: var(--text-muted); font-size: .75rem; }
+    .scale-product.with-image strong, .scale-product.with-image span, .scale-product.with-image small { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, .45); }
     .scale-product.selected { border-color: var(--success); background: rgba(16, 185, 129, .10); }
     .scale-pagination { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-muted); font-size: .72rem; }
     .scale-pagination div { display: flex; align-items: center; gap: .4rem; }
