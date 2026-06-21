@@ -391,11 +391,38 @@
   .placeholder { @apply p-12 text-center text-text-muted text-base; }
 
   /* Settings-style cards (used by /settings and any future config page) */
+  .settings-page-shell { @apply flex flex-col gap-5 p-4 lg:p-6; }
+  .settings-hero {
+    @apply rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card via-bg-card to-bg-panel p-5;
+    box-shadow: 0 18px 45px var(--shadow);
+  }
+  .settings-hero-kicker { @apply mb-1 text-xs font-black uppercase tracking-[0.18em] text-accent-primary; }
+  .settings-hero-title { @apply m-0 text-2xl font-black text-text-main md:text-3xl; }
+  .settings-hero-copy { @apply mt-2 max-w-3xl text-sm text-text-muted; }
+  .settings-card-grid { @apply grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3; }
+  .settings-nav-card {
+    @apply rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition-all duration-150 hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover;
+    box-shadow: 0 12px 30px var(--shadow);
+  }
+  .settings-nav-card b { @apply mt-2 block text-xl; }
+  .settings-nav-card p { @apply mt-2 text-sm text-text-muted; }
+  .settings-nav-card strong { @apply mt-4 block text-sm text-accent-primary; }
+  .settings-action-card {
+    @apply rounded-2xl border border-border-flat bg-bg-card p-5;
+    box-shadow: 0 18px 45px var(--shadow);
+  }
+  .settings-mini-card { @apply rounded-xl border border-border-flat bg-bg-panel p-4; }
+  .settings-row-card { @apply flex items-center gap-3 rounded-xl border border-border-flat bg-bg-panel px-4 py-3; }
+  .settings-order-list { @apply flex flex-col gap-2; }
+  .settings-order-item { @apply flex items-center gap-3 rounded-xl border border-border-flat bg-bg-panel px-4 py-3; }
+  .settings-order-index { @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bg-card font-mono text-sm font-black text-text-muted; }
+  .settings-order-controls { @apply flex shrink-0 gap-2; }
+  .settings-icon-btn { @apply flex h-10 w-10 items-center justify-center rounded-lg border border-border-flat bg-bg-card text-text-main transition hover:border-accent-primary hover:bg-bg-card-hover disabled:cursor-not-allowed disabled:opacity-35; }
   .settings-section {
-    @apply bg-bg-card border border-border-flat rounded-xl p-6;
+    @apply bg-bg-card border border-border-flat rounded-2xl p-5 md:p-6;
     box-shadow: var(--card-shadow), 0 18px 45px var(--shadow);
   }
-  .settings-section-title { @apply mb-4 text-[1.1rem] text-accent-primary; }
+  .settings-section-title { @apply mb-4 text-xl font-black text-accent-primary; }
   .settings-section p { @apply text-text-muted; }
 
   /* Modal primitives — used by /tiles, /items, etc.

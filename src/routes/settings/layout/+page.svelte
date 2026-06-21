@@ -25,9 +25,8 @@
         const s = { key, value, updatedAt: now() };
         settingsDB.update(list => {
             const idx = list.findIndex(x => x.key === key);
-            if (idx >= 0) list[idx] = s;
-            else list.push(s);
-            return list;
+            if (idx >= 0) return list.map((item, itemIndex) => itemIndex === idx ? s : item);
+            return [...list, s];
         });
         upsert('settings', s, 'key');
     }
@@ -67,38 +66,86 @@
     }
 </script>
 
-<MgmtPage title="Button Layout" backFallback="/settings">
+<MgmtPage title="POS Button Setup" backFallback="/settings">
     <button slot="actions" class="btn btn-primary" on:click={save}>Save Layout</button>
 
-    <div class="p-6 flex flex-col gap-8 max-w-2xl">
-        <section class="settings-section">
-            <h3 class="settings-section-title">Cart Buttons</h3>
-            <p class="text-text-muted text-[0.9rem] -mt-3 mb-4">These fill the bottom of the trolley sidebar (Payment is always last).</p>
-            <div class="flex flex-col gap-2">
-                {#each cartLayout as key, i}
-                    <div class="flex items-center gap-3 bg-bg-card border border-border-flat rounded-md px-4 py-3">
-                        <span class="text-text-muted font-mono w-6">{i + 1}</span>
-                        <span class="flex-1 font-semibold">{CART_BUTTONS[key] || key}</span>
-                        <button class="w-10 h-10 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center" disabled={i === 0} on:click={() => cartLayout = move(cartLayout, i, -1)!}>↑</button>
-                        <button class="w-10 h-10 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center" disabled={i === cartLayout.length - 1} on:click={() => cartLayout = move(cartLayout, i, 1)!}>↓</button>
-                    </div>
-                {/each}
-            </div>
+    <div class="settings-page-shell">
+        <section class="settings-hero">
+            <p class="settings-hero-kicker">POS screen</p>
+            <h2 class="settings-hero-title">Arrange the selling buttons</h2>
+            <p class="settings-hero-copy">
+                Choose the order cashiers see on the main till screen. Payment stays fixed so the checkout flow is always easy to find.
+            </p>
         </section>
 
-        <section class="settings-section">
-            <h3 class="settings-section-title">Toolbar Buttons</h3>
-            <p class="text-text-muted text-[0.9rem] -mt-3 mb-4">These sit under the product grid, next to pagination.</p>
-            <div class="flex flex-col gap-2">
-                {#each toolbarLayout as key, i}
-                    <div class="flex items-center gap-3 bg-bg-card border border-border-flat rounded-md px-4 py-3">
-                        <span class="text-text-muted font-mono w-6">{i + 1}</span>
-                        <span class="flex-1 font-semibold">{TOOLBAR_BUTTONS[key] || key}</span>
-                        <button class="w-10 h-10 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center" disabled={i === 0} on:click={() => toolbarLayout = move(toolbarLayout, i, -1)!}>↑</button>
-                        <button class="w-10 h-10 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center" disabled={i === toolbarLayout.length - 1} on:click={() => toolbarLayout = move(toolbarLayout, i, 1)!}>↓</button>
+        <div class="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <div class="flex flex-col gap-5">
+                <section class="settings-section">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                            <p class="settings-hero-kicker">Trolley actions</p>
+                            <h3 class="settings-section-title !mb-2">Cart Buttons</h3>
+                            <p class="m-0 text-sm text-text-muted">These fill the bottom of the trolley sidebar.</p>
+                        </div>
+                        <span class="tag">Payment fixed</span>
                     </div>
-                {/each}
+                    <div class="settings-order-list mt-5">
+                        {#each cartLayout as key, i}
+                            <div class="settings-order-item">
+                                <span class="settings-order-index">{i + 1}</span>
+                                <div class="min-w-0 flex-1">
+                                    <strong class="block truncate text-text-main">{CART_BUTTONS[key] || key}</strong>
+                                    <small class="text-text-muted">{i < 2 ? 'Shown before Payment' : 'Shown after Payment'}</small>
+                                </div>
+                                <div class="settings-order-controls">
+                                    <button class="settings-icon-btn" aria-label="Move up" disabled={i === 0} on:click={() => cartLayout = move(cartLayout, i, -1)!}>↑</button>
+                                    <button class="settings-icon-btn" aria-label="Move down" disabled={i === cartLayout.length - 1} on:click={() => cartLayout = move(cartLayout, i, 1)!}>↓</button>
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                </section>
+
+                <section class="settings-section">
+                    <div>
+                        <p class="settings-hero-kicker">Product grid toolbar</p>
+                        <h3 class="settings-section-title !mb-2">Toolbar Buttons</h3>
+                        <p class="m-0 text-sm text-text-muted">These sit under the product grid, next to pagination.</p>
+                    </div>
+                    <div class="settings-order-list mt-5">
+                        {#each toolbarLayout as key, i}
+                            <div class="settings-order-item">
+                                <span class="settings-order-index">{i + 1}</span>
+                                <div class="min-w-0 flex-1">
+                                    <strong class="block truncate text-text-main">{TOOLBAR_BUTTONS[key] || key}</strong>
+                                    <small class="text-text-muted">Toolbar position {i + 1}</small>
+                                </div>
+                                <div class="settings-order-controls">
+                                    <button class="settings-icon-btn" aria-label="Move up" disabled={i === 0} on:click={() => toolbarLayout = move(toolbarLayout, i, -1)!}>↑</button>
+                                    <button class="settings-icon-btn" aria-label="Move down" disabled={i === toolbarLayout.length - 1} on:click={() => toolbarLayout = move(toolbarLayout, i, 1)!}>↓</button>
+                                </div>
+                            </div>
+                        {/each}
+                    </div>
+                </section>
             </div>
-        </section>
+
+            <aside class="settings-action-card self-start xl:sticky xl:top-4">
+                <p class="settings-hero-kicker">Preview</p>
+                <h3 class="settings-section-title !mb-3">Trolley Button Order</h3>
+                <div class="rounded-2xl border border-border-flat bg-bg-panel p-3">
+                    <div class="grid grid-cols-3 gap-2">
+                        {#each [...cartLayout.slice(0, 2), 'payment', ...cartLayout.slice(2)] as key}
+                            <div class="flex min-h-[54px] items-center justify-center rounded-xl border border-border-flat px-2 text-center text-xs font-black {key === 'payment' ? 'bg-success text-white' : 'bg-bg-card text-text-main'}">
+                                {key === 'payment' ? 'Payment' : (CART_BUTTONS[key] || key)}
+                            </div>
+                        {/each}
+                    </div>
+                </div>
+                <p class="mt-4 text-sm text-text-muted">
+                    This is only the order. Permissions and button behaviour stay controlled by their own pages.
+                </p>
+            </aside>
+        </div>
     </div>
 </MgmtPage>

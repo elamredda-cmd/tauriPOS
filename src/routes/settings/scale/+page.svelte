@@ -100,13 +100,13 @@
         <a class="btn btn-secondary" href="/settings/printers">Printer Setup</a>
     </div>
 
-    <div class="p-4 lg:p-6 space-y-5">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                    <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-success">Scale connection</p>
-                    <h2 class="m-0 text-2xl font-black text-text-main">Connect the weighing scale</h2>
-                    <p class="mt-2 max-w-3xl text-sm text-text-muted">
+                    <p class="settings-hero-kicker !text-success">Scale connection</p>
+                    <h2 class="settings-hero-title">Connect the weighing scale</h2>
+                    <p class="settings-hero-copy">
                         Your Adam scale uses a serial cable. Choose the serial port from this page, then the Scale button on the till will fill the weight automatically.
                     </p>
                 </div>
@@ -121,11 +121,11 @@
 
         <div class="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
             <div class="flex flex-col gap-5">
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
+                <section class="settings-section">
                     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
-                            <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Port finder</p>
-                            <h3 class="m-0 text-xl font-black text-text-main">Choose scale port</h3>
+                            <p class="settings-hero-kicker">Port finder</p>
+                            <h3 class="settings-section-title !mb-2">Choose scale port</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
                                 Plug in the USB-to-RS232 adapter, then use Find ports. On Windows it will look like COM3. On Mac it is normally a /dev/cu.usbserial port.
                             </p>
@@ -135,7 +135,7 @@
                         </button>
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card mt-5">
                         <div class="form-grid">
                             <div class="field span-2">
                                 <label>Scale Port</label>
@@ -170,11 +170,11 @@
                     </div>
                 </section>
 
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
+                <section class="settings-section">
                     <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
-                            <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Reading settings</p>
-                            <h3 class="m-0 text-xl font-black text-text-main">Speed and test</h3>
+                            <p class="settings-hero-kicker">Reading settings</p>
+                            <h3 class="settings-section-title !mb-2">Speed and test</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
                                 Start with 9600. If the test says no data, press PRINT on the scale, or try 4800 and 2400.
                             </p>
@@ -184,7 +184,7 @@
                         </button>
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card mt-5">
                         <div class="form-grid">
                             <CustomSelect
                                 label="Baud Rate"
@@ -212,19 +212,19 @@
                 </section>
             </div>
 
-            <aside class="self-start rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)] 2xl:sticky 2xl:top-4">
-                <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">What to choose</p>
-                <h3 class="m-0 text-xl font-black text-text-main">Port help</h3>
+            <aside class="settings-section self-start 2xl:sticky 2xl:top-4">
+                <p class="settings-hero-kicker">What to choose</p>
+                <h3 class="settings-section-title !mb-3">Port help</h3>
                 <div class="mt-5 flex flex-col gap-3">
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Windows</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Choose the COM port for the USB-to-RS232 adapter, for example COM3.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Mac</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Choose a /dev/cu.usbserial or /dev/tty.usbserial port. /dev/cu is usually best for adapters.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">No weight yet</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Some scales only send after pressing PRINT. Others need continuous RS-232 output enabled from the scale menu.</p>
                     </div>

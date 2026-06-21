@@ -62,11 +62,11 @@
         <button class="btn btn-secondary" on:click={playSuccessSound}>Test Sale Complete</button>
     </div>
 
-    <div class="flex flex-col gap-5 p-4 lg:p-6">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
-            <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-accent-primary">Operator feedback</p>
-            <h2 class="m-0 text-2xl font-black text-text-main">Fast feedback without slowing the till</h2>
-            <p class="mt-2 max-w-3xl text-sm text-text-muted">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
+            <p class="settings-hero-kicker">Operator feedback</p>
+            <h2 class="settings-hero-title">Fast feedback without slowing the till</h2>
+            <p class="settings-hero-copy">
                 These controls decide what the cashier hears or feels when buttons are pressed, items are added, sales complete, or a barcode fails.
             </p>
         </section>

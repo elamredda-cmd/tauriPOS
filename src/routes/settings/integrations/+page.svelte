@@ -62,11 +62,11 @@
         <button class="btn btn-primary" on:click={testCctvPosOverlay}>Send CCTV Test</button>
     </div>
 
-    <div class="flex flex-col gap-5 p-4 lg:p-6">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
-            <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-success">Integrations</p>
-            <h2 class="m-0 text-2xl font-black text-text-main">CCTV POS overlay</h2>
-            <p class="mt-2 max-w-3xl text-sm text-text-muted">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
+            <p class="settings-hero-kicker !text-success">Integrations</p>
+            <h2 class="settings-hero-title">CCTV POS overlay</h2>
+            <p class="settings-hero-copy">
                 Send product names and final receipt lines to a supported DVR/NVR POS input. These settings are saved on this till only.
             </p>
             {#if cctvTestStatus}

@@ -3212,7 +3212,6 @@
                             <button on:click={() => handleScaleKey(key)}>{key}</button>
                         {/each}
                     </div>
-                    <button class="scale-clear" on:click={() => handleScaleKey("C")}>Clear weight</button>
                     <div class="scale-total">
                         <span>Total price</span>
                         <strong>{formatMoney(scaleLinePrice)}</strong>
@@ -4129,7 +4128,7 @@
         .login-person { min-height: 0; }
         .login-person p:not(.login-error) { display: none; }
     }
-    .scale-workspace { width: min(1180px, 98vw); height: min(760px, 96vh); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
+    .scale-workspace { width: min(1180px, 98vw); height: min(760px, 96vh); max-height: calc(100vh - .75rem); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
     .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: var(--bg-card); }
     .scale-header h2 { margin: .1rem 0; font-size: 1.55rem; }
     .scale-header p { margin: 0; color: var(--text-muted); font-size: .85rem; }
@@ -4156,7 +4155,7 @@
     .scale-selected span, .scale-display span, .scale-live span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
     .scale-selected small { color: var(--text-muted); }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-    .scale-units button, .scale-clear { padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
+    .scale-units button { padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
     .scale-live { min-height: 76px; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
@@ -4167,14 +4166,35 @@
     .scale-numpad button { min-height: 0; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.05rem; font-weight: 800; }
     .scale-total { margin-top: auto; flex-direction: row; align-items: center; justify-content: space-between; }
     .scale-total strong { color: var(--success); font-size: 1.45rem; }
-    .scale-add { min-height: 46px; font-size: .95rem; }
+    .scale-add { flex: 0 0 auto; min-height: 48px; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
     .scale-empty { padding: 2rem; color: var(--text-muted); text-align: center; border: 1px dashed var(--border-flat); border-radius: .8rem; }
     @media (max-width: 880px) { .scale-layout { grid-template-columns: 1fr 310px; } .scale-product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+    @media (max-width: 1040px) and (max-height: 820px) {
+        .scale-workspace { width: calc(100vw - .5rem); height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
+        .scale-layout { grid-template-columns: minmax(0, 1fr) minmax(270px, .7fr); }
+        .scale-entry { padding: .5rem; gap: .35rem; }
+        .scale-selected, .scale-display, .scale-live, .scale-total { padding: .45rem .55rem; }
+        .scale-product { padding: .55rem; }
+        .scale-product span, .scale-product small { font-size: .68rem; }
+        .scale-display strong, .scale-total strong { font-size: 1.2rem; }
+        .scale-live { min-height: 58px; }
+        .scale-live button { min-height: 34px; padding: 0 .5rem; }
+        .scale-numpad { flex: 0 0 145px; min-height: 145px; }
+        .scale-add { min-height: 44px; }
+    }
     @media (max-height: 690px) {
-        .scale-workspace { height: 98vh; }
+        .scale-workspace { height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
         .scale-header p, .scale-selected small { display: none; }
         .scale-header { padding: .45rem .8rem; }
         .scale-products, .scale-entry { padding: .5rem; gap: .3rem; }
-        .scale-numpad { min-height: 150px; }
+        .scale-page-tabs { min-height: 34px; }
+        .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
+        .scale-products .flat-input { padding-top: .45rem; padding-bottom: .45rem; }
+        .scale-numpad { flex: 0 0 132px; min-height: 132px; }
+    }
+    @media (max-width: 760px) {
+        .scale-layout { grid-template-columns: 1fr; overflow-y: auto; }
+        .scale-products { min-height: 420px; }
+        .scale-entry { overflow: visible; border-left: 0; border-top: 1px solid var(--border-flat); }
     }
 </style>

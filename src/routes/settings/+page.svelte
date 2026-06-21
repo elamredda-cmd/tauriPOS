@@ -73,13 +73,13 @@
 <MgmtPage title="Settings">
     <button slot="actions" class="btn btn-primary" on:click={saveStore}>Save Store Information</button>
 
-    <div class="flex flex-col gap-5 p-4 lg:p-6">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card via-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
             <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
                 <div>
-                    <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-accent-primary">Shop control centre</p>
-                    <h2 class="m-0 text-2xl font-black text-text-main md:text-3xl">Make L&amp;Bj POS work your way</h2>
-                    <p class="mt-2 max-w-3xl text-sm text-text-muted">
+                    <p class="settings-hero-kicker">Shop control centre</p>
+                    <h2 class="settings-hero-title">Make L&amp;Bj POS work your way</h2>
+                    <p class="settings-hero-copy">
                         Daily shop behaviour stays here. Hardware, backups, CCTV, and deeper tools now live in their own pages.
                     </p>
                 </div>
@@ -104,7 +104,7 @@
             {/if}
         </section>
 
-        <nav class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="Settings shortcuts">
+        <nav class="settings-card-grid" aria-label="Settings shortcuts">
             <a href="/settings/themes" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Appearance</span>
                 <b class="mt-2 block text-xl">Colour Theme</b>

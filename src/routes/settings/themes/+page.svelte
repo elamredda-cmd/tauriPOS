@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { goBack } from '$lib/navigation';
+    import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { activeTheme, setTheme, type Theme } from '$lib/stores/theme';
     import { upsert } from '$lib/stores/database';
     import { now } from '$lib/stores/db';
@@ -20,77 +20,49 @@
     }
 </script>
 
-<div class="page-container">
-    <header class="page-header">
-        <div class="header-left">
-            <button type="button" class="btn-icon" aria-label="Go back" on:click={() => goBack('/settings')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20">
-                    <line x1="19" y1="12" x2="5" y2="12"></line>
-                    <polyline points="12 19 5 12 12 5"></polyline>
-                </svg>
-            </button>
-            <h1>App Appearance</h1>
-        </div>
-    </header>
+<MgmtPage title="App Appearance" backFallback="/settings">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
+            <p class="settings-hero-kicker">Appearance</p>
+            <h2 class="settings-hero-title">Choose the shop theme</h2>
+            <p class="settings-hero-copy">
+                Themes are saved to settings and sync across tills, so every screen can keep the same look.
+            </p>
+        </section>
 
-    <div class="themes-grid">
-        {#each themes as theme}
-            <button 
-                class="theme-card flat-card { $activeTheme === theme.id ? 'active' : '' }"
-                on:click={() => selectTheme(theme.id)}
-            >
-                <div class="theme-preview" style="background: {theme.color1}">
-                    <div class="preview-header bg-white/5"></div>
-                    <div class="preview-content">
-                        <div class="preview-item" style="background: {theme.color2}"></div>
-                        <div class="preview-item"></div>
-                        <div class="preview-item"></div>
+        <section class="settings-card-grid" aria-label="Theme choices">
+            {#each themes as theme}
+                <button
+                    class="theme-card settings-action-card {$activeTheme === theme.id ? 'active' : ''}"
+                    on:click={() => selectTheme(theme.id)}
+                >
+                    <div class="theme-preview" style="background: {theme.color1}">
+                        <div class="preview-header"></div>
+                        <div class="preview-content">
+                            <div class="preview-item" style="background: {theme.color2}"></div>
+                            <div class="preview-item"></div>
+                            <div class="preview-item"></div>
+                        </div>
                     </div>
-                </div>
-                <div class="theme-info">
-                    <h3>{theme.name}</h3>
-                    <p>{theme.desc}</p>
-                </div>
-                {#if $activeTheme === theme.id}
-                    <div class="active-badge">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="14">
-                            <polyline points="20 6 9 17 4 12"></polyline>
-                        </svg>
+                    <div class="theme-info">
+                        <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Theme</span>
+                        <h3>{theme.name}</h3>
+                        <p>{theme.desc}</p>
                     </div>
-                {/if}
-            </button>
-        {/each}
+                    {#if $activeTheme === theme.id}
+                        <div class="active-badge">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="14">
+                                <polyline points="20 6 9 17 4 12"></polyline>
+                            </svg>
+                        </div>
+                    {/if}
+                </button>
+            {/each}
+        </section>
     </div>
-</div>
+</MgmtPage>
 
 <style>
-    .page-container {
-        padding: 40px;
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    .page-header {
-        margin-bottom: 40px;
-    }
-
-    .header-left {
-        display: flex;
-        align-items: center;
-        gap: 20px;
-    }
-
-    .header-left h1 {
-        font-size: 2.5rem;
-        margin: 0;
-    }
-
-    .themes-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-        gap: 24px;
-    }
-
     .theme-card {
         position: relative;
         display: flex;
@@ -99,7 +71,8 @@
         overflow: hidden;
         text-align: left;
         cursor: pointer;
-        transition: transform 0.2s, border-color 0.2s;
+        min-height: 310px;
+        transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
     }
 
     .theme-card:hover {
@@ -108,7 +81,7 @@
 
     .theme-card.active {
         border-color: var(--accent-primary);
-        box-shadow: 0 0 0 2px var(--accent-primary);
+        box-shadow: 0 0 0 2px var(--accent-primary), 0 18px 45px var(--shadow);
     }
 
     .theme-preview {
@@ -117,11 +90,14 @@
         display: flex;
         flex-direction: column;
         border-bottom: 1px solid var(--border-flat);
+        border-radius: .9rem .9rem 0 0;
+        overflow: hidden;
     }
 
     .preview-header {
         height: 30px;
         width: 100%;
+        background: rgba(255, 255, 255, .08);
     }
 
     .preview-content {
@@ -134,7 +110,7 @@
 
     .preview-item {
         background: rgba(255,255,255,0.1);
-        border-radius: 4px;
+        border-radius: 10px;
     }
 
     .theme-info {
@@ -142,8 +118,9 @@
     }
 
     .theme-info h3 {
-        margin: 0 0 8px 0;
+        margin: 6px 0 8px 0;
         font-size: 1.2rem;
+        color: var(--text-main);
     }
 
     .theme-info p {

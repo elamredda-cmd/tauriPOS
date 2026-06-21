@@ -129,7 +129,7 @@
 
     function modeCardClass(active: boolean, enabled: boolean) {
         return [
-            'group min-h-[122px] rounded-xl border p-4 text-left transition-all duration-150',
+            'group min-h-[92px] rounded-xl border p-3 text-left transition-all duration-150',
             'flex flex-col gap-2 bg-bg-panel hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card',
             'focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent-primary',
             active ? 'border-accent-primary bg-bg-card shadow-[0_16px_40px_var(--shadow)]' : 'border-border-flat',
@@ -139,10 +139,19 @@
 
     function switchCardClass(active: boolean) {
         return [
-            'min-h-[96px] rounded-xl border p-4 text-left transition-all duration-150',
+            'min-h-[88px] rounded-xl border p-3 text-left transition-all duration-150',
             'flex flex-col gap-2 bg-bg-panel hover:border-accent-primary hover:bg-bg-card',
             active ? 'border-success bg-success/10' : 'border-border-flat',
         ].join(' ');
+    }
+
+    function compactInfoCardClass(tone: 'accent' | 'success' | 'neutral' = 'neutral') {
+        const toneClass = tone === 'accent'
+            ? 'border-accent-primary bg-accent-primary/10'
+            : tone === 'success'
+                ? 'border-success bg-success/10'
+                : 'border-border-flat bg-bg-panel';
+        return `min-h-[88px] rounded-xl border p-3 ${toneClass}`;
     }
 
     const receiptConnections: Array<{ value: PrinterConnectionType; label: string; note: string; enabled: boolean }> = [
@@ -191,13 +200,13 @@
         <a class="btn btn-secondary" href="/settings/scale">Scale Setup</a>
     </div>
 
-    <div class="p-4 lg:p-6 space-y-5">
-        <section class="rounded-2xl border border-border-flat bg-gradient-to-br from-bg-card to-bg-panel p-5 shadow-[0_18px_45px_var(--shadow)]">
+    <div class="settings-page-shell">
+        <section class="settings-hero">
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                    <p class="mb-1 text-xs font-black uppercase tracking-[0.18em] text-text-muted">Hardware setup</p>
-                    <h2 class="m-0 text-2xl font-black text-text-main">Printers, labels, and cash drawer</h2>
-                    <p class="mt-2 max-w-3xl text-sm text-text-muted">
+                    <p class="settings-hero-kicker !text-text-muted">Hardware setup</p>
+                    <h2 class="settings-hero-title">Printers, labels, and cash drawer</h2>
+                    <p class="settings-hero-copy">
                         Choose the connection type first. The page then only shows the fields needed for that printer mode.
                     </p>
                 </div>
@@ -222,11 +231,11 @@
 
         <div class="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_380px]">
             <div class="flex flex-col gap-5">
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
+                <section class="settings-section">
                     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                         <div>
-                            <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Receipt printer</p>
-                            <h3 class="m-0 text-xl font-black text-text-main">Customer receipts</h3>
+                            <p class="settings-hero-kicker">Receipt printer</p>
+                            <h3 class="settings-section-title !mb-2">Customer receipts</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
                                 Network ESC/POS is fastest for Ethernet printers. USB raw is best for silent Windows USB printing.
                             </p>
@@ -239,7 +248,7 @@
                         </button>
                     </div>
 
-                    <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
                         {#each receiptConnections as option}
                             <button
                                 class={modeCardClass(receipt.connection === option.value, option.enabled)}
@@ -247,208 +256,182 @@
                                 disabled={!option.enabled}
                                 on:click={() => updateSetting('receipt_printer_connection', option.value)}
                             >
-                                <span class="text-base font-black text-text-main">{option.label}</span>
-                                <span class="text-sm leading-snug text-text-muted">{option.note}</span>
+                                <span class="text-sm font-black leading-tight text-text-main">{option.label}</span>
+                                <span class="line-clamp-3 text-xs leading-snug text-text-muted">{option.note}</span>
                                 {#if receipt.connection === option.value}
-                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
+                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2 py-0.5 text-[0.68rem] font-black uppercase tracking-[0.06em] text-success">Selected</span>
                                 {/if}
                             </button>
                         {/each}
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-accent-primary bg-accent-primary/10 p-4">
-                        <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="mt-5 grid grid-cols-1 gap-3 xl:grid-cols-[220px_minmax(0,1fr)]">
+                        <div class={compactInfoCardClass('accent')}>
                             <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Selected mode</span>
-                            <strong class="text-lg text-text-main">{receiptMode?.label || receipt.connection}</strong>
+                            <strong class="mt-2 block text-base leading-tight text-text-main">{receiptMode?.label || receipt.connection}</strong>
+                            <p class="m-0 mt-2 line-clamp-4 text-xs leading-snug text-text-muted">{receiptMode?.note}</p>
                         </div>
-                        <p class="m-0 mt-2 text-sm text-text-muted">{receiptMode?.note}</p>
-                    </div>
 
-                    <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
-                        <div class="mb-4 flex items-center justify-between gap-3">
-                            <div>
-                                <h4 class="m-0 text-base font-black">Connection details</h4>
-                                <p class="m-0 mt-1 text-sm text-text-muted">Only the useful fields for the selected mode are shown.</p>
+                        <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                            <div class="mb-4 flex items-center justify-between gap-3">
+                                <div>
+                                    <h4 class="m-0 text-base font-black">Connection details</h4>
+                                    <p class="m-0 mt-1 text-sm text-text-muted">Only the useful fields for the selected mode are shown.</p>
+                                </div>
                             </div>
-                        </div>
-                        <div class="form-grid">
-                            {#if receipt.connection === 'system'}
-                                <div class="span-2 rounded-xl border border-dashed border-border-flat bg-bg-card p-4">
-                                    <b class="text-text-main">System printer mode</b>
-                                    <p class="m-0 mt-1 text-sm text-text-muted">
-                                        This uses the normal Windows/macOS print dialog. It is good for manual receipt printing, but it cannot silently auto-print after payment.
-                                    </p>
-                                </div>
-                            {:else if receipt.connection === 'network_escpos'}
-                                <div class="field">
-                                    <label>Receipt Printer IP</label>
-                                    <input
-                                        value={receipt.host}
-                                        placeholder="e.g. 192.168.1.50"
-                                        on:change={(event) => updateSetting('receipt_printer_host', event.currentTarget.value.trim())}
-                                    />
-                                </div>
-                                <div class="field">
-                                    <label>Port</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        max="65535"
-                                        value={receipt.port}
-                                        on:change={(event) => updateSetting('receipt_printer_port', event.currentTarget.value || '9100')}
-                                    />
-                                    <small class="text-text-muted">Most network thermal printers use port 9100.</small>
-                                </div>
-                            {:else if receipt.connection === 'usb_raw'}
-                                <div class="field span-2">
-                                    <div class="flex flex-wrap items-center justify-between gap-2">
-                                        <label>Windows Printer Name</label>
-                                        <button type="button" class="btn btn-secondary" on:click={findSystemPrinters} disabled={findingPrinters}>
-                                            {findingPrinters ? 'Finding...' : 'Find printers'}
-                                        </button>
+                            <div class="form-grid">
+                                {#if receipt.connection === 'system'}
+                                    <div class="span-2 rounded-xl border border-dashed border-border-flat bg-bg-card p-4">
+                                        <b class="text-text-main">System printer mode</b>
+                                        <p class="m-0 mt-1 text-sm text-text-muted">
+                                            This uses the normal Windows/macOS print dialog. It is good for manual receipt printing, but it cannot silently auto-print after payment.
+                                        </p>
                                     </div>
-                                    {#if receiptPrinterOptions.length > 0}
-                                        <CustomSelect
-                                            value={receipt.printerName}
-                                            options={receiptPrinterOptions}
-                                            placeholder="Choose printer..."
-                                            on:change={(event) => updateSetting('receipt_printer_name', String(event.detail))}
-                                        />
-                                    {:else}
+                                {:else if receipt.connection === 'network_escpos'}
+                                    <div class="field">
+                                        <label>Receipt Printer IP</label>
                                         <input
-                                            value={receipt.printerName}
-                                            placeholder="e.g. Xprinter USB"
-                                            on:change={(event) => updateSetting('receipt_printer_name', event.currentTarget.value.trim())}
+                                            value={receipt.host}
+                                            placeholder="e.g. 192.168.1.50"
+                                            on:change={(event) => updateSetting('receipt_printer_host', event.currentTarget.value.trim())}
                                         />
-                                    {/if}
-                                    <small class="text-text-muted">Use the exact installed Windows printer name. This is the best mode for silent USB printing on Windows.</small>
-                                    {#if printerFinderStatus}<small class="text-text-muted">{printerFinderStatus}</small>{/if}
-                                </div>
-                            {:else}
-                                <div class="field span-2">
-                                    <label>{receipt.connection === 'bluetooth' ? 'Bluetooth COM Port' : 'Serial / COM Port'}</label>
-                                    <input
-                                        value={receipt.devicePath}
-                                        placeholder="e.g. COM3 or /dev/tty.usbserial"
-                                        on:change={(event) => updateSetting('receipt_printer_device_path', event.currentTarget.value.trim())}
-                                    />
-                                    <small class="text-text-muted">Bluetooth SPP printers normally appear as a COM port. Set baud/port options in Windows device settings if needed.</small>
-                                </div>
-                            {/if}
-                            <CustomSelect
-                                label="Paper Width"
-                                value={receipt.paperWidth}
-                                options={paperWidthOptions}
-                                on:change={(event) => updateSetting('receipt_printer_paper_width', String(event.detail))}
-                            />
-                            <CustomSelect
-                                label="Character Encoding"
-                                value={receipt.encoding}
-                                options={encodingOptions}
-                                on:change={(event) => updateSetting('receipt_printer_encoding', String(event.detail))}
-                            />
+                                    </div>
+                                    <div class="field">
+                                        <label>Port</label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="65535"
+                                            value={receipt.port}
+                                            on:change={(event) => updateSetting('receipt_printer_port', event.currentTarget.value || '9100')}
+                                        />
+                                        <small class="text-text-muted">Most network thermal printers use port 9100.</small>
+                                    </div>
+                                {:else if receipt.connection === 'usb_raw'}
+                                    <div class="field span-2">
+                                        <div class="flex flex-wrap items-center justify-between gap-2">
+                                            <label>Windows Printer Name</label>
+                                            <button type="button" class="btn btn-secondary" on:click={findSystemPrinters} disabled={findingPrinters}>
+                                                {findingPrinters ? 'Finding...' : 'Find printers'}
+                                            </button>
+                                        </div>
+                                        {#if receiptPrinterOptions.length > 0}
+                                            <CustomSelect
+                                                value={receipt.printerName}
+                                                options={receiptPrinterOptions}
+                                                placeholder="Choose printer..."
+                                                on:change={(event) => updateSetting('receipt_printer_name', String(event.detail))}
+                                            />
+                                        {:else}
+                                            <input
+                                                value={receipt.printerName}
+                                                placeholder="e.g. Xprinter USB"
+                                                on:change={(event) => updateSetting('receipt_printer_name', event.currentTarget.value.trim())}
+                                            />
+                                        {/if}
+                                        <small class="text-text-muted">Use the exact installed Windows printer name. This is the best mode for silent USB printing on Windows.</small>
+                                        {#if printerFinderStatus}<small class="text-text-muted">{printerFinderStatus}</small>{/if}
+                                    </div>
+                                {:else}
+                                    <div class="field span-2">
+                                        <label>{receipt.connection === 'bluetooth' ? 'Bluetooth COM Port' : 'Serial / COM Port'}</label>
+                                        <input
+                                            value={receipt.devicePath}
+                                            placeholder="e.g. COM3 or /dev/tty.usbserial"
+                                            on:change={(event) => updateSetting('receipt_printer_device_path', event.currentTarget.value.trim())}
+                                        />
+                                        <small class="text-text-muted">Bluetooth SPP printers normally appear as a COM port. Set baud/port options in Windows device settings if needed.</small>
+                                    </div>
+                                {/if}
+                                <CustomSelect
+                                    label="Paper Width"
+                                    value={receipt.paperWidth}
+                                    options={paperWidthOptions}
+                                    on:change={(event) => updateSetting('receipt_printer_paper_width', String(event.detail))}
+                                />
+                                <CustomSelect
+                                    label="Character Encoding"
+                                    value={receipt.encoding}
+                                    options={encodingOptions}
+                                    on:change={(event) => updateSetting('receipt_printer_encoding', String(event.detail))}
+                                />
+                            </div>
                         </div>
                     </div>
 
                     <div class="mt-5 rounded-xl border border-success bg-success/10 p-4">
-                        <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                            <div>
-                                <h4 class="m-0 text-base font-black text-text-main">After payment</h4>
-                                <p class="m-0 mt-1 text-sm text-text-muted">Control what happens after the sale is saved.</p>
-                            </div>
-                            <span class="w-max rounded-full bg-success/10 px-3 py-1 text-sm font-black text-success">
-                                Auto print: {receipt.autoPrintAfterPayment ? 'On' : 'Off'}
-                            </span>
+                        <div class="flex flex-col gap-1">
+                            <h4 class="m-0 text-base font-black text-text-main">After payment</h4>
+                            <p class="m-0 text-sm text-text-muted">Small controls for what happens after the sale is saved.</p>
                         </div>
-                        <div class="mt-4 grid gap-3 lg:grid-cols-4">
+                        <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
                             <button class={switchCardClass(receipt.autoPrintAfterPayment)} on:click={() => updateSetting('receipt_printer_auto_print_after_payment', receipt.autoPrintAfterPayment ? 'false' : 'true')}>
-                                <span class="font-black text-text-main">Auto print after payment</span>
-                                <small class="text-sm text-text-muted">Print automatically after successful payment using direct modes.</small>
-                                <b class="mt-auto text-sm text-success">{receipt.autoPrintAfterPayment ? 'On' : 'Off'}</b>
+                                <span class="text-sm font-black leading-tight text-text-main">Auto print</span>
+                                <small class="line-clamp-3 text-xs leading-snug text-text-muted">Print receipt automatically after payment.</small>
+                                <b class="mt-auto text-xs text-success">{receipt.autoPrintAfterPayment ? 'On' : 'Off'}</b>
                             </button>
                             <button class={switchCardClass(receipt.cutPaper)} on:click={() => updateSetting('receipt_printer_cut_paper', receipt.cutPaper ? 'false' : 'true')}>
-                                <span class="font-black text-text-main">Cut paper</span>
-                                <small class="text-sm text-text-muted">Send paper-cut command after receipt.</small>
-                                <b class="mt-auto text-sm text-success">{receipt.cutPaper ? 'On' : 'Off'}</b>
+                                <span class="text-sm font-black leading-tight text-text-main">Cut paper</span>
+                                <small class="line-clamp-3 text-xs leading-snug text-text-muted">Send cutter command after receipt.</small>
+                                <b class="mt-auto text-xs text-success">{receipt.cutPaper ? 'On' : 'Off'}</b>
                             </button>
-                            <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
-                                <label class="font-black text-text-main" for="receipt-cut-feed-lines">Feed before cut</label>
+                            <div class={compactInfoCardClass()}>
+                                <label class="text-sm font-black leading-tight text-text-main" for="receipt-cut-feed-lines">Feed before cut</label>
                                 <input
                                     id="receipt-cut-feed-lines"
-                                    class="mt-2"
+                                    class="mt-2 h-11"
                                     type="number"
                                     min="0"
                                     max="20"
                                     value={receipt.cutFeedLines}
                                     on:change={(event) => updateSetting('receipt_printer_cut_feed_lines', event.currentTarget.value || '8')}
                                 />
-                                <small class="mt-2 block text-sm text-text-muted">More lines keeps the footer above the cutter.</small>
+                                <small class="mt-2 block line-clamp-2 text-xs text-text-muted">Keeps footer above cutter.</small>
                             </div>
                             <button class={switchCardClass(receipt.openDrawerAfterPayment)} on:click={() => updateSetting('receipt_printer_open_drawer_after_payment', receipt.openDrawerAfterPayment ? 'false' : 'true')}>
-                                <span class="font-black text-text-main">Drawer after payment</span>
-                                <small class="text-sm text-text-muted">Open the cash drawer after every successful payment.</small>
-                                <b class="mt-auto text-sm text-success">{receipt.openDrawerAfterPayment ? 'On' : 'Off'}</b>
+                                <span class="text-sm font-black leading-tight text-text-main">Open drawer</span>
+                                <small class="line-clamp-3 text-xs leading-snug text-text-muted">Open drawer after every payment.</small>
+                                <b class="mt-auto text-xs text-success">{receipt.openDrawerAfterPayment ? 'On' : 'Off'}</b>
                             </button>
                         </div>
                     </div>
 
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
-                        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                            <div>
-                                <h4 class="m-0 text-base font-black text-text-main">Cash drawer pulse</h4>
-                                <p class="m-0 mt-1 text-sm text-text-muted">
-                                    The drawer normally plugs into the receipt printer. These settings control the printer and kick pulse.
-                                </p>
-                            </div>
-                            <div class="flex flex-wrap gap-2">
-                                <button
-                                    class="btn {drawerManualEnabled ? 'btn-success' : 'btn-secondary'}"
-                                    on:click={() => updateSetting('cash_drawer_enabled', drawerManualEnabled ? 'false' : 'true')}
-                                >
-                                    Drawer: {drawerManualEnabled ? 'Enabled' : 'Disabled'}
-                                </button>
-                                <button class="btn btn-secondary" on:click={testDrawer}>Test Drawer</button>
-                            </div>
+                        <div class="mb-4 flex flex-col gap-1">
+                            <h4 class="m-0 text-base font-black text-text-main">Cash drawer pulse</h4>
+                            <p class="m-0 text-sm text-text-muted">The drawer normally plugs into the receipt printer. These tiles keep the setup readable without making the section huge.</p>
                         </div>
-                        <div class="form-grid">
-                            {#if drawer.connection === 'network_escpos'}
-                                <div class="field">
-                                    <label>Drawer Printer IP</label>
-                                    <input
-                                        value={drawer.host}
-                                        placeholder="e.g. 192.168.1.50"
-                                        on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
-                                    />
-                                    <small class="text-text-muted">For network printers this can use the same IP as the receipt printer.</small>
-                                </div>
-                                <div class="field">
-                                    <label>Drawer Printer Port</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        max="65535"
-                                        value={drawer.port}
-                                        on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
-                                    />
-                                    <small class="text-text-muted">Most network thermal printers use port 9100.</small>
-                                </div>
-                            {:else}
-                                <div class="span-2 rounded-xl border border-border-flat bg-bg-card p-4">
-                                    <b class="text-text-main">Using receipt printer</b>
-                                    <p class="m-0 mt-1 text-sm text-text-muted">
-                                        {drawerTarget || 'Set the receipt printer to USB raw, Network, Serial, or Bluetooth first.'}
-                                    </p>
-                                </div>
-                            {/if}
-                            <CustomSelect
-                                label="Drawer Pin"
-                                value={String(drawer.pin)}
-                                options={drawerPinOptions}
-                                on:change={(event) => updateSetting('cash_drawer_pin', String(event.detail))}
-                            />
-                            <div class="field">
-                                <label>Pulse Timing</label>
-                                <div class="grid grid-cols-2 gap-2">
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                            <button
+                                class={switchCardClass(drawerManualEnabled)}
+                                on:click={() => updateSetting('cash_drawer_enabled', drawerManualEnabled ? 'false' : 'true')}
+                            >
+                                <span class="text-sm font-black leading-tight text-text-main">Drawer pulse</span>
+                                <small class="text-xs leading-snug text-text-muted">Allow the printer to open the cash drawer.</small>
+                                <b class="mt-auto text-xs text-success">{drawerManualEnabled ? 'Enabled' : 'Disabled'}</b>
+                            </button>
+                            <button class={switchCardClass(false)} on:click={testDrawer}>
+                                <span class="text-sm font-black leading-tight text-text-main">Test drawer</span>
+                                <small class="text-xs leading-snug text-text-muted">Send one kick pulse now.</small>
+                                <b class="mt-auto text-xs text-accent-primary">Open now</b>
+                            </button>
+                            <div class={compactInfoCardClass()}>
+                                <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Target</span>
+                                <strong class="mt-2 block text-sm leading-tight text-text-main">
+                                    {drawerTarget || 'Set receipt printer first'}
+                                </strong>
+                            </div>
+                            <div class={compactInfoCardClass()}>
+                                <CustomSelect
+                                    label="Drawer Pin"
+                                    value={String(drawer.pin)}
+                                    options={drawerPinOptions}
+                                    on:change={(event) => updateSetting('cash_drawer_pin', String(event.detail))}
+                                />
+                            </div>
+                            <div class="rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-2">
+                                <label class="text-sm font-black leading-tight text-text-main">Pulse timing</label>
+                                <div class="mt-2 grid grid-cols-2 gap-2">
                                     <input
                                         type="number"
                                         min="2"
@@ -466,17 +449,37 @@
                                         title="Pulse off milliseconds"
                                     />
                                 </div>
-                                <small class="text-text-muted">50 / 250 works for most Epson-compatible printers.</small>
+                                <small class="mt-2 block text-xs text-text-muted">50 / 250 works for most Epson-compatible printers.</small>
                             </div>
+                            {#if drawer.connection === 'network_escpos'}
+                                <div class="field rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-1">
+                                    <label>Drawer Printer IP</label>
+                                    <input
+                                        value={drawer.host}
+                                        placeholder="e.g. 192.168.1.50"
+                                        on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
+                                    />
+                                </div>
+                                <div class="field rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-1">
+                                    <label>Drawer Printer Port</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        max="65535"
+                                        value={drawer.port}
+                                        on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
+                                    />
+                                </div>
+                            {/if}
                         </div>
                     </div>
                 </section>
 
-                <section class="rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)]">
+                <section class="settings-section">
                     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                         <div>
-                            <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Label printer</p>
-                            <h3 class="m-0 text-xl font-black text-text-main">Shelf labels and barcode labels</h3>
+                            <p class="settings-hero-kicker">Label printer</p>
+                            <h3 class="settings-section-title !mb-2">Shelf labels and barcode labels</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
                                 Use USB raw with ESC/POS for Xprinter receipt-roll labels, or ZPL/TSPL for dedicated label printers.
                             </p>
@@ -489,7 +492,7 @@
                         </button>
                     </div>
 
-                    <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
                         {#each labelConnections as option}
                             <button
                                 class={modeCardClass(label.connection === option.value, option.enabled)}
@@ -497,41 +500,38 @@
                                 disabled={!option.enabled}
                                 on:click={() => updateSetting('label_printer_connection', option.value)}
                             >
-                                <span class="text-base font-black text-text-main">{option.label}</span>
-                                <span class="text-sm leading-snug text-text-muted">{option.note}</span>
+                                <span class="text-sm font-black leading-tight text-text-main">{option.label}</span>
+                                <span class="line-clamp-3 text-xs leading-snug text-text-muted">{option.note}</span>
                                 {#if label.connection === option.value}
-                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2.5 py-1 text-xs font-black uppercase tracking-[0.06em] text-success">Selected</span>
+                                    <span class="mt-auto w-max rounded-full bg-success/10 px-2 py-0.5 text-[0.68rem] font-black uppercase tracking-[0.06em] text-success">Selected</span>
                                 {/if}
                             </button>
                         {/each}
                     </div>
 
-                    <div class="mt-5 rounded-xl border border-accent-primary bg-accent-primary/10 p-4">
-                        <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <div class="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+                        <div class={compactInfoCardClass('accent')}>
                             <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Selected mode</span>
-                            <strong class="text-lg text-text-main">{labelMode?.label || label.connection}</strong>
+                            <strong class="mt-2 block text-sm leading-tight text-text-main">{labelMode?.label || label.connection}</strong>
+                            <p class="m-0 mt-2 line-clamp-3 text-xs leading-snug text-text-muted">{labelMode?.note}</p>
                         </div>
-                        <p class="m-0 mt-2 text-sm text-text-muted">{labelMode?.note}</p>
-                    </div>
-
-                    <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
                         <button class={switchCardClass(label.cutPaper)} on:click={() => updateSetting('label_printer_cut_paper', label.cutPaper ? 'false' : 'true')}>
-                            <span class="text-base font-black text-text-main">Cut after label</span>
-                            <span class="text-sm text-text-muted">For Xprinter and ESC/POS printers with a cutter.</span>
+                            <span class="text-sm font-black leading-tight text-text-main">Cut after label</span>
+                            <span class="line-clamp-3 text-xs leading-snug text-text-muted">For Xprinter and ESC/POS cutters.</span>
                             <b class="mt-auto text-xs uppercase tracking-[0.12em] {label.cutPaper ? 'text-success' : 'text-text-muted'}">{label.cutPaper ? 'On' : 'Off'}</b>
                         </button>
-                        <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
-                            <label class="font-black text-text-main" for="label-gap-lines">Label gap / feed</label>
+                        <div class={compactInfoCardClass()}>
+                            <label class="text-sm font-black leading-tight text-text-main" for="label-gap-lines">Label gap / feed</label>
                             <input
                                 id="label-gap-lines"
-                                class="mt-2"
+                                class="mt-2 h-11"
                                 type="number"
                                 min="0"
                                 max="12"
                                 value={label.gapLines}
                                 on:change={(event) => updateSetting('label_printer_gap_lines', event.currentTarget.value || '0')}
                             />
-                            <small class="mt-2 block text-sm text-text-muted">Use 0 or 1 for a smaller Xprinter gap.</small>
+                            <small class="mt-2 block line-clamp-2 text-xs text-text-muted">Use 0 or 1 for Xprinter.</small>
                         </div>
                     </div>
 
@@ -611,27 +611,27 @@
                 </section>
             </div>
 
-            <aside class="self-start rounded-2xl border border-border-flat bg-bg-card p-5 shadow-[0_18px_45px_var(--shadow)] 2xl:sticky 2xl:top-4">
-                <p class="mb-1 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Quick guide</p>
-                <h3 class="m-0 text-xl font-black text-text-main">What to choose</h3>
+            <aside class="settings-section self-start 2xl:sticky 2xl:top-4">
+                <p class="settings-hero-kicker">Quick guide</p>
+                <h3 class="settings-section-title !mb-3">What to choose</h3>
                 <div class="mt-5 flex flex-col gap-3">
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">USB receipt printer</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Install the Windows printer driver, then use USB raw with the exact Windows printer name for silent printing.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Network receipt printer</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Give the printer a fixed IP, use ESC/POS network, port 9100, then test print.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Serial / Bluetooth</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Pair or install the printer so it appears as a COM/device path, then use Serial or Bluetooth mode.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Cash drawer</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">The drawer normally plugs into the receipt printer, not the computer. Turn on Drawer after payment if needed.</p>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="settings-mini-card">
                         <b class="text-text-main">Label printer</b>
                         <p class="m-0 mt-1 text-sm text-text-muted">Use ZPL for Zebra-style printers or TSPL for TSC-style printers when using direct printing.</p>
                     </div>
