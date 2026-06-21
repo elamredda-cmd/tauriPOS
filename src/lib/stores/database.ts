@@ -22,10 +22,23 @@ import { currentEmployee } from './session';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 
 function resetRemoteConnections(): void {
     resetMysqlConnection();
     mysql.resetCachedConnection();
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation, timeout]);
+    } finally {
+        clearTimeout(timeoutId!);
+    }
 }
 
 const AUDIT_ENTITY_BY_TABLE: Record<string, string> = {
@@ -2328,12 +2341,17 @@ export async function getTillSequence(): Promise<number> {
         if (n > 0) return n;
     }
     if (!isMultiMode()) return 0;
+    if (!get(connectionState).mysqlOnline) return 0;
     try {
         const config = get(connectionState).mysqlConfig;
         if (!config) return 0;
-        const seq = await invoke<number>('allocate_mysql_till_sequence', {
-            mysqlUri: buildMysqlUri(config),
-        });
+        const seq = await withTimeout(
+            invoke<number>('allocate_mysql_till_sequence', {
+                mysqlUri: buildMysqlUri(config),
+            }),
+            RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS,
+            'MariaDB receipt sequence check timed out',
+        );
         if (seq > 0) {
             await sqlite.upsert('settings',
                 { key: 'till_seq', value: String(seq), updatedAt: new Date().toISOString() }, 'key');
@@ -2367,17 +2385,21 @@ export async function ensureTillReceiptSequence(): Promise<number> {
     if (sequenceFromName && sequenceFromName !== cachedSeq) {
         const tillId = await getSettingValue('till_id');
         let remoteConflict = false;
-        if (isMultiMode() && tillId) {
+        if (isMultiMode() && tillId && get(connectionState).mysqlOnline) {
             try {
                 const remote = await getMysqlDb();
                 if (remote) {
                     const blockStart = sequenceFromName * RECEIPT_BLOCK;
-                    const rows: any[] = await remote.select(
-                        `SELECT COUNT(*) AS count
-                         FROM orders
-                         WHERE orderNumber >= ? AND orderNumber < ?
-                           AND tillNumber <> ?`,
-                        [blockStart, blockStart + RECEIPT_BLOCK, tillId],
+                    const rows: any[] = await withTimeout(
+                        remote.select(
+                            `SELECT COUNT(*) AS count
+                             FROM orders
+                             WHERE orderNumber >= ? AND orderNumber < ?
+                               AND tillNumber <> ?`,
+                            [blockStart, blockStart + RECEIPT_BLOCK, tillId],
+                        ),
+                        RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS,
+                        'MariaDB receipt sequence conflict check timed out',
                     );
                     remoteConflict = Number(rows[0]?.count || 0) > 0;
                 }
@@ -2722,7 +2744,7 @@ let isFastSyncRunning = false;
 let isHeartbeatRunning = false;
 const OFFLINE_RECONNECT_CHECK_MS = 30 * 1000;
 const FAST_SYNC_INTERVAL_MS = 5000;
-const FULL_SYNC_INTERVAL_MS = 10000;
+const FULL_SYNC_INTERVAL_MS = 60 * 1000;
 
 /**
  * Heartbeat: actively ping MariaDB to keep the online/offline indicator

@@ -50,6 +50,7 @@ let mysqlOpenPromise: Promise<Database | null> | null = null;
 let mysqlOpenUri = '';
 let mysqlConnectionGeneration = 0;
 const HEARTBEAT_TIMEOUT_MS = 3000;
+const MYSQL_OPEN_TIMEOUT_MS = 1200;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
     let timeoutId: ReturnType<typeof setTimeout>;
@@ -160,9 +161,9 @@ export function buildMysqlUri(config: MysqlConfig): string {
 export async function testMysqlConnection(config: MysqlConfig): Promise<boolean> {
     let testDb: Database | null = null;
     try {
-        testDb = await Database.load(buildMysqlUri(config));
+        testDb = await withTimeout(Database.load(buildMysqlUri(config)), MYSQL_OPEN_TIMEOUT_MS);
         // Run a trivial query to confirm the connection is alive
-        await testDb.select('SELECT 1');
+        await withTimeout(testDb.select('SELECT 1'), MYSQL_OPEN_TIMEOUT_MS);
         return true;
     } catch (e) {
         console.warn('connection: MySQL test failed:', e);
@@ -234,13 +235,13 @@ export async function pingMysql(): Promise<boolean> {
 async function openMysqlConnection(uri: string, generation: number): Promise<Database | null> {
     let opened: Database | null = null;
     try {
-        opened = await Database.load(uri);
+        opened = await withTimeout(Database.load(uri), MYSQL_OPEN_TIMEOUT_MS);
         if (generation !== mysqlConnectionGeneration || currentMysqlUri() !== uri) {
             await closeDatabase(opened);
             return null;
         }
 
-        await opened.select('SELECT 1');
+        await withTimeout(opened.select('SELECT 1'), MYSQL_OPEN_TIMEOUT_MS);
         if (generation !== mysqlConnectionGeneration || currentMysqlUri() !== uri) {
             await closeDatabase(opened);
             return null;

@@ -1977,6 +1977,7 @@
     }
 
     async function setAmountAndComplete(amount: number) {
+        if (isCompletingSale) return;
         amountTenderedString = amount.toString();
         hasTypedPayment = true;
         await tick();
@@ -1984,6 +1985,7 @@
     }
 
     async function addQuickAmount(amount: number) {
+        if (isCompletingSale) return;
         if (!hasTypedPayment || amountTenderedString === "0") {
             amountTenderedString = "0";
             hasTypedPayment = true;
@@ -2001,6 +2003,7 @@
     }
 
     function selectPaymentMethod(method: "cash" | "card") {
+        if (isCompletingSale) return;
         paymentMethod = method;
         if (method === "card" && paymentInputAmount >= paymentDue) {
             amountTenderedString = "0";
@@ -2009,6 +2012,7 @@
     }
 
     function clearPaymentInput() {
+        if (isCompletingSale) return;
         amountTenderedString = "0";
         hasTypedPayment = false;
     }
@@ -2111,46 +2115,46 @@
             toast("Amount tendered is less than total", "error");
             return;
         }
-        await ensureTillReceiptSequence();
-
-        // Determine split amounts
-        let cashAmount = 0;
-        let cardAmount = 0;
-        let change = 0;
-        let method: 'cash' | 'card' | 'split' | 'loyalty' = paymentMethod;
-
-        if (paymentMethod === "cash") {
-            cashAmount = paymentDue;
-            cardAmount = 0;
-            change = tendered - paymentDue;
-        } else if (paymentMethod === "card") {
-            // Check if user typed a cash amount less than total (split payment)
-            const typedCash = paymentInputAmount;
-            if (typedCash > 0 && typedCash < paymentDue) {
-                // Split: part cash, rest on card
-                cashAmount = typedCash;
-                cardAmount = paymentDue - typedCash;
-                change = 0;
-                method = 'split';
-            } else {
-                // Full card
-                cashAmount = 0;
-                cardAmount = paymentDue;
-                change = 0;
-            }
-        }
-        if (loyaltyCreditUsed > 0 && paymentDue === 0) {
-            method = 'loyalty';
-            cashAmount = 0;
-            cardAmount = 0;
-            change = 0;
-        }
-        const recordedPaymentMethod = loyaltyCreditUsed > 0 && method !== 'loyalty'
-            ? `${method}+loyalty`
-            : method;
-
         isCompletingSale = true;
         try {
+            await ensureTillReceiptSequence();
+
+            // Determine split amounts
+            let cashAmount = 0;
+            let cardAmount = 0;
+            let change = 0;
+            let method: 'cash' | 'card' | 'split' | 'loyalty' = paymentMethod;
+
+            if (paymentMethod === "cash") {
+                cashAmount = paymentDue;
+                cardAmount = 0;
+                change = tendered - paymentDue;
+            } else if (paymentMethod === "card") {
+                // Check if user typed a cash amount less than total (split payment)
+                const typedCash = paymentInputAmount;
+                if (typedCash > 0 && typedCash < paymentDue) {
+                    // Split: part cash, rest on card
+                    cashAmount = typedCash;
+                    cardAmount = paymentDue - typedCash;
+                    change = 0;
+                    method = 'split';
+                } else {
+                    // Full card
+                    cashAmount = 0;
+                    cardAmount = paymentDue;
+                    change = 0;
+                }
+            }
+            if (loyaltyCreditUsed > 0 && paymentDue === 0) {
+                method = 'loyalty';
+                cashAmount = 0;
+                cardAmount = 0;
+                change = 0;
+            }
+            const recordedPaymentMethod = loyaltyCreditUsed > 0 && method !== 'loyalty'
+                ? `${method}+loyalty`
+                : method;
+
             const timestamp = now();
 
             const orderId = uuid();
@@ -2313,7 +2317,7 @@
                 true,
                 () => printCompletedSaleReceipt(committedSale),
             );
-            triggerSync();
+            void triggerSync();
         } catch (e) {
             console.error(e);
             toast(`Sale was not completed: ${e}`, "error");
@@ -3557,15 +3561,17 @@
                         </div>
                         <button
                             class="np-btn np-clear w-[48px] md:w-[52px] !h-11 md:!h-12"
+                            disabled={isCompletingSale}
                             on:click={clearPaymentInput}>C</button
                         >
                     </div>
-                    <div class="np-grid payment-np-grid {paymentMethod === 'card' ? 'opacity-35 pointer-events-none' : ''}">
+                    <div class="np-grid payment-np-grid {paymentMethod === 'card' || isCompletingSale ? 'opacity-35 pointer-events-none' : ''}">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                             <button
                                 class="np-btn payment-np-button !h-10 md:!h-[48px] !text-lg md:!text-xl {key === '⌫'
                                     ? '!text-warning'
                                     : ''}"
+                                disabled={isCompletingSale}
                                 on:click={() => handlePaymentPadKey(key)}
                             >
                                 {key}
@@ -3579,7 +3585,8 @@
                             : 'invisible'}"
                     >
                         <button
-                            class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer"
+                            class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={isCompletingSale}
                             on:click={() => setAmountAndComplete(paymentDue)}
                         >
                             <div class="text-sm font-black">Pay Full</div>
@@ -3587,7 +3594,8 @@
                         </button>
                         {#if nextPoundAmount !== null}
                             <button
-                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success"
+                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={isCompletingSale}
                                 on:click={() =>
                                     setAmountAndComplete(nextPoundAmount!)}
                             >
@@ -3601,7 +3609,8 @@
                         {/if}
                         {#each fixedQuickAmounts as amt}
                             <button
-                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer"
+                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={isCompletingSale}
                                 on:click={() => addQuickAmount(amt)}
                             >
                                 <div class="text-sm font-black">

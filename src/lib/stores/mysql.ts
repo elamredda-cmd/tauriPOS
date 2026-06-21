@@ -23,6 +23,19 @@ let currentUri: string = '';
 let openingPromise: Promise<Database> | null = null;
 let openingUri = '';
 let connectionGeneration = 0;
+const MYSQL_OPEN_TIMEOUT_MS = 1200;
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('MariaDB connection timed out')), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation, timeout]);
+    } finally {
+        clearTimeout(timeoutId!);
+    }
+}
 
 function buildMysqlUri(config: MysqlConfig): string {
     const { user, password, host, port, database } = config;
@@ -32,7 +45,10 @@ function buildMysqlUri(config: MysqlConfig): string {
 export async function getDb(config?: MysqlConfig): Promise<Database> {
     const cfg = config || get(connectionState).mysqlConfig;
 
-    if (db && cfg && buildMysqlUri(cfg) === currentUri) return db;
+    if (db && cfg && buildMysqlUri(cfg) === currentUri) {
+        if (get(connectionState).mysqlOnline) return db;
+        resetCachedConnection();
+    }
 
     if (!cfg) {
         if (!db) throw new Error('MySQL no config provided and no cached connection');
@@ -64,7 +80,7 @@ export function resetCachedConnection(): void {
 async function openConnection(uri: string, database: string, generation: number): Promise<Database> {
     let opened: Database | null = null;
     try {
-        opened = await Database.load(uri);
+        opened = await withTimeout(Database.load(uri), MYSQL_OPEN_TIMEOUT_MS);
         if (generation !== connectionGeneration || openingUri !== uri) {
             await closeDatabase(opened);
             throw new Error('MariaDB connection was reset while opening');
