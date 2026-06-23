@@ -158,6 +158,7 @@
     let scalePollTimer: ReturnType<typeof setInterval> | undefined;
     let scalePollingSignature = "";
     const SCALE_PRODUCTS_PER_PAGE = 9;
+    const POS_TILES_PER_PAGE = 16;
     const MAX_SCALE_WEIGHT_DIGITS = 6;
     const MAX_ORDER_TOTAL_PENCE = 999_999_999;
     let quickAddName = "";
@@ -437,15 +438,15 @@
         Math.ceil(
             (activePageTiles.length > 0
                 ? Math.max(...activePageTiles.map((t) => t.position))
-                : 0) / 12,
+                : 0) / POS_TILES_PER_PAGE,
         ),
     );
 
     $: if (currentPageIndex >= totalPages)
         currentPageIndex = Math.max(0, totalPages - 1);
 
-    $: displayTiles = Array.from({ length: 12 }, (_, i) => {
-        const absolutePos = currentPageIndex * 12 + i + 1; // 1-indexed
+    $: displayTiles = Array.from({ length: POS_TILES_PER_PAGE }, (_, i) => {
+        const absolutePos = currentPageIndex * POS_TILES_PER_PAGE + i + 1; // 1-indexed
         const tile = activePageTiles.find((t) => t.position === absolutePos);
         if (!tile) return null;
         return {
@@ -2627,7 +2628,7 @@
 
         <!-- Product Grid (Fixed 4x3) -->
         <div class="pos-product-workspace flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
-            <div class="pos-product-grid grid grid-cols-4 grid-rows-3 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
+            <div class="pos-product-grid grid grid-cols-4 grid-rows-4 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
                     {#if slot && slot.product}
                         {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, currentTime)}
@@ -2748,7 +2749,7 @@
 
     <!-- Cart / Trolly -->
     <aside
-        class="pos-cart flex flex-col w-[clamp(310px,32vw,460px)] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
+        class="pos-cart flex flex-col w-[34vw] min-w-[330px] max-w-[480px] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
     >
         <!-- Compact Trolly Header (Order info + Search + Clear) -->
         <div
@@ -2844,17 +2845,17 @@
                 {@const scaleDisplay = getScaleSaleDisplay(item.note, item.quantity, item.price, item.originalPrice)}
                 <div
                     bind:this={cartItemEls[i]}
-                    class="cart-line flex items-center gap-2 p-1.5 md:p-2 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'}"
+                    class="cart-line flex items-center gap-1.5 p-1 md:p-1.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'}"
                     on:click={() => (selectedCartIndex = i)}
                 >
                     <div
-                        class="text-xs md:text-sm font-bold text-accent-primary min-w-[20px] md:min-w-[26px] pt-0.5"
+                        class="text-[11px] md:text-xs font-bold text-accent-primary min-w-[18px] md:min-w-[22px] pt-0.5"
                     >
                         {scaleDisplay.label}
                     </div>
                     <div class="flex-1 min-w-0">
                         <h4
-                            class="m-0 text-xs md:text-[0.9rem] font-black text-text-main truncate leading-tight"
+                            class="m-0 text-[12px] md:text-[13px] font-black text-text-main truncate leading-tight"
                             title={item.name}
                         >
                             {item.name}
@@ -2892,16 +2893,16 @@
                             </div>
                         {/if}
                     </div>
-                    <div class="w-[72px] md:w-[82px] text-right shrink-0">
-                        <div class="text-[10px] md:text-xs text-text-muted font-semibold leading-tight truncate">
+                    <div class="w-[62px] md:w-[74px] text-right shrink-0">
+                        <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
                             {formatMoney(item.price)}
                         </div>
-                        <div class="text-xs md:text-[0.95rem] font-black text-text-main leading-tight mt-0.5 truncate">
+                        <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
                             {formatMoney(item.price * item.quantity)}
                         </div>
                     </div>
                     <button
-                        class="w-7 h-7 flex items-center justify-center text-text-muted hover:text-danger opacity-60 group-hover:opacity-100 transition-all shrink-0"
+                        class="w-6 h-6 flex items-center justify-center text-text-muted hover:text-danger opacity-60 group-hover:opacity-100 transition-all shrink-0"
                         on:click|stopPropagation={() => deleteItem(i)}
                     >
                         <svg
@@ -4160,47 +4161,52 @@
     .scale-pagination div { display: flex; align-items: center; gap: .4rem; }
     .scale-pagination button { min-height: 34px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }
     .scale-pagination button:disabled { opacity: .3; }
-    .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: .45rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
+    .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 72px 42px 64px 66px minmax(190px, 1fr) 52px 48px; gap: .38rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
     .scale-selected, .scale-display, .scale-live, .scale-total { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .1rem; border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-card); }
     .scale-selected span, .scale-display span, .scale-live span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
-    .scale-selected small { color: var(--text-muted); }
+    .scale-selected { min-width: 0; min-height: 0; overflow: hidden; }
+    .scale-selected strong, .scale-selected small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .scale-selected strong { line-height: 1.15; }
+    .scale-selected small { color: var(--text-muted); line-height: 1.2; }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-    .scale-units button { padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
+    .scale-units button { min-height: 0; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
-    .scale-live { min-height: 76px; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
+    .scale-live { min-height: 0; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
     .scale-live div { min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
     .scale-live small { color: var(--text-muted); font-size: .74rem; line-height: 1.2; word-break: break-word; }
     .scale-live button { min-height: 38px; padding: 0 .7rem; white-space: nowrap; }
-    .scale-numpad { flex: 1; min-height: 190px; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .35rem; }
-    .scale-numpad button { min-height: 0; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.05rem; font-weight: 800; }
-    .scale-total { margin-top: auto; flex-direction: row; align-items: center; justify-content: space-between; }
+    .scale-numpad { min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .42rem; }
+    .scale-numpad button { min-height: 0; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.28rem; font-weight: 900; }
+    .scale-total { margin-top: 0; flex-direction: row; align-items: center; justify-content: space-between; }
     .scale-total strong { color: var(--success); font-size: 1.45rem; }
-    .scale-add { flex: 0 0 auto; min-height: 48px; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
+    .scale-add { min-height: 0; height: 100%; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
     .scale-empty { padding: 2rem; color: var(--text-muted); text-align: center; border: 1px dashed var(--border-flat); border-radius: .8rem; }
     @media (max-width: 880px) { .scale-layout { grid-template-columns: 1fr 310px; } .scale-product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1040px) and (max-height: 820px) {
         .scale-workspace { width: calc(100vw - .5rem); height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
         .scale-layout { grid-template-columns: minmax(0, 1fr) minmax(270px, .7fr); }
-        .scale-entry { padding: .5rem; gap: .35rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 64px 38px 56px 56px minmax(178px, 1fr) 46px 44px; gap: .35rem; }
         .scale-selected, .scale-display, .scale-live, .scale-total { padding: .45rem .55rem; }
         .scale-product { padding: .55rem; }
         .scale-product span, .scale-product small { font-size: .68rem; }
         .scale-display strong, .scale-total strong { font-size: 1.2rem; }
-        .scale-live { min-height: 58px; }
+        .scale-live { min-height: 0; }
         .scale-live button { min-height: 34px; padding: 0 .5rem; }
-        .scale-numpad { flex: 0 0 145px; min-height: 145px; }
-        .scale-add { min-height: 44px; }
+        .scale-numpad { min-height: 0; gap: .32rem; }
+        .scale-numpad button { font-size: 1.15rem; }
     }
     @media (max-height: 690px) {
         .scale-workspace { height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
         .scale-header p, .scale-selected small { display: none; }
         .scale-header { padding: .45rem .8rem; }
-        .scale-products, .scale-entry { padding: .5rem; gap: .3rem; }
+        .scale-products { padding: .5rem; gap: .3rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 44px 34px 46px 48px minmax(150px, 1fr) 38px 40px; gap: .3rem; }
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
         .scale-products .flat-input { padding-top: .45rem; padding-bottom: .45rem; }
-        .scale-numpad { flex: 0 0 132px; min-height: 132px; }
+        .scale-numpad { min-height: 0; gap: .28rem; }
+        .scale-numpad button { font-size: 1.05rem; }
     }
     @media (max-width: 760px) {
         .scale-layout { grid-template-columns: 1fr; overflow-y: auto; }

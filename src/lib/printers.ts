@@ -410,6 +410,55 @@ function labelText(value: string, max = 36): string {
     return String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+function labelWidthMm(design: LabelDesign): number {
+    return Math.max(15, Math.min(210, Number(design.widthMm) || 50));
+}
+
+function labelHeightMm(design: LabelDesign): number {
+    return Math.max(15, Math.min(297, Number(design.heightMm) || 30));
+}
+
+function labelTextColumns(design: LabelDesign, kind: 'normal' | 'name' | 'price' = 'normal'): number {
+    const width = labelWidthMm(design);
+    const base = width >= 76
+        ? 42
+        : width >= 62
+            ? 36
+            : width >= 50
+                ? 30
+                : width >= 40
+                    ? 24
+                    : 18;
+    if (kind === 'price') return Math.max(8, Math.floor(base * 0.7));
+    if (kind === 'name') return Math.max(10, Math.floor(base * (labelNameScale(design) > 1 ? 0.78 : 0.9)));
+    return base;
+}
+
+function wrapLabelText(value: string, maxChars: number, maxLines: number): string[] {
+    const words = labelText(value, Math.max(maxChars * maxLines * 2, maxChars)).split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [];
+    const lines: string[] = [];
+    let current = '';
+    for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        if (next.length <= maxChars) {
+            current = next;
+            continue;
+        }
+        if (current) lines.push(current);
+        current = word.slice(0, maxChars);
+        if (lines.length >= maxLines) break;
+    }
+    if (current && lines.length < maxLines) lines.push(current);
+    if (lines.length > 0 && words.join(' ').length > lines.join(' ').length) {
+        const lastIndex = lines.length - 1;
+        lines[lastIndex] = lines[lastIndex].length > Math.max(3, maxChars - 1)
+            ? `${lines[lastIndex].slice(0, Math.max(0, maxChars - 3))}...`
+            : lines[lastIndex];
+    }
+    return lines;
+}
+
 function labelPrice(product: Product): string {
     return `GBP ${money(product.price)}`;
 }
@@ -483,11 +532,28 @@ function mmToDots(mm: number): number {
     return Math.max(80, Math.round(Number(mm || 1) * 8));
 }
 
+function labelMarginDots(widthDots: number): number {
+    return Math.max(10, Math.min(30, Math.round(widthDots * 0.045)));
+}
+
+function zplBarcodeModuleWidth(widthDots: number, barcode: string): number {
+    if (widthDots >= 620 && barcode.length <= 18) return 3;
+    if (widthDots >= 300) return 2;
+    return 1;
+}
+
+function tsplBarcodeWidth(widthDots: number, barcode: string): { narrow: number; wide: number } {
+    const narrow = widthDots >= 620 && barcode.length <= 18 ? 3 : 2;
+    return { narrow, wide: Math.max(narrow, narrow * 2) };
+}
+
 function buildZplProductLabel(payload: ProductLabelPayload): number[] {
     const { product, store, design } = payload;
-    const width = mmToDots(design.widthMm);
-    const height = mmToDots(design.heightMm);
-    const margin = Math.max(12, Math.round(width * 0.05));
+    const widthMm = labelWidthMm(design);
+    const heightMm = labelHeightMm(design);
+    const width = mmToDots(widthMm);
+    const height = mmToDots(heightMm);
+    const margin = labelMarginDots(width);
     let y = 10;
     const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0'];
     if (design.showStore && store.name) {
@@ -495,22 +561,27 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
         y += Math.round(24 * labelScale(design));
     }
     if (design.showName) {
-        lines.push(`^FO${margin},${y}${zplFont(28, design, labelNameScale(design))}^FB${width - margin * 2},2,2,C^FD${zplEscape(product.name)}^FS`);
-        y += Math.round((design.heightMm >= 40 ? 58 : 42) * labelNameScale(design));
+        const nameLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
+        const nameFont = widthMm >= 70 ? 30 : 26;
+        lines.push(`^FO${margin},${y}${zplFont(nameFont, design, labelNameScale(design))}^FB${width - margin * 2},${nameLines},2,C^FD${zplEscape(product.name)}^FS`);
+        y += Math.round((nameLines === 2 ? 62 : 38) * labelNameScale(design));
     }
     if (design.showPrice) {
-        lines.push(`^FO${margin},${y}${zplFont(44, design, labelPriceScale(design))}^FB${width - margin * 2},1,0,C^FD${zplEscape(labelPrice(product))}^FS`);
-        y += Math.round(48 * labelPriceScale(design));
+        const priceFont = widthMm >= 70 ? 52 : 44;
+        lines.push(`^FO${margin},${y}${zplFont(priceFont, design, labelPriceScale(design))}^FB${width - margin * 2},1,0,C^FD${zplEscape(labelPrice(product))}^FS`);
+        y += Math.round((widthMm >= 70 ? 58 : 48) * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
-    const barcodeHeight = Math.max(35, Math.min(90, height - y - 32));
-    if (barcode && barcodeHeight >= 28) {
-        lines.push(`^BY2,2,${barcodeHeight}`);
-        lines.push(`^FO${margin},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
-    }
     const footer: string[] = [];
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
+    const footerReserve = footer.length > 0 ? 28 : 8;
+    const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
+    const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
+    if (barcode && barcodeHeight >= 28) {
+        lines.push(`^BY${zplBarcodeModuleWidth(width, barcode)},2,${barcodeHeight}`);
+        lines.push(`^FO${margin},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
+    }
     if (footer.length > 0) {
         lines.push(`^FO${margin},${height - 24}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(footer.join('  '))}^FS`);
     }
@@ -520,13 +591,15 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
 
 function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): number[] {
     const { product, store, design } = payload;
-    const width = mmToDots(design.widthMm);
-    const height = mmToDots(design.heightMm);
-    const margin = Math.max(12, Math.round(width * 0.05));
+    const widthMm = labelWidthMm(design);
+    const heightMm = labelHeightMm(design);
+    const width = mmToDots(widthMm);
+    const height = mmToDots(heightMm);
+    const margin = labelMarginDots(width);
     const scale = tsplScale(design);
     let y = 10;
     const lines = [
-        `SIZE ${Math.max(15, Number(design.widthMm) || 50)} mm,${Math.max(15, Number(design.heightMm) || 30)} mm`,
+        `SIZE ${widthMm} mm,${heightMm} mm`,
         `GAP ${Math.max(0, Math.min(12, gapLines))} mm,0`,
         'DIRECTION 1',
         'CLS',
@@ -537,34 +610,45 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): 
     }
     if (design.showName) {
         const nameScale = tsplSizeScale(design.nameTextScale || design.textScale);
-        lines.push(`TEXT ${margin},${y},"${tsplNameFont(design)}",0,${nameScale},${nameScale},"${tsplEscape(product.name)}"`);
-        y += Math.round((design.heightMm >= 40 ? 46 : 34) * labelNameScale(design));
+        const maxLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
+        const nameLines = wrapLabelText(product.name, labelTextColumns(design, 'name'), maxLines);
+        for (const nameLine of nameLines) {
+            lines.push(`TEXT ${margin},${y},"${tsplNameFont(design)}",0,${nameScale},${nameScale},"${tsplEscape(nameLine)}"`);
+            y += Math.round((nameScale > 1 ? 32 : 24) * labelNameScale(design));
+        }
+        y += 4;
     }
     if (design.showPrice) {
         const priceScale = tsplSizeScale(design.priceTextScale || design.textScale);
         lines.push(`TEXT ${margin},${y},"${tsplPriceFont(design)}",0,${priceScale},${priceScale},"${tsplEscape(labelPrice(product))}"`);
-        y += Math.round(50 * labelPriceScale(design));
+        y += Math.round((widthMm >= 70 ? 58 : 50) * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
-    const barcodeHeight = Math.max(35, Math.min(90, height - y - 24));
-    if (barcode && barcodeHeight >= 28) {
-        lines.push(`BARCODE ${margin},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,2,2,"${tsplEscape(barcode)}"`);
-    }
     const footer: string[] = [];
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
+    const footerReserve = footer.length > 0 ? 28 : 8;
+    const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
+    const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
+    if (barcode && barcodeHeight >= 28) {
+        const barcodeWidth = tsplBarcodeWidth(width, barcode);
+        lines.push(`BARCODE ${margin},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,${barcodeWidth.narrow},${barcodeWidth.wide},"${tsplEscape(barcode)}"`);
+    }
     if (footer.length > 0) lines.push(`TEXT ${margin},${height - 24},"1",0,${scale},${scale},"${tsplEscape(footer.join('  '))}"`);
     lines.push(`PRINT ${labelCopies(payload.quantity)}`, '');
     return Array.from(new TextEncoder().encode(lines.join('\r\n')));
 }
 
-function escposCode39(value: string): number[] {
+function escposCode39(value: string, options: { height?: number; moduleWidth?: number; showText?: boolean } = {}): number[] {
     const safe = value.toUpperCase().replace(/[^0-9A-Z $%+\-.\/:]/g, '').slice(0, 48);
     if (!safe) return [];
+    const height = Math.max(24, Math.min(180, Math.round(options.height ?? 0x45)));
+    const moduleWidth = Math.max(2, Math.min(6, Math.round(options.moduleWidth ?? 2)));
+    const hriPosition = options.showText === false ? 0x00 : 0x02;
     return [
-        0x1d, 0x48, 0x02,
-        0x1d, 0x68, 0x45,
-        0x1d, 0x77, 0x02,
+        0x1d, 0x48, hriPosition,
+        0x1d, 0x68, height,
+        0x1d, 0x77, moduleWidth,
         0x1d, 0x6b, 0x45,
         safe.length,
         ...encodeText(safe, 'latin1'),
@@ -579,18 +663,38 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
     const boldOff = [0x1b, 0x45, 0x00];
     const normalSize = [0x1d, 0x21, 0x00];
     const barcode = labelBarcodeValue(product);
+    const widthMm = labelWidthMm(design);
+    const heightMm = labelHeightMm(design);
+    const columns = labelTextColumns(design);
+    const nameColumns = labelTextColumns(design, 'name');
+    const nameLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
+    const barcodeHeight = heightMm >= 60 ? 92 : heightMm >= 40 ? 76 : 58;
+    const barcodeModuleWidth = widthMm >= 76 && barcode.length <= 18 ? 3 : 2;
     const bytes: number[] = [];
     for (let copy = 0; copy < labelCopies(payload.quantity); copy += 1) {
         bytes.push(0x1b, 0x40, ...centerOn, ...escposFontSelect(design), ...escposTextSize(design, 'normal'));
-        if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, 32), 'latin1'), ...boldOff);
-        if (design.showName) bytes.push(...escposTextSize(design, 'name'), ...line(labelText(product.name, 32), 'latin1'), ...normalSize, ...escposTextSize(design, 'normal'));
-        if (design.showPrice) bytes.push(...escposTextSize(design, 'price'), ...boldOn, ...line(labelPrice(product), 'latin1'), ...boldOff, ...normalSize, ...escposTextSize(design, 'normal'));
-        if (barcode) bytes.push(...escposCode39(barcode), ...line('', 'latin1'));
-        if (design.showBarcodeText && barcode) bytes.push(...line(barcode, 'latin1'));
+        if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, columns), 'latin1'), ...boldOff);
+        if (design.showName) {
+            bytes.push(...escposTextSize(design, 'name'));
+            const wrappedName = wrapLabelText(product.name, nameColumns, nameLines);
+            for (const nameLine of wrappedName) bytes.push(...line(nameLine, 'latin1'));
+            bytes.push(...normalSize, ...escposTextSize(design, 'normal'));
+        }
+        if (design.showPrice) bytes.push(...escposTextSize(design, 'price'), ...boldOn, ...line(labelText(labelPrice(product), columns), 'latin1'), ...boldOff, ...normalSize, ...escposTextSize(design, 'normal'));
+        if (barcode) {
+            bytes.push(
+                ...escposCode39(barcode, {
+                    height: barcodeHeight,
+                    moduleWidth: barcodeModuleWidth,
+                    showText: design.showBarcodeText,
+                }),
+                ...line('', 'latin1')
+            );
+        }
         const footer: string[] = [];
         if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
         if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
-        if (footer.length > 0) bytes.push(...line(labelText(footer.join('  '), 32), 'latin1'));
+        if (footer.length > 0) bytes.push(...line(labelText(footer.join('  '), columns), 'latin1'));
         bytes.push(...leftOn, ...feedLines(gapLines));
     }
     bytes.push(...escposCut(cutPaper));

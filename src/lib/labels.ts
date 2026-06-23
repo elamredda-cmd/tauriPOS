@@ -28,6 +28,11 @@ export const labelSizePresets = [
     { label: '50 × 30 mm', width: 50, height: 30 },
     { label: '57 × 32 mm', width: 57, height: 32 },
     { label: '62 × 29 mm', width: 62, height: 29 },
+    { label: '80 × 30 mm', width: 80, height: 30 },
+    { label: '80 × 40 mm', width: 80, height: 40 },
+    { label: '80 × 50 mm', width: 80, height: 50 },
+    { label: '80 × 60 mm', width: 80, height: 60 },
+    { label: '80 × 100 mm', width: 80, height: 100 },
     { label: '100 × 50 mm', width: 100, height: 50 },
     { label: '100 × 150 mm', width: 100, height: 150 },
 ];

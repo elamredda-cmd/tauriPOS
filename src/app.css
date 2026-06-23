@@ -567,7 +567,7 @@
 }
 
 .cart-line {
-    min-height: 48px;
+    min-height: 40px;
 }
 
 .cart-line-selected {
@@ -588,13 +588,13 @@
 
 .cart-promo-badge {
     max-width: min(100%, 230px);
-    margin-top: .25rem;
-    padding: .18rem .5rem;
+    margin-top: .12rem;
+    padding: .12rem .38rem;
     display: inline-flex;
     align-items: center;
     gap: .35rem;
     border-radius: 999px;
-    font-size: .66rem;
+    font-size: .58rem;
     font-weight: 900;
     line-height: 1;
     white-space: nowrap;
@@ -752,7 +752,11 @@
 }
 
 @media (max-width: 900px) {
-    .pos-cart { width: clamp(285px, 39vw, 340px) !important; }
+    .pos-cart {
+        width: 39vw !important;
+        min-width: 285px !important;
+        max-width: 340px !important;
+    }
     .pos-products { padding: .45rem !important; }
     .pos-checkout-shell .payment-action { font-size: .72rem; letter-spacing: .02em; }
     .management-page { padding: .75rem !important; }
@@ -878,7 +882,10 @@
 }
 
 @media (min-width: 1800px) {
-    .pos-cart { width: min(28vw, 520px) !important; }
+    .pos-cart {
+        width: 28vw !important;
+        max-width: 520px !important;
+    }
 }
 
 @layer components {
@@ -925,11 +932,11 @@
         }
 
         .pos-product-grid h3 {
-            @apply !text-xs;
+            @apply !text-[11px];
         }
 
         .pos-product-grid span {
-            @apply !text-[11px];
+            @apply !text-[10px];
         }
 
         .pos-toolbar {
@@ -941,7 +948,7 @@
         }
 
         .pos-cart {
-            @apply !w-[345px];
+            @apply !w-[372px];
         }
 
         .pos-cart-header {
@@ -957,11 +964,21 @@
         }
 
         .pos-cart-items {
-            @apply !gap-1 !p-2;
+            @apply !gap-0.5 !p-1.5;
+        }
+
+        .pos-cart-items .cart-line {
+            min-height: 38px !important;
+            padding: .28rem .38rem !important;
+            gap: .35rem !important;
         }
 
         .pos-cart-items h4 {
-            @apply !text-xs;
+            @apply !text-[12px];
+        }
+
+        .pos-cart-items .cart-promo-badge {
+            display: none !important;
         }
 
         .pos-cart-controls {
@@ -977,7 +994,7 @@
         }
 
         .pos-total-section > div:last-child {
-            @apply !my-0 !py-2;
+            @apply !my-0 !py-1.5;
         }
 
         .pos-total-section > div:last-child > span {

@@ -8,8 +8,14 @@
     export let design: LabelDesign;
     export let preview = false;
 
+    $: labelWidth = Math.max(15, Number(design.widthMm) || 50);
+    $: labelHeight = Math.max(15, Number(design.heightMm) || 30);
+    $: isWideLabel = labelWidth >= 70;
+    $: isTallLabel = labelHeight >= 45;
+    $: labelPadding = labelWidth >= 70 ? 3 : labelWidth <= 32 ? 1.4 : 2;
+    $: nameLines = isWideLabel && isTallLabel ? 2 : 1;
     $: barcodeValue = product.barcode || product.sku || product.scalePlu || product.id.slice(0, 12);
-    $: barcodeHeight = design.heightMm >= 50 ? 70 : design.heightMm >= 30 ? 42 : 28;
+    $: barcodeHeight = labelHeight >= 70 ? 92 : labelHeight >= 50 ? 70 : labelHeight >= 30 ? 44 : 28;
     $: labelFont = design.fontFamily === 'serif'
         ? 'Georgia, Times New Roman, serif'
         : design.fontFamily === 'condensed'
@@ -22,8 +28,10 @@
 
 <article
     class="product-label template-{design.template}"
+    class:wide={isWideLabel}
+    class:tall={isTallLabel}
     class:preview
-    style="--label-width:{design.widthMm}mm;--label-height:{design.heightMm}mm;--label-font:{labelFont};--label-text-scale:{textScale};--label-name-scale:{nameScale};--label-price-scale:{priceScale};"
+    style="--label-width:{labelWidth}mm;--label-height:{labelHeight}mm;--label-padding:{labelPadding}mm;--label-name-lines:{nameLines};--label-font:{labelFont};--label-text-scale:{textScale};--label-name-scale:{nameScale};--label-price-scale:{priceScale};"
 >
     {#if design.showStore}<small class="store">{store.name}</small>{/if}
     {#if design.showName}<h2>{product.name}</h2>{/if}
@@ -37,10 +45,10 @@
 </article>
 
 <style>
-    .product-label { width: var(--label-width); height: var(--label-height); padding: 2mm; overflow: hidden; display: grid; grid-template-rows: auto auto 1fr auto; align-content: start; color: #000; border: .25mm solid #000; background: #fff; font-family: var(--label-font); page-break-after: always; break-after: page; }
+    .product-label { width: var(--label-width); height: var(--label-height); padding: var(--label-padding); overflow: hidden; display: grid; grid-template-rows: auto auto 1fr auto; align-content: start; color: #000; border: .25mm solid #000; background: #fff; font-family: var(--label-font); page-break-after: always; break-after: page; }
     .product-label.preview { max-width: 100%; transform-origin: top center; }
     .store { overflow: hidden; font-size: calc(2.4mm * var(--label-text-scale)); font-weight: 800; text-align: center; text-transform: uppercase; white-space: nowrap; }
-    h2 { margin: .4mm 0; overflow: hidden; font-family: var(--label-font); font-size: clamp(8px, calc(3.3mm * var(--label-name-scale)), 22px); line-height: 1.05; text-align: center; white-space: nowrap; text-overflow: ellipsis; }
+    h2 { margin: .4mm 0; overflow: hidden; display: -webkit-box; font-family: var(--label-font); font-size: clamp(8px, calc(3.3mm * var(--label-name-scale)), 22px); line-height: 1.05; text-align: center; text-overflow: ellipsis; -webkit-line-clamp: var(--label-name-lines); -webkit-box-orient: vertical; }
     .price { margin: .2mm 0; font-size: clamp(13px, calc(6mm * var(--label-price-scale)), 44px); line-height: 1; text-align: center; }
     .barcode { min-height: 0; overflow: hidden; display: flex; align-items: stretch; justify-content: center; }
     .barcode :global(.loyalty-barcode) { width: 100%; padding: .5mm; border-radius: 0; }
@@ -53,9 +61,13 @@
     .template-compact footer { grid-column: 1 / -1; }
     .template-barcode .price { font-size: calc(4mm * var(--label-price-scale)); }
     .template-shelf { grid-template-columns: 1fr auto; grid-template-rows: auto auto 1fr; }
-    .template-shelf h2 { text-align: left; white-space: normal; }
+    .template-shelf h2 { text-align: left; }
     .template-shelf .price { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: clamp(18px, calc(9mm * var(--label-price-scale)), 54px); }
     .template-shelf .barcode, .template-shelf footer { grid-column: 1 / -1; }
+    .wide:not(.template-compact):not(.template-shelf) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+    .wide h2 { font-size: clamp(10px, calc(3.8mm * var(--label-name-scale)), 26px); }
+    .wide .price { font-size: clamp(20px, calc(8mm * var(--label-price-scale)), 54px); }
+    .wide footer { font-size: calc(2.25mm * var(--label-text-scale)); }
     @media print {
         .product-label { margin: 0; border: none; }
     }

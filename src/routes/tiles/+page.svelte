@@ -24,6 +24,7 @@
 
     let activePageId = "";
     let currentPageIndex = 0;
+    const POS_TILES_PER_PAGE = 16;
 
     // Wait for DB to load
     $: {
@@ -45,12 +46,12 @@
         Math.ceil(
             (activePageTiles.length > 0
                 ? Math.max(...activePageTiles.map((t) => t.position))
-                : 0) / 12,
+                : 0) / POS_TILES_PER_PAGE,
         ),
     );
 
-    $: displayTiles = Array.from({ length: 12 }, (_, i) => {
-        const absolutePos = currentPageIndex * 12 + i + 1; // 1-indexed
+    $: displayTiles = Array.from({ length: POS_TILES_PER_PAGE }, (_, i) => {
+        const absolutePos = currentPageIndex * POS_TILES_PER_PAGE + i + 1; // 1-indexed
         const tile = activePageTiles.find((t) => t.position === absolutePos);
         if (!tile) return null;
         return {
@@ -263,9 +264,9 @@
         <!-- Tile Grid Area -->
         {#if activePageId}
             <div class="flex flex-col gap-4 flex-1 min-h-0">
-                <div class="grid grid-cols-4 grid-rows-3 gap-4 flex-1 min-h-0">
+                <div class="grid grid-cols-4 grid-rows-4 gap-3 flex-1 min-h-0">
                     {#each displayTiles as slot, i}
-                        {@const absolutePos = currentPageIndex * 12 + i + 1}
+                        {@const absolutePos = currentPageIndex * POS_TILES_PER_PAGE + i + 1}
                         {#if slot}
                             <div
                                 class="flat-card relative h-full min-h-0 overflow-hidden cursor-pointer flex flex-col hover:!border-accent-primary {!slot.product ? '!border-danger bg-danger/5' : ''}"
@@ -273,7 +274,7 @@
                             >
                                 {#if slot.product}
                                     <div
-                                        class="relative w-full h-[120px] shrink-0 overflow-hidden"
+                                        class="relative w-full h-[88px] shrink-0 overflow-hidden"
                                         style="background-color: {slot.product.color || '#3b82f6'}"
                                     >
                                         {#if slot.product.image}
@@ -283,16 +284,16 @@
                                             {formatMoney(slot.product.price)}
                                         </div>
                                     </div>
-                                    <div class="p-3 flex-1 flex flex-col justify-between">
-                                        <h3 class="m-0 text-[1.1rem]">{slot.product.name}</h3>
+                                    <div class="p-2 flex-1 flex flex-col justify-between">
+                                        <h3 class="m-0 text-[0.95rem] leading-tight line-clamp-2">{slot.product.name}</h3>
                                         <p class="text-[0.75rem] text-text-muted mt-1">Pos: {absolutePos}</p>
                                     </div>
                                 {:else}
-                                    <div class="relative w-full h-[120px] flex items-center justify-center bg-bg-panel text-danger">
+                                    <div class="relative w-full h-[88px] flex items-center justify-center bg-bg-panel text-danger">
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="32"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                                     </div>
-                                    <div class="p-3 flex-1 flex flex-col justify-between">
-                                        <h3 class="m-0 text-[1.1rem] !text-danger">Item Deleted</h3>
+                                    <div class="p-2 flex-1 flex flex-col justify-between">
+                                        <h3 class="m-0 text-[0.95rem] !text-danger">Item Deleted</h3>
                                         <p class="text-[0.75rem] text-text-muted mt-1">Pos: {absolutePos}</p>
                                     </div>
                                 {/if}
