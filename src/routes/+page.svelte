@@ -4135,7 +4135,7 @@
         .login-person { min-height: 0; }
         .login-person p:not(.login-error) { display: none; }
     }
-    .scale-workspace { width: min(1180px, 98vw); height: min(760px, 96vh); max-height: calc(100vh - .75rem); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
+    .scale-workspace { width: 98vw; max-width: 1180px; height: calc(100vh - .75rem); max-height: 760px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
     .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: var(--bg-card); }
     .scale-header h2 { margin: .1rem 0; font-size: 1.55rem; }
     .scale-header p { margin: 0; color: var(--text-muted); font-size: .85rem; }
@@ -4147,8 +4147,8 @@
     .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
     .scale-products .flat-input { padding-top: .65rem; padding-bottom: .65rem; }
-    .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(0, 1fr)); gap: .55rem; }
-    .scale-product { position: relative; min-height: 0; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
+    .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
+    .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
     .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
     .scale-product-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
     .scale-product-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgba(15, 23, 42, .82), rgba(15, 23, 42, .25), rgba(15, 23, 42, .05)); }
@@ -4169,44 +4169,47 @@
     .scale-selected strong { line-height: 1.15; }
     .scale-selected small { color: var(--text-muted); line-height: 1.2; }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-    .scale-units button { min-height: 0; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
+    .scale-units button { min-height: 42px; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
     .scale-live { min-height: 0; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
     .scale-live div { min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
     .scale-live small { color: var(--text-muted); font-size: .74rem; line-height: 1.2; word-break: break-word; }
-    .scale-live button { min-height: 38px; padding: 0 .7rem; white-space: nowrap; }
-    .scale-numpad { min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .42rem; }
-    .scale-numpad button { min-height: 0; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.28rem; font-weight: 900; }
+    .scale-live button { min-height: 40px; padding: 0 .7rem; white-space: nowrap; }
+    .scale-numpad { min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(44px, 1fr)); gap: .42rem; }
+    .scale-numpad button { min-height: 44px; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.28rem; font-weight: 900; }
     .scale-total { margin-top: 0; flex-direction: row; align-items: center; justify-content: space-between; }
     .scale-total strong { color: var(--success); font-size: 1.45rem; }
-    .scale-add { min-height: 0; height: 100%; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
+    .scale-add { min-height: 48px; height: auto; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
     .scale-empty { padding: 2rem; color: var(--text-muted); text-align: center; border: 1px dashed var(--border-flat); border-radius: .8rem; }
     @media (max-width: 880px) { .scale-layout { grid-template-columns: 1fr 310px; } .scale-product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1040px) and (max-height: 820px) {
         .scale-workspace { width: calc(100vw - .5rem); height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
         .scale-layout { grid-template-columns: minmax(0, 1fr) minmax(270px, .7fr); }
-        .scale-entry { padding: .5rem; grid-template-rows: 64px 38px 56px 56px minmax(178px, 1fr) 46px 44px; gap: .35rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 64px 40px 56px 58px minmax(178px, 1fr) 46px 46px; gap: .35rem; }
         .scale-selected, .scale-display, .scale-live, .scale-total { padding: .45rem .55rem; }
         .scale-product { padding: .55rem; }
         .scale-product span, .scale-product small { font-size: .68rem; }
         .scale-display strong, .scale-total strong { font-size: 1.2rem; }
+        .scale-product-grid { grid-template-rows: repeat(3, minmax(78px, 1fr)); }
+        .scale-product { min-height: 78px; }
         .scale-live { min-height: 0; }
-        .scale-live button { min-height: 34px; padding: 0 .5rem; }
+        .scale-live button { min-height: 38px; padding: 0 .5rem; }
         .scale-numpad { min-height: 0; gap: .32rem; }
-        .scale-numpad button { font-size: 1.15rem; }
+        .scale-numpad button { min-height: 40px; font-size: 1.15rem; }
     }
     @media (max-height: 690px) {
         .scale-workspace { height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
         .scale-header p, .scale-selected small { display: none; }
         .scale-header { padding: .45rem .8rem; }
         .scale-products { padding: .5rem; gap: .3rem; }
-        .scale-entry { padding: .5rem; grid-template-rows: 44px 34px 46px 48px minmax(150px, 1fr) 38px 40px; gap: .3rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 48px 38px 50px 50px minmax(160px, 1fr) 42px 44px; gap: .3rem; }
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
         .scale-products .flat-input { padding-top: .45rem; padding-bottom: .45rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
-        .scale-numpad button { font-size: 1.05rem; }
+        .scale-numpad button { min-height: 38px; font-size: 1.05rem; }
+        .scale-add { min-height: 42px; }
     }
     @media (max-width: 760px) {
         .scale-layout { grid-template-columns: 1fr; overflow-y: auto; }

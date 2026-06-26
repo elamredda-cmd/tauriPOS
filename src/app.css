@@ -754,7 +754,7 @@
 @media (max-width: 900px) {
     .pos-cart {
         width: 39vw !important;
-        min-width: 285px !important;
+        min-width: 315px !important;
         max-width: 340px !important;
     }
     .pos-products { padding: .45rem !important; }
@@ -774,6 +774,27 @@
     .items-management-header > div:last-child { max-width: none !important; flex-wrap: wrap; justify-content: flex-start !important; }
     .items-management-header > div:last-child > div { min-width: min(100%, 260px); }
     .tiles-management-page > header { padding: .75rem !important; gap: .65rem; flex-wrap: wrap; }
+}
+
+.pos-cart-controls button {
+    min-height: 40px !important;
+}
+
+.pos-action-grid {
+    grid-auto-rows: 3.25rem !important;
+}
+
+.pos-action-grid > button {
+    min-height: 52px !important;
+    height: auto !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+}
+
+.pos-action-grid .payment-action {
+    min-height: 108px !important;
 }
 
 @media (max-height: 680px) {
@@ -879,6 +900,18 @@
         min-height: 32px !important;
         font-size: .68rem !important;
     }
+
+    .pos-action-grid {
+        grid-auto-rows: 3rem !important;
+    }
+
+    .pos-action-grid > button {
+        min-height: 48px !important;
+    }
+
+    .pos-action-grid .payment-action {
+        min-height: 100px !important;
+    }
 }
 
 @media (min-width: 1800px) {
@@ -948,7 +981,7 @@
         }
 
         .pos-cart {
-            @apply !w-[372px];
+            @apply !w-[390px];
         }
 
         .pos-cart-header {
@@ -986,7 +1019,8 @@
         }
 
         .pos-cart-controls button {
-            @apply !h-9;
+            height: 42px !important;
+            min-height: 42px !important;
         }
 
         .pos-total-section {
@@ -1006,16 +1040,18 @@
         }
 
         .pos-action-grid {
-            @apply !gap-1 !px-2 !pb-2;
-            grid-auto-rows: 2.65rem !important;
+            @apply !gap-1.5 !px-2 !pb-2;
+            grid-auto-rows: 3rem !important;
         }
 
         .pos-action-grid button {
-            @apply !text-[10px];
+            min-height: 48px !important;
+            @apply !text-[11px];
         }
 
         .pos-action-grid .payment-action {
-            @apply !text-sm;
+            min-height: 100px !important;
+            @apply !text-base;
         }
     }
 }
