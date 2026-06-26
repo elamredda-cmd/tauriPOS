@@ -187,9 +187,15 @@
 
     const labelProtocolOptions = [
         { label: 'System printer / driver', value: 'system' },
-        { label: 'ESC/POS / Xprinter receipt roll', value: 'escpos' },
+        { label: 'ESC/POS / Xprinter USB', value: 'escpos' },
         { label: 'ZPL / Zebra style', value: 'zpl' },
         { label: 'TSPL / TSC style', value: 'tspl' },
+    ];
+
+    const labelDpiOptions = [
+        { label: '203 DPI (8 dots/mm)', value: '203' },
+        { label: '300 DPI (12 dots/mm)', value: '300' },
+        { label: '600 DPI (24 dots/mm)', value: '600' },
     ];
 </script>
 
@@ -481,7 +487,7 @@
                             <p class="settings-hero-kicker">Label printer</p>
                             <h3 class="settings-section-title !mb-2">Shelf labels and barcode labels</h3>
                             <p class="mt-2 max-w-2xl text-sm text-text-muted">
-                                Use USB raw with ESC/POS for Xprinter receipt-roll labels, or ZPL/TSPL for dedicated label printers.
+                                Use ESC/POS for your Xprinter USB setup. Use TSPL only if the printer understands TSPL and does not print command text.
                             </p>
                         </div>
                         <button
@@ -517,7 +523,7 @@
                         </div>
                         <button class={switchCardClass(label.cutPaper)} on:click={() => updateSetting('label_printer_cut_paper', label.cutPaper ? 'false' : 'true')}>
                             <span class="text-sm font-black leading-tight text-text-main">Cut after label</span>
-                            <span class="line-clamp-3 text-xs leading-snug text-text-muted">For Xprinter and ESC/POS cutters.</span>
+                            <span class="line-clamp-3 text-xs leading-snug text-text-muted">Send cutter command after label.</span>
                             <b class="mt-auto text-xs uppercase tracking-[0.12em] {label.cutPaper ? 'text-success' : 'text-text-muted'}">{label.cutPaper ? 'On' : 'Off'}</b>
                         </button>
                         <div class={compactInfoCardClass()}>
@@ -531,14 +537,14 @@
                                 value={label.gapLines}
                                 on:change={(event) => updateSetting('label_printer_gap_lines', event.currentTarget.value || '0')}
                             />
-                            <small class="mt-2 block line-clamp-2 text-xs text-text-muted">Use 0 or 1 for Xprinter.</small>
+                            <small class="mt-2 block line-clamp-2 text-xs text-text-muted">Use 0 for ESC/POS. Use 2 or 3mm only when TSPL works correctly.</small>
                         </div>
                     </div>
 
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
                         <div class="mb-4">
                             <h4 class="m-0 text-base font-black">Label connection details</h4>
-                            <p class="m-0 mt-1 text-sm text-text-muted">Use ESC/POS for Xprinter receipt printers. Use TSPL or ZPL for dedicated label printers.</p>
+                            <p class="m-0 mt-1 text-sm text-text-muted">Use TSPL for Xprinter sticker label printers. Use ESC/POS for receipt printers.</p>
                         </div>
                         <div class="form-grid">
                             <CustomSelect
@@ -547,6 +553,14 @@
                                 options={labelProtocolOptions}
                                 on:change={(event) => updateSetting('label_printer_protocol', String(event.detail))}
                             />
+                            {#if label.connection !== 'system'}
+                                <CustomSelect
+                                    label="Print Resolution (DPI)"
+                                    value={String(label.dpi)}
+                                    options={labelDpiOptions}
+                                    on:change={(event) => updateSetting('label_printer_dpi', String(event.detail))}
+                                />
+                            {/if}
                             {#if label.connection === 'system'}
                                 <div class="rounded-xl border border-dashed border-border-flat bg-bg-card p-4">
                                     <b class="text-text-main">System printer mode</b>

@@ -2,8 +2,10 @@ import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 import tailwindcss from "@tailwindcss/vite";
 
-const host = process.env.TAURI_DEV_HOST;
-const port = Number(process.env.VITE_PORT || 1420);
+const nodeGlobal = /** @type {{ process?: { env?: Record<string, string | undefined> } }} */ (globalThis);
+const env = nodeGlobal.process?.env ?? {};
+const host = env.TAURI_DEV_HOST;
+const port = Number(env.VITE_PORT || 1420);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({

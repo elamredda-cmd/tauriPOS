@@ -137,7 +137,7 @@
                             <small class="block text-text-muted">{formatMoney(item.product.price)}</small>
                         </div>
                         <div class="grid grid-cols-[44px_68px_44px] gap-1">
-                            <button class="h-11 rounded-md border border-border-flat bg-bg-card text-lg font-black transition hover:bg-bg-card-hover" on:click={() => setQuantity(item.product.id, item.quantity - 1)}>−</button>
+                            <button class="h-11 rounded-md border border-border-flat bg-bg-card text-lg font-black transition hover:bg-bg-card-hover" on:click={() => setQuantity(item.product.id, item.quantity - 1)}>-</button>
                             <input class="h-11 w-[68px] rounded-md border border-border-flat bg-bg-card text-center font-bold" type="number" min="1" max="500" value={item.quantity} on:change={(event) => setQuantity(item.product.id, Number(event.currentTarget.value))} />
                             <button class="h-11 rounded-md border border-border-flat bg-bg-card text-lg font-black transition hover:bg-bg-card-hover" on:click={() => setQuantity(item.product.id, item.quantity + 1)}>+</button>
                         </div>
@@ -151,7 +151,7 @@
                     </div>
                 {/if}
             </div>
-            <p class="mt-3 text-xs text-text-muted capitalize">Uses the saved label design: {design.widthMm} × {design.heightMm} mm · {design.template}</p>
+            <p class="mt-3 text-xs text-text-muted capitalize">Uses the saved label design: {design.widthMm} x {design.heightMm} mm - {design.template}</p>
         </section>
     </div>
 </MgmtPage>

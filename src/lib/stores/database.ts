@@ -631,7 +631,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'label_printer_enabled', 'label_printer_connection', 'label_printer_protocol',
     'label_printer_host', 'label_printer_port', 'label_printer_name',
     'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
-    'label_printer_gap_lines',
+    'label_printer_gap_lines', 'label_printer_dpi',
     'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
     'scale_hardware_poll_ms',
     // Server-side control rows — never copy between tills.
@@ -1934,7 +1934,8 @@ export async function getReportSnapshot(
 ): Promise<ReportSnapshot> {
     if (isMultiMode()) {
         try {
-            await flushOfflineQueue();
+            const pendingBeforeFlush = await pendingReportWriteCount();
+            if (pendingBeforeFlush > 0) await flushOfflineQueue();
             const pendingWrites = await pendingReportWriteCount();
             if (pendingWrites > 0) {
                 const local = await getSqliteReportSnapshot(startDate, endDate, sortBy, limit, tillNumber);
@@ -2021,7 +2022,8 @@ export async function getLastReportMarker(tillNumber: string): Promise<string | 
     const localMarker = await sqlite.getLastReportMarker(tillNumber);
     if (isMultiMode()) {
         try {
-            await flushOfflineQueue();
+            const pendingBeforeFlush = await pendingReportWriteCount();
+            if (pendingBeforeFlush > 0) await flushOfflineQueue();
             const mysqlDb = await getMysqlDb();
             if (mysqlDb) {
                 const remoteMarker = await mysql.mysqlGetLastReportMarker(tillNumber);
@@ -2034,6 +2036,34 @@ export async function getLastReportMarker(tillNumber: string): Promise<string | 
         }
     }
     return localMarker;
+}
+
+const LIVE_SYSTEM_REPORT_READY_CACHE_MS = 60_000;
+let liveSystemReportReadyUntil = 0;
+
+async function ensureLiveSystemReportReady(force = false): Promise<void> {
+    if (!isMultiMode()) return;
+    if (!force && Date.now() < liveSystemReportReadyUntil) return;
+    if (!(await pingMysql())) {
+        throw new Error('MariaDB is offline. Whole-system end-of-day needs live sync first.');
+    }
+    const pendingBeforeFlush = await pendingReportWriteCount();
+    if (pendingBeforeFlush > 0) await flushOfflineQueue();
+    const pendingSales = await pendingReportWriteCount();
+    if (pendingSales > 0) {
+        throw new Error(`${pendingSales} transaction update${pendingSales === 1 ? ' is' : 's are'} still waiting to sync. Sync first, then run whole-system end-of-day.`);
+    }
+    const stats = await getOfflineQueueStats();
+    if (stats.conflicts > 0) {
+        throw new Error(`${stats.conflicts} sync conflict${stats.conflicts === 1 ? '' : 's'} need review before whole-system end-of-day.`);
+    }
+    liveSystemReportReadyUntil = Date.now() + LIVE_SYSTEM_REPORT_READY_CACHE_MS;
+}
+
+export async function getLiveLastReportMarker(tillNumber: string): Promise<string | null> {
+    if (!isMultiMode()) return sqlite.getLastReportMarker(tillNumber);
+    await ensureLiveSystemReportReady();
+    return mysql.mysqlGetLastReportMarker(tillNumber);
 }
 
 export async function saveReportMarker(
@@ -2061,6 +2091,49 @@ export async function saveReportMarker(
         `report marker for ${tillNumber || 'system'}`,
         () => mysql.mysqlUpsert('till_report_markers', row, 'id'),
         () => queueOffline('till_report_markers', 'upsert', row, 'id'),
+    );
+    return row;
+}
+
+export async function saveLiveReportMarker(
+    tillNumber: string,
+    periodStart: string,
+    periodEnd: string,
+    extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {}
+): Promise<any> {
+    if (!isMultiMode()) return saveReportMarker(tillNumber, periodStart, periodEnd, extra);
+    await ensureLiveSystemReportReady();
+    const mysqlDb = await getMysqlDb();
+    if (!mysqlDb) throw new Error('MariaDB is offline. Whole-system end-of-day was not closed.');
+    const stamp = new Date().toISOString();
+    const row = {
+        id: crypto.randomUUID(),
+        tillNumber,
+        type: 'period',
+        markerTime: periodEnd,
+        periodStart,
+        periodEnd,
+        employeeId: extra.employeeId || '',
+        reportText: extra.reportText || '',
+        reportTotal: extra.reportTotal || 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+    };
+    await mysql.mysqlUpsert('till_report_markers', row, 'id');
+    await sqlite.upsert('till_report_markers', row, 'id');
+    await recordAuditEvent(
+        'report_period_closed',
+        'report',
+        row.id,
+        null,
+        {
+            scope: tillNumber ? 'till' : 'system',
+            tillNumber,
+            periodStart,
+            periodEnd,
+            reportTotal: extra.reportTotal || 0,
+        },
+        extra.employeeId || currentAuditEmployeeId(),
     );
     return row;
 }
@@ -2560,7 +2633,8 @@ export async function getTillPeriodReport(
 ) {
     if (isMultiMode()) {
         try {
-            await flushOfflineQueue();
+            const pendingBeforeFlush = await pendingReportWriteCount();
+            if (pendingBeforeFlush > 0) await flushOfflineQueue();
             if (await pendingReportWriteCount() === 0) {
                 const mysqlDb = await getMysqlDb();
                 if (mysqlDb) return mysql.mysqlGetTillPeriodReport(tillNumber, startTime, endTime);
@@ -2570,6 +2644,14 @@ export async function getTillPeriodReport(
         }
     }
     return sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+}
+
+export async function getLiveTillPeriodReport(
+    tillNumber: string, startTime: string, endTime: string
+) {
+    if (!isMultiMode()) return sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+    await ensureLiveSystemReportReady();
+    return mysql.mysqlGetTillPeriodReport(tillNumber, startTime, endTime);
 }
 
 // ─── Svelte Store Hydration ─────────────────────────────────────────────────

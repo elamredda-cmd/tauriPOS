@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
-import { settingsDB, type Order, type OrderLine, type Product, type Setting, type Store } from '$lib/stores/db';
+import { formatMoney, settingsDB, type Order, type OrderLine, type Product, type Setting, type Store } from '$lib/stores/db';
 import type { ReceiptDesign } from '$lib/receipt';
-import type { LabelDesign, LabelTextScale } from '$lib/labels';
+import { defaultLabelDesign, type LabelDesign, type LabelTextScale } from '$lib/labels';
 import { getScaleSaleDisplay } from '$lib/scaleSale';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
@@ -36,6 +36,8 @@ export interface LabelPrinterConfig {
     baudRate: number;
     cutPaper: boolean;
     gapLines: number;
+    dpi: number;
+    paperWidth: ReceiptPaperWidth;
 }
 
 function setting(settings: Setting[], key: string, fallback = ''): string {
@@ -115,6 +117,7 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
     const labelHost = setting(settings, 'label_printer_host');
     const labelPrinterName = setting(settings, 'label_printer_name');
     const labelDevicePath = setting(settings, 'label_printer_device_path');
+    const hasOwnLabelTarget = Boolean(labelHost.trim() || labelPrinterName.trim() || labelDevicePath.trim());
     const configuredConnection = setting(settings, 'label_printer_connection', '');
     const shouldInheritReceipt = isDirectConnection(receipt.connection)
         && (!hasOwnConnection || (configuredConnection === 'system' && !labelHost.trim() && !labelPrinterName.trim() && !labelDevicePath.trim()));
@@ -131,13 +134,11 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         shouldInheritReceipt ? fallbackConnection : setting(settings, 'label_printer_connection', fallbackConnection),
         fallbackConnection
     );
-    const canInheritReceiptDetails = isDirectConnection(receipt.connection) && connection === receipt.connection;
-    const protocolRaw = setting(settings, 'label_printer_protocol', canInheritReceiptDetails ? 'escpos' : 'system');
+    const canInheritReceiptDetails = isDirectConnection(receipt.connection) && connection === receipt.connection && !hasOwnLabelTarget;
+    const protocolRaw = setting(settings, 'label_printer_protocol', '');
     const directProtocol = protocolRaw === 'escpos' || protocolRaw === 'zpl' || protocolRaw === 'tspl'
         ? protocolRaw
-        : canInheritReceiptDetails
-            ? 'escpos'
-            : 'zpl';
+        : 'escpos';
     return {
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
@@ -147,8 +148,10 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         printerName: labelPrinterName || (canInheritReceiptDetails ? receipt.printerName : ''),
         devicePath: labelDevicePath || (canInheritReceiptDetails ? receipt.devicePath : ''),
         baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
-        cutPaper: boolSetting(settings, 'label_printer_cut_paper', true),
-        gapLines: intSetting(settings, 'label_printer_gap_lines', 1, 0, 12),
+        cutPaper: boolSetting(settings, 'label_printer_cut_paper', false),
+        gapLines: intSetting(settings, 'label_printer_gap_lines', directProtocol === 'tspl' ? 2 : 0, 0, 12),
+        dpi: intSetting(settings, 'label_printer_dpi', 203, 100, 1200),
+        paperWidth: receipt.paperWidth,
     };
 }
 
@@ -191,6 +194,30 @@ function textRow(left: string, right: string, width: number): string {
     return `${cleanLeft}${' '.repeat(space)}${cleanRight}`;
 }
 
+function thermalReportLines(text: string, width: number): string[] {
+    const output: string[] = [];
+    const source = String(text || '')
+        .replace(/\r/g, '')
+        .replace(/\u2192/g, '->')
+        .replace(/[\u2013\u2014]/g, '-')
+        .replace(/\t/g, '    ');
+    for (const rawLine of source.split('\n')) {
+        let lineText = rawLine.replace(/\s+$/g, '');
+        if (!lineText) {
+            output.push('');
+            continue;
+        }
+        while (lineText.length > width) {
+            let splitAt = lineText.lastIndexOf(' ', width);
+            if (splitAt < Math.floor(width * 0.45)) splitAt = width;
+            output.push(lineText.slice(0, splitAt).trimEnd());
+            lineText = lineText.slice(splitAt).trimStart();
+        }
+        output.push(lineText);
+    }
+    return output;
+}
+
 export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): number[] {
     const width = config.paperWidth === '58mm' ? 32 : 42;
     const divider = '-'.repeat(width);
@@ -223,6 +250,20 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
         ...line('', config.encoding),
         ...line('', config.encoding),
     ];
+    bytes.push(...receiptCut(config));
+    return bytes;
+}
+
+export function buildEscposTextReport(text: string, config = getReceiptPrinterConfig()): number[] {
+    const width = config.paperWidth === '58mm' ? 32 : 42;
+    const bytes = [
+        0x1b, 0x40,
+        0x1b, 0x4d, 0x00,
+        0x1b, 0x61, 0x00,
+    ];
+    for (const reportLine of thermalReportLines(text, width)) {
+        bytes.push(...line(reportLine, config.encoding));
+    }
     bytes.push(...receiptCut(config));
     return bytes;
 }
@@ -391,6 +432,24 @@ export async function sendEscposReceipt(payload: ReceiptPayload, config = getRec
     await printReceiptPayload(payload, config);
 }
 
+export async function printEscposTextReport(
+    text: string,
+    documentName = 'L&Bj POS report',
+    config = getReceiptPrinterConfig()
+): Promise<void> {
+    if (!config.enabled) throw new Error('Receipt printer is disabled');
+    if (!isDirectConnection(config.connection)) throw new Error('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first');
+    await sendDirectPrinterData({
+        connection: config.connection,
+        host: config.host,
+        port: config.port,
+        printerName: config.printerName,
+        devicePath: config.devicePath,
+        data: buildEscposTextReport(text, config),
+        documentName,
+    });
+}
+
 type ProductLabelPayload = {
     product: Product;
     store: Store;
@@ -464,7 +523,7 @@ function labelPrice(product: Product): string {
 }
 
 function labelScaleValue(scale: LabelTextScale | undefined): number {
-    return scale === 'small' ? 0.86 : scale === 'large' ? 1.18 : 1;
+    return scale === 'small' ? 0.68 : scale === 'large' ? 1.32 : 1;
 }
 
 function labelScale(design: LabelDesign): number {
@@ -477,6 +536,10 @@ function labelNameScale(design: LabelDesign): number {
 
 function labelPriceScale(design: LabelDesign): number {
     return labelScaleValue(design.priceTextScale || design.textScale);
+}
+
+function labelShowsBarcode(design: LabelDesign): boolean {
+    return design.showBarcode !== false;
 }
 
 function zplFont(size: number, design: LabelDesign, scale = labelScale(design)): string {
@@ -498,6 +561,28 @@ function tsplNameFont(design: LabelDesign): string {
 
 function tsplPriceFont(design: LabelDesign): string {
     return design.priceTextScale === 'small' ? '3' : '4';
+}
+
+function tsplFontWidth(font: string): number {
+    if (font === '4') return 24;
+    if (font === '3') return 16;
+    if (font === '2') return 12;
+    return 8;
+}
+
+function centeredX(width: number, margin: number, contentWidth: number): number {
+    const printableWidth = Math.max(1, width - margin * 2);
+    return Math.max(margin, Math.round((width - Math.min(contentWidth, printableWidth)) / 2));
+}
+
+function estimatedBarcodeWidth(value: string, moduleWidth: number): number {
+    return Math.max(40, Math.round((value.length * 11 + 35) * moduleWidth));
+}
+
+function tsplCenteredText(width: number, margin: number, y: number, font: string, scale: number, value: string): string {
+    const escaped = tsplEscape(value);
+    const x = centeredX(width, margin, escaped.length * tsplFontWidth(font) * scale);
+    return `TEXT ${x},${y},"${font}",0,${scale},${scale},"${escaped}"`;
 }
 
 function escposFontSelect(design: LabelDesign): number[] {
@@ -528,8 +613,17 @@ function tsplEscape(value: string): string {
     return labelText(value, 80).replace(/"/g, "'");
 }
 
-function mmToDots(mm: number): number {
-    return Math.max(80, Math.round(Number(mm || 1) * 8));
+function labelDotsPerMm(dpi: number): number {
+    return Math.max(4, (Number(dpi) || 203) / 25.4);
+}
+
+function mmToDots(mm: number, dotsPerMm = 8): number {
+    return Math.max(80, Math.round((Number(mm) || 1) * dotsPerMm));
+}
+
+function escposPrintableWidthDots(paperWidth: ReceiptPaperWidth, dotsPerMm: number): number {
+    const printableMm = paperWidth === '58mm' ? 48 : 72;
+    return Math.max(80, Math.round(printableMm * dotsPerMm));
 }
 
 function labelMarginDots(widthDots: number): number {
@@ -547,15 +641,15 @@ function tsplBarcodeWidth(widthDots: number, barcode: string): { narrow: number;
     return { narrow, wide: Math.max(narrow, narrow * 2) };
 }
 
-function buildZplProductLabel(payload: ProductLabelPayload): number[] {
+function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number): number[] {
     const { product, store, design } = payload;
     const widthMm = labelWidthMm(design);
     const heightMm = labelHeightMm(design);
-    const width = mmToDots(widthMm);
-    const height = mmToDots(heightMm);
+    const width = mmToDots(widthMm, dotsPerMm);
+    const height = mmToDots(heightMm, dotsPerMm);
     const margin = labelMarginDots(width);
     let y = 10;
-    const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0'];
+    const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0', '^LT0'];
     if (design.showStore && store.name) {
         lines.push(`^FO${margin},${y}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(store.name)}^FS`);
         y += Math.round(24 * labelScale(design));
@@ -572,15 +666,18 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
         y += Math.round((widthMm >= 70 ? 58 : 48) * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
+    const hasBarcode = labelShowsBarcode(design);
     const footer: string[] = [];
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
     const footerReserve = footer.length > 0 ? 28 : 8;
     const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
     const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
-    if (barcode && barcodeHeight >= 28) {
-        lines.push(`^BY${zplBarcodeModuleWidth(width, barcode)},2,${barcodeHeight}`);
-        lines.push(`^FO${margin},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
+    if (hasBarcode && barcode && barcodeHeight >= 28) {
+        const moduleWidth = zplBarcodeModuleWidth(width, barcode);
+        const barcodeX = centeredX(width, margin, estimatedBarcodeWidth(barcode, moduleWidth));
+        lines.push(`^BY${moduleWidth},2,${barcodeHeight}`);
+        lines.push(`^FO${barcodeX},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
     }
     if (footer.length > 0) {
         lines.push(`^FO${margin},${height - 24}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(footer.join('  '))}^FS`);
@@ -589,12 +686,12 @@ function buildZplProductLabel(payload: ProductLabelPayload): number[] {
     return Array.from(new TextEncoder().encode(lines.join('\n')));
 }
 
-function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): number[] {
+function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number): number[] {
     const { product, store, design } = payload;
     const widthMm = labelWidthMm(design);
     const heightMm = labelHeightMm(design);
-    const width = mmToDots(widthMm);
-    const height = mmToDots(heightMm);
+    const width = mmToDots(widthMm, dotsPerMm);
+    const height = mmToDots(heightMm, dotsPerMm);
     const margin = labelMarginDots(width);
     const scale = tsplScale(design);
     let y = 10;
@@ -602,39 +699,44 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number): 
         `SIZE ${widthMm} mm,${heightMm} mm`,
         `GAP ${Math.max(0, Math.min(12, gapLines))} mm,0`,
         'DIRECTION 1',
+        'REFERENCE 0,0',
+        'OFFSET 0 mm',
         'CLS',
     ];
     if (design.showStore && store.name) {
-        lines.push(`TEXT ${margin},${y},"2",0,${scale},${scale},"${tsplEscape(store.name)}"`);
+        lines.push(tsplCenteredText(width, margin, y, '2', scale, store.name));
         y += 26 * scale;
     }
     if (design.showName) {
         const nameScale = tsplSizeScale(design.nameTextScale || design.textScale);
+        const nameFont = tsplNameFont(design);
         const maxLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
         const nameLines = wrapLabelText(product.name, labelTextColumns(design, 'name'), maxLines);
         for (const nameLine of nameLines) {
-            lines.push(`TEXT ${margin},${y},"${tsplNameFont(design)}",0,${nameScale},${nameScale},"${tsplEscape(nameLine)}"`);
+            lines.push(tsplCenteredText(width, margin, y, nameFont, nameScale, nameLine));
             y += Math.round((nameScale > 1 ? 32 : 24) * labelNameScale(design));
         }
         y += 4;
     }
     if (design.showPrice) {
         const priceScale = tsplSizeScale(design.priceTextScale || design.textScale);
-        lines.push(`TEXT ${margin},${y},"${tsplPriceFont(design)}",0,${priceScale},${priceScale},"${tsplEscape(labelPrice(product))}"`);
+        lines.push(tsplCenteredText(width, margin, y, tsplPriceFont(design), priceScale, labelPrice(product)));
         y += Math.round((widthMm >= 70 ? 58 : 50) * labelPriceScale(design));
     }
     const barcode = labelBarcodeValue(product);
+    const hasBarcode = labelShowsBarcode(design);
     const footer: string[] = [];
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
     const footerReserve = footer.length > 0 ? 28 : 8;
     const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
     const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
-    if (barcode && barcodeHeight >= 28) {
+    if (hasBarcode && barcode && barcodeHeight >= 28) {
         const barcodeWidth = tsplBarcodeWidth(width, barcode);
-        lines.push(`BARCODE ${margin},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,${barcodeWidth.narrow},${barcodeWidth.wide},"${tsplEscape(barcode)}"`);
+        const barcodeX = centeredX(width, margin, estimatedBarcodeWidth(barcode, barcodeWidth.narrow));
+        lines.push(`BARCODE ${barcodeX},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,${barcodeWidth.narrow},${barcodeWidth.wide},"${tsplEscape(barcode)}"`);
     }
-    if (footer.length > 0) lines.push(`TEXT ${margin},${height - 24},"1",0,${scale},${scale},"${tsplEscape(footer.join('  '))}"`);
+    if (footer.length > 0) lines.push(tsplCenteredText(width, margin, height - 24, '1', scale, footer.join('  ')));
     lines.push(`PRINT ${labelCopies(payload.quantity)}`, '');
     return Array.from(new TextEncoder().encode(lines.join('\r\n')));
 }
@@ -655,6 +757,576 @@ function escposCode39(value: string, options: { height?: number; moduleWidth?: n
     ];
 }
 
+const CODE39_PATTERNS: Record<string, string> = {
+    '0': 'nnnwwnwnn',
+    '1': 'wnnwnnnnw',
+    '2': 'nnwwnnnnw',
+    '3': 'wnwwnnnnn',
+    '4': 'nnnwwnnnw',
+    '5': 'wnnwwnnnn',
+    '6': 'nnwwwnnnn',
+    '7': 'nnnwnnwnw',
+    '8': 'wnnwnnwnn',
+    '9': 'nnwwnnwnn',
+    A: 'wnnnnwnnw',
+    B: 'nnwnnwnnw',
+    C: 'wnwnnwnnn',
+    D: 'nnnnwwnnw',
+    E: 'wnnnwwnnn',
+    F: 'nnwnwwnnn',
+    G: 'nnnnnwwnw',
+    H: 'wnnnnwwnn',
+    I: 'nnwnnwwnn',
+    J: 'nnnnwwwnn',
+    K: 'wnnnnnnww',
+    L: 'nnwnnnnww',
+    M: 'wnwnnnnwn',
+    N: 'nnnnwnnww',
+    O: 'wnnnwnnwn',
+    P: 'nnwnwnnwn',
+    Q: 'nnnnnnwww',
+    R: 'wnnnnnwwn',
+    S: 'nnwnnnwwn',
+    T: 'nnnnwnwwn',
+    U: 'wwnnnnnnw',
+    V: 'nwwnnnnnw',
+    W: 'wwwnnnnnn',
+    X: 'nwnnwnnnw',
+    Y: 'wwnnwnnnn',
+    Z: 'nwwnwnnnn',
+    '-': 'nwnnnnwnw',
+    '.': 'wwnnnnwnn',
+    ' ': 'nwwnnnwnn',
+    '*': 'nwnnwnwnn',
+    '$': 'nwnwnwnnn',
+    '/': 'nwnwnnnwn',
+    '+': 'nwnnnwnwn',
+    '%': 'nnnwnwnwn',
+};
+
+function labelDisplayPrice(product: Product): string {
+    return formatMoney(product.price);
+}
+
+function labelCanvasFont(design: LabelDesign): string {
+    if (design.fontFamily === 'serif') return 'Georgia, "Times New Roman", serif';
+    if (design.fontFamily === 'condensed') return '"Arial Narrow", "Helvetica Condensed", Arial, sans-serif';
+    return 'Arial, Helvetica, sans-serif';
+}
+
+function labelPaddingDots(widthMm: number, dotsPerMm = 8): number {
+    const paddingMm = widthMm >= 70 ? 1.5 : widthMm <= 32 ? 0.8 : 1;
+    return Math.max(4, Math.round(paddingMm * dotsPerMm));
+}
+
+function labelTopPaddingDots(widthMm: number, dotsPerMm = 8): number {
+    const paddingMm = widthMm >= 70 ? 0.25 : widthMm <= 32 ? 0 : 0.05;
+    return Math.max(0, Math.round(paddingMm * dotsPerMm));
+}
+
+function setCanvasFont(ctx: CanvasRenderingContext2D, design: LabelDesign, size: number, weight = 700) {
+    ctx.font = `${weight} ${Math.max(8, Math.round(size))}px ${labelCanvasFont(design)}`;
+}
+
+function canvasLineHeight(size: number, ratio = 1.12): number {
+    return Math.max(10, Math.ceil(size * ratio));
+}
+
+type FittedWrappedText = {
+    lines: string[];
+    fontSize: number;
+    lineHeight: number;
+};
+
+function labelBarcodeHeightDots(heightMm: number, availableHeight: number, dotsPerMm = 8): number {
+    if (availableHeight <= 0) return 0;
+    const targetMm = heightMm >= 60 ? 14 : heightMm >= 40 ? 10 : heightMm >= 30 ? 7 : 5.5;
+    const minMm = heightMm >= 30 ? 5 : 4;
+    const target = Math.round(targetMm * dotsPerMm);
+    const minimum = Math.round(minMm * dotsPerMm);
+    if (availableHeight < minimum) return 0;
+    return Math.min(target, availableHeight);
+}
+
+function clipCanvasArea(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+    ctx.beginPath();
+    ctx.rect(x, y, Math.max(1, width), Math.max(1, height));
+    ctx.clip();
+}
+
+function wrapCanvasText(ctx: CanvasRenderingContext2D, value: string, maxWidth: number, maxLines: number): string[] {
+    const words = labelText(value, 160).split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [];
+    const lines: string[] = [];
+    let current = '';
+    for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        if (ctx.measureText(next).width <= maxWidth) {
+            current = next;
+            continue;
+        }
+        if (current) lines.push(current);
+        current = word;
+        while (ctx.measureText(current).width > maxWidth && current.length > 1) {
+            current = current.slice(0, -1);
+        }
+        if (lines.length >= maxLines) break;
+    }
+    if (current && lines.length < maxLines) lines.push(current);
+    if (lines.length > 0 && words.join(' ').length > lines.join(' ').length) {
+        const lastIndex = lines.length - 1;
+        let last = lines[lastIndex];
+        while (last.length > 1 && ctx.measureText(`${last}...`).width > maxWidth) {
+            last = last.slice(0, -1);
+        }
+        lines[lastIndex] = `${last}...`;
+    }
+    return lines;
+}
+
+function ellipsizeCanvasText(ctx: CanvasRenderingContext2D, value: string, maxWidth: number): string {
+    let text = labelText(value, 160);
+    if (ctx.measureText(text).width <= maxWidth) return text;
+    while (text.length > 1 && ctx.measureText(`${text}...`).width > maxWidth) {
+        text = text.slice(0, -1);
+    }
+    return `${text}...`;
+}
+
+function wrapCanvasTextStrict(ctx: CanvasRenderingContext2D, value: string, maxWidth: number, maxLines: number) {
+    const words = labelText(value, 160).split(/\s+/).filter(Boolean);
+    if (words.length === 0) return { lines: [], fits: true };
+    const lines: string[] = [];
+    let current = '';
+    for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        if (ctx.measureText(next).width <= maxWidth) {
+            current = next;
+            continue;
+        }
+        if (!current || ctx.measureText(word).width > maxWidth) {
+            return { lines: [], fits: false };
+        }
+        lines.push(current);
+        current = word;
+        if (lines.length >= maxLines) return { lines, fits: false };
+    }
+    if (current) lines.push(current);
+    return { lines, fits: lines.length <= maxLines };
+}
+
+function fitWrappedCanvasText(
+    ctx: CanvasRenderingContext2D,
+    design: LabelDesign,
+    value: string,
+    maxWidth: number,
+    maxLines: number,
+    minSize: number,
+    maxSize: number,
+    weight = 800,
+    ratio = 1.06
+): FittedWrappedText {
+    const minimum = Math.max(8, Math.round(minSize));
+    for (let size = Math.max(minimum, Math.round(maxSize)); size >= minimum; size -= 1) {
+        setCanvasFont(ctx, design, size, weight);
+        const wrapped = wrapCanvasTextStrict(ctx, value, maxWidth, maxLines);
+        if (wrapped.fits) {
+            return { lines: wrapped.lines, fontSize: size, lineHeight: canvasLineHeight(size, ratio) };
+        }
+    }
+    setCanvasFont(ctx, design, minimum, weight);
+    return {
+        lines: wrapCanvasText(ctx, value, maxWidth, maxLines),
+        fontSize: minimum,
+        lineHeight: canvasLineHeight(minimum, ratio),
+    };
+}
+
+function fitSingleLineCanvasText(
+    ctx: CanvasRenderingContext2D,
+    design: LabelDesign,
+    value: string,
+    maxWidth: number,
+    minSize: number,
+    maxSize: number,
+    weight = 800
+): number {
+    const minimum = Math.max(8, Math.round(minSize));
+    for (let size = Math.max(minimum, Math.round(maxSize)); size >= minimum; size -= 1) {
+        setCanvasFont(ctx, design, size, weight);
+        if (ctx.measureText(value).width <= maxWidth) return size;
+    }
+    return minimum;
+}
+
+function drawCanvasLine(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    align: CanvasTextAlign = 'center'
+) {
+    ctx.textAlign = align;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#000';
+    ctx.fillText(text, x, y);
+}
+
+function code39Safe(value: string): string {
+    return value.toUpperCase().replace(/[^0-9A-Z. $/+%-]/g, '').slice(0, 48);
+}
+
+function code39Units(value: string): number {
+    const encoded = `*${code39Safe(value)}*`;
+    let total = 0;
+    for (const character of encoded) {
+        const pattern = CODE39_PATTERNS[character] || CODE39_PATTERNS['-'];
+        for (const width of pattern) total += width === 'w' ? 3 : 1;
+        total += 1;
+    }
+    return Math.max(1, total);
+}
+
+function drawCode39Barcode(ctx: CanvasRenderingContext2D, value: string, x: number, y: number, width: number, height: number) {
+    const safe = code39Safe(value);
+    if (!safe || width <= 0 || height <= 0) return;
+    const encoded = `*${safe}*`;
+    const narrow = Math.max(1, width / code39Units(value));
+    const barcodeWidth = code39Units(value) * narrow;
+    let cursor = Math.round(x + Math.max(0, (width - barcodeWidth) / 2));
+    const top = Math.round(y);
+    const barHeight = Math.max(12, Math.round(height));
+    ctx.fillStyle = '#000';
+    for (const character of encoded) {
+        const pattern = CODE39_PATTERNS[character] || CODE39_PATTERNS['-'];
+        for (let index = 0; index < pattern.length; index += 1) {
+            const barWidth = (pattern[index] === 'w' ? 3 : 1) * narrow;
+            const nextCursor = cursor + barWidth;
+            if (index % 2 === 0) {
+                const start = Math.round(cursor);
+                const end = Math.round(nextCursor);
+                ctx.fillRect(start, top, Math.max(1, end - start), barHeight);
+            }
+            cursor = nextCursor;
+        }
+        cursor += narrow;
+    }
+}
+
+function drawLabelBarcode(
+    ctx: CanvasRenderingContext2D,
+    barcode: string,
+    padding: number,
+    barcodeTop: number,
+    printableWidth: number,
+    barcodeHeight: number
+) {
+    if (barcodeHeight <= 0) return;
+    drawCode39Barcode(ctx, barcode, padding, barcodeTop, printableWidth, barcodeHeight);
+}
+
+function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number, maxWidthDots = 0): HTMLCanvasElement {
+    if (typeof document === 'undefined') {
+        throw new Error('Label image printing is only available inside the app window');
+    }
+
+    const { product, store, design } = payload;
+    const widthMm = labelWidthMm(design);
+    const heightMm = labelHeightMm(design);
+    let width = mmToDots(widthMm, dotsPerMm);
+    const height = mmToDots(heightMm, dotsPerMm);
+    if (maxWidthDots > 0 && width > maxWidthDots) width = Math.max(80, maxWidthDots);
+    const padding = labelPaddingDots(widthMm, dotsPerMm);
+    const topPadding = labelTopPaddingDots(widthMm, dotsPerMm);
+    const bottomPadding = Math.max(1, Math.round(0.25 * dotsPerMm));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not prepare label image');
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
+
+    const printableWidth = Math.max(1, width - padding * 2);
+    const centerX = width / 2;
+    const smallSize = Math.round(2.3 * dotsPerMm * labelScale(design));
+    const nameSize = Math.round((widthMm >= 70 ? 3.8 : 3.3) * dotsPerMm * labelNameScale(design));
+    const standardPriceSize = Math.round((widthMm >= 70 ? 6.2 : 4.6) * dotsPerMm * labelPriceScale(design));
+    const shelfPriceSize = Math.round(6.8 * dotsPerMm * labelPriceScale(design));
+    const footerParts: string[] = [];
+    const barcode = labelBarcodeValue(product);
+    const hasBarcode = labelShowsBarcode(design) && Boolean(code39Safe(barcode));
+    const hasSidePrice = design.template === 'compact' || design.template === 'shelf';
+    if (hasBarcode && design.showBarcodeText) footerParts.push(barcode);
+    if (design.showSku && product.sku) footerParts.push(`SKU ${product.sku}`);
+    if (design.showPlu && product.scalePlu) footerParts.push(`PLU ${product.scalePlu}`);
+    const gap = Math.max(1, Math.round(0.2 * dotsPerMm));
+    const footerText = footerParts.join('  ');
+    const footerSize = footerParts.length > 0
+        ? fitSingleLineCanvasText(ctx, design, footerText, printableWidth, 8, smallSize, 700)
+        : 0;
+    const footerHeight = footerParts.length > 0 ? canvasLineHeight(footerSize, 1.0) : 0;
+    const maxBottom = Math.max(topPadding, height - bottomPadding);
+    const reservedFooter = footerHeight > 0 ? footerHeight + gap : 0;
+    const barcodeHeight = hasBarcode
+        ? labelBarcodeHeightDots(heightMm, maxBottom - topPadding - reservedFooter, dotsPerMm)
+        : 0;
+    const reservedBarcode = barcodeHeight > 0 ? barcodeHeight + gap : 0;
+    const textAreaHeight = Math.max(12, maxBottom - topPadding - reservedFooter - reservedBarcode);
+    const priceText = labelDisplayPrice(product);
+    let y = topPadding;
+
+    ctx.save();
+    clipCanvasArea(ctx, padding, topPadding, printableWidth, Math.max(1, maxBottom - topPadding));
+    if (hasSidePrice) {
+        const rightSafety = Math.max(18, Math.round(3.2 * dotsPerMm));
+        const priceFitInset = Math.max(2, Math.round(0.6 * dotsPerMm));
+        const priceWidth = design.showPrice ? Math.min(Math.round(printableWidth * 0.38), Math.max(1, Math.round(width * 0.3))) : 0;
+        const leftWidth = Math.max(1, printableWidth - priceWidth - (priceWidth ? gap : 0));
+        const leftCenterX = padding + leftWidth / 2;
+        const priceCenterX = width - padding - rightSafety - priceWidth / 2;
+        let leftY = topPadding;
+        if (design.showStore && store.name) {
+            const storeSize = fitSingleLineCanvasText(ctx, design, store.name.toUpperCase(), leftWidth, 8, smallSize, 800);
+            setCanvasFont(ctx, design, storeSize, 800);
+            drawCanvasLine(ctx, ellipsizeCanvasText(ctx, store.name.toUpperCase(), leftWidth), leftCenterX, leftY);
+            leftY += canvasLineHeight(storeSize, 1.05);
+        }
+        if (design.showName) {
+            const maxLines = heightMm >= 28 ? 2 : 1;
+            const nameMaxHeight = Math.max(10, textAreaHeight - (leftY - topPadding));
+            const fittedName = fitWrappedCanvasText(
+                ctx,
+                design,
+                product.name,
+                leftWidth,
+                maxLines,
+                9,
+                Math.min(Math.round(nameSize * 1.45), Math.floor(nameMaxHeight / Math.max(1, maxLines) / 1.02)),
+                800,
+                1.05
+            );
+            setCanvasFont(ctx, design, fittedName.fontSize, 800);
+            for (const lineTextValue of fittedName.lines) {
+                if (leftY + fittedName.lineHeight > topPadding + textAreaHeight + 2) break;
+                drawCanvasLine(ctx, lineTextValue, leftCenterX, leftY);
+                leftY += fittedName.lineHeight;
+            }
+        }
+        if (design.showPrice && priceWidth > 0) {
+            const basePriceSize = design.template === 'shelf' ? shelfPriceSize : standardPriceSize;
+            const priceSize = fitSingleLineCanvasText(
+                ctx,
+                design,
+                priceText,
+                Math.max(1, priceWidth - priceFitInset),
+                12,
+                Math.min(Math.round(basePriceSize * 1.1), Math.floor(textAreaHeight / 1.02)),
+                900
+            );
+            setCanvasFont(ctx, design, priceSize, 900);
+            drawCanvasLine(ctx, priceText, priceCenterX, topPadding);
+        }
+        y = Math.max(leftY, topPadding + Math.min(textAreaHeight, canvasLineHeight(design.showPrice ? standardPriceSize : smallSize, 1.0)));
+    } else {
+        if (design.showStore && store.name) {
+            const storeSize = fitSingleLineCanvasText(ctx, design, store.name.toUpperCase(), printableWidth, 8, smallSize, 800);
+            setCanvasFont(ctx, design, storeSize, 800);
+            drawCanvasLine(ctx, ellipsizeCanvasText(ctx, store.name.toUpperCase(), printableWidth), centerX, y);
+            y += canvasLineHeight(storeSize, 1.05);
+        }
+        const priceBaseSize = design.template === 'barcode'
+            ? Math.round(3.2 * dotsPerMm * labelPriceScale(design))
+            : standardPriceSize;
+        const priceReserve = design.showPrice ? canvasLineHeight(Math.min(priceBaseSize, Math.round(textAreaHeight * 0.45)), 1.0) : 0;
+        if (design.showName) {
+            const maxLines = heightMm >= 28 ? 2 : 1;
+            const nameMaxHeight = Math.max(10, textAreaHeight - (y - topPadding) - priceReserve - (design.showPrice ? gap : 0));
+            const fittedName = fitWrappedCanvasText(
+                ctx,
+                design,
+                product.name,
+                printableWidth,
+                maxLines,
+                9,
+                Math.min(Math.round(nameSize * 1.45), Math.floor(nameMaxHeight / Math.max(1, maxLines) / 1.02)),
+                800,
+                1.05
+            );
+            setCanvasFont(ctx, design, fittedName.fontSize, 800);
+            for (const lineTextValue of fittedName.lines) {
+                if (y + fittedName.lineHeight > topPadding + textAreaHeight + 2) break;
+                drawCanvasLine(ctx, lineTextValue, centerX, y);
+                y += fittedName.lineHeight;
+            }
+        }
+        if (design.showPrice && y < topPadding + textAreaHeight) {
+            const priceSize = fitSingleLineCanvasText(
+                ctx,
+                design,
+                priceText,
+                Math.max(1, printableWidth - 4),
+                12,
+                Math.min(Math.round(priceBaseSize * 1.08), Math.floor((topPadding + textAreaHeight - y) / 1.02)),
+                900
+            );
+            setCanvasFont(ctx, design, priceSize, 900);
+            drawCanvasLine(ctx, priceText, centerX, y);
+            y += canvasLineHeight(priceSize, 1.0);
+        }
+    }
+    ctx.restore();
+
+    if (hasBarcode && barcodeHeight > 0) {
+        const latestBarcodeTop = Math.max(topPadding, maxBottom - reservedFooter - barcodeHeight);
+        const barcodeTop = Math.min(Math.max(y + gap, topPadding), latestBarcodeTop);
+        drawLabelBarcode(ctx, barcode, padding, barcodeTop, printableWidth, barcodeHeight);
+        y = barcodeTop + barcodeHeight;
+    }
+
+    if (footerParts.length > 0) {
+        const footerY = Math.min(Math.max(y + gap, topPadding), maxBottom - footerHeight);
+        setCanvasFont(ctx, design, footerSize, 700);
+        drawCanvasLine(ctx, footerText, centerX, footerY);
+    }
+
+    return canvas;
+}
+
+function canvasToMonoRaster(canvas: HTMLCanvasElement): { bytesPerRow: number; height: number; data: number[] } {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not read label image');
+    const { width, height } = canvas;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    const bytesPerRow = Math.ceil(width / 8);
+    const raster: number[] = [];
+    for (let y = 0; y < height; y += 1) {
+        for (let byteIndex = 0; byteIndex < bytesPerRow; byteIndex += 1) {
+            let byte = 0;
+            for (let bit = 0; bit < 8; bit += 1) {
+                const x = byteIndex * 8 + bit;
+                if (x >= width) continue;
+                const offset = (y * width + x) * 4;
+                const red = data[offset];
+                const green = data[offset + 1];
+                const blue = data[offset + 2];
+                const alpha = data[offset + 3];
+                const luminance = (red * 0.299 + green * 0.587 + blue * 0.114) * (alpha / 255) + 255 * (1 - alpha / 255);
+                if (luminance < 180) byte |= 0x80 >> bit;
+            }
+            raster.push(byte);
+        }
+    }
+    return { bytesPerRow, height, data: raster };
+}
+
+function canvasToEscposRaster(canvas: HTMLCanvasElement): number[] {
+    const raster = canvasToMonoRaster(canvas);
+    const { bytesPerRow, height, data } = raster;
+    // Split into horizontal bands so a tall label fits the printer's small raster
+    // buffer. Each GS v 0 command prints contiguously below the previous one, so a
+    // single big bitmap that would otherwise be truncated mid-label prints in full.
+    const maxBandBytes = 4000;
+    const bandHeight = Math.max(1, Math.min(height, Math.floor(maxBandBytes / Math.max(1, bytesPerRow)) || 1));
+    const bytes: number[] = [];
+    for (let top = 0; top < height; top += bandHeight) {
+        const rows = Math.min(bandHeight, height - top);
+        const start = top * bytesPerRow;
+        const end = start + rows * bytesPerRow;
+        bytes.push(
+            0x1d, 0x76, 0x30, 0x00,
+            bytesPerRow & 0xff,
+            (bytesPerRow >> 8) & 0xff,
+            rows & 0xff,
+            (rows >> 8) & 0xff,
+            ...data.slice(start, end),
+        );
+    }
+    return bytes;
+}
+
+function bytesToHex(bytes: number[]): string {
+    return bytes.map((byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join('');
+}
+
+function buildEscposRasterProductLabels(
+    payload: ProductLabelPayload,
+    cutPaper: boolean,
+    gapLines: number,
+    dotsPerMm: number,
+    maxWidthDots: number
+): number[] {
+    const canvas = renderEscposLabelCanvas(payload, dotsPerMm, maxWidthDots);
+    const image = canvasToEscposRaster(canvas);
+    const bytes: number[] = [
+        0x1b, 0x40,
+        0x1d, 0x4c, 0x00, 0x00,
+        0x1b, 0x24, 0x00, 0x00,
+        0x1b, 0x61, 0x00,
+    ];
+    const copies = labelCopies(payload.quantity);
+    for (let copy = 0; copy < copies; copy += 1) {
+        bytes.push(...image);
+        if (copy < copies - 1) bytes.push(...feedLines(gapLines));
+    }
+    bytes.push(0x1b, 0x61, 0x00, ...escposCut(cutPaper));
+    return bytes;
+}
+
+function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number): number[] {
+    const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
+    const raster = canvasToMonoRaster(canvas);
+    const totalBytes = raster.data.length;
+    const lines = [
+        '^XA',
+        `^PW${canvas.width}`,
+        `^LL${canvas.height}`,
+        '^LH0,0',
+        '^LT0',
+        `^FO0,0^GFA,${totalBytes},${totalBytes},${raster.bytesPerRow},${bytesToHex(raster.data)}^FS`,
+        `^PQ${labelCopies(payload.quantity)},0,1,N`,
+        '^XZ',
+        '',
+    ];
+    return Array.from(new TextEncoder().encode(lines.join('\n')));
+}
+
+function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number): number[] {
+    const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
+    const raster = canvasToMonoRaster(canvas);
+    const widthMm = labelWidthMm(payload.design);
+    const heightMm = labelHeightMm(payload.design);
+    const prefix = [
+        `SIZE ${widthMm} mm,${heightMm} mm`,
+        `GAP ${Math.max(0, Math.min(12, gapLines))} mm,0`,
+        'DIRECTION 1',
+        'REFERENCE 0,0',
+        'OFFSET 0 mm',
+        'CLS',
+        `BITMAP 0,0,${raster.bytesPerRow},${raster.height},0,`,
+    ].join('\r\n');
+    const suffix = `\r\nPRINT ${labelCopies(payload.quantity)}\r\n`;
+    return [
+        ...Array.from(new TextEncoder().encode(prefix)),
+        ...raster.data,
+        ...Array.from(new TextEncoder().encode(suffix)),
+    ];
+}
+
+function buildRasterProductLabel(payload: ProductLabelPayload, config: LabelPrinterConfig): number[] {
+    const dotsPerMm = labelDotsPerMm(config.dpi);
+    if (config.protocol === 'zpl') return buildZplRasterProductLabel(payload, dotsPerMm);
+    if (config.protocol === 'tspl') return buildTsplRasterProductLabel(payload, config.gapLines, dotsPerMm);
+    return buildEscposRasterProductLabels(
+        payload,
+        config.cutPaper,
+        config.gapLines,
+        dotsPerMm,
+        escposPrintableWidthDots(config.paperWidth, dotsPerMm)
+    );
+}
+
 function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolean, gapLines: number): number[] {
     const { product, store, design } = payload;
     const centerOn = [0x1b, 0x61, 0x01];
@@ -663,6 +1335,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
     const boldOff = [0x1b, 0x45, 0x00];
     const normalSize = [0x1d, 0x21, 0x00];
     const barcode = labelBarcodeValue(product);
+    const hasBarcode = labelShowsBarcode(design);
     const widthMm = labelWidthMm(design);
     const heightMm = labelHeightMm(design);
     const columns = labelTextColumns(design);
@@ -681,7 +1354,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
             bytes.push(...normalSize, ...escposTextSize(design, 'normal'));
         }
         if (design.showPrice) bytes.push(...escposTextSize(design, 'price'), ...boldOn, ...line(labelText(labelPrice(product), columns), 'latin1'), ...boldOff, ...normalSize, ...escposTextSize(design, 'normal'));
-        if (barcode) {
+        if (hasBarcode && barcode) {
             bytes.push(
                 ...escposCode39(barcode, {
                     height: barcodeHeight,
@@ -702,8 +1375,9 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
 }
 
 export function buildProductLabel(payload: ProductLabelPayload, config = getLabelPrinterConfig()): number[] {
-    if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines);
-    if (config.protocol === 'zpl') return buildZplProductLabel(payload);
+    const dotsPerMm = labelDotsPerMm(config.dpi);
+    if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines, dotsPerMm);
+    if (config.protocol === 'zpl') return buildZplProductLabel(payload, dotsPerMm);
     return buildEscposProductLabels(payload, config.cutPaper, config.gapLines);
 }
 
@@ -711,15 +1385,64 @@ export async function printProductLabels(payload: ProductLabelPayload, config = 
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
     if (config.protocol === 'system') throw new Error('Choose ESC/POS, TSPL, or ZPL for direct label printing');
+    const data = typeof document !== 'undefined'
+        ? buildRasterProductLabel(payload, config)
+        : buildProductLabel(payload, config);
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
-        data: buildProductLabel(payload, config),
+        data,
         documentName: `Label ${labelText(payload.product.name, 24)}`.trim(),
     });
+}
+
+function labelTestPayload(): ProductLabelPayload {
+    return {
+        product: {
+            id: 'LABELTEST123',
+            categoryId: '',
+            taxRateId: '',
+            name: 'Label printer test',
+            sku: 'TEST-SKU',
+            barcode: '123456789012',
+            scalePlu: '',
+            price: 100,
+            costPrice: 0,
+            stockLevel: 0,
+            trackStock: false,
+            isWeighable: false,
+            showInGoods: false,
+            goodsSortOrder: 0,
+            color: '#ffffff',
+            image: '',
+            isActive: true,
+            createdAt: '',
+            updatedAt: '',
+        },
+        store: {
+            id: 'store',
+            name: 'L&Bj POS',
+            address: '',
+            phone: '',
+            email: '',
+            currency: 'GBP',
+            taxIncludedInPrice: true,
+            receiptHeader: '',
+            receiptFooter: '',
+            createdAt: '',
+        },
+        design: {
+            ...defaultLabelDesign,
+            widthMm: 50,
+            heightMm: 30,
+            showBarcode: true,
+            showBarcodeText: true,
+        },
+        quantity: 1,
+    };
 }
 
 export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
@@ -745,6 +1468,9 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
         ? [
             'SIZE 50 mm,30 mm',
             `GAP ${Math.max(0, Math.min(12, config.gapLines))} mm,0`,
+            'DIRECTION 1',
+            'REFERENCE 0,0',
+            'OFFSET 0 mm',
             'CLS',
             'TEXT 20,20,"3",0,1,1,"L&Bj POS"',
             'TEXT 20,55,"2",0,1,1,"Label printer test"',
@@ -754,6 +1480,8 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
         ].join('\r\n')
         : [
             '^XA',
+            '^LH0,0',
+            '^LT0',
             '^CF0,35',
             '^FO40,35^FDL&Bj POS^FS',
             '^CF0,25',
@@ -770,13 +1498,16 @@ export async function sendLabelPrinterTest(config = getLabelPrinterConfig()): Pr
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose Network, USB raw, Serial, or Bluetooth for direct label test printing');
     if (config.protocol === 'system') throw new Error('Choose ESC/POS, ZPL, or TSPL for direct label test printing');
+    const data = typeof document !== 'undefined'
+        ? buildRasterProductLabel(labelTestPayload(), config)
+        : buildLabelTest(config);
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
-        data: buildLabelTest(config),
+        data,
         documentName: 'L&Bj POS label test',
     });
 }

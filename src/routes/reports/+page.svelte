@@ -6,11 +6,15 @@
     import { toast } from '$lib/stores/toast';
     import { currentEmployee } from '$lib/stores/session';
     import { hasPermission } from '$lib/permissions';
+    import { getReceiptPrinterConfig, printEscposTextReport } from '$lib/printers';
     import {
         getReportSnapshot,
         getLastReportMarker,
+        getLiveLastReportMarker,
         saveReportMarker,
+        saveLiveReportMarker,
         getTillPeriodReport,
+        getLiveTillPeriodReport,
         getTillName,
         getOrCreateTillId,
         type SalesOverview,
@@ -85,6 +89,8 @@
     let closeReportCanEnd = false;
     let closeReportConfirming = false;
     let closeReportSaving = false;
+    let reportPrintBusy = false;
+    let closeReportPrintBusy = false;
 
     async function loadData() {
         const sequence = ++loadSequence;
@@ -192,12 +198,74 @@
         toast('Report exported', 'success');
     }
 
-    function printReport() {
+    function buildSalesReportText() {
+        const selectedTillName = allTills.find(till => till.id === selectedTill)?.name || 'All Tills';
+        const lines = [
+            'L&Bj POS',
+            'Sales Report',
+            `Period: ${startDate} to ${endDate}`,
+            `Till: ${selectedTillName}`,
+            ''.padEnd(32, '-'),
+            `Net sales: ${formatMoney(business.netSales)}`,
+            `Gross sales: ${formatMoney(business.grossSales)}`,
+            `Refunds: ${formatMoney(business.refunds)}`,
+            `Voids: ${formatMoney(business.voids)}`,
+            `Discounts: ${formatMoney(business.discountTotal)}`,
+            `Gross profit: ${formatMoney(business.grossProfit)}`,
+            ''.padEnd(32, '-'),
+            `Transactions: ${overview.totalTransactions}`,
+            `Refund tx: ${overview.refundTransactions}`,
+            `Void tx: ${business.voidTransactions}`,
+            `Items sold: ${overview.totalItemsSold}`,
+            ''.padEnd(32, '-'),
+            `Cash: ${formatMoney(breakdown.totalCash)}`,
+            `Card: ${formatMoney(breakdown.totalCard)}`,
+            `Loyalty: ${formatMoney(breakdown.totalLoyalty)}`,
+        ];
+        if (topProducts.length > 0) {
+            lines.push(''.padEnd(32, '-'), 'Top products');
+            for (const product of topProducts.slice(0, 8)) {
+                lines.push(`${product.qtySold} x ${product.name}`, `  ${formatMoney(product.totalRevenue)}`);
+            }
+        }
+        lines.push(''.padEnd(32, '-'), `Printed: ${new Date().toLocaleString('en-GB')}`);
+        return lines.join('\n');
+    }
+
+    async function printThermalReport(text: string, documentName: string, busyTarget: 'main' | 'close') {
+        if ((busyTarget === 'main' && reportPrintBusy) || (busyTarget === 'close' && closeReportPrintBusy)) return;
+        const config = getReceiptPrinterConfig($settingsDB);
+        if (config.connection === 'system') {
+            toast('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            return;
+        }
+        if (busyTarget === 'main') reportPrintBusy = true;
+        else closeReportPrintBusy = true;
+        try {
+            await printEscposTextReport(text, documentName, config);
+            toast('Report sent to thermal printer', 'success');
+        } catch (error) {
+            toast(`Report did not print: ${error}`, 'error');
+        } finally {
+            if (busyTarget === 'main') reportPrintBusy = false;
+            else closeReportPrintBusy = false;
+        }
+    }
+
+    async function printReport() {
         if (!reportReady) {
             toast('Wait for the current report to finish loading', 'info');
             return;
         }
-        window.print();
+        await printThermalReport(buildSalesReportText(), 'L&Bj POS sales report', 'main');
+    }
+
+    async function printCloseReport() {
+        if (!closeReportText) {
+            toast('Open a report first', 'info');
+            return;
+        }
+        await printThermalReport(closeReportText, 'L&Bj POS end-of-day report', 'close');
     }
 
     function filledDailyTrend(start: string, end: string, points: DailySalesPoint[]) {
@@ -241,12 +309,17 @@
     async function previewPeriodReport(scope: 'till' | 'system', closePeriod: boolean) {
         try {
             const markerTill = scope === 'system' ? '' : tillId;
-            const title = scope === 'system' ? 'Whole System End-of-Day Report' : `${tillName} End-of-Day Report`;
-            const lastMarker = await getLastReportMarker(markerTill);
+            const title = scope === 'system' ? 'Whole System Period Close Report' : `${tillName} Period Close Report`;
+            const strictWholeSystemClose = scope === 'system' && closePeriod;
+            const lastMarker = strictWholeSystemClose
+                ? await getLiveLastReportMarker(markerTill)
+                : await getLastReportMarker(markerTill);
             const nowStr = new Date().toISOString();
             const periodStart = lastMarker || '2000-01-01T00:00:00.000Z';
 
-            const data = await getTillPeriodReport(markerTill, periodStart, nowStr);
+            const data = strictWholeSystemClose
+                ? await getLiveTillPeriodReport(markerTill, periodStart, nowStr)
+                : await getTillPeriodReport(markerTill, periodStart, nowStr);
             const period = lastMarker
                 ? `${new Date(lastMarker).toLocaleString('en-GB')} → ${new Date(nowStr).toLocaleString('en-GB')}`
                 : `All time → ${new Date(nowStr).toLocaleString('en-GB')}`;
@@ -262,7 +335,7 @@
             showTillReport = true;
         } catch (e) {
             console.error(e);
-            toast('Failed to generate report', 'error');
+            toast(`Failed to generate report: ${e}`, 'error');
         }
     }
 
@@ -295,7 +368,8 @@
         }
         closeReportSaving = true;
         try {
-            await saveReportMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
+            const saveMarker = closeReportTillNumber ? saveReportMarker : saveLiveReportMarker;
+            await saveMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
                 employeeId: $currentEmployee?.id || '',
                 reportText: closeReportText,
                 reportTotal: tillReportData.overview.totalRevenue,
@@ -339,6 +413,8 @@
     $: currentReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
     $: reportReady = !loading && loadedReportKey === currentReportKey;
     $: reconciliationDifference = business.grossSales - business.discountTotal - business.refunds - business.netSales;
+    $: closeReportStartDay = closeReportStart ? localDateValue(new Date(closeReportStart)) : '';
+    $: closeReportIncludesPreviousDays = Boolean(closeReportStartDay && closeReportStartDay < localDateValue(new Date()));
 </script>
 
 <MgmtPage title="Sales Reports">
@@ -369,7 +445,9 @@
                 {loading ? 'Loading…' : 'Refresh'}
             </button>
             <button class="btn btn-secondary" disabled={!reportReady} on:click={exportCsv}>Export CSV</button>
-            <button class="btn btn-secondary" disabled={!reportReady} on:click={printReport}>Print</button>
+            <button class="btn btn-secondary" disabled={!reportReady || reportPrintBusy} on:click={printReport}>
+                {reportPrintBusy ? 'Printing...' : 'Print'}
+            </button>
             <div class="ml-auto flex flex-col items-end text-xs">
                 <span class="font-bold {reportSource === 'Live MariaDB' ? 'text-success' : 'text-warning'}">{reportSource}</span>
                 {#if lastRefreshed}<span class="text-text-muted">Updated {lastRefreshed}</span>{/if}
@@ -654,20 +732,20 @@
 
         <!-- Close Reports -->
         <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">End-of-Day / Z Reports</h3>
+            <h3 class="text-[1.15rem] mb-4 text-accent-primary">Period Close / Z Reports</h3>
             <div class="flex flex-wrap gap-4">
                 <button class="btn btn-primary" disabled={!tillId} on:click={runTillDayReport}>
-                    End Period: This Till
+                    Close Period: This Till
                 </button>
                 <button class="btn btn-primary" on:click={runSystemDayReport}>
-                    End Period: Whole System
+                    Close Period: Whole System
                 </button>
                 <button class="btn btn-secondary" disabled={!tillId} on:click={runTillFullReport}>
                     Preview This Till All-Time
                 </button>
             </div>
             <p class="text-text-muted text-sm mt-2">
-                End Period uses the time from the last close to now. It does not mean midnight to midnight.
+                Close Period uses the time from the last close to now. It is not automatically today's calendar sales.
                 Use the whole-system close when the shop day is finished for every till.
             </p>
         </section>
@@ -676,16 +754,24 @@
 
 <!-- Till Report Modal -->
 {#if showTillReport && tillReportData}
-    <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)]" on:click={() => showTillReport = false}>
-        <div class="w-[760px] max-w-[calc(100vw-1.5rem)] max-h-[calc(100vh-1.5rem)] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3" on:click|stopPropagation>
-            <div class="flex justify-between items-center">
-                <h3 class="text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
-                <button class="bg-transparent text-text-muted text-[1.2rem]" on:click={() => showTillReport = false}>✕</button>
+    <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)] p-2" on:click={() => showTillReport = false}>
+        <div class="w-[760px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-1rem)] overflow-y-auto rounded-md bg-bg-card border border-border-flat flex flex-col" on:click|stopPropagation>
+            <div class="sticky top-0 z-10 flex justify-between items-center gap-3 border-b border-border-flat bg-bg-card p-3 md:p-4">
+                <div class="min-w-0">
+                    <h3 class="m-0 truncate text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
+                    <div class="mt-1 text-xs text-text-muted">{tillReportPeriod}</div>
+                </div>
+                <button class="shrink-0 bg-transparent text-text-muted text-[1.2rem]" on:click={() => showTillReport = false}>✕</button>
             </div>
-            <div class="text-xs text-text-muted">{tillReportPeriod}</div>
+            <div class="flex flex-col gap-3 p-3 md:p-4">
+            {#if closeReportIncludesPreviousDays}
+                <div class="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                    This period started before today, so the total can include previous days.
+                </div>
+            {/if}
             {#if closeReportCanEnd}
                 <div class="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
-                    This is only a preview. Press <strong>End Period</strong> to close this report period and make the next report start from now.
+                    This is only a preview. Press <strong>Close Period</strong> to close this report period and make the next report start from now.
                 </div>
                 {#if !hasPermission($currentEmployee, 'end_day_close', $settingsDB)}
                     <div class="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
@@ -756,24 +842,26 @@
                         This will close the current report period for {closeReportTillNumber ? tillName : 'the whole system'}.
                         The next end report will start from this close time.
                     </p>
-                    <div class="mt-3 flex justify-end gap-3">
-                        <button class="btn btn-secondary" disabled={closeReportSaving} on:click={() => closeReportConfirming = false}>
-                            Cancel
-                        </button>
-                        <button class="btn btn-danger" disabled={closeReportSaving} on:click={confirmEndReportPeriod}>
-                            {closeReportSaving ? 'Ending...' : 'Yes, End Period'}
-                        </button>
-                    </div>
                 </div>
             {/if}
+            </div>
 
-            <div class="flex justify-end gap-3">
-                {#if closeReportCanEnd && !closeReportConfirming}
+            <div class="sticky bottom-0 z-10 flex flex-wrap justify-end gap-3 border-t border-border-flat bg-bg-card p-3 md:p-4">
+                {#if closeReportConfirming}
+                    <button class="btn btn-secondary" disabled={closeReportSaving} on:click={() => closeReportConfirming = false}>
+                        Cancel
+                    </button>
+                    <button class="btn btn-danger" disabled={closeReportSaving} on:click={confirmEndReportPeriod}>
+                        {closeReportSaving ? 'Closing...' : 'Yes, Close Period'}
+                    </button>
+                {:else if closeReportCanEnd}
                     <button class="btn btn-danger" disabled={closeReportSaving} on:click={requestEndReportPeriod}>
-                        {closeReportSaving ? 'Ending...' : 'End Period'}
+                        {closeReportSaving ? 'Closing...' : 'Close Period'}
                     </button>
                 {/if}
-                <button class="btn btn-secondary" on:click={() => window.print()}>Print</button>
+                <button class="btn btn-secondary" disabled={closeReportPrintBusy} on:click={printCloseReport}>
+                    {closeReportPrintBusy ? 'Printing...' : 'Print'}
+                </button>
                 <button class="btn btn-primary" on:click={() => showTillReport = false}>Close</button>
             </div>
         </div>

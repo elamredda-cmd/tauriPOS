@@ -2,7 +2,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { now, productsDB, settingsDB, storeDB, type Product } from '$lib/stores/db';
+    import { formatMoney, now, productsDB, settingsDB, storeDB, type Product } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { defaultLabelDesign, getLabelDesign, labelSizePresets, type LabelDesign, type LabelTemplate } from '$lib/labels';
@@ -117,7 +117,7 @@
                                 <strong class="block truncate">{product.name}</strong>
                                 <small class="block text-text-muted">{product.sku || product.barcode || product.scalePlu || ''}</small>
                             </span>
-                            <b class="shrink-0">£{(product.price / 100).toFixed(2)}</b>
+                            <b class="shrink-0">{formatMoney(product.price)}</b>
                         </button>
                     {/each}
                 </div>
@@ -154,7 +154,7 @@
                     {/each}
                 </div>
                 <div class="mt-4 grid grid-cols-2 gap-2">
-                    {#each [['showStore','Store name'],['showName','Item name'],['showPrice','Price'],['showBarcodeText','Barcode text'],['showSku','SKU'],['showPlu','PLU']] as option}
+                    {#each [['showStore','Store name'],['showName','Item name'],['showPrice','Price'],['showBarcode','Barcode'],['showBarcodeText','Barcode number'],['showSku','SKU'],['showPlu','PLU']] as option}
                         <button
                             type="button"
                             class="min-h-[54px] rounded-lg border p-3 text-left font-bold transition {design[option[0] as keyof LabelDesign] ? 'border-accent-primary bg-accent-primary/15 text-accent-primary' : 'border-border-flat bg-bg-panel hover:border-accent-primary hover:bg-bg-card-hover'}"
@@ -197,7 +197,7 @@
         <aside class="settings-section sticky top-0 self-start min-h-[520px] flex flex-col items-center justify-center gap-8 overflow-auto max-[950px]:static max-[950px]:min-h-[360px]">
             <div class="flex w-full items-center justify-between gap-4">
                 <h3 class="settings-section-title !mb-0">Live Preview</h3>
-                <span class="text-sm text-text-muted">{design.widthMm} × {design.heightMm} mm</span>
+                <span class="text-sm text-text-muted">{design.widthMm} x {design.heightMm} mm</span>
             </div>
             {#if selectedProduct}<ProductLabel product={selectedProduct as Product} store={$storeDB} {design} preview />{:else}<p>Select an item to preview its label.</p>{/if}
         </aside>
