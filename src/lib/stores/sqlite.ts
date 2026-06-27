@@ -694,8 +694,8 @@ async function runDataMigrations() {
         const exists = (await d.select(`SELECT 1 FROM settings WHERE key = ?`, [key])) as any[];
         if (exists.length === 0) {
             const defaults: Record<string, string> = {
-                pos_cart_layout: JSON.stringify(['goods', 'recent_trans', 'change_price', 'hold']),
-                pos_toolbar_layout: JSON.stringify(['scale', 'label_print', 'discount'])
+                pos_cart_layout: JSON.stringify(['goods', 'last_receipt', 'change_price', 'hold']),
+                pos_toolbar_layout: JSON.stringify(['scale', 'recent_trans', 'label_print', 'discount'])
             };
             await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`,
                 [key, defaults[key], new Date().toISOString()]);
@@ -741,7 +741,7 @@ async function runDataMigrations() {
                 ]);
             } catch {
                 await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_cart_layout'`, [
-                    JSON.stringify(['goods', 'recent_trans', 'change_price', 'hold']),
+                    JSON.stringify(['goods', 'last_receipt', 'change_price', 'hold']),
                     new Date().toISOString(),
                 ]);
             }
@@ -750,6 +750,56 @@ async function runDataMigrations() {
             'migration_cart_label_print_to_hold', 'done', new Date().toISOString()
         ]);
         console.log('Migration: replaced cart Label Print with Hold');
+    }
+
+    const lastReceiptButtonMigration = (await d.select(`SELECT 1 FROM settings WHERE key = 'migration_recent_to_last_receipt_button'`)) as any[];
+    if (lastReceiptButtonMigration.length === 0) {
+        const cartRows = (await d.select(`SELECT value FROM settings WHERE key = 'pos_cart_layout' LIMIT 1`)) as any[];
+        try {
+            const layout = JSON.parse(cartRows[0]?.value || '[]') as string[];
+            const updated = layout
+                .map((button) => button === 'recent_trans' ? 'last_receipt' : button)
+                .map((button) => button === 'drawer' || button === 'label_print' ? 'hold' : button)
+                .filter((button) => ['goods', 'last_receipt', 'change_price', 'hold', 'scale', 'discount'].includes(button));
+            if (!updated.includes('last_receipt')) {
+                const goodsIndex = updated.indexOf('goods');
+                updated.splice(goodsIndex >= 0 ? goodsIndex + 1 : 0, 0, 'last_receipt');
+            }
+            await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_cart_layout'`, [
+                JSON.stringify([...new Set(updated)]),
+                new Date().toISOString(),
+            ]);
+        } catch {
+            await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_cart_layout'`, [
+                JSON.stringify(['goods', 'last_receipt', 'change_price', 'hold']),
+                new Date().toISOString(),
+            ]);
+        }
+
+        const toolbarRows = (await d.select(`SELECT value FROM settings WHERE key = 'pos_toolbar_layout' LIMIT 1`)) as any[];
+        try {
+            const layout = JSON.parse(toolbarRows[0]?.value || '[]') as string[];
+            const cleaned = layout
+                .map((button) => button === 'drawer' ? 'label_print' : button)
+                .filter((button) => ['scale', 'recent_trans', 'label_print', 'discount', 'goods', 'change_price'].includes(button))
+                .filter((button) => button !== 'recent_trans');
+            const scaleIndex = cleaned.indexOf('scale');
+            cleaned.splice(scaleIndex >= 0 ? scaleIndex + 1 : 0, 0, 'recent_trans');
+            await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_toolbar_layout'`, [
+                JSON.stringify([...new Set(cleaned)]),
+                new Date().toISOString(),
+            ]);
+        } catch {
+            await d.execute(`UPDATE settings SET value = ?, updatedAt = ? WHERE key = 'pos_toolbar_layout'`, [
+                JSON.stringify(['scale', 'recent_trans', 'label_print', 'discount']),
+                new Date().toISOString(),
+            ]);
+        }
+
+        await d.execute(`INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)`, [
+            'migration_recent_to_last_receipt_button', 'done', new Date().toISOString()
+        ]);
+        console.log('Migration: moved Recent Trans to toolbar and added Last Receipt');
     }
 }
 

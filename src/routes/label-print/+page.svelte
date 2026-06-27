@@ -76,6 +76,7 @@
                 }, labelPrinter);
             }
             toast(`${totalLabels} label${totalLabels === 1 ? '' : 's'} sent to printer`, 'success');
+            selected = new Map();
         } catch (error) {
             toast(`Labels did not print: ${error}`, 'error');
         } finally {

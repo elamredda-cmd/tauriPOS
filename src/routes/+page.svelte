@@ -31,7 +31,9 @@
         uuid,
         settingsDB,
         type Customer,
+        type Discount,
         type Employee,
+        type Product,
     } from "$lib/stores/db";
     import { toast } from "$lib/stores/toast";
     import {
@@ -69,7 +71,8 @@
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
-    import { getReceiptPrinterConfig, printEscposReceipt, sendEscposReceipt } from "$lib/printers";
+    import { getLabelPrinterConfig, getReceiptPrinterConfig, printEscposReceipt, printProductLabels, sendEscposReceipt } from "$lib/printers";
+    import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
 
@@ -166,6 +169,7 @@
     let quickAddPrice = "0";
     let quickAddCategoryId = "";
     let quickAddTaxRateId = "";
+    let quickAddBusy = false;
     let showClearConfirm = false;
     let showReversalConfirm = false;
     let showPartialRefundPad = false;
@@ -246,18 +250,19 @@
     let trolleyMessageType: "info" | "error" | "success" = "info";
     let trolleyMessageTimeout: any;
 
-    const cartLayoutDefault = ['goods', 'recent_trans', 'change_price', 'hold'];
-    const toolbarLayoutDefault = ['scale', 'label_print', 'discount'];
-    const allowedCartLayoutKeys = new Set(['goods', 'recent_trans', 'change_price', 'hold', 'scale', 'discount']);
+    const cartLayoutDefault = ['goods', 'last_receipt', 'change_price', 'hold'];
+    const toolbarLayoutDefault = ['scale', 'recent_trans', 'label_print', 'discount'];
+    const allowedCartLayoutKeys = new Set(['goods', 'last_receipt', 'change_price', 'hold', 'scale', 'discount']);
     const allowedToolbarLayoutKeys = new Set(['scale', 'label_print', 'discount', 'goods', 'recent_trans', 'change_price']);
 
-    function parsePosLayout(value: string | undefined, fallback: string[], allowedKeys: Set<string>) {
+    function parsePosLayout(value: string | undefined, fallback: string[], allowedKeys: Set<string>, area: "cart" | "toolbar") {
         try {
             const parsed = JSON.parse(value || "");
             if (!Array.isArray(parsed)) return fallback;
             const valid = parsed
                 .map((key) => key === "drawer" ? "label_print" : key)
-                .map((key) => fallback === cartLayoutDefault && key === "label_print" ? "hold" : key)
+                .map((key) => area === "cart" && key === "recent_trans" ? "last_receipt" : key)
+                .map((key) => area === "cart" && key === "label_print" ? "hold" : key)
                 .filter((key): key is string => typeof key === "string" && allowedKeys.has(key));
             return valid.length > 0 ? [...new Set(valid)] : fallback;
         } catch {
@@ -265,8 +270,19 @@
         }
     }
 
-    $: cartLayout = parsePosLayout($settingsDB.find(s => s.key === 'pos_cart_layout')?.value, cartLayoutDefault, allowedCartLayoutKeys);
-    $: toolbarLayout = parsePosLayout($settingsDB.find(s => s.key === 'pos_toolbar_layout')?.value, toolbarLayoutDefault, allowedToolbarLayoutKeys);
+    function ensureRecentNextToScale(layout: string[]) {
+        const withoutRecent = layout.filter((key) => key !== "recent_trans");
+        const scaleIndex = withoutRecent.indexOf("scale");
+        if (scaleIndex === -1) return ["recent_trans", ...withoutRecent];
+        return [
+            ...withoutRecent.slice(0, scaleIndex + 1),
+            "recent_trans",
+            ...withoutRecent.slice(scaleIndex + 1),
+        ];
+    }
+
+    $: cartLayout = parsePosLayout($settingsDB.find(s => s.key === 'pos_cart_layout')?.value, cartLayoutDefault, allowedCartLayoutKeys, "cart");
+    $: toolbarLayout = ensureRecentNextToScale(parsePosLayout($settingsDB.find(s => s.key === 'pos_toolbar_layout')?.value, toolbarLayoutDefault, allowedToolbarLayoutKeys, "toolbar"));
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
     $: trainingModeEnabled = ($settingsDB.find(s => s.key === 'training_mode_enabled')?.value ?? 'false') === 'true';
     $: scaleTilePages = (() => {
@@ -483,6 +499,7 @@
         cart,
     );
     $: promoSavings = cartEval.totalSavings;
+    $: selectedPromotionNotice = getCartPromotionNotice(cartEval.lines[selectedCartIndex]);
     $: if (cart.length === 0) selectedManualDiscountId = "";
     let taxTotal = 0;
     let total = 0;
@@ -541,6 +558,69 @@
             };
         });
         return { lines, totalSavings: lines.reduce((sum, line) => sum + line.savings, 0) };
+    }
+
+    type CartPromoNotice = {
+        kind: "applied" | "eligible";
+        label: string;
+        detail: string;
+        title: string;
+    };
+
+    function promoNameSummary(names: string[]) {
+        if (names.length === 0) return "Promotion";
+        return names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+    }
+
+    function discountDealText(discount: Discount | undefined) {
+        if (!discount) return "";
+        if (discount.kind === "bundle_fixed_price" && discount.bundleQuantity > 1 && discount.bundlePrice > 0) {
+            return `Buy ${discount.bundleQuantity} for ${formatMoney(discount.bundlePrice)}`;
+        }
+        if (discount.kind === "bogo_fixed_price" && discount.minQuantity >= 1 && discount.secondPrice >= 0) {
+            const setSize = discount.minQuantity + 1;
+            return `Buy ${setSize}: ${setSize === 2 ? "2nd" : "last"} ${formatMoney(discount.secondPrice)}`;
+        }
+        if (discount.kind === "temporary_item") {
+            return discount.type === "percentage"
+                ? `${discount.value}% off`
+                : `Offer price ${formatMoney(discount.value)}`;
+        }
+        return "";
+    }
+
+    function eligiblePromotionDetail(line: CartEvaluation["lines"][number]) {
+        const deals = line.eligibleFor
+            .map((promo) => discountDealText($discountsDB.find((discount) => discount.id === promo.discountId)))
+            .filter(Boolean);
+        if (deals.length > 0) return deals.length === 1 ? deals[0] : `${deals[0]} +${deals.length - 1} more`;
+        const names = line.eligibleFor.map((promo) => promo.discountName);
+        return `${promoNameSummary(names)} available`;
+    }
+
+    function getCartPromotionNotice(line: CartEvaluation["lines"][number] | undefined): CartPromoNotice | null {
+        if (!line) return null;
+        if (line.applied.length > 0) {
+            const names = line.applied.map((promo) => promo.discountName);
+            const savings = line.applied.reduce((sum, promo) => sum + promo.savings, 0);
+            const nameText = promoNameSummary(names);
+            return {
+                kind: "applied",
+                label: "Promo",
+                detail: `${nameText} applied - ${formatMoney(savings)} saved`,
+                title: line.applied.map((promo) => `${promo.discountName}: ${formatMoney(promo.savings)} saved`).join(", "),
+            };
+        }
+        if (line.eligibleFor.length > 0) {
+            const names = line.eligibleFor.map((promo) => promo.discountName);
+            return {
+                kind: "eligible",
+                label: "Offer",
+                detail: eligiblePromotionDetail(line),
+                title: line.eligibleFor.map((promo) => promo.discountName).join(", "),
+            };
+        }
+        return null;
     }
 
     function openDiscounts() {
@@ -1084,6 +1164,7 @@
         quickAddName = "";
         quickAddSku = "";
         quickAddPrice = "0";
+        quickAddBusy = false;
         quickAddCategoryId =
             $activeCategories.length > 0 ? $activeCategories[0].id : "";
         quickAddTaxRateId =
@@ -1102,7 +1183,8 @@
         }
     }
 
-    async function saveQuickProduct() {
+    async function saveQuickProduct(printLabel = false) {
+        if (quickAddBusy) return;
         if (!quickAddName.trim()) {
             toast("Item Name is required", "error");
             return;
@@ -1117,7 +1199,7 @@
             return;
         }
 
-        const newProduct = {
+        const newProduct: Product = {
             id: uuid(),
             categoryId: quickAddCategoryId,
             taxRateId: quickAddTaxRateId || "tax-standard-vat",
@@ -1139,14 +1221,32 @@
             updatedAt: now(),
         };
 
+        quickAddBusy = true;
         try {
             await addProduct(newProduct);
             productsDB.update((ps) => [...ps, newProduct]);
             addToCart(newProduct);
             showQuickAddModal = false;
-            toast("Product added and added to cart", "success");
+            if (printLabel) {
+                try {
+                    const labelPrinter = getLabelPrinterConfig($settingsDB);
+                    await printProductLabels({
+                        product: newProduct,
+                        store: $storeDB,
+                        design: getLabelDesign($settingsDB),
+                        quantity: 1,
+                    }, labelPrinter);
+                    toast("Product added and label sent to printer", "success");
+                } catch (printError) {
+                    toast(`Product added, but label did not print: ${String(printError).replace(/^Error:\s*/, "")}`, "error");
+                }
+            } else {
+                toast("Product added and added to cart", "success");
+            }
         } catch (error) {
             toast(String(error).replace(/^Error:\s*/, ""), "error");
+        } finally {
+            quickAddBusy = false;
         }
     }
     function handleSearchKeydown(e: KeyboardEvent) {
@@ -1488,8 +1588,8 @@
 
     let showRecentTransactions = false;
     let selectedRecentOrderId: string | null = null;
-    let recentTransactionsPage = 0;
-    const RECENT_TRANSACTIONS_PAGE_SIZE = 25;
+    let lastReceiptPrinting = false;
+    const RECENT_RECEIPT_LIMIT = 10;
     $: scannerOverlayOpen =
         showNumpad ||
         showChangePricePad ||
@@ -1542,12 +1642,10 @@
                 new Date(b.completedAt).getTime() -
                 new Date(a.completedAt).getTime(),
         );
-    $: recentTransactionsPageCount = Math.max(1, Math.ceil(allRecentOrders.length / RECENT_TRANSACTIONS_PAGE_SIZE));
-    $: if (recentTransactionsPage >= recentTransactionsPageCount) recentTransactionsPage = recentTransactionsPageCount - 1;
-    $: recentOrders = allRecentOrders.slice(
-        recentTransactionsPage * RECENT_TRANSACTIONS_PAGE_SIZE,
-        (recentTransactionsPage + 1) * RECENT_TRANSACTIONS_PAGE_SIZE,
-    );
+    $: latestTillReceiptOrder = tillId
+        ? allRecentOrders.find((order) => order.tillNumber === tillId) || null
+        : null;
+    $: recentOrders = allRecentOrders.slice(0, RECENT_RECEIPT_LIMIT);
     $: if (
         showRecentTransactions &&
         selectedRecentOrderId &&
@@ -1557,7 +1655,6 @@
     }
 
     async function openRecentTransactions() {
-        recentTransactionsPage = 0;
         selectedRecentOrderId =
             allRecentOrders.length > 0 ? allRecentOrders[0].id : null;
         showRecentTransactions = true;
@@ -1568,13 +1665,7 @@
         }
     }
 
-    async function printReceipt() {
-        if (!selectedRecentOrderId || !recentOrders.some((order) => order.id === selectedRecentOrderId)) {
-            toast("Select a receipt before printing", "error");
-            return;
-        }
-        const selectedOrder = recentOrders.find((order) => order.id === selectedRecentOrderId);
-        if (!selectedOrder) return;
+    async function printStoredReceipt(selectedOrder: any, successMessage = "Receipt sent to printer") {
         if (receiptPrinterConfig.connection === "system") {
             toast("Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first", "error");
             return;
@@ -1584,7 +1675,7 @@
                 store: $storeDB,
                 order: selectedOrder,
                 lines: $orderLinesDB
-                    .filter((line) => line.orderId === selectedRecentOrderId)
+                    .filter((line) => line.orderId === selectedOrder.id)
                     .map((line) => ({
                         ...line,
                         sku: productById.get(line.productId)?.sku || "",
@@ -1593,9 +1684,37 @@
                 tillName: registerById.get(selectedOrder.tillNumber)?.name || tillName,
                 design: receiptDesign,
             }, receiptPrinterConfig);
-            toast("Receipt sent to printer", "success");
+            toast(successMessage, "success");
         } catch (error) {
             toast(`Receipt did not print: ${error}`, "error");
+        }
+    }
+
+    async function printReceipt() {
+        if (!selectedRecentOrderId || !recentOrders.some((order) => order.id === selectedRecentOrderId)) {
+            toast("Select a receipt before printing", "error");
+            return;
+        }
+        const selectedOrder = recentOrders.find((order) => order.id === selectedRecentOrderId);
+        if (!selectedOrder) return;
+        await printStoredReceipt(selectedOrder);
+    }
+
+    async function printLastTillReceipt() {
+        if (lastReceiptPrinting) return;
+        if (!tillId) {
+            toast("This till is still loading. Try again in a moment.", "error");
+            return;
+        }
+        if (!latestTillReceiptOrder) {
+            toast("No receipt found for this till", "error");
+            return;
+        }
+        lastReceiptPrinting = true;
+        try {
+            await printStoredReceipt(latestTillReceiptOrder, "Last receipt sent to printer");
+        } finally {
+            lastReceiptPrinting = false;
         }
     }
 
@@ -2843,9 +2962,13 @@
             {/if}
             {#each cart as item, i}
                 {@const scaleDisplay = getScaleSaleDisplay(item.note, item.quantity, item.price, item.originalPrice)}
+                {@const promoNotice = getCartPromotionNotice(cartEval.lines[i])}
+                {@const lineSavings = cartEval.lines[i]?.savings || 0}
+                {@const lineGross = item.price * item.quantity}
+                {@const lineNet = Math.max(0, lineGross - lineSavings)}
                 <div
                     bind:this={cartItemEls[i]}
-                    class="cart-line flex items-center gap-1.5 p-1 md:p-1.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'}"
+                    class="cart-line flex items-center gap-1.5 p-1 md:p-1.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'} {promoNotice?.kind === 'applied' ? 'cart-line-promo-applied' : promoNotice?.kind === 'eligible' ? 'cart-line-promo-eligible' : ''}"
                     on:click={() => (selectedCartIndex = i)}
                 >
                     <div
@@ -2854,12 +2977,17 @@
                         {scaleDisplay.label}
                     </div>
                     <div class="flex-1 min-w-0">
-                        <h4
-                            class="m-0 text-[12px] md:text-[13px] font-black text-text-main truncate leading-tight"
-                            title={item.name}
-                        >
-                            {item.name}
-                        </h4>
+                        <div class="cart-line-title">
+                            <h4
+                                class="m-0 text-[12px] md:text-[13px] font-black text-text-main truncate leading-tight"
+                                title={item.name}
+                            >
+                                {item.name}
+                            </h4>
+                            {#if promoNotice}
+                                <span class="cart-promo-chip cart-promo-chip-{promoNotice.kind}" title={promoNotice.title}>{promoNotice.label}</span>
+                            {/if}
+                        </div>
                         {#if item.quantityLocked}
                             <span class="text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-warning">Scale label · fixed quantity</span>
                         {/if}
@@ -2869,37 +2997,23 @@
                                 >{item.note}</span
                             >
                         {/if}
-                        {#if cartEval.lines[i]?.applied?.length}
-                            {#each cartEval.lines[i].applied as ap}
-                                <div
-                                    class="cart-promo-badge cart-promo-badge-applied"
-                                    title={`${ap.discountName} -${formatMoney(ap.savings)}`}
-                                >
-                                    <span class="cart-promo-dot"></span>
-                                    <span class="truncate">{ap.discountName}</span>
-                                    <strong>−{formatMoney(ap.savings)}</strong>
-                                </div>
-                            {/each}
-                        {:else if cartEval.lines[i]?.eligibleFor?.length}
-                            <div
-                                class="cart-promo-badge cart-promo-badge-eligible"
-                                title={cartEval.lines[i].eligibleFor.map((el) => el.discountName).join(", ")}
-                            >
-                                <span class="cart-promo-dot"></span>
-                                <span class="truncate">Eligible: {cartEval.lines[i].eligibleFor[0].discountName}</span>
-                                {#if cartEval.lines[i].eligibleFor.length > 1}
-                                    <strong>+{cartEval.lines[i].eligibleFor.length - 1}</strong>
-                                {/if}
+                    </div>
+                    <div class="cart-line-price w-[62px] md:w-[74px] text-right shrink-0">
+                        {#if lineSavings > 0}
+                            <div class="cart-price-original">
+                                {formatMoney(lineGross)}
+                            </div>
+                            <div class="cart-price-discounted">
+                                {formatMoney(lineNet)}
+                            </div>
+                        {:else}
+                            <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
+                                {formatMoney(item.price)}
+                            </div>
+                            <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
+                                {formatMoney(lineGross)}
                             </div>
                         {/if}
-                    </div>
-                    <div class="w-[62px] md:w-[74px] text-right shrink-0">
-                        <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
-                            {formatMoney(item.price)}
-                        </div>
-                        <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
-                            {formatMoney(item.price * item.quantity)}
-                        </div>
                     </div>
                     <button
                         class="w-6 h-6 flex items-center justify-center text-text-muted hover:text-danger opacity-60 group-hover:opacity-100 transition-all shrink-0"
@@ -3018,21 +3132,30 @@
 
         <!-- Total Section -->
         <div class="pos-total-section px-2 md:px-4 py-1 md:py-2 shrink-0">
-            {#if promoSavings > 0}
-                <div
-                    class="flex justify-between items-center text-sm font-bold text-success mb-1"
-                >
-                    <span>Promotions</span>
-                    <span>−{formatMoney(promoSavings)}</span>
-                </div>
-            {/if}
             <div
-                class="flex justify-between items-center py-3 border-y border-border-flat my-1"
+                class="pos-total-row flex justify-between items-center py-3 border-y border-border-flat my-1"
             >
-                <span
-                    class="text-lg md:text-xl font-bold text-text-muted uppercase tracking-wider"
-                    >Total</span
-                >
+                <div class="flex flex-col gap-0.5 min-w-0">
+                    <span
+                        class="text-lg md:text-xl font-bold text-text-muted uppercase tracking-wider"
+                        >Total</span
+                    >
+                    {#if promoSavings > 0}
+                        <span
+                            class="pos-promo-summary {selectedPromotionNotice ? `pos-promo-summary-${selectedPromotionNotice.kind}` : 'pos-promo-summary-applied'}"
+                            title={selectedPromotionNotice?.title || `Promotions saved ${formatMoney(promoSavings)}`}
+                        >
+                            {selectedPromotionNotice?.detail || `Promotions -${formatMoney(promoSavings)}`}
+                        </span>
+                    {:else if selectedPromotionNotice}
+                        <span
+                            class="pos-promo-summary pos-promo-summary-{selectedPromotionNotice.kind}"
+                            title={selectedPromotionNotice.title}
+                        >
+                            {selectedPromotionNotice.detail}
+                        </span>
+                    {/if}
+                </div>
                 <div class="flex flex-col items-end">
                     <span
                         class="text-2xl md:text-3xl lg:text-4xl font-black text-accent-primary tracking-tight"
@@ -3059,10 +3182,11 @@
                         class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         on:click={openGoodsModal}>GOODS</button
                     >
-                {:else if btn === 'recent_trans'}
+                {:else if btn === 'last_receipt'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors"
-                        on:click={openRecentTransactions}>RECENT<br/>TRANS</button
+                        class="h-full bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={lastReceiptPrinting || !latestTillReceiptOrder}
+                        on:click={printLastTillReceipt}>{lastReceiptPrinting ? 'PRINTING' : 'LAST'}<br/>{lastReceiptPrinting ? '...' : 'RECEIPT'}</button
                     >
                 {:else if btn === 'change_price'}
                     <button
@@ -3406,7 +3530,7 @@
 {#if showPaymentModal}
     <div class="modal-overlay" on:click={closePayment}>
         <div
-            class="payment-modal w-[940px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
+            class="payment-modal w-[1040px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
             on:click|stopPropagation
         >
             <div
@@ -3485,7 +3609,7 @@
 
                     <div class="payment-methods flex gap-2">
                         <button
-                            class="flat-card flex-1 p-3 text-base md:text-lg font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-2.5 text-sm md:text-base font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'cash'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -3493,7 +3617,7 @@
                             >Cash</button
                         >
                         <button
-                            class="flat-card flex-1 p-3 text-base md:text-lg font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
+                            class="flat-card flex-1 p-2.5 text-sm md:text-base font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
                             'card'
                                 ? '!bg-accent-primary !text-white !border-accent-primary'
                                 : ''}"
@@ -3501,6 +3625,54 @@
                             >Card</button
                         >
                     </div>
+
+                    {#if paymentMethod === "cash"}
+                        <div class="payment-quick-grid grid grid-cols-2 gap-2">
+                            <button
+                                class="payment-quick-button payment-quick-full flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={isCompletingSale}
+                                on:click={() => setAmountAndComplete(paymentDue)}
+                            >
+                                <div class="text-sm font-black">Pay Full</div>
+                                <div class="text-xs text-text-muted">(Exact)</div>
+                            </button>
+                            {#if nextPoundAmount !== null}
+                                <button
+                                    class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success disabled:opacity-50 disabled:cursor-not-allowed"
+                                    disabled={isCompletingSale}
+                                    on:click={() =>
+                                        setAmountAndComplete(nextPoundAmount!)}
+                                >
+                                    <div class="text-sm font-black text-success">
+                                        {formatMoney(nextPoundAmount)}
+                                    </div>
+                                    <div class="text-[0.7rem] text-text-muted">
+                                        Chg: {formatMoney(nextPoundAmount - paymentDue)}
+                                    </div>
+                                </button>
+                            {/if}
+                            {#each fixedQuickAmounts as amt}
+                                <button
+                                    class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                    disabled={isCompletingSale}
+                                    on:click={() => addQuickAmount(amt)}
+                                >
+                                    <div class="text-sm font-black">
+                                        + {formatMoney(amt)}
+                                    </div>
+                                </button>
+                            {/each}
+                        </div>
+                    {:else}
+                        <div class="payment-card-note min-h-[52px] text-xs text-text-muted leading-snug rounded-sm bg-bg-panel border border-border-flat p-2">
+                            {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
+                                <p>Cash part locked: {formatMoney(paymentInputAmount)}. Card will take {formatMoney(paymentDue - paymentInputAmount)}.</p>
+                                <button class="mt-1 underline text-accent-primary font-bold" on:click={() => selectPaymentMethod("cash")}>Edit cash part</button>
+                            {:else}
+                                <p>Full card payment. For split payment, enter the cash amount on Cash first, then choose Card.</p>
+                            {/if}
+                        </div>
+                    {/if}
 
                     <div class="payment-result-actions flex flex-col gap-2 mt-auto">
                         {#if paymentMethod === "cash"}
@@ -3559,14 +3731,14 @@
                 </div>
 
                 <div
-                    class="payment-pad w-full md:w-[320px] flex flex-col bg-bg-panel p-2.5 md:p-3 rounded-md"
+                    class="payment-pad w-full md:w-full flex flex-col bg-bg-panel p-2.5 md:p-3 rounded-md"
                 >
                     <div class="flex gap-2 mb-2">
-                        <div class="np-display payment-display flex-1 !h-11 md:!h-12 !text-xl md:!text-2xl">
+                        <div class="np-display payment-display flex-1 !h-14 md:!h-16 !text-2xl md:!text-[2rem]">
                             {formatMoney(paymentInputAmount)}
                         </div>
                         <button
-                            class="np-btn np-clear w-[48px] md:w-[52px] !h-11 md:!h-12"
+                            class="np-btn np-clear w-[56px] md:w-[64px] !h-14 md:!h-16"
                             disabled={isCompletingSale}
                             on:click={clearPaymentInput}>C</button
                         >
@@ -3574,7 +3746,7 @@
                     <div class="np-grid payment-np-grid {paymentMethod === 'card' || isCompletingSale ? 'opacity-35 pointer-events-none' : ''}">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                             <button
-                                class="np-btn payment-np-button !h-10 md:!h-[48px] !text-lg md:!text-xl {key === '⌫'
+                                class="np-btn payment-np-button !h-14 md:!h-[68px] !text-xl md:!text-2xl {key === '⌫'
                                     ? '!text-warning'
                                     : ''}"
                                 disabled={isCompletingSale}
@@ -3583,55 +3755,6 @@
                                 {key}
                             </button>
                         {/each}
-                    </div>
-                    <div
-                        class="payment-quick-grid grid grid-cols-3 gap-2 mt-2 {paymentMethod ===
-                        'cash'
-                            ? 'visible'
-                            : 'invisible'}"
-                    >
-                        <button
-                            class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                            disabled={isCompletingSale}
-                            on:click={() => setAmountAndComplete(paymentDue)}
-                        >
-                            <div class="text-sm font-black">Pay Full</div>
-                            <div class="text-xs text-text-muted">(Exact)</div>
-                        </button>
-                        {#if nextPoundAmount !== null}
-                            <button
-                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success disabled:opacity-50 disabled:cursor-not-allowed"
-                                disabled={isCompletingSale}
-                                on:click={() =>
-                                    setAmountAndComplete(nextPoundAmount!)}
-                            >
-                                <div class="text-sm font-black text-success">
-                                    {formatMoney(nextPoundAmount)}
-                                </div>
-                                <div class="text-[0.7rem] text-text-muted">
-                                    Chg: {formatMoney(nextPoundAmount - paymentDue)}
-                                </div>
-                            </button>
-                        {/if}
-                        {#each fixedQuickAmounts as amt}
-                            <button
-                                class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                                disabled={isCompletingSale}
-                                on:click={() => addQuickAmount(amt)}
-                            >
-                                <div class="text-sm font-black">
-                                    + {formatMoney(amt)}
-                                </div>
-                            </button>
-                        {/each}
-                    </div>
-                    <div class="payment-card-note mt-2 min-h-[42px] text-xs text-text-muted leading-snug {paymentMethod === 'card' ? '' : 'invisible'}">
-                        {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
-                            <p>Cash part locked: {formatMoney(paymentInputAmount)}. Card will take {formatMoney(paymentDue - paymentInputAmount)}.</p>
-                            <button class="mt-1 underline text-accent-primary font-bold" on:click={() => selectPaymentMethod("cash")}>Edit cash part</button>
-                        {:else}
-                            <p>Full card payment. For split payment, enter the cash amount on Cash first, then choose Card.</p>
-                        {/if}
                     </div>
                 </div>
             </div>
@@ -3772,31 +3895,8 @@
                     {/each}
                     {#if recentOrders.length === 0}
                         <p class="text-center text-text-muted p-5">
-                            No recent transactions
+                            No recent receipts
                         </p>
-                    {/if}
-                    {#if allRecentOrders.length > RECENT_TRANSACTIONS_PAGE_SIZE}
-                        <div class="flex items-center justify-between gap-2 pt-2">
-                            <button
-                                class="btn btn-secondary"
-                                disabled={recentTransactionsPage === 0}
-                                on:click={() => {
-                                    recentTransactionsPage--;
-                                    selectedRecentOrderId = null;
-                                }}>Newer</button
-                            >
-                            <span class="text-sm text-text-muted">
-                                Page {recentTransactionsPage + 1} of {recentTransactionsPageCount}
-                            </span>
-                            <button
-                                class="btn btn-secondary"
-                                disabled={recentTransactionsPage >= recentTransactionsPageCount - 1}
-                                on:click={() => {
-                                    recentTransactionsPage++;
-                                    selectedRecentOrderId = null;
-                                }}>Older</button
-                            >
-                        </div>
                     {/if}
                 </div>
 
@@ -4004,12 +4104,22 @@
                 </div>
             </div>
 
-            <button
-                class="btn btn-success w-full h-16 text-xl"
-                on:click={saveQuickProduct}
-            >
-                Save & Add to Cart
-            </button>
+            <div class="grid grid-cols-1 min-[700px]:grid-cols-2 gap-3">
+                <button
+                    class="btn btn-success h-16 text-lg"
+                    disabled={quickAddBusy}
+                    on:click={() => saveQuickProduct(false)}
+                >
+                    {quickAddBusy ? "Saving..." : "Save & Add to Cart"}
+                </button>
+                <button
+                    class="btn btn-primary h-16 text-lg"
+                    disabled={quickAddBusy}
+                    on:click={() => saveQuickProduct(true)}
+                >
+                    {quickAddBusy ? "Saving..." : "Save, Add & Print Label"}
+                </button>
+            </div>
         </div>
     </div>
 {/if}

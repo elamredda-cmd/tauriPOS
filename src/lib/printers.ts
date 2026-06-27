@@ -641,7 +641,7 @@ function tsplBarcodeWidth(widthDots: number, barcode: string): { narrow: number;
     return { narrow, wide: Math.max(narrow, narrow * 2) };
 }
 
-function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number): number[] {
+function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number, cutPaper = false): number[] {
     const { product, store, design } = payload;
     const widthMm = labelWidthMm(design);
     const heightMm = labelHeightMm(design);
@@ -650,6 +650,7 @@ function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number): 
     const margin = labelMarginDots(width);
     let y = 10;
     const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0', '^LT0'];
+    if (cutPaper) lines.push('^MMC');
     if (design.showStore && store.name) {
         lines.push(`^FO${margin},${y}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(store.name)}^FS`);
         y += Math.round(24 * labelScale(design));
@@ -686,7 +687,7 @@ function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number): 
     return Array.from(new TextEncoder().encode(lines.join('\n')));
 }
 
-function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number): number[] {
+function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number, cutPaper = false): number[] {
     const { product, store, design } = payload;
     const widthMm = labelWidthMm(design);
     const heightMm = labelHeightMm(design);
@@ -701,6 +702,7 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
         'DIRECTION 1',
         'REFERENCE 0,0',
         'OFFSET 0 mm',
+        ...(cutPaper ? ['SET CUTTER ON'] : []),
         'CLS',
     ];
     if (design.showStore && store.name) {
@@ -1274,7 +1276,7 @@ function buildEscposRasterProductLabels(
     return bytes;
 }
 
-function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number): number[] {
+function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number, cutPaper = false): number[] {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
     const raster = canvasToMonoRaster(canvas);
     const totalBytes = raster.data.length;
@@ -1284,6 +1286,7 @@ function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: num
         `^LL${canvas.height}`,
         '^LH0,0',
         '^LT0',
+        ...(cutPaper ? ['^MMC'] : []),
         `^FO0,0^GFA,${totalBytes},${totalBytes},${raster.bytesPerRow},${bytesToHex(raster.data)}^FS`,
         `^PQ${labelCopies(payload.quantity)},0,1,N`,
         '^XZ',
@@ -1292,7 +1295,7 @@ function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: num
     return Array.from(new TextEncoder().encode(lines.join('\n')));
 }
 
-function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number): number[] {
+function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number, cutPaper = false): number[] {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
     const raster = canvasToMonoRaster(canvas);
     const widthMm = labelWidthMm(payload.design);
@@ -1303,6 +1306,7 @@ function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: num
         'DIRECTION 1',
         'REFERENCE 0,0',
         'OFFSET 0 mm',
+        ...(cutPaper ? ['SET CUTTER ON'] : []),
         'CLS',
         `BITMAP 0,0,${raster.bytesPerRow},${raster.height},0,`,
     ].join('\r\n');
@@ -1316,8 +1320,8 @@ function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: num
 
 function buildRasterProductLabel(payload: ProductLabelPayload, config: LabelPrinterConfig): number[] {
     const dotsPerMm = labelDotsPerMm(config.dpi);
-    if (config.protocol === 'zpl') return buildZplRasterProductLabel(payload, dotsPerMm);
-    if (config.protocol === 'tspl') return buildTsplRasterProductLabel(payload, config.gapLines, dotsPerMm);
+    if (config.protocol === 'zpl') return buildZplRasterProductLabel(payload, dotsPerMm, config.cutPaper);
+    if (config.protocol === 'tspl') return buildTsplRasterProductLabel(payload, config.gapLines, dotsPerMm, config.cutPaper);
     return buildEscposRasterProductLabels(
         payload,
         config.cutPaper,
@@ -1376,15 +1380,12 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
 
 export function buildProductLabel(payload: ProductLabelPayload, config = getLabelPrinterConfig()): number[] {
     const dotsPerMm = labelDotsPerMm(config.dpi);
-    if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines, dotsPerMm);
-    if (config.protocol === 'zpl') return buildZplProductLabel(payload, dotsPerMm);
+    if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines, dotsPerMm, config.cutPaper);
+    if (config.protocol === 'zpl') return buildZplProductLabel(payload, dotsPerMm, config.cutPaper);
     return buildEscposProductLabels(payload, config.cutPaper, config.gapLines);
 }
 
-export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
-    if (!config.enabled) throw new Error('Label printer is disabled');
-    if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
-    if (config.protocol === 'system') throw new Error('Choose ESC/POS, TSPL, or ZPL for direct label printing');
+async function sendProductLabelsJob(payload: ProductLabelPayload, config: LabelPrinterConfig): Promise<void> {
     const data = typeof document !== 'undefined'
         ? buildRasterProductLabel(payload, config)
         : buildProductLabel(payload, config);
@@ -1397,6 +1398,20 @@ export async function printProductLabels(payload: ProductLabelPayload, config = 
         data,
         documentName: `Label ${labelText(payload.product.name, 24)}`.trim(),
     });
+}
+
+export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
+    if (!config.enabled) throw new Error('Label printer is disabled');
+    if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
+    if (config.protocol === 'system') throw new Error('Choose ESC/POS, TSPL, or ZPL for direct label printing');
+    const copies = labelCopies(payload.quantity);
+    if (config.cutPaper && copies > 1) {
+        for (let copy = 0; copy < copies; copy += 1) {
+            await sendProductLabelsJob({ ...payload, quantity: 1 }, config);
+        }
+        return;
+    }
+    await sendProductLabelsJob({ ...payload, quantity: copies }, config);
 }
 
 function labelTestPayload(): ProductLabelPayload {

@@ -6,13 +6,14 @@
 
     const CART_BUTTONS: Record<string, string> = {
         goods: 'Goods',
-        recent_trans: 'Recent Trans',
+        last_receipt: 'Last Receipt',
         change_price: 'Change Price',
         hold: 'Hold',
     };
 
     const TOOLBAR_BUTTONS: Record<string, string> = {
         scale: 'Scale',
+        recent_trans: 'Recent Trans',
         label_print: 'Label Print',
         discount: 'Discount',
     };
@@ -37,6 +38,7 @@
             if (!Array.isArray(parsed)) return fallback;
             const mapped = parsed
                 .map((button) => {
+                    if (key === 'pos_cart_layout' && button === 'recent_trans') return 'last_receipt';
                     if (key === 'pos_cart_layout' && (button === 'drawer' || button === 'label_print')) return 'hold';
                     if (key === 'pos_toolbar_layout' && button === 'drawer') return 'label_print';
                     return button;
@@ -48,8 +50,19 @@
         }
     }
 
-    let cartLayout: string[] = parseLayout('pos_cart_layout', ['goods', 'recent_trans', 'change_price', 'hold'], CART_BUTTONS);
-    let toolbarLayout: string[] = parseLayout('pos_toolbar_layout', ['scale', 'label_print', 'discount'], TOOLBAR_BUTTONS);
+    function ensureRecentNextToScale(layout: string[]) {
+        const withoutRecent = layout.filter((button) => button !== 'recent_trans');
+        const scaleIndex = withoutRecent.indexOf('scale');
+        if (scaleIndex === -1) return ['recent_trans', ...withoutRecent];
+        return [
+            ...withoutRecent.slice(0, scaleIndex + 1),
+            'recent_trans',
+            ...withoutRecent.slice(scaleIndex + 1),
+        ];
+    }
+
+    let cartLayout: string[] = parseLayout('pos_cart_layout', ['goods', 'last_receipt', 'change_price', 'hold'], CART_BUTTONS);
+    let toolbarLayout: string[] = ensureRecentNextToScale(parseLayout('pos_toolbar_layout', ['scale', 'recent_trans', 'label_print', 'discount'], TOOLBAR_BUTTONS));
 
     function move(arr: string[], i: number, dir: number) {
         const j = i + dir;
@@ -60,6 +73,7 @@
     }
 
     function save() {
+        toolbarLayout = ensureRecentNextToScale(toolbarLayout);
         setSetting('pos_cart_layout', JSON.stringify(cartLayout));
         setSetting('pos_toolbar_layout', JSON.stringify(toolbarLayout));
         toast('Layout saved');
