@@ -788,67 +788,50 @@ async function cleanupDuplicatePromotionMemberships(d: Database): Promise<void> 
     `);
 }
 
-async function cleanupDeletedOrOrphanedPromotionRows(d: Database): Promise<void> {
-    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_items (id VARCHAR(36) PRIMARY KEY)`);
-    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_discounts (id VARCHAR(36) PRIMARY KEY)`);
-    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_groups (id VARCHAR(36) PRIMARY KEY)`);
-    await d.execute(`DELETE FROM tmp_deleted_promotion_items`);
-    await d.execute(`DELETE FROM tmp_deleted_promotion_discounts`);
-    await d.execute(`DELETE FROM tmp_deleted_promotion_groups`);
+async function deleteRowsByIds(d: Database, table: string, ids: string[]): Promise<void> {
+    const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+    const batchSize = 200;
+    for (let i = 0; i < uniqueIds.length; i += batchSize) {
+        const batch = uniqueIds.slice(i, i + batchSize);
+        const placeholders = batch.map(() => '?').join(', ');
+        await d.execute(`DELETE FROM ${table} WHERE id IN (${placeholders})`, batch);
+    }
+}
 
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_items (id)
-        SELECT row_id FROM tombstones WHERE table_name = 'promo_group_items'
-    `);
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_items (id)
+async function cleanupDeletedOrOrphanedPromotionRows(d: Database): Promise<void> {
+    const deletedItemRows: any[] = await d.select(`
+        SELECT row_id AS id FROM tombstones WHERE table_name = 'promo_group_items'
+        UNION
         SELECT item.id
         FROM promo_group_items item
         INNER JOIN tombstones tombstone
             ON tombstone.table_name = 'promo_groups'
             AND tombstone.row_id = item.groupId
     `);
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
-        SELECT row_id FROM tombstones WHERE table_name = 'discounts'
-    `);
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
+
+    const deletedDiscountRows: any[] = await d.select(`
+        SELECT row_id AS id FROM tombstones WHERE table_name = 'discounts'
+        UNION
         SELECT discount.id
         FROM discounts discount
         INNER JOIN tombstones tombstone
             ON tombstone.table_name = 'promo_groups'
             AND tombstone.row_id = discount.groupId
-    `);
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
+        UNION
         SELECT discount.id
         FROM discounts discount
         LEFT JOIN promo_groups promo_group ON promo_group.id = discount.groupId
         WHERE COALESCE(discount.groupId, '') <> ''
           AND promo_group.id IS NULL
     `);
-    await d.execute(`
-        INSERT IGNORE INTO tmp_deleted_promotion_groups (id)
-        SELECT row_id FROM tombstones WHERE table_name = 'promo_groups'
+
+    const deletedGroupRows: any[] = await d.select(`
+        SELECT row_id AS id FROM tombstones WHERE table_name = 'promo_groups'
     `);
 
-    await d.execute(`
-        DELETE item FROM promo_group_items item
-        INNER JOIN tmp_deleted_promotion_items doomed ON doomed.id = item.id
-    `);
-    await d.execute(`
-        DELETE discount FROM discounts discount
-        INNER JOIN tmp_deleted_promotion_discounts doomed ON doomed.id = discount.id
-    `);
-    await d.execute(`
-        DELETE promo_group FROM promo_groups promo_group
-        INNER JOIN tmp_deleted_promotion_groups doomed ON doomed.id = promo_group.id
-    `);
-
-    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_items`);
-    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_discounts`);
-    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_groups`);
+    await deleteRowsByIds(d, 'promo_group_items', deletedItemRows.map(row => row.id));
+    await deleteRowsByIds(d, 'discounts', deletedDiscountRows.map(row => row.id));
+    await deleteRowsByIds(d, 'promo_groups', deletedGroupRows.map(row => row.id));
 }
 
 async function cleanupDuplicateOpenShifts(d: Database): Promise<void> {
