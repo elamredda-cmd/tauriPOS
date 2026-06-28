@@ -433,12 +433,17 @@ export async function flushOfflineQueue(): Promise<number> {
                     if (!config) throw new Error('MariaDB configuration is unavailable');
                     await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle: data });
                 } else if (row.operation === 'promotionBundle') {
-                    await mysql.mysqlSavePromotionBundle(
-                        data.group,
-                        data.discount,
-                        Array.isArray(data.items) ? data.items : [],
-                        Array.isArray(data.products) ? data.products : [],
-                    );
+                    const refs = await promotionRefsForQueuedRow(row, data);
+                    if (await remoteHasPromotionDelete(mysqlDb, refs)) {
+                        await applyRemotePromotionDeleteLocally(d, refs);
+                    } else {
+                        await mysql.mysqlSavePromotionBundle(
+                            data.group,
+                            data.discount,
+                            Array.isArray(data.items) ? data.items : [],
+                            Array.isArray(data.products) ? data.products : [],
+                        );
+                    }
                 } else if (row.operation === 'promotionDelete') {
                     await mysql.mysqlDeletePromotionBundle(
                         Array.isArray(data.discountIds) ? data.discountIds : [data.discountId].filter(Boolean),

@@ -1035,46 +1035,56 @@ export async function mysqlSavePromotionBundle(
     products: any[] = [],
 ): Promise<void> {
     const d = await getDb();
-    await d.execute('START TRANSACTION');
-    try {
-        // Membership rows have product foreign keys. Insert missing product
-        // snapshots first without overwriting newer product edits on MariaDB.
-        const productSnapshots = [...products];
-        const knownProductIds = new Set(productSnapshots.map(product => product?.id).filter(Boolean));
-        for (const item of items) {
-            if (item?.productId && !knownProductIds.has(item.productId)) {
-                productSnapshots.push({
-                    id: item.productId,
-                    name: 'Synced promotion item',
-                    price: 0,
-                    costPrice: 0,
-                });
-                knownProductIds.add(item.productId);
-            }
-        }
-        await mysqlEnsureProductSnapshots(productSnapshots);
 
-        await mysqlUpsert('promo_groups', group);
-        await mysqlUpsert('discounts', discount);
-
-        const itemIds = items.map(item => item.id).filter(Boolean);
-        if (itemIds.length > 0) {
-            const placeholders = itemIds.map(() => '?').join(', ');
-            await d.execute(
-                `DELETE FROM promo_group_items WHERE groupId = ? AND id NOT IN (${placeholders})`,
-                [group.id, ...itemIds],
-            );
-        } else {
-            await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [group.id]);
+    // Membership rows have product foreign keys. Insert missing product
+    // snapshots first without overwriting newer product edits on MariaDB.
+    const productSnapshots = [...products];
+    const knownProductIds = new Set(productSnapshots.map(product => product?.id).filter(Boolean));
+    for (const item of items) {
+        if (item?.productId && !knownProductIds.has(item.productId)) {
+            productSnapshots.push({
+                id: item.productId,
+                name: 'Synced promotion item',
+                price: 0,
+                costPrice: 0,
+            });
+            knownProductIds.add(item.productId);
         }
+    }
+    await mysqlEnsureProductSnapshots(productSnapshots);
 
-        for (const item of items) {
-            await mysqlUpsert('promo_group_items', item);
-        }
-        await d.execute('COMMIT');
-    } catch (error) {
-        await d.execute('ROLLBACK');
-        throw error;
+    await mysqlUpsert('promo_groups', group);
+    await mysqlUpsert('discounts', discount);
+
+    for (const item of items) {
+        if (!item?.id || !item?.groupId || !item?.productId) continue;
+        await d.execute(
+            `DELETE FROM promo_group_items WHERE groupId = ? AND productId = ? AND id <> ?`,
+            [item.groupId, item.productId, item.id],
+        );
+        await mysqlUpsert('promo_group_items', item);
+    }
+
+    const itemIds = items.map(item => item.id).filter(Boolean);
+    if (itemIds.length > 0) {
+        const placeholders = itemIds.map(() => '?').join(', ');
+        await d.execute(
+            `DELETE FROM promo_group_items WHERE groupId = ? AND id NOT IN (${placeholders})`,
+            [group.id, ...itemIds],
+        );
+    } else {
+        await d.execute(`DELETE FROM promo_group_items WHERE groupId = ?`, [group.id]);
+    }
+
+    const [discountRows, itemRows] = await Promise.all([
+        d.select(`SELECT id FROM discounts WHERE id = ? LIMIT 1`, [discount.id]) as Promise<any[]>,
+        d.select(`SELECT id FROM promo_group_items WHERE groupId = ?`, [group.id]) as Promise<any[]>,
+    ]);
+    if (discountRows.length === 0) {
+        throw new Error(`Promotion sync failed: discount ${discount.id} was not saved`);
+    }
+    if (itemRows.length !== itemIds.length) {
+        throw new Error(`Promotion sync failed: saved ${itemRows.length} of ${itemIds.length} item(s) for ${group.id}`);
     }
 }
 
