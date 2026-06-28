@@ -680,6 +680,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     await cleanupDuplicatePromotionMemberships(d);
     await cleanupDuplicateOpenShifts(d);
     await ensureDeleteTombstoneTriggers(d);
+    await cleanupDeletedOrOrphanedPromotionRows(d);
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
     // MariaDB supports CREATE INDEX IF NOT EXISTS from 10.5+.  We wrap each
@@ -785,6 +786,69 @@ async function cleanupDuplicatePromotionMemberships(d: Database): Promise<void> 
             AND duplicate.productId = keeper.productId
             AND duplicate.id < keeper.id
     `);
+}
+
+async function cleanupDeletedOrOrphanedPromotionRows(d: Database): Promise<void> {
+    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_items (id VARCHAR(36) PRIMARY KEY)`);
+    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_discounts (id VARCHAR(36) PRIMARY KEY)`);
+    await d.execute(`CREATE TEMPORARY TABLE IF NOT EXISTS tmp_deleted_promotion_groups (id VARCHAR(36) PRIMARY KEY)`);
+    await d.execute(`DELETE FROM tmp_deleted_promotion_items`);
+    await d.execute(`DELETE FROM tmp_deleted_promotion_discounts`);
+    await d.execute(`DELETE FROM tmp_deleted_promotion_groups`);
+
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_items (id)
+        SELECT row_id FROM tombstones WHERE table_name = 'promo_group_items'
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_items (id)
+        SELECT item.id
+        FROM promo_group_items item
+        INNER JOIN tombstones tombstone
+            ON tombstone.table_name = 'promo_groups'
+            AND tombstone.row_id = item.groupId
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
+        SELECT row_id FROM tombstones WHERE table_name = 'discounts'
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
+        SELECT discount.id
+        FROM discounts discount
+        INNER JOIN tombstones tombstone
+            ON tombstone.table_name = 'promo_groups'
+            AND tombstone.row_id = discount.groupId
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_discounts (id)
+        SELECT discount.id
+        FROM discounts discount
+        LEFT JOIN promo_groups promo_group ON promo_group.id = discount.groupId
+        WHERE COALESCE(discount.groupId, '') <> ''
+          AND promo_group.id IS NULL
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO tmp_deleted_promotion_groups (id)
+        SELECT row_id FROM tombstones WHERE table_name = 'promo_groups'
+    `);
+
+    await d.execute(`
+        DELETE item FROM promo_group_items item
+        INNER JOIN tmp_deleted_promotion_items doomed ON doomed.id = item.id
+    `);
+    await d.execute(`
+        DELETE discount FROM discounts discount
+        INNER JOIN tmp_deleted_promotion_discounts doomed ON doomed.id = discount.id
+    `);
+    await d.execute(`
+        DELETE promo_group FROM promo_groups promo_group
+        INNER JOIN tmp_deleted_promotion_groups doomed ON doomed.id = promo_group.id
+    `);
+
+    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_items`);
+    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_discounts`);
+    await d.execute(`DROP TEMPORARY TABLE IF EXISTS tmp_deleted_promotion_groups`);
 }
 
 async function cleanupDuplicateOpenShifts(d: Database): Promise<void> {

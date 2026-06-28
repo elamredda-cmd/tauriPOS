@@ -408,20 +408,20 @@ export async function flushOfflineQueue(): Promise<number> {
                 [purgeRows[0].value]
             );
         }
+        let flushed = await discardQueuedDeletedPromotionRows(mysqlDb, d);
         const rows: any[] = await d.select(
             `SELECT * FROM _offline_queue ORDER BY created_at ASC, id ASC`
         );
 
-        let flushed = 0;
         for (const row of rows) {
             try {
                 const data = JSON.parse(row.data);
                 if (row.operation === 'upsert') {
-                    if (row.table_name === 'promo_group_items' && data?.productId) {
-                        const products = await getLocalProductsForPromotionItems([data]);
-                        await mysql.mysqlEnsureProductSnapshots(products);
+                    if (PROMOTION_SYNC_TABLE_SET.has(row.table_name)) {
+                        await flushQueuedPromotionUpsert(row, data, mysqlDb, d);
+                    } else {
+                        await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
                     }
-                    await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
                 } else if (row.operation === 'remove') {
                     await mysql.mysqlRemove(row.table_name, data.id, row.id_key);
                 } else if (row.operation === 'adjustStock') {
@@ -451,6 +451,14 @@ export async function flushOfflineQueue(): Promise<number> {
                 flushed++;
             } catch (e) {
                 const data = JSON.parse(row.data);
+                if (isPromotionForeignKeyFailure(e, row)) {
+                    const refs = await promotionRefsForQueuedRow(row, data);
+                    await applyRemotePromotionDeleteLocally(d, refs);
+                    await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+                    flushed++;
+                    console.warn(`database: discarded stale queued promotion ${row.id} after MariaDB rejected its missing parent`);
+                    continue;
+                }
                 if (String(e).includes('SYNC_CONFLICT') || isReversalConflict(e, data)) {
                     if (row.table_name === 'products') {
                         const conflict = String(e).toLowerCase();
@@ -524,6 +532,181 @@ async function pendingPromotionQueueCount(): Promise<number> {
             OR table_name IN ('discounts', 'promo_groups', 'promo_group_items')`
     );
     return Number(rows[0]?.count || 0);
+}
+
+type PromotionDeleteRefs = {
+    groupId: string;
+    discountIds: string[];
+    itemIds: string[];
+};
+
+function uniqueStrings(values: unknown[]): string[] {
+    return Array.from(new Set(values.map(value => String(value || '')).filter(Boolean)));
+}
+
+async function selectLocalPromotionIds(groupId: string): Promise<{ discountIds: string[]; itemIds: string[] }> {
+    if (!groupId) return { discountIds: [], itemIds: [] };
+    const d = await sqlite.getDb();
+    const [discountRows, itemRows] = await Promise.all([
+        d.select(`SELECT id FROM discounts WHERE groupId = ?`, [groupId]) as Promise<any[]>,
+        d.select(`SELECT id FROM promo_group_items WHERE groupId = ?`, [groupId]) as Promise<any[]>,
+    ]);
+    return {
+        discountIds: discountRows.map(row => row.id).filter(Boolean),
+        itemIds: itemRows.map(row => row.id).filter(Boolean),
+    };
+}
+
+async function promotionRefsForQueuedRow(row: any, data: any): Promise<PromotionDeleteRefs | null> {
+    let groupId = '';
+    let discountIds: string[] = [];
+    let itemIds: string[] = [];
+
+    if (row.operation === 'promotionBundle') {
+        groupId = String(data?.group?.id || data?.discount?.groupId || '');
+        discountIds = uniqueStrings([data?.discount?.id]);
+        itemIds = uniqueStrings(Array.isArray(data?.items) ? data.items.map((item: any) => item?.id) : []);
+    } else if (row.table_name === 'promo_groups') {
+        groupId = String(data?.id || '');
+    } else if (row.table_name === 'discounts') {
+        groupId = String(data?.groupId || '');
+        discountIds = uniqueStrings([data?.id]);
+    } else if (row.table_name === 'promo_group_items') {
+        groupId = String(data?.groupId || '');
+        itemIds = uniqueStrings([data?.id]);
+    } else {
+        return null;
+    }
+
+    const localIds = await selectLocalPromotionIds(groupId);
+    return {
+        groupId,
+        discountIds: uniqueStrings([...discountIds, ...localIds.discountIds]),
+        itemIds: uniqueStrings([...itemIds, ...localIds.itemIds]),
+    };
+}
+
+async function remoteHasPromotionDelete(mysqlDb: any, refs: PromotionDeleteRefs | null): Promise<boolean> {
+    if (!refs) return false;
+    const pairs: Array<[string, string]> = [];
+    if (refs.groupId) pairs.push(['promo_groups', refs.groupId]);
+    for (const id of refs.discountIds) pairs.push(['discounts', id]);
+    for (const id of refs.itemIds) pairs.push(['promo_group_items', id]);
+    if (pairs.length === 0) return false;
+
+    const where = pairs.map(() => `(table_name = ? AND row_id = ?)`).join(' OR ');
+    const params = pairs.flatMap(pair => pair);
+    const rows: any[] = await mysqlDb.select(
+        `SELECT COUNT(*) AS count FROM tombstones WHERE ${where}`,
+        params,
+    );
+    return Number(rows[0]?.count || 0) > 0;
+}
+
+async function remotePromotionGroupExists(mysqlDb: any, groupId: string): Promise<boolean> {
+    if (!groupId) return false;
+    const rows: any[] = await mysqlDb.select(`SELECT id FROM promo_groups WHERE id = ? LIMIT 1`, [groupId]);
+    return rows.length > 0;
+}
+
+async function getLocalPromotionBundleByGroupId(groupId: string): Promise<{ group: any; discount: any; items: any[]; products: any[] } | null> {
+    if (!groupId) return null;
+    const d = await sqlite.getDb();
+    const [groupRows, discountRows, items] = await Promise.all([
+        d.select(`SELECT * FROM promo_groups WHERE id = ? LIMIT 1`, [groupId]) as Promise<any[]>,
+        d.select(`SELECT * FROM discounts WHERE groupId = ? ORDER BY updatedAt DESC, id LIMIT 1`, [groupId]) as Promise<any[]>,
+        d.select(`SELECT * FROM promo_group_items WHERE groupId = ? ORDER BY productId, id`, [groupId]) as Promise<any[]>,
+    ]);
+    const group = groupRows[0];
+    const discount = discountRows[0];
+    if (!group || !discount) return null;
+    return {
+        group,
+        discount,
+        items,
+        products: await getLocalProductsForPromotionItems(items),
+    };
+}
+
+async function applyRemotePromotionDeleteLocally(d: any, refs: PromotionDeleteRefs | null): Promise<void> {
+    if (!refs) return;
+    if (refs.groupId || refs.discountIds.length > 0) {
+        await deleteLocalPromotionBundle(refs.discountIds, refs.groupId);
+        return;
+    }
+    if (refs.itemIds.length > 0) {
+        const placeholders = refs.itemIds.map(() => '?').join(', ');
+        await d.execute(`DELETE FROM promo_group_items WHERE id IN (${placeholders})`, refs.itemIds);
+    }
+}
+
+async function discardQueuedDeletedPromotionRows(mysqlDb: any, d: any): Promise<number> {
+    const rows: any[] = await d.select(
+        `SELECT * FROM _offline_queue
+         WHERE operation = 'promotionBundle'
+            OR (operation = 'upsert' AND table_name IN ('discounts', 'promo_groups', 'promo_group_items'))
+         ORDER BY created_at ASC, id ASC`
+    );
+    let discarded = 0;
+    for (const row of rows) {
+        let data: any;
+        try {
+            data = JSON.parse(row.data);
+        } catch {
+            continue;
+        }
+        const refs = await promotionRefsForQueuedRow(row, data);
+        if (await remoteHasPromotionDelete(mysqlDb, refs)) {
+            await applyRemotePromotionDeleteLocally(d, refs);
+            await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+            discarded++;
+        }
+    }
+    if (discarded > 0) {
+        console.log(`database: discarded ${discarded} stale queued promotion change(s) already deleted on MariaDB`);
+    }
+    return discarded;
+}
+
+async function flushQueuedPromotionUpsert(row: any, data: any, mysqlDb: any, d: any): Promise<void> {
+    const refs = await promotionRefsForQueuedRow(row, data);
+    if (await remoteHasPromotionDelete(mysqlDb, refs)) {
+        await applyRemotePromotionDeleteLocally(d, refs);
+        return;
+    }
+
+    if (refs?.groupId) {
+        const bundle = await getLocalPromotionBundleByGroupId(refs.groupId);
+        if (bundle) {
+            await mysql.mysqlSavePromotionBundle(bundle.group, bundle.discount, bundle.items, bundle.products);
+            return;
+        }
+    }
+
+    if (row.table_name === 'promo_group_items') {
+        if (!data?.groupId || !(await remotePromotionGroupExists(mysqlDb, data.groupId))) {
+            await d.execute(`DELETE FROM promo_group_items WHERE id = ?`, [data?.id]);
+            return;
+        }
+        if (data?.productId) {
+            const products = await getLocalProductsForPromotionItems([data]);
+            await mysql.mysqlEnsureProductSnapshots(products);
+        }
+    }
+
+    if (row.table_name === 'discounts' && data?.groupId && !(await remotePromotionGroupExists(mysqlDb, data.groupId))) {
+        await d.execute(`DELETE FROM discounts WHERE id = ?`, [data?.id]);
+        return;
+    }
+
+    await mysql.mysqlSafeOfflineUpsert(row.table_name, data, row.id_key);
+}
+
+function isPromotionForeignKeyFailure(error: unknown, row: any): boolean {
+    const message = String(error).toLowerCase();
+    return (row.operation === 'promotionBundle' || PROMOTION_SYNC_TABLE_SET.has(row.table_name))
+        && message.includes('foreign key constraint fails')
+        && (message.includes('promo_group_items') || message.includes('promo_groups') || message.includes('discounts'));
 }
 
 async function pushWriteInBackground(
@@ -1282,6 +1465,16 @@ async function pushNewerLocalPromotionPackages(): Promise<number> {
 
         const items: any[] = await local.select(`SELECT * FROM promo_group_items WHERE groupId = ?`, [groupId]);
         const products = await getLocalProductsForPromotionItems(items);
+        const refs: PromotionDeleteRefs = {
+            groupId,
+            discountIds: [discount.id].filter(Boolean),
+            itemIds: items.map(item => item.id).filter(Boolean),
+        };
+        if (await remoteHasPromotionDelete(mysqlDb, refs)) {
+            await deleteLocalPromotionBundle(refs.discountIds, groupId);
+            pushed++;
+            continue;
+        }
 
         const [remoteDiscounts, remoteGroups, remoteItems] = await Promise.all([
             mysqlDb.select(`SELECT * FROM discounts WHERE id = ? OR groupId = ?`, [discount.id, groupId]) as Promise<any[]>,
@@ -2846,8 +3039,7 @@ async function runHeartbeat(): Promise<void> {
             return;
         }
         if (online && !wasOnline) {
-            console.log('database: connection restored — flushing offline queue and resyncing…');
-            try { await flushOfflineQueue(); } catch (e) { console.warn('database: flush on reconnect failed:', e); }
+            console.log('database: connection restored — resyncing before replaying offline changes…');
             runSyncCycle().catch(console.error);
         }
     } finally {
@@ -2963,10 +3155,12 @@ export async function runFastSyncCycle(): Promise<void> {
         }
         await ensureDatabaseIdentityForSync();
 
+        const preFlushSyncTime = await mysql.mysqlGetServerTime();
+        const removedBeforeFlush = await applyTombstones(preFlushSyncTime);
         const pendingBeforeFlush = await pendingOfflineQueueCount();
         const flushed = pendingBeforeFlush > 0 ? await flushOfflineQueue() : 0;
         const repairedPromotions = await pushNewerLocalPromotionPackages();
-        const shouldCatchUpEverything = !wasOnline || flushed > 0;
+        const shouldCatchUpEverything = !wasOnline || flushed > 0 || removedBeforeFlush > 0;
         const tablesToPull = shouldCatchUpEverything ? ALL_SYNC_TABLES : FAST_SYNC_TABLES;
 
         // Server clock is the authority for delta sync; read it once per cycle.
@@ -3007,7 +3201,7 @@ export async function runFastSyncCycle(): Promise<void> {
             }
         }
 
-        const removed = await applyTombstones(newSyncTime);
+        const removed = removedBeforeFlush + await applyTombstones(newSyncTime);
 
         // Only rehydrate stores if there were actual changes (avoids unnecessary re-renders)
         if (totalChanges > 0 || removed > 0 || repairedPromotions > 0) {
@@ -3041,7 +3235,12 @@ export async function runSyncCycle(): Promise<void> {
         }
         await ensureDatabaseIdentityForSync();
 
-        // Flush any queued offline operations first (replays writes made while offline).
+        // Pull deletes first so an offline till cannot resurrect an old
+        // promotion that another till already removed.
+        const preFlushSyncTime = await mysql.mysqlGetServerTime();
+        const removedBeforeFlush = await applyTombstones(preFlushSyncTime);
+
+        // Flush any queued offline operations after applying remote deletions.
         await flushOfflineQueue();
         const repairedPromotions = await pushNewerLocalPromotionPackages();
 
@@ -3088,7 +3287,7 @@ export async function runSyncCycle(): Promise<void> {
 
         // Apply deletions from other tills AFTER upserts so a delete can't be
         // resurrected by a stale insert in the same cycle.
-        const removed = await applyTombstones(newSyncTime);
+        const removed = removedBeforeFlush + await applyTombstones(newSyncTime);
         if (removed > 0) console.log(`database: applied ${removed} tombstone deletions`);
 
         // Rehydrate Svelte stores so the UI reflects latest data
