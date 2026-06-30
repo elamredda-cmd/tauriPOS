@@ -1,8 +1,19 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
-    import { getMysqlDb, saveMode, testMysqlConnection, type MysqlConfig } from '$lib/stores/connection';
+    import { connectionState, getMysqlDb, saveMode, testMysqlConnection, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
-    import { ensureDatabaseIdentityForSync, ensureLocalShopIdentity, hydrateSvelteStores, wipeAndPullFromServer } from '$lib/stores/database';
+    import {
+        ensureDatabaseIdentityForSync,
+        forcePushToServer,
+        hasRestorePendingMariaDbReplace,
+        ensureLocalShopIdentity,
+        getDb,
+        hydrateSvelteStores,
+        migrateLocalDataToServer,
+        replaceMariaDbDataFromThisTill,
+        wipeAndPullFromServer
+    } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
     import { hashPin } from '$lib/stores/session';
     import { employeesDB, settingsDB, now, uuid } from '$lib/stores/db';
@@ -28,10 +39,141 @@
     let needsAdmin = false;
     let needsShopDetails = true;
     let stockTrackingEnabled = true;
+    const RESTORE_NOTICE_KEY = 'pos_restore_notice';
+
+    type SetupProgressState = 'idle' | 'running' | 'success' | 'error';
+    let setupProgressState: SetupProgressState = 'idle';
+    let setupProgress = 0;
+    let setupProgressTitle = '';
+    let setupProgressDetail = '';
+
+    type RestoreNotice = {
+        type: 'success' | 'error';
+        message: string;
+        details?: string;
+    };
+
+    let restoreNotice: RestoreNotice | null = null;
+
+    type ShopDataCounts = {
+        products: number;
+        categories: number;
+        orders: number;
+        customers: number;
+        employees: number;
+        storeInfo: number;
+    };
 
     // ── Helpers ─────────────────────────────────────────────────
     function buildConfig(): MysqlConfig {
         return { host, port, user: username, password, database };
+    }
+
+    function cleanError(error: unknown): string {
+        return String(error).replace(/^Error:\s*/, '').trim();
+    }
+
+    function setSetupProgress(
+        state: SetupProgressState,
+        progress: number,
+        title: string,
+        detail = '',
+    ) {
+        setupProgressState = state;
+        setupProgress = Math.max(0, Math.min(100, progress));
+        setupProgressTitle = title;
+        setupProgressDetail = detail;
+        testMessage = detail || title;
+    }
+
+    function resetSetupProgress() {
+        setupProgressState = 'idle';
+        setupProgress = 0;
+        setupProgressTitle = '';
+        setupProgressDetail = '';
+    }
+
+    function clearRestoreNotice() {
+        restoreNotice = null;
+        try {
+            sessionStorage.removeItem(RESTORE_NOTICE_KEY);
+        } catch {
+            // Nothing else to do if session storage is unavailable.
+        }
+    }
+
+    onMount(() => {
+        try {
+            const raw = sessionStorage.getItem(RESTORE_NOTICE_KEY);
+            if (!raw) return;
+            restoreNotice = JSON.parse(raw) as RestoreNotice;
+        } catch {
+            restoreNotice = null;
+        }
+    });
+
+    function normalizeCounts(row: any): ShopDataCounts {
+        return {
+            products: Number(row.products || 0),
+            categories: Number(row.categories || 0),
+            orders: Number(row.orders || 0),
+            customers: Number(row.customers || 0),
+            employees: Number(row.employees || 0),
+            storeInfo: Number(row.storeInfo || 0),
+        };
+    }
+
+    function hasBusinessData(counts: ShopDataCounts): boolean {
+        return counts.products > 0 || counts.categories > 0 || counts.orders > 0
+            || counts.customers > 0;
+    }
+
+    function hasRecoverableLocalData(counts: ShopDataCounts): boolean {
+        return hasBusinessData(counts) || counts.employees > 0 || counts.storeInfo > 0;
+    }
+
+    function shouldRepairIncompleteMariaDb(localCounts: ShopDataCounts, remoteCounts: ShopDataCounts): boolean {
+        return hasBusinessData(localCounts)
+            && hasBusinessData(remoteCounts)
+            && remoteCounts.orders === 0
+            && (
+                localCounts.products > remoteCounts.products
+                || localCounts.categories > remoteCounts.categories
+                || localCounts.customers > remoteCounts.customers
+            );
+    }
+
+    function shouldReplaceMariaDbFromRestoredTill(localCounts: ShopDataCounts, remoteCounts: ShopDataCounts): boolean {
+        if (!hasBusinessData(localCounts) || !hasBusinessData(remoteCounts)) return false;
+        const localHasMoreCatalogData = localCounts.products > remoteCounts.products
+            || localCounts.categories > remoteCounts.categories
+            || localCounts.customers > remoteCounts.customers;
+        return localHasMoreCatalogData && localCounts.orders >= remoteCounts.orders;
+    }
+
+    async function countLocalShopData(): Promise<ShopDataCounts> {
+        const local = await getDb();
+        const rows: any[] = await local.select(
+            `SELECT (SELECT COUNT(*) FROM products) AS products,
+                    (SELECT COUNT(*) FROM categories) AS categories,
+                    (SELECT COUNT(*) FROM orders) AS orders,
+                    (SELECT COUNT(*) FROM customers) AS customers,
+                    (SELECT COUNT(*) FROM employees) AS employees,
+                    (SELECT COUNT(*) FROM settings WHERE key = 'store_info') AS storeInfo`
+        );
+        return normalizeCounts(rows[0] || {});
+    }
+
+    async function countRemoteShopData(server: any): Promise<ShopDataCounts> {
+        const rows: any[] = await server.select(
+            `SELECT (SELECT COUNT(*) FROM products) AS products,
+                    (SELECT COUNT(*) FROM categories) AS categories,
+                    (SELECT COUNT(*) FROM orders) AS orders,
+                    (SELECT COUNT(*) FROM customers) AS customers,
+                    (SELECT COUNT(*) FROM employees) AS employees,
+                    (SELECT COUNT(*) FROM settings WHERE \`key\` = 'store_info') AS storeInfo`
+        );
+        return normalizeCounts(rows[0] || {});
     }
 
     function hasActiveAdmin() {
@@ -92,6 +234,7 @@
     async function handleTestConnection() {
         testResult = 'testing';
         testMessage = '';
+        resetSetupProgress();
         try {
             const ok = await testMysqlConnection(buildConfig());
             testResult = ok ? 'pass' : 'fail';
@@ -108,23 +251,88 @@
         connecting = true;
         try {
             const cfg = buildConfig();
+            setSetupProgress('running', 10, 'Connecting to MariaDB', 'Checking server and creating missing tables...');
             await initMysqlDb(cfg);
+            connectionState.set({ mode: 'multi', mysqlConfig: cfg, mysqlOnline: false, syncError: null });
             await saveMode('multi', cfg);
+            setSetupProgress('running', 25, 'Checking shop identity', 'Making sure this till belongs to the correct shop database...');
             await ensureDatabaseIdentityForSync();
             const server = await getMysqlDb();
             if (!server) throw new Error('MariaDB connected during the test but could not be opened.');
-            const admins: any[] = await server.select(
+            connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
+            setSetupProgress('running', 35, 'Checking shop data', 'Counting products, categories, orders, and customers...');
+            const remoteCounts = await countRemoteShopData(server);
+            const localCounts = await countLocalShopData();
+            const restoreNeedsMariaDbReplace = await hasRestorePendingMariaDbReplace();
+
+            if (restoreNeedsMariaDbReplace || shouldReplaceMariaDbFromRestoredTill(localCounts, remoteCounts)) {
+                setSetupProgress(
+                    'running',
+                    50,
+                    'Replacing MariaDB from restored till',
+                    `This till has ${localCounts.products.toLocaleString()} products, MariaDB has ${remoteCounts.products.toLocaleString()}. Replacing MariaDB while keeping employees and settings...`
+                );
+                await replaceMariaDbDataFromThisTill();
+                const replacedCounts = await countRemoteShopData(server);
+                if (replacedCounts.products < localCounts.products) {
+                    throw new Error(
+                        `MariaDB replace incomplete: MariaDB has ${replacedCounts.products.toLocaleString()} products, but this till has ${localCounts.products.toLocaleString()}.`
+                    );
+                }
+                setSetupProgress('running', 82, 'MariaDB replaced', 'Refreshing this till after upload...');
+            } else if (shouldRepairIncompleteMariaDb(localCounts, remoteCounts)) {
+                setSetupProgress(
+                    'running',
+                    50,
+                    'Completing MariaDB upload',
+                    `MariaDB has ${remoteCounts.products.toLocaleString()} products, this till has ${localCounts.products.toLocaleString()}. Uploading the missing data...`
+                );
+                await forcePushToServer();
+                const repairedCounts = await countRemoteShopData(server);
+                if (repairedCounts.products < localCounts.products) {
+                    throw new Error(
+                        `Upload incomplete: MariaDB has ${repairedCounts.products.toLocaleString()} products, but this till has ${localCounts.products.toLocaleString()}.`
+                    );
+                }
+                setSetupProgress('running', 82, 'MariaDB upload completed', 'Refreshing this till after upload...');
+            } else if (hasBusinessData(remoteCounts)) {
+                setSetupProgress(
+                    'running',
+                    50,
+                    'Downloading MariaDB data to this till',
+                    `Found ${remoteCounts.products.toLocaleString()} products and ${remoteCounts.categories.toLocaleString()} categories on MariaDB.`
+                );
+                await wipeAndPullFromServer();
+                setSetupProgress('running', 82, 'Downloaded data', 'Refreshing this till with the downloaded shop data...');
+            } else if (hasRecoverableLocalData(localCounts)) {
+                setSetupProgress(
+                    'running',
+                    50,
+                    'Uploading restored till data to MariaDB',
+                    `Uploading ${localCounts.products.toLocaleString()} products and ${localCounts.categories.toLocaleString()} categories from this till.`
+                );
+                await migrateLocalDataToServer();
+                setSetupProgress('running', 82, 'Uploaded data', 'Refreshing this till after upload...');
+            } else {
+                setSetupProgress('running', 65, 'Preparing empty shop', 'No existing shop data was found yet.');
+                await hydrateSvelteStores();
+            }
+
+            setSetupProgress('running', 90, 'Saving connection', 'Finishing this till setup...');
+            await saveMode('multi', cfg);
+            connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
+            const finalServer = await getMysqlDb();
+            if (!finalServer) throw new Error('MariaDB disconnected while finishing setup.');
+            const admins: any[] = await finalServer.select(
                 `SELECT id FROM employees WHERE role = 'admin' AND isActive = 1 LIMIT 1`
             );
-            const shopSettings: any[] = await server.select(
+            const shopSettings: any[] = await finalServer.select(
                 "SELECT `key` FROM settings WHERE `key` = 'store_info' LIMIT 1"
             );
 
-            // Download existing employees and shop data before deciding whether
-            // this is a new shop or an additional till joining an existing one.
-            await wipeAndPullFromServer();
-
             if (admins.length > 0) {
+                setSetupProgress('success', 100, 'Setup complete', 'This till is connected and ready.');
+                clearRestoreNotice();
                 goto('/');
                 return;
             }
@@ -132,11 +340,25 @@
             needsShopDetails = shopSettings.length === 0;
             needsAdmin = true;
             testResult = 'pass';
-            testMessage = 'Database connected. No active administrator exists, so create the first administrator.';
+            setSetupProgress('success', 100, 'Database connected', 'No active administrator exists, so create the first administrator.');
             connecting = false;
         } catch (err) {
+            const message = cleanError(err);
+            if (restoreNotice?.type === 'success') {
+                restoreNotice = {
+                    type: 'error',
+                    message: 'The database was restored, but MariaDB connection did not finish.',
+                    details: message,
+                };
+                try {
+                    sessionStorage.setItem(RESTORE_NOTICE_KEY, JSON.stringify(restoreNotice));
+                } catch {
+                    // The visible message above is enough if storage is blocked.
+                }
+            }
             testResult = 'fail';
-            testMessage = `Connection failed: ${err}`;
+            setSetupProgress('error', 100, 'Connection failed', message);
+            connectionState.set({ mode: null, mysqlConfig: null, mysqlOnline: false, syncError: message });
             connecting = false;
         }
     }
@@ -148,6 +370,7 @@
             await hydrateSvelteStores();
             needsShopDetails = !get(settingsDB).some((setting) => setting.key === 'store_info');
             if (hasActiveAdmin()) {
+                clearRestoreNotice();
                 goto('/');
                 return;
             }
@@ -155,7 +378,7 @@
             connecting = false;
         } catch (err) {
             testResult = 'fail';
-            testMessage = `Error: ${err}`;
+            testMessage = `Error: ${cleanError(err)}`;
             connecting = false;
         }
     }
@@ -165,10 +388,11 @@
         try {
             await createShopAdmin();
             await hydrateSvelteStores();
+            clearRestoreNotice();
             goto('/');
         } catch (err) {
             testResult = 'fail';
-            testMessage = `Error: ${err}`;
+            testMessage = `Error: ${cleanError(err)}`;
             connecting = false;
         }
     }
@@ -191,6 +415,21 @@
         </div>
 
         <!-- ── Mode cards ────────────────────────────────────── -->
+        {#if restoreNotice}
+            <div class="w-full rounded-lg border p-4 text-sm {restoreNotice.type === 'error' ? 'border-danger bg-danger/10 text-danger' : 'border-success bg-success/10 text-success'}">
+                <div class="flex items-start justify-between gap-4">
+                    <div class="min-w-0">
+                        <strong class="block text-base">{restoreNotice.type === 'error' ? 'Restore needs attention' : 'Restore completed'}</strong>
+                        <p class="mt-1 break-words">{restoreNotice.message}</p>
+                        {#if restoreNotice.details}
+                            <p class="mt-2 break-all rounded-md border border-current/25 bg-bg-panel/60 p-3 text-xs text-text-main">{restoreNotice.details}</p>
+                        {/if}
+                    </div>
+                    <button class="btn btn-secondary shrink-0" type="button" on:click={clearRestoreNotice}>Dismiss</button>
+                </div>
+            </div>
+        {/if}
+
         {#if !needsAdmin}
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 w-full">
 
@@ -293,6 +532,27 @@
                     </div>
                 {/if}
 
+                {#if setupProgressState !== 'idle'}
+                    <div
+                        class="setup-progress-panel"
+                        class:setup-progress-success={setupProgressState === 'success'}
+                        class:setup-progress-error={setupProgressState === 'error'}
+                    >
+                        <div class="setup-progress-head">
+                            <div>
+                                <strong>{setupProgressTitle}</strong>
+                                {#if setupProgressDetail}
+                                    <p>{setupProgressDetail}</p>
+                                {/if}
+                            </div>
+                            <b>{setupProgress}%</b>
+                        </div>
+                        <div class="setup-progress-track" aria-label="Database setup progress">
+                            <span style={`width: ${setupProgress}%`}></span>
+                        </div>
+                    </div>
+                {/if}
+
                 <!-- Action buttons -->
                 <div class="flex gap-3 justify-end">
                     <button
@@ -386,4 +646,42 @@
     :global(.animate-fade-in) {
         animation: fadeIn 0.25s ease-out both;
     }
+    .setup-progress-panel {
+        display: grid;
+        gap: .7rem;
+        padding: .9rem 1rem;
+        border: 1px solid var(--accent-primary);
+        border-radius: .65rem;
+        background: var(--bg-card);
+    }
+    .setup-progress-panel.setup-progress-success { border-color: var(--success); }
+    .setup-progress-panel.setup-progress-error { border-color: var(--danger); }
+    .setup-progress-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+    .setup-progress-head strong { color: var(--text-main); }
+    .setup-progress-head p {
+        margin: .25rem 0 0;
+        color: var(--text-muted);
+        overflow-wrap: anywhere;
+    }
+    .setup-progress-head b { color: var(--text-main); }
+    .setup-progress-track {
+        height: .65rem;
+        overflow: hidden;
+        border-radius: 999px;
+        background: var(--border-flat);
+    }
+    .setup-progress-track span {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: var(--accent-primary);
+        transition: width .25s ease;
+    }
+    .setup-progress-success .setup-progress-track span { background: var(--success); }
+    .setup-progress-error .setup-progress-track span { background: var(--danger); }
 </style>

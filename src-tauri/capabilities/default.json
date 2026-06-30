@@ -15,6 +15,25 @@
     "opener:default",
     "sql:allow-load",
     "sql:allow-execute",
-    "sql:allow-select"
+    "sql:allow-select",
+    "sql:allow-close",
+    "allow-greet",
+    "allow-send-cctv-pos-text",
+    "allow-send-raw-printer-data",
+    "allow-send-device-printer-data",
+    "allow-send-system-printer-data",
+    "allow-list-system-printers",
+    "allow-list-serial-ports",
+    "allow-select-restore-database-file",
+    "allow-read-scale-weight",
+    "allow-open-cash-drawer",
+    "allow-commit-local-sale",
+    "allow-commit-mysql-sale",
+    "allow-commit-online-reversal",
+    "allow-allocate-mysql-till-sequence",
+    "allow-create-local-backup",
+    "allow-latest-local-backup",
+    "allow-restore-latest-local-backup",
+    "allow-restore-local-database-from-path"
   ]
 }

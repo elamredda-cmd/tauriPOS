@@ -67,9 +67,37 @@ const IGNORED_AUDIT_SETTING_KEYS = new Set([
     'bootstrap_uploaded',
     'last_fast_sync_time',
     'last_sync_time',
+    'restore_pending_mariadb_replace',
     'transaction_purge_applied_at',
 ]);
 const IGNORED_AUDIT_SETTING_PREFIXES = ['sync_ts_'];
+const RESTORE_PENDING_MARIADB_REPLACE_KEY = 'restore_pending_mariadb_replace';
+const RESTORE_PENDING_MARIADB_REPLACE_MESSAGE =
+    'Restore is waiting to replace MariaDB. Use Database Repair -> Replace MariaDB From Restore before normal sync.';
+
+export async function hasRestorePendingMariaDbReplace(): Promise<boolean> {
+    try {
+        const d = await sqlite.getDb();
+        const rows: any[] = await d.select(
+            'SELECT value FROM settings WHERE key = ? LIMIT 1',
+            [RESTORE_PENDING_MARIADB_REPLACE_KEY],
+        );
+        return rows.length > 0 && rows[0]?.value !== '0';
+    } catch {
+        return false;
+    }
+}
+
+async function pauseSyncIfRestorePending(): Promise<boolean> {
+    if (!await hasRestorePendingMariaDbReplace()) return false;
+    stopBackgroundSync();
+    connectionState.update(s => ({
+        ...s,
+        mysqlOnline: false,
+        syncError: RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+    }));
+    return true;
+}
 
 // ─── Re-exports that never change (always local SQLite) ─────────────────────
 
@@ -933,14 +961,68 @@ async function remoteHasShopData(): Promise<boolean> {
     if (!d) return false;
     const rows: any[] = await d.select(
         `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
                 (SELECT COUNT(*) FROM orders) AS orders,
-                (SELECT COUNT(*) FROM customers) AS customers,
-                (SELECT COUNT(*) FROM employees) AS employees,
-                (SELECT COUNT(*) FROM settings WHERE \`key\` = 'store_info') AS storeInfo`
+                (SELECT COUNT(*) FROM customers) AS customers`
     );
     const row = rows[0] || {};
-    return ['products', 'orders', 'customers', 'employees', 'storeInfo']
+    return ['products', 'categories', 'orders', 'customers']
         .some((key) => Number(row[key] || 0) > 0);
+}
+
+type BusinessDataCounts = {
+    products: number;
+    categories: number;
+    orders: number;
+    customers: number;
+};
+
+function normalizeBusinessCounts(row: any): BusinessDataCounts {
+    return {
+        products: Number(row.products || 0),
+        categories: Number(row.categories || 0),
+        orders: Number(row.orders || 0),
+        customers: Number(row.customers || 0),
+    };
+}
+
+function hasBusinessData(counts: BusinessDataCounts): boolean {
+    return counts.products > 0 || counts.categories > 0 || counts.orders > 0 || counts.customers > 0;
+}
+
+async function countLocalBusinessData(): Promise<BusinessDataCounts> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
+                (SELECT COUNT(*) FROM orders) AS orders,
+                (SELECT COUNT(*) FROM customers) AS customers`
+    );
+    return normalizeBusinessCounts(rows[0] || {});
+}
+
+async function countRemoteBusinessData(): Promise<BusinessDataCounts> {
+    const d = await getMysqlDb();
+    if (!d) return normalizeBusinessCounts({});
+    const rows: any[] = await d.select(
+        `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
+                (SELECT COUNT(*) FROM orders) AS orders,
+                (SELECT COUNT(*) FROM customers) AS customers`
+    );
+    return normalizeBusinessCounts(rows[0] || {});
+}
+
+async function remoteLooksLikeIncompleteLocalUpload(): Promise<boolean> {
+    const localCounts = await countLocalBusinessData();
+    const remoteCounts = await countRemoteBusinessData();
+    return remoteCounts.orders === 0
+        && localCounts.products > 0
+        && (
+            localCounts.products > remoteCounts.products
+            || localCounts.categories > remoteCounts.categories
+            || localCounts.customers > remoteCounts.customers
+        );
 }
 
 function namesConflict(localName: string, remoteName: string): boolean {
@@ -981,15 +1063,40 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
     let remoteIdentity = await getRemoteAppIdentity();
     const localName = localIdentity?.shopName || await getLocalStoreName();
     const remoteName = remoteIdentity?.shopName || await getRemoteStoreName();
+    const localHasBusinessData = hasBusinessData(await countLocalBusinessData());
 
     if (localIdentity && remoteIdentity) {
         if (localIdentity.shopId !== remoteIdentity.shopId) {
+            if (!localHasBusinessData) {
+                await saveLocalAppIdentity(remoteIdentity);
+                return remoteIdentity;
+            }
+            if (!await remoteHasShopData() || await remoteLooksLikeIncompleteLocalUpload()) {
+                const identity = {
+                    ...localIdentity,
+                    shopName: localIdentity.shopName || localName || remoteName,
+                    updatedAt: new Date().toISOString(),
+                };
+                await saveRemoteAppIdentity(identity);
+                if (identity.shopName !== localIdentity.shopName) await saveLocalAppIdentity(identity);
+                return identity;
+            }
             throw new DatabaseIdentityMismatchError(identityMismatchMessage(localIdentity, remoteIdentity));
         }
         return localIdentity;
     }
 
     if (!localIdentity && remoteIdentity) {
+        if (!localHasBusinessData) {
+            await saveLocalAppIdentity(remoteIdentity);
+            return remoteIdentity;
+        }
+        if (!await remoteHasShopData() || await remoteLooksLikeIncompleteLocalUpload()) {
+            const identity = makeIdentity(localName || remoteIdentity.shopName || remoteName);
+            await saveLocalAppIdentity(identity);
+            await saveRemoteAppIdentity(identity);
+            return identity;
+        }
         if (namesConflict(localName, remoteIdentity.shopName || remoteName)) {
             const preview = makeIdentity(localName);
             throw new DatabaseIdentityMismatchError(identityMismatchMessage(preview, remoteIdentity));
@@ -1000,7 +1107,8 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
 
     if (localIdentity && !remoteIdentity) {
         if (await remoteHasShopData()) {
-            if (namesConflict(localIdentity.shopName || localName, remoteName)) {
+            if (namesConflict(localIdentity.shopName || localName, remoteName)
+                && !await remoteLooksLikeIncompleteLocalUpload()) {
                 const preview = { ...localIdentity, shopName: localIdentity.shopName || localName };
                 const remotePreview = makeIdentity(remoteName);
                 throw new DatabaseIdentityMismatchError(identityMismatchMessage(preview, remotePreview));
@@ -1016,7 +1124,8 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
         return identity;
     }
 
-    if (namesConflict(localName, remoteName)) {
+    if (namesConflict(localName, remoteName) && await remoteHasShopData()
+        && !await remoteLooksLikeIncompleteLocalUpload()) {
         throw new DatabaseIdentityMismatchError(
             `${DATABASE_IDENTITY_MISMATCH_CODE}: This MariaDB database appears to belong to a different shop. ` +
             `Local shop: ${localName}. MariaDB shop: ${remoteName}. ` +
@@ -1184,9 +1293,28 @@ const PUSH_TABLES = [
     'stock_receipts', 'stock_receipt_lines'
 ];
 
+const PRESERVE_DURING_RESTORE_TABLES = new Set(['employees', 'settings', 'app_identity']);
+
+const REMOTE_REPLACE_DELETE_TABLES = [
+    'stock_receipt_lines', 'stock_receipts',
+    'manager_approvals', 'till_report_markers',
+    'cash_movements', 'shifts',
+    'payments', 'order_lines', 'orders',
+    'loyalty_logs', 'audit_logs', 'inventory_logs',
+    'product_suppliers', 'suppliers',
+    'promo_group_items', 'promo_groups', 'discounts',
+    'pos_tiles', 'pos_pages',
+    'products', 'categories', 'customers',
+    'registers', 'tax_rates',
+];
+
 /** Push every local table to MariaDB (skips device-local settings keys). */
-async function forcePushTables(localDb: any): Promise<void> {
+async function forcePushTables(
+    localDb: any,
+    options: { skipTables?: Set<string> } = {},
+): Promise<void> {
     for (const table of PUSH_TABLES) {
+        if (options.skipTables?.has(table)) continue;
         let rows: any[] = await localDb.select(`SELECT * FROM ${table}`);
         if (table === 'settings') rows = rows.filter((r: any) => isSyncableSetting(r.key));
         if (rows.length === 0) continue;
@@ -1201,6 +1329,20 @@ async function forcePushTables(localDb: any): Promise<void> {
             const idKey = table === 'settings' ? 'key' : 'id';
             for (const row of rows) await mysql.mysqlUpsert(table, row, idKey);
         }
+    }
+}
+
+async function verifyProductUploadCount(localDb: any): Promise<void> {
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('MariaDB is unavailable after upload');
+    const localRows: any[] = await localDb.select('SELECT COUNT(*) AS count FROM products');
+    const remoteRows: any[] = await remote.select('SELECT COUNT(*) AS count FROM products');
+    const localCount = Number(localRows[0]?.count || 0);
+    const remoteCount = Number(remoteRows[0]?.count || 0);
+    if (remoteCount < localCount) {
+        throw new Error(
+            `Upload incomplete: MariaDB has ${remoteCount.toLocaleString()} products, but this till has ${localCount.toLocaleString()}.`
+        );
     }
 }
 
@@ -1229,6 +1371,7 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
 
         console.log('database: server is empty — performing one-time initial upload…');
         await forcePushTables(localDb);
+        await verifyProductUploadCount(localDb);
 
         await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
         await sqlite.upsert('settings', { key: 'bootstrap_uploaded', value: '1', updatedAt: new Date().toISOString() }, 'key');
@@ -2703,11 +2846,26 @@ export async function getLatestLocalBackup(): Promise<string | null> {
     return invoke<string | null>('latest_local_backup');
 }
 
-export async function restoreLatestLocalBackup(): Promise<string> {
+export interface DatabaseRestoreResult {
+    restoredFrom: string;
+    replacedDatabase: string;
+    safetyBackup: string | null;
+    restartRequired?: boolean;
+}
+
+async function closeLocalDatabaseForRestore(): Promise<void> {
     stopBackgroundSync();
-    const d = await sqlite.getDb();
-    await d.close();
-    return invoke<string>('restore_latest_local_backup');
+    await sqlite.closeDb();
+}
+
+export async function restoreLatestLocalBackup(): Promise<DatabaseRestoreResult> {
+    await closeLocalDatabaseForRestore();
+    return invoke<DatabaseRestoreResult>('restore_latest_local_backup');
+}
+
+export async function restoreLocalDatabaseFromPath(sourcePath: string): Promise<DatabaseRestoreResult> {
+    await closeLocalDatabaseForRestore();
+    return invoke<DatabaseRestoreResult>('restore_local_database_from_path', { sourcePath });
 }
 
 export interface SchemaValidationResult {
@@ -2777,16 +2935,20 @@ export async function migrateLocalDataToServer(): Promise<void> {
     await ensureDatabaseIdentityForSync();
     const counts: any[] = await remote.select(
         `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
                 (SELECT COUNT(*) FROM orders) AS orders,
                 (SELECT COUNT(*) FROM customers) AS customers`
     );
     const c = counts[0] || {};
-    if (Number(c.products) > 0 || Number(c.orders) > 0 || Number(c.customers) > 0) {
+    if (Number(c.products) > 0 || Number(c.categories) > 0 || Number(c.orders) > 0
+        || Number(c.customers) > 0) {
         throw new Error('Migration stopped: MariaDB already contains shop data');
     }
     const validation = await validateDatabaseSchemas();
     if (!validation.ok) throw new Error(validation.issues.join('; '));
-    await forcePushTables(await sqlite.getDb());
+    const localDb = await sqlite.getDb();
+    await forcePushTables(localDb);
+    await verifyProductUploadCount(localDb);
     await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
     await sqlite.upsert('settings', {
         key: 'bootstrap_uploaded',
@@ -2794,6 +2956,95 @@ export async function migrateLocalDataToServer(): Promise<void> {
         updatedAt: new Date().toISOString(),
     }, 'key');
     await forceFullSync();
+}
+
+async function replaceLocalEmployeesFromServer(remote: any, localDb: any): Promise<void> {
+    const employees: any[] = await remote.select('SELECT * FROM employees');
+    await localDb.execute('DELETE FROM employees');
+    for (const employee of employees) {
+        await sqlite.upsert('employees', employee, 'id');
+    }
+}
+
+async function adoptRemoteIdentityLocally(remote: any): Promise<AppIdentity> {
+    const rows: any[] = await remote.select(`SELECT * FROM app_identity WHERE id = ? LIMIT 1`, [APP_IDENTITY_ID]);
+    const identity = normalizeIdentity(rows[0] || null);
+    if (!identity) {
+        const localIdentity = await ensureLocalShopIdentity();
+        await saveRemoteAppIdentity(localIdentity);
+        return localIdentity;
+    }
+    await saveLocalAppIdentity(identity);
+    return identity;
+}
+
+async function clearLocalSyncMarkers(localDb: any): Promise<void> {
+    await localDb.execute(
+        `DELETE FROM settings WHERE key LIKE 'sync_ts_%'
+            OR key IN (
+                'last_sync_time',
+                'last_fast_sync_time',
+                'bootstrap_uploaded',
+                'transaction_purge_applied_at',
+                '${RESTORE_PENDING_MARIADB_REPLACE_KEY}'
+            )`
+    );
+}
+
+async function clearRemoteTombstones(remote: any): Promise<void> {
+    await remote.execute('DELETE FROM tombstones');
+}
+
+/**
+ * Destructive repair for old-till imports:
+ * keep MariaDB employees/settings/shop identity, replace business data with
+ * the restored local SQLite data, then make this till adopt the MariaDB identity.
+ */
+export async function replaceMariaDbDataFromThisTill(): Promise<void> {
+    if (!isMultiMode()) throw new Error('Connect this till to MariaDB first');
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('MariaDB is unavailable');
+
+    stopBackgroundSync();
+    while (isSyncRunning || isFastSyncRunning) {
+        await new Promise(r => setTimeout(r, 100));
+    }
+
+    try {
+        const validation = await validateDatabaseSchemas();
+        if (!validation.ok) throw new Error(validation.issues.join('; '));
+
+        const localDb = await sqlite.getDb();
+        const localCounts: any[] = await localDb.select(
+            `SELECT (SELECT COUNT(*) FROM products) AS products,
+                    (SELECT COUNT(*) FROM categories) AS categories,
+                    (SELECT COUNT(*) FROM customers) AS customers`
+        );
+        if (Number(localCounts[0]?.products || 0) === 0) {
+            throw new Error('This till has no restored products to upload');
+        }
+
+        await adoptRemoteIdentityLocally(remote);
+        await replaceLocalEmployeesFromServer(remote, localDb);
+
+        for (const table of REMOTE_REPLACE_DELETE_TABLES) {
+            await remote.execute(`DELETE FROM ${table}`);
+        }
+        await clearRemoteTombstones(remote);
+
+        await forcePushTables(localDb, { skipTables: PRESERVE_DURING_RESTORE_TABLES });
+        await verifyProductUploadCount(localDb);
+        await clearRemoteTombstones(remote);
+        await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
+        await clearLocalSyncMarkers(localDb);
+        await hydrateSvelteStores();
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+    } catch (error) {
+        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(error) }));
+        throw error;
+    } finally {
+        startBackgroundSync();
+    }
 }
 
 /**
@@ -3035,6 +3286,7 @@ const FULL_SYNC_INTERVAL_MS = 60 * 1000;
  */
 async function runHeartbeat(): Promise<void> {
     if (!isMultiMode() || isHeartbeatRunning) return;
+    if (await pauseSyncIfRestorePending()) return;
     isHeartbeatRunning = true;
     try {
         const wasOnline = get(connectionState).mysqlOnline;
@@ -3150,6 +3402,7 @@ async function pruneLocalPromotionMembershipsToRemote(remoteRows: any[]): Promis
 export async function runFastSyncCycle(): Promise<void> {
     if (!isMultiMode() || isFastSyncRunning || isSyncRunning) return;
     if (!get(connectionState).mysqlOnline) return;
+    if (await pauseSyncIfRestorePending()) return;
     isFastSyncRunning = true;
     try {
         const wasOnline = get(connectionState).mysqlOnline;
@@ -3231,6 +3484,7 @@ export async function runFastSyncCycle(): Promise<void> {
 export async function runSyncCycle(): Promise<void> {
     if (!isMultiMode() || isSyncRunning || isFastSyncRunning) return;
     if (!get(connectionState).mysqlOnline) return;
+    if (await pauseSyncIfRestorePending()) return;
     isSyncRunning = true;
     try {
         const mysqlDb = await getMysqlDb();
@@ -3320,6 +3574,7 @@ export async function runSyncCycle(): Promise<void> {
  */
 export async function triggerSync(): Promise<void> {
     if (!isMultiMode()) return;
+    if (await pauseSyncIfRestorePending()) return;
     // Run a fast sync immediately to push/pull transaction data
     await runFastSyncCycle();
 }
@@ -3334,6 +3589,11 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
     if (syncInterval) clearInterval(syncInterval);
     if (fastSyncInterval) clearInterval(fastSyncInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
+    syncInterval = null;
+    fastSyncInterval = null;
+    heartbeatInterval = null;
+
+    if (await pauseSyncIfRestorePending()) return;
 
     // Do not block the POS. A heartbeat confirms the connection first; once
     // online it flushes queued writes and starts a full catch-up sync.
@@ -3470,6 +3730,7 @@ export async function forcePushToServer(): Promise<void> {
         const localDb = await sqlite.getDb();
         // Reuse the shared push helper (skips device-local settings keys).
         await forcePushTables(localDb);
+        await verifyProductUploadCount(localDb);
         console.log('database: Force push complete.');
     } catch (e) {
         console.error('database: force push failed:', e);
@@ -3516,9 +3777,24 @@ export async function wipeAndPullFromServer(): Promise<void> {
             `DELETE FROM settings WHERE key LIKE 'sync_ts_%' OR key IN ('last_sync_time', 'last_fast_sync_time')`
         );
         console.log('database: local tables wiped. Running full sync cycle...');
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
 
         // This will now download everything from scratch into empty tables
         await runSyncCycle();
+        const state = get(connectionState);
+        if (state.mode === 'multi' && state.mysqlConfig) {
+            const stamp = new Date().toISOString();
+            await localDb.execute(
+                `INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
+                ['pos_mode', 'multi', stamp]
+            );
+            await localDb.execute(
+                `INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
+                ['mysql_config', JSON.stringify(state.mysqlConfig), stamp]
+            );
+        }
 
         console.log('database: wipe and pull complete, rehydrating stores...');
         await hydrateSvelteStores();

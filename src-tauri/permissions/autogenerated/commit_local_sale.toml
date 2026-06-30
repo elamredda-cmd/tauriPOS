@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-commit-local-sale"
+description = "Enables the commit_local_sale command without any pre-configured scope."
+commands.allow = ["commit_local_sale"]
+
+[[permission]]
+identifier = "deny-commit-local-sale"
+description = "Denies the commit_local_sale command without any pre-configured scope."
+commands.deny = ["commit_local_sale"]

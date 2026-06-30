@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-allocate-mysql-till-sequence"
+description = "Enables the allocate_mysql_till_sequence command without any pre-configured scope."
+commands.allow = ["allocate_mysql_till_sequence"]
+
+[[permission]]
+identifier = "deny-allocate-mysql-till-sequence"
+description = "Denies the allocate_mysql_till_sequence command without any pre-configured scope."
+commands.deny = ["allocate_mysql_till_sequence"]

@@ -10,6 +10,13 @@ export async function getDb(): Promise<Database> {
     return db;
 }
 
+export async function closeDb(): Promise<void> {
+    if (!db) return;
+    const current = db;
+    db = null;
+    await current.close(current.path);
+}
+
 export async function initDb() {
     const d = await getDb();
 

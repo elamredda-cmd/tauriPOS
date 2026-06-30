@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
+    import { invoke } from '@tauri-apps/api/core';
     import { get } from 'svelte/store';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { connectionState } from '$lib/stores/connection';
@@ -16,7 +17,9 @@
         createLocalBackup,
         migrateLocalDataToServer,
         purgeAllTransactions,
+        replaceMariaDbDataFromThisTill,
         restoreLatestLocalBackup,
+        restoreLocalDatabaseFromPath,
         retrySyncConflict,
         upsert,
         validateDatabaseSchemas,
@@ -29,24 +32,79 @@
     let syncStatus = '';
     let wipeStatus = '';
     let pushStatus = '';
+    let replaceServerStatus = '';
     let backupStatus = '';
     let restoreStatus = '';
+    type RestoreProgressState = 'idle' | 'confirm' | 'running' | 'success' | 'stopped';
+    let restoreProgressState: RestoreProgressState = 'idle';
+    let restoreProgress = 0;
+    let restoreProgressTitle = '';
+    let restoreProgressDetail = '';
     let purgeStatus = '';
     let purgeResponsibilityAccepted = false;
     let purgeFinalConfirmation = false;
     let migrationConfirmed = false;
     let wipeConfirmed = false;
     let pushConfirmed = false;
+    let replaceServerConfirmed = false;
     let restoreConfirmed = false;
+    let restoreFilePath = '';
+    let restoreFileConfirmed = false;
     let busy = false;
     let taxIncludedInPrice = $storeDB.taxIncludedInPrice;
     let syncConflicts: SyncConflict[] = [];
     let conflictStatus = '';
+    const RESTORE_NOTICE_KEY = 'pos_restore_notice';
+
+    function cleanError(error: unknown): string {
+        return String(error).replace(/^Error:\s*/, '').trim();
+    }
+
+    function setRestoreProgress(
+        state: RestoreProgressState,
+        progress: number,
+        title: string,
+        detail = '',
+    ) {
+        restoreProgressState = state;
+        restoreProgress = Math.max(0, Math.min(100, progress));
+        restoreProgressTitle = title;
+        restoreProgressDetail = detail;
+        restoreStatus = detail || title;
+    }
+
+    function resetRestoreProgress() {
+        restoreProgressState = 'idle';
+        restoreProgress = 0;
+        restoreProgressTitle = '';
+        restoreProgressDetail = '';
+        restoreStatus = '';
+        restoreConfirmed = false;
+        restoreFileConfirmed = false;
+    }
+
+    function stopRestoreWithError(message: string) {
+        setRestoreProgress('stopped', 100, 'Restore stopped', message);
+        toast(`Restore stopped: ${message}`, 'error');
+    }
+
+    function saveRestoreNotice(type: 'success' | 'error', message: string, details = '') {
+        try {
+            sessionStorage.setItem(RESTORE_NOTICE_KEY, JSON.stringify({ type, message, details }));
+        } catch {
+            // If session storage is unavailable, the on-screen status still shows the message.
+        }
+    }
 
     onMount(async () => {
         if (get(currentEmployee)?.role !== 'admin') {
-            toast('Advanced Maintenance is available to administrators only.', 'error');
-            goto('/settings');
+            const restoreNotice = sessionStorage.getItem(RESTORE_NOTICE_KEY);
+            if (!restoreNotice) {
+                toast('Advanced Maintenance is available to administrators only.', 'error');
+                goto('/settings');
+            } else {
+                goto('/setup');
+            }
             return;
         }
         await refreshConflicts();
@@ -159,26 +217,145 @@
         }
     }
 
+    async function replaceMariaDbFromThisTill() {
+        if (!replaceServerConfirmed) {
+            replaceServerConfirmed = true;
+            replaceServerStatus = 'Click again to delete MariaDB business data and upload this restored till. Employees and settings are kept.';
+            return;
+        }
+        busy = true;
+        try {
+            replaceServerStatus = 'Replacing MariaDB business data from this restored till...';
+            await replaceMariaDbDataFromThisTill();
+            replaceServerStatus = 'MariaDB was replaced from this till. Employees and settings were kept.';
+        } catch (error) {
+            replaceServerStatus = `MariaDB replace failed: ${cleanError(error)}`;
+        } finally {
+            busy = false;
+            replaceServerConfirmed = false;
+        }
+    }
+
     async function restoreBackup() {
         const latest = await getLatestLocalBackup();
         if (!latest) {
-            restoreStatus = 'No local backup is available.';
+            stopRestoreWithError('No local backup is available.');
             return;
         }
         if (!restoreConfirmed) {
             restoreConfirmed = true;
+            restoreFileConfirmed = false;
+            setRestoreProgress(
+                'confirm',
+                0,
+                'Ready to restore latest backup',
+                `Click Restore Latest Backup again to replace this till's local data with ${latest}`
+            );
             restoreStatus = `Click again to replace this till’s local data with ${latest}`;
             return;
         }
         busy = true;
         try {
-            restoreStatus = 'Restoring latest backup...';
-            await restoreLatestLocalBackup();
-            window.location.reload();
+            setRestoreProgress('running', 20, 'Checking backup', latest);
+            setRestoreProgress('running', 55, 'Creating safety backup and replacing database', 'Do not close the app while this is running.');
+            const result = await restoreLatestLocalBackup();
+            if (result.restartRequired) {
+                setRestoreProgress(
+                    'success',
+                    100,
+                    'Restore ready to finish',
+                    `Windows is still using the current database. Close and reopen the app to finish restore. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                );
+                busy = false;
+                restoreConfirmed = false;
+                return;
+            }
+            setRestoreProgress(
+                'success',
+                100,
+                'Restore completed',
+                `Restored ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}. Reloading...`
+            );
+            saveRestoreNotice(
+                'success',
+                'Database restored. Continue setup or connect MariaDB to finish.',
+                `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
+            );
+            setTimeout(() => window.location.reload(), 700);
         } catch (error) {
-            restoreStatus = `Restore failed: ${error}`;
+            stopRestoreWithError(cleanError(error));
             busy = false;
             restoreConfirmed = false;
+        }
+    }
+
+    async function restoreDatabaseFile() {
+        const path = restoreFilePath.trim();
+        if (!path) {
+            stopRestoreWithError('Choose the old till database file first.');
+            return;
+        }
+        if (!restoreFileConfirmed) {
+            restoreFileConfirmed = true;
+            restoreConfirmed = false;
+            setRestoreProgress(
+                'confirm',
+                0,
+                'Ready to restore selected file',
+                `Click Restore From File again to replace this till's local data with ${path}`
+            );
+            return;
+        }
+        busy = true;
+        try {
+            setRestoreProgress('running', 20, 'Checking selected database', path);
+            setRestoreProgress('running', 55, 'Creating safety backup and replacing database', 'Do not close the app while this is running.');
+            const result = await restoreLocalDatabaseFromPath(path);
+            if (result.restartRequired) {
+                setRestoreProgress(
+                    'success',
+                    100,
+                    'Restore ready to finish',
+                    `Windows is still using the current database. Close and reopen the app to finish restore. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                );
+                busy = false;
+                restoreFileConfirmed = false;
+                return;
+            }
+            setRestoreProgress(
+                'success',
+                100,
+                'Restore completed',
+                `Restored ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}. Reloading...`
+            );
+            saveRestoreNotice(
+                'success',
+                'Database restored. Continue setup or connect MariaDB to finish.',
+                `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
+            );
+            setTimeout(() => window.location.reload(), 700);
+        } catch (error) {
+            stopRestoreWithError(cleanError(error));
+            busy = false;
+            restoreFileConfirmed = false;
+        }
+    }
+
+    async function chooseRestoreDatabaseFile() {
+        resetRestoreProgress();
+        restoreStatus = 'Opening file picker...';
+        restoreFileConfirmed = false;
+        try {
+            const selected = await invoke<string | null>('select_restore_database_file');
+            if (!selected) {
+                restoreStatus = 'No database file selected.';
+                return;
+            }
+            restoreFilePath = selected;
+            restoreStatus = `Selected database file: ${selected}`;
+        } catch (error) {
+            restoreStatus = `File picker failed: ${cleanError(error)}`;
+            toast(restoreStatus, 'error');
         }
     }
 
@@ -280,6 +457,14 @@
                         <button class="btn btn-danger" disabled={busy} on:click={forcePush}>Push Local Data to Server</button>
                         {#if pushStatus}<small>{pushStatus}</small>{/if}
                     </article>
+                    <article class="danger-card">
+                        <strong>Replace MariaDB From Restore</strong>
+                        <p>Delete MariaDB products, customers, orders, stock, discounts, and reports, then upload this restored till. Employees and settings stay.</p>
+                        <button class="btn btn-danger" disabled={busy} on:click={replaceMariaDbFromThisTill}>
+                            {replaceServerConfirmed ? 'Confirm Replace MariaDB' : 'Replace MariaDB From This Till'}
+                        </button>
+                        {#if replaceServerStatus}<small>{replaceServerStatus}</small>{/if}
+                    </article>
                 </div>
             </section>
         {/if}
@@ -362,8 +547,57 @@
                 <button class="btn btn-primary" disabled={busy} on:click={createBackup}>Create Local Backup</button>
                 <button class="btn btn-danger" disabled={busy} on:click={restoreBackup}>Restore Latest Backup</button>
             </div>
+            <div class="restore-file-panel">
+                <label for="restore-file-path">Old till database file path</label>
+                <div class="restore-file-row">
+                    <input
+                        id="restore-file-path"
+                        class="flat-input"
+                        bind:value={restoreFilePath}
+                        placeholder="For example: D:\old-till\pos.db"
+                        on:input={() => restoreFileConfirmed = false}
+                    />
+                    <button class="btn btn-secondary" disabled={busy} on:click={chooseRestoreDatabaseFile}>
+                        Choose File
+                    </button>
+                    <button class="btn btn-danger" disabled={busy || !restoreFilePath.trim()} on:click={restoreDatabaseFile}>
+                        {restoreFileConfirmed ? 'Confirm Restore From File' : 'Restore From File'}
+                    </button>
+                </div>
+                <small>Use this when moving the database from an old till. Choose the copied .db file, or paste the full path.</small>
+            </div>
+            {#if restoreProgressState !== 'idle'}
+                <div
+                    class="restore-progress-panel"
+                    class:restore-stopped={restoreProgressState === 'stopped'}
+                    class:restore-success={restoreProgressState === 'success'}
+                >
+                    <div class="restore-progress-head">
+                        <div>
+                            <strong>{restoreProgressTitle}</strong>
+                            {#if restoreProgressDetail}
+                                <p>{restoreProgressDetail}</p>
+                            {/if}
+                        </div>
+                        <b>{restoreProgress}%</b>
+                    </div>
+                    <div class="restore-progress-track" aria-label="Restore progress">
+                        <span style={`width: ${restoreProgress}%`}></span>
+                    </div>
+                    {#if restoreProgressState === 'stopped'}
+                        <div class="button-row">
+                            <button class="btn btn-secondary" type="button" on:click={resetRestoreProgress}>
+                                Stop Restore
+                            </button>
+                            <button class="btn btn-primary" type="button" disabled={busy} on:click={chooseRestoreDatabaseFile}>
+                                Choose Another File
+                            </button>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
             {#if backupStatus}<p class="status-text break-all">{backupStatus}</p>{/if}
-            {#if restoreStatus}<p class="status-text">{restoreStatus}</p>{/if}
+            {#if restoreStatus}<p class="status-text break-all">{restoreStatus}</p>{/if}
         </section>
     </div>
 </MgmtPage>
@@ -380,7 +614,23 @@
     .status-card div { display: flex; flex-direction: column; }
     .status-card span, article p, article small { color: var(--text-muted); }
     .button-row { display: flex; flex-wrap: wrap; gap: .65rem; }
-    .repair-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; }
+    .restore-file-panel { margin-top: 1rem; display: grid; gap: .45rem; }
+    .restore-file-panel label { font-weight: 800; color: var(--text-main); }
+    .restore-file-panel small { color: var(--text-muted); }
+    .restore-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .65rem; align-items: stretch; }
+    .restore-file-row input { min-height: 46px; }
+    .restore-progress-panel { margin-top: .9rem; display: grid; gap: .7rem; padding: .9rem 1rem; border: 1px solid var(--accent-primary); border-radius: .75rem; background: var(--bg-panel); }
+    .restore-progress-panel.restore-stopped { border-color: var(--danger); background: rgba(239, 68, 68, .08); }
+    .restore-progress-panel.restore-success { border-color: var(--success); background: rgba(34, 197, 94, .08); }
+    .restore-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .restore-progress-head strong { color: var(--text-main); }
+    .restore-progress-head p { margin: .25rem 0 0; color: var(--text-muted); overflow-wrap: anywhere; }
+    .restore-progress-head b { color: var(--text-main); }
+    .restore-progress-track { height: .65rem; overflow: hidden; border-radius: 999px; background: var(--border-flat); }
+    .restore-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent-primary); transition: width .25s ease; }
+    .restore-stopped .restore-progress-track span { background: var(--danger); }
+    .restore-success .restore-progress-track span { background: var(--success); }
+    .repair-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .8rem; }
     .repair-grid article { padding: 1rem; display: flex; flex-direction: column; gap: .65rem; border: 1px solid var(--border-flat); border-radius: .75rem; background: var(--bg-panel); }
     .repair-grid article .btn { margin-top: auto; }
     .conflict-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
@@ -396,6 +646,7 @@
     .purge-warning { color: var(--danger); }
     .purge-warning { margin: 0 0 .8rem; font-weight: 800; }
     @media (max-width: 900px) {
+        .restore-file-row { grid-template-columns: 1fr; }
         .repair-grid { grid-template-columns: 1fr; }
         .conflict-list article { align-items: stretch; flex-direction: column; }
     }

@@ -1,12 +1,12 @@
 mod commerce;
 
+use serde::Serialize;
 use std::{
     fs::OpenOptions,
     io::Write,
     net::{TcpStream, ToSocketAddrs},
     time::{Duration, Instant},
 };
-use serde::Serialize;
 use tauri::Manager;
 
 #[cfg(target_os = "windows")]
@@ -190,7 +190,9 @@ fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     let mut found = 0u32;
     let status = unsafe { GetCommPorts(ports.as_mut_ptr(), ports.len() as u32, &mut found) };
     if status != 0 {
-        return Err(format!("Could not list serial ports (Windows error {status})"));
+        return Err(format!(
+            "Could not list serial ports (Windows error {status})"
+        ));
     }
 
     ports.truncate(found as usize);
@@ -212,7 +214,12 @@ fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 
 #[cfg(not(target_os = "windows"))]
 fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
-    fn add_matching_ports(ports: &mut Vec<SerialPortInfo>, dir: &str, prefixes: &[&str], kind: &str) {
+    fn add_matching_ports(
+        ports: &mut Vec<SerialPortInfo>,
+        dir: &str,
+        prefixes: &[&str],
+        kind: &str,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -270,6 +277,91 @@ fn platform_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 #[tauri::command]
 fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     platform_serial_ports()
+}
+
+#[cfg(target_os = "windows")]
+fn platform_select_restore_database_file() -> Result<Option<String>, String> {
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        CommDlgExtendedError, GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+
+    let mut file_buffer = vec![0u16; 32_768];
+    let mut filter = wide_null(
+        "SQLite database (*.db;*.sqlite;*.sqlite3)\0*.db;*.sqlite;*.sqlite3\0All files (*.*)\0*.*\0",
+    );
+    let mut title = wide_null("Choose old till database");
+    let mut default_ext = wide_null("db");
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.lpstrFilter = filter.as_mut_ptr();
+    dialog.nFilterIndex = 1;
+    dialog.lpstrFile = file_buffer.as_mut_ptr();
+    dialog.nMaxFile = file_buffer.len() as u32;
+    dialog.lpstrTitle = title.as_mut_ptr();
+    dialog.lpstrDefExt = default_ext.as_mut_ptr();
+    dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+
+    let selected = unsafe { GetOpenFileNameW(&mut dialog) };
+    if selected == 0 {
+        let error = unsafe { CommDlgExtendedError() };
+        if error == 0 {
+            return Ok(None);
+        }
+        return Err(format!("Windows file picker failed (dialog error {error})"));
+    }
+
+    let len = file_buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file_buffer.len());
+    Ok(Some(String::from_utf16_lossy(&file_buffer[..len])))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_select_restore_database_file() -> Result<Option<String>, String> {
+    use std::process::Command;
+
+    let script = r#"try
+  set dbFile to choose file with prompt "Choose old till database" of type {"db", "sqlite", "sqlite3"}
+  return POSIX path of dbFile
+on error number -128
+  return ""
+end try"#;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| format!("Could not open macOS file picker: {error}"))?;
+
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            "macOS file picker failed".into()
+        } else {
+            format!("macOS file picker failed: {message}")
+        });
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(path))
+    }
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn platform_select_restore_database_file() -> Result<Option<String>, String> {
+    Err(
+        "File picker is available on Windows and macOS. Paste the database path on this machine."
+            .into(),
+    )
+}
+
+#[tauri::command]
+fn select_restore_database_file() -> Result<Option<String>, String> {
+    platform_select_restore_database_file()
 }
 
 #[derive(Serialize)]
@@ -568,7 +660,11 @@ fn platform_read_scale_weight(
 
     let baud = baud_rate.unwrap_or(9_600).clamp(1_200, 115_200);
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_200).clamp(200, 5_000));
-    let stty_device_flag = if cfg!(target_os = "macos") { "-f" } else { "-F" };
+    let stty_device_flag = if cfg!(target_os = "macos") {
+        "-f"
+    } else {
+        "-F"
+    };
     let _ = Command::new("stty")
         .arg(stty_device_flag)
         .arg(device_path)
@@ -619,7 +715,11 @@ fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {
         text.chars()
             .map(|ch| {
                 let code = ch as u32;
-                if code <= 0xff { code as u8 } else { b'?' }
+                if code <= 0xff {
+                    code as u8
+                } else {
+                    b'?'
+                }
             })
             .collect()
     } else {
@@ -663,7 +763,9 @@ fn send_cctv_pos_text(
     stream
         .write_all(&payload)
         .map_err(|error| format!("Could not send CCTV POS text: {error}"))?;
-    stream.flush().map_err(|error| format!("Could not flush CCTV POS text: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("Could not flush CCTV POS text: {error}"))?;
     Ok(())
 }
 
@@ -701,15 +803,14 @@ fn send_raw_printer_data(
     stream
         .write_all(&data)
         .map_err(|error| format!("Could not send printer data: {error}"))?;
-    stream.flush().map_err(|error| format!("Could not flush printer data: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("Could not flush printer data: {error}"))?;
     Ok(())
 }
 
 #[tauri::command]
-fn send_device_printer_data(
-    device_path: String,
-    data: Vec<u8>,
-) -> Result<(), String> {
+fn send_device_printer_data(device_path: String, data: Vec<u8>) -> Result<(), String> {
     let device_path = device_path.trim();
     if device_path.is_empty() {
         return Err("Printer device path is required".into());
@@ -784,7 +885,11 @@ fn send_system_printer_data(
     let mut printer_name_w = wide_null(printer_name);
     let mut printer: HANDLE = std::ptr::null_mut();
     let opened = unsafe {
-        OpenPrinterW(printer_name_w.as_mut_ptr(), &mut printer, std::ptr::null_mut())
+        OpenPrinterW(
+            printer_name_w.as_mut_ptr(),
+            &mut printer,
+            std::ptr::null_mut(),
+        )
     };
     if opened == 0 {
         return Err(last_windows_error("Could not open Windows printer"));
@@ -891,7 +996,9 @@ fn open_cash_drawer(
     stream
         .write_all(&payload)
         .map_err(|error| format!("Could not send drawer pulse: {error}"))?;
-    stream.flush().map_err(|error| format!("Could not flush drawer pulse: {error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("Could not flush drawer pulse: {error}"))?;
     Ok(())
 }
 
@@ -901,6 +1008,10 @@ pub fn run() {
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Err(error) = commerce::apply_pending_restore_on_startup(app.handle()) {
+                eprintln!("Could not apply pending database restore: {error}");
+            }
+
             #[cfg(target_os = "windows")]
             match WindowsKeepAwake::enable() {
                 Ok(guard) => {
@@ -930,6 +1041,7 @@ pub fn run() {
             send_system_printer_data,
             list_system_printers,
             list_serial_ports,
+            select_restore_database_file,
             read_scale_weight,
             open_cash_drawer,
             commerce::commit_local_sale,
@@ -939,6 +1051,7 @@ pub fn run() {
             commerce::create_local_backup,
             commerce::latest_local_backup,
             commerce::restore_latest_local_backup,
+            commerce::restore_local_database_from_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

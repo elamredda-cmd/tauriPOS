@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-send-raw-printer-data"
+description = "Enables the send_raw_printer_data command without any pre-configured scope."
+commands.allow = ["send_raw_printer_data"]
+
+[[permission]]
+identifier = "deny-send-raw-printer-data"
+description = "Denies the send_raw_printer_data command without any pre-configured scope."
+commands.deny = ["send_raw_printer_data"]

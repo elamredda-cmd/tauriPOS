@@ -18,11 +18,16 @@
     $: label = getLabelPrinterConfig($settingsDB);
     $: drawer = getCashDrawerConfig($settingsDB);
     $: drawerTarget = cashDrawerTargetLabel(drawer);
+    $: explicitDrawerHost = settingValue('cash_drawer_printer_host');
+    $: explicitDrawerPrinterName = settingValue('cash_drawer_printer_name');
+    $: explicitDrawerDevicePath = settingValue('cash_drawer_printer_device_path');
+    $: drawerUsesReceiptPrinter = !explicitDrawerHost.trim() && !explicitDrawerPrinterName.trim() && !explicitDrawerDevicePath.trim();
     $: drawerManualEnabled = ($settingsDB.find((item) => item.key === 'cash_drawer_enabled')?.value ?? (drawerTarget ? 'true' : 'false')) !== 'false';
     $: receiptMode = receiptConnections.find((option) => option.value === receipt.connection);
     $: labelMode = labelConnections.find((option) => option.value === label.connection);
     $: receiptPrinterOptions = printerOptionsFor(receipt.printerName);
     $: labelPrinterOptions = printerOptionsFor(label.printerName);
+    $: drawerPrinterOptions = printerOptionsFor(explicitDrawerPrinterName);
     let receiptTestStatus = '';
     let labelTestStatus = '';
     let drawerTestStatus = '';
@@ -44,6 +49,43 @@
             return [...settings, row];
         });
         await upsert('settings', row, 'key');
+    }
+
+    function settingValue(key: string, fallback = '') {
+        return $settingsDB.find((item) => item.key === key)?.value ?? fallback;
+    }
+
+    async function useReceiptPrinterForDrawer() {
+        await updateSetting('cash_drawer_printer_host', '');
+        await updateSetting('cash_drawer_printer_name', '');
+        await updateSetting('cash_drawer_printer_device_path', '');
+        drawerTestStatus = 'Drawer will use the configured receipt printer.';
+        toast('Drawer set to receipt printer', 'success');
+    }
+
+    async function setSeparateDrawerTarget(kind: 'network' | 'printer' | 'device', value: string) {
+        const trimmed = value.trim();
+        if (kind === 'network') {
+            await updateSetting('cash_drawer_printer_host', trimmed);
+            if (trimmed) {
+                await updateSetting('cash_drawer_printer_name', '');
+                await updateSetting('cash_drawer_printer_device_path', '');
+            }
+            return;
+        }
+        if (kind === 'printer') {
+            await updateSetting('cash_drawer_printer_name', trimmed);
+            if (trimmed) {
+                await updateSetting('cash_drawer_printer_host', '');
+                await updateSetting('cash_drawer_printer_device_path', '');
+            }
+            return;
+        }
+        await updateSetting('cash_drawer_printer_device_path', trimmed);
+        if (trimmed) {
+            await updateSetting('cash_drawer_printer_host', '');
+            await updateSetting('cash_drawer_printer_name', '');
+        }
     }
 
     async function testReceiptPrinter() {
@@ -405,7 +447,7 @@
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
                         <div class="mb-4 flex flex-col gap-1">
                             <h4 class="m-0 text-base font-black text-text-main">Cash drawer pulse</h4>
-                            <p class="m-0 text-sm text-text-muted">The drawer normally plugs into the receipt printer. These tiles keep the setup readable without making the section huge.</p>
+                            <p class="m-0 text-sm text-text-muted">The drawer normally plugs into the receipt printer. Leave the separate target fields empty for that setup.</p>
                         </div>
                         <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                             <button
@@ -424,8 +466,11 @@
                             <div class={compactInfoCardClass()}>
                                 <span class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Target</span>
                                 <strong class="mt-2 block text-sm leading-tight text-text-main">
-                                    {drawerTarget || 'Set receipt printer first'}
+                                    {drawerUsesReceiptPrinter ? `Receipt printer: ${drawerTarget || 'set receipt printer first'}` : drawerTarget}
                                 </strong>
+                                <small class="mt-2 block text-xs text-text-muted">
+                                    {drawerUsesReceiptPrinter ? 'Connected through the configured receipt printer.' : 'Using separate drawer target below.'}
+                                </small>
                             </div>
                             <div class={compactInfoCardClass()}>
                                 <CustomSelect
@@ -457,26 +502,68 @@
                                 </div>
                                 <small class="mt-2 block text-xs text-text-muted">50 / 250 works for most Epson-compatible printers.</small>
                             </div>
-                            {#if drawer.connection === 'network_escpos'}
-                                <div class="field rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-1">
-                                    <label>Drawer Printer IP</label>
-                                    <input
-                                        value={drawer.host}
-                                        placeholder="e.g. 192.168.1.50"
-                                        on:change={(event) => updateSetting('cash_drawer_printer_host', event.currentTarget.value.trim())}
-                                    />
+                            <div class="rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-4">
+                                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                    <div>
+                                        <label class="text-sm font-black leading-tight text-text-main">Separate drawer target</label>
+                                        <p class="m-0 mt-1 text-xs text-text-muted">Only fill these if the drawer is not connected to the receipt printer.</p>
+                                    </div>
+                                    <button type="button" class="btn btn-secondary" on:click={useReceiptPrinterForDrawer} disabled={drawerUsesReceiptPrinter}>
+                                        Use Receipt Printer
+                                    </button>
                                 </div>
-                                <div class="field rounded-xl border border-border-flat bg-bg-card p-3 sm:col-span-2 xl:col-span-1">
-                                    <label>Drawer Printer Port</label>
-                                    <input
-                                        type="number"
-                                        min="1"
-                                        max="65535"
-                                        value={drawer.port}
-                                        on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
-                                    />
+                                <div class="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
+                                    <div class="field">
+                                        <div class="flex flex-wrap items-center justify-between gap-2">
+                                            <label>Separate Windows Printer</label>
+                                            <button type="button" class="btn btn-secondary" on:click={findSystemPrinters} disabled={findingPrinters}>
+                                                {findingPrinters ? 'Finding...' : 'Find printers'}
+                                            </button>
+                                        </div>
+                                        {#if drawerPrinterOptions.length > 0}
+                                            <CustomSelect
+                                                value={explicitDrawerPrinterName}
+                                                options={drawerPrinterOptions}
+                                                placeholder="Use receipt printer"
+                                                on:change={(event) => setSeparateDrawerTarget('printer', String(event.detail))}
+                                            />
+                                        {:else}
+                                            <input
+                                                value={explicitDrawerPrinterName}
+                                                placeholder="Leave empty to use receipt printer"
+                                                on:change={(event) => setSeparateDrawerTarget('printer', event.currentTarget.value)}
+                                            />
+                                        {/if}
+                                    </div>
+                                    <div class="field">
+                                        <label>Separate Network IP</label>
+                                        <input
+                                            value={explicitDrawerHost}
+                                            placeholder="Leave empty to use receipt printer"
+                                            on:change={(event) => setSeparateDrawerTarget('network', event.currentTarget.value)}
+                                        />
+                                    </div>
+                                    <div class="field">
+                                        <label>Separate COM / Device Path</label>
+                                        <input
+                                            value={explicitDrawerDevicePath}
+                                            placeholder="e.g. COM3 or /dev/tty.usbserial"
+                                            on:change={(event) => setSeparateDrawerTarget('device', event.currentTarget.value)}
+                                        />
+                                    </div>
+                                    <div class="field">
+                                        <label>Network Port</label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="65535"
+                                            value={settingValue('cash_drawer_printer_port', '9100') || '9100'}
+                                            on:change={(event) => updateSetting('cash_drawer_printer_port', event.currentTarget.value || '9100')}
+                                        />
+                                        <small class="text-text-muted">Used only when a separate drawer IP is entered.</small>
+                                    </div>
                                 </div>
-                            {/if}
+                            </div>
                         </div>
                     </div>
                 </section>

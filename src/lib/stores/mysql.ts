@@ -1348,12 +1348,27 @@ export async function mysqlBulkAddProducts(products: any[]): Promise<void> {
     await d.execute('START TRANSACTION');
     try {
         for (const p of products) {
-            const keys = Object.keys(p).filter(k => validCols.includes(k));
-            const values = keys.map(k => normalizeValue(p[k]));
-            const columns = keys.map(k => `\`${k}\``).join(', ');
-            const placeholders = keys.map(() => '?').join(', ');
-            const sql = `INSERT IGNORE INTO products (${columns}) VALUES (${placeholders})`;
-            await d.execute(sql, values);
+            const product = normalizeProductIdentifiers(p);
+            const keys = Object.keys(product).filter(k => validCols.includes(k));
+            if (!keys.includes('id')) throw new Error(`Product upload failed: missing product id for ${product.name || 'unknown item'}`);
+            const values = keys.map(k => normalizeValue(product[k]));
+            const existing: any[] = await d.select('SELECT id FROM products WHERE id = ? LIMIT 1', [product.id]);
+
+            if (existing.length > 0) {
+                const updateKeys = keys.filter(k => k !== 'id');
+                if (updateKeys.length === 0) continue;
+                const assignments = updateKeys.map(k => `\`${k}\` = ?`).join(', ');
+                const updateValues = updateKeys.map(k => normalizeValue(product[k]));
+                await d.execute(`UPDATE products SET ${assignments} WHERE id = ?`, [...updateValues, product.id]);
+            } else {
+                const columns = keys.map(k => `\`${k}\``).join(', ');
+                const placeholders = keys.map(() => '?').join(', ');
+                try {
+                    await d.execute(`INSERT INTO products (${columns}) VALUES (${placeholders})`, values);
+                } catch (error) {
+                    throw new Error(`Product upload failed for ${product.name || product.id}: ${error}`);
+                }
+            }
         }
         await d.execute('COMMIT');
     } catch (e) {

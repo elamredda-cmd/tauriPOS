@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "resources": {
+      "../vendor/mariadb/mariadb-11.4.12-winx64.msi": "mariadb/mariadb-11.4.12-winx64.msi"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "installerHooks": "nsis/mariadb-hooks.nsh"
+      }
+    }
+  }
+}

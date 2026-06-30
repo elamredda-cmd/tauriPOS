@@ -1,8 +1,9 @@
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use sqlx::mysql::MySqlPoolOptions;
-use sqlx::{MySqlPool, SqlitePool};
-use std::{fs, path::PathBuf, time::Duration};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{MySqlPool, Row, SqlitePool};
+use std::{fs, path::PathBuf, thread, time::Duration};
 use tauri::{AppHandle, Manager};
 
 fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -152,6 +153,21 @@ pub struct CommitSaleResult {
     pub bundle: SaleBundle,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDatabaseResult {
+    pub restored_from: String,
+    pub replaced_database: String,
+    pub safety_backup: Option<String>,
+    pub restart_required: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PendingRestoreMarker {
+    source: String,
+    preserve_from: Option<String>,
+}
+
 fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -166,6 +182,36 @@ fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     } else {
         format!("pos-{profile}.db")
     }))
+}
+
+fn local_backup_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let backup_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("backups");
+    fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    Ok(backup_dir)
+}
+
+fn pending_restore_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("pending-restore.txt"))
+}
+
+fn restore_source_path(source_path: &str) -> Result<PathBuf, String> {
+    let trimmed = source_path
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim();
+    if trimmed.is_empty() {
+        return Err("Choose or paste the old till database file path first".into());
+    }
+    Ok(PathBuf::from(trimmed))
 }
 
 async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error> {
@@ -741,12 +787,7 @@ pub async fn create_local_backup(app: AppHandle) -> Result<String, String> {
     if !source.exists() {
         return Err("Local database does not exist yet".into());
     }
-    let backup_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("backups");
-    fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let backup_dir = local_backup_dir(&app)?;
     let name = format!(
         "pos-backup-{}.db",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
@@ -764,11 +805,7 @@ pub async fn create_local_backup(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn latest_local_backup(app: AppHandle) -> Result<Option<String>, String> {
-    let backup_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("backups");
+    let backup_dir = local_backup_dir(&app)?;
     if !backup_dir.exists() {
         return Ok(None);
     }
@@ -781,14 +818,334 @@ pub async fn latest_local_backup(app: AppHandle) -> Result<Option<String>, Strin
     Ok(files.last().map(|e| e.path().display().to_string()))
 }
 
+async fn validate_restore_database(source: &PathBuf) -> Result<(), String> {
+    if !source.exists() {
+        return Err("The selected database file does not exist".into());
+    }
+    if !source.is_file() {
+        return Err("The selected path is not a database file".into());
+    }
+
+    let uri = format!("sqlite://{}?mode=ro", source.display());
+    let pool = SqlitePool::connect(&uri)
+        .await
+        .map_err(|e| format!("Could not open the selected database: {e}"))?;
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| format!("Could not check database integrity: {e}"))?;
+    if integrity.to_lowercase() != "ok" {
+        return Err(format!(
+            "The selected database failed integrity check: {integrity}"
+        ));
+    }
+
+    let required_tables = ["settings", "products"];
+    for table in required_tables {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| format!("Could not inspect database tables: {e}"))?;
+        if count == 0 {
+            return Err(format!(
+                "The selected database does not look like an L&Bj POS database. Missing table: {table}"
+            ));
+        }
+    }
+
+    pool.close().await;
+    Ok(())
+}
+
+fn retry_file_operation<T, F>(mut operation: F) -> Result<T, std::io::Error>
+where
+    F: FnMut() -> Result<T, std::io::Error>,
+{
+    let mut last_error = None;
+    for _ in 0..8 {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+    Err(last_error.expect("retry_file_operation should always run at least once"))
+}
+
+fn quote_sqlite_text(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+async fn table_exists(pool: &SqlitePool, schema: &str, table: &str) -> Result<bool, String> {
+    let query = format!(
+        "SELECT COUNT(*) FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?"
+    );
+    let count: i64 = sqlx::query_scalar(&query)
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Could not inspect {schema}.{table}: {e}"))?;
+    Ok(count > 0)
+}
+
+async fn table_columns(pool: &SqlitePool, schema: &str, table: &str) -> Result<Vec<String>, String> {
+    let query = format!("PRAGMA {schema}.table_info({table})");
+    let rows = sqlx::query(&query)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Could not inspect {schema}.{table} columns: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .collect())
+}
+
+async fn copy_preserved_table(
+    pool: &SqlitePool,
+    table: &str,
+    where_clause: Option<&str>,
+) -> Result<(), String> {
+    if !table_exists(pool, "main", table).await? || !table_exists(pool, "preserved", table).await? {
+        return Ok(());
+    }
+
+    let target_columns = table_columns(pool, "main", table).await?;
+    let source_columns = table_columns(pool, "preserved", table).await?;
+    let source_set: std::collections::HashSet<_> = source_columns.iter().cloned().collect();
+    let columns: Vec<String> = target_columns
+        .into_iter()
+        .filter(|column| source_set.contains(column))
+        .collect();
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let column_list = columns.join(", ");
+    let delete_query = match where_clause {
+        Some(clause) => format!("DELETE FROM main.{table} WHERE {clause}"),
+        None => format!("DELETE FROM main.{table}"),
+    };
+    sqlx::query(&delete_query)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Could not clear preserved {table}: {e}"))?;
+
+    let insert_query = match where_clause {
+        Some(clause) => format!(
+            "INSERT INTO main.{table} ({column_list}) SELECT {column_list} FROM preserved.{table} WHERE {clause}"
+        ),
+        None => format!(
+            "INSERT INTO main.{table} ({column_list}) SELECT {column_list} FROM preserved.{table}"
+        ),
+    };
+    sqlx::query(&insert_query)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Could not copy preserved {table}: {e}"))?;
+    Ok(())
+}
+
+async fn restore_preserved_local_setup(target: &PathBuf, preserve_from: Option<&str>) -> Result<(), String> {
+    let Some(preserve_from) = preserve_from else {
+        return Ok(());
+    };
+    if !PathBuf::from(preserve_from).exists() {
+        return Ok(());
+    }
+
+    let target_uri = format!("sqlite://{}", target.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&target_uri)
+        .await
+        .map_err(|e| format!("Could not reopen restored database to preserve settings: {e}"))?;
+    let attach = format!(
+        "ATTACH DATABASE '{}' AS preserved",
+        quote_sqlite_text(preserve_from)
+    );
+    sqlx::query(&attach)
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Could not read safety backup to preserve settings: {e}"))?;
+
+    copy_preserved_table(&pool, "employees", None).await?;
+    copy_preserved_table(&pool, "settings", None).await?;
+    copy_preserved_table(&pool, "app_identity", None).await?;
+
+    sqlx::query(
+        "DELETE FROM settings
+         WHERE key LIKE 'sync_ts_%'
+            OR key IN ('last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded', 'transaction_purge_applied_at')",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Could not clear old sync markers after restore: {e}"))?;
+
+    sqlx::query(
+        "INSERT INTO settings (key, value, updatedAt)
+         VALUES ('restore_pending_mariadb_replace', '1', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .map_err(|e| format!("Could not mark restore for MariaDB replacement: {e}"))?;
+
+    let _ = sqlx::query("DETACH DATABASE preserved").execute(&pool).await;
+    pool.close().await;
+    Ok(())
+}
+
+fn schedule_pending_restore(
+    app: &AppHandle,
+    staging_path: &PathBuf,
+    preserve_from: Option<&str>,
+) -> Result<(), String> {
+    let marker = pending_restore_marker_path(app)?;
+    let payload = PendingRestoreMarker {
+        source: staging_path.display().to_string(),
+        preserve_from: preserve_from.map(str::to_string),
+    };
+    let text = serde_json::to_string(&payload)
+        .map_err(|e| format!("Could not prepare pending restore marker: {e}"))?;
+    fs::write(&marker, text)
+        .map_err(|e| format!("Could not schedule restore for restart: {e}"))?;
+    Ok(())
+}
+
+pub fn apply_pending_restore_on_startup(app: &AppHandle) -> Result<(), String> {
+    let marker = pending_restore_marker_path(app)?;
+    if !marker.exists() {
+        return Ok(());
+    }
+
+    let source_text = fs::read_to_string(&marker)
+        .map_err(|e| format!("Could not read pending restore marker: {e}"))?;
+    let pending = serde_json::from_str::<PendingRestoreMarker>(&source_text)
+        .unwrap_or(PendingRestoreMarker {
+            source: source_text.trim().to_string(),
+            preserve_from: None,
+        });
+    let source = PathBuf::from(pending.source.trim());
+    if !source.exists() {
+        let _ = fs::remove_file(&marker);
+        return Err("Pending restore file is missing. Restore was cancelled.".into());
+    }
+
+    tauri::async_runtime::block_on(validate_restore_database(&source))?;
+    let target = local_db_path(app)?;
+    let backup_dir = local_backup_dir(app)?;
+    let backup_path = backup_dir.join(format!(
+        "pre-startup-restore-backup-{}.db",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+
+    if target.exists() {
+        fs::copy(&target, &backup_path)
+            .map_err(|e| format!("Could not create startup safety backup before restore: {e}"))?;
+        fs::remove_file(&target)
+            .map_err(|e| format!("Could not replace local database during startup: {e}"))?;
+    }
+
+    fs::rename(&source, &target)
+        .or_else(|_| fs::copy(&source, &target).map(|_| ()))
+        .map_err(|e| format!("Could not finish pending restore during startup: {e}"))?;
+    tauri::async_runtime::block_on(restore_preserved_local_setup(
+        &target,
+        pending.preserve_from.as_deref(),
+    ))?;
+    let _ = fs::remove_file(&source);
+    let _ = fs::remove_file(&marker);
+    Ok(())
+}
+
+async fn restore_local_database_from_path_impl(
+    app: AppHandle,
+    source: PathBuf,
+) -> Result<RestoreDatabaseResult, String> {
+    validate_restore_database(&source).await?;
+
+    let target = local_db_path(&app)?;
+    if source.canonicalize().ok() == target.canonicalize().ok() {
+        return Err("The selected file is already the live till database".into());
+    }
+
+    let backup_dir = local_backup_dir(&app)?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let staging_path = backup_dir.join(format!("restore-staging-{stamp}.db"));
+    fs::copy(&source, &staging_path)
+        .map_err(|e| format!("Restore stopped before changing data: could not prepare the selected database: {e}"))?;
+    if let Err(error) = validate_restore_database(&staging_path).await {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!(
+            "Restore stopped before changing data: the prepared database failed safety check: {error}"
+        ));
+    }
+
+    let safety_backup = if target.exists() {
+        let target_path = backup_dir.join(format!("pre-restore-pos-backup-{stamp}.db"));
+        retry_file_operation(|| fs::copy(&target, &target_path))
+            .map_err(|e| format!("Could not create safety backup before restore: {e}"))?;
+        Some(target_path.display().to_string())
+    } else {
+        None
+    };
+
+    if target.exists() {
+        if retry_file_operation(|| fs::remove_file(&target)).is_err() {
+            schedule_pending_restore(&app, &staging_path, safety_backup.as_deref())?;
+            return Ok(RestoreDatabaseResult {
+                restored_from: source.display().to_string(),
+                replaced_database: target.display().to_string(),
+                safety_backup,
+                restart_required: true,
+            });
+        }
+    }
+
+    if retry_file_operation(|| fs::rename(&staging_path, &target)).is_err() {
+        if let Some(backup) = &safety_backup {
+            let _ = fs::copy(backup, &target);
+        }
+        schedule_pending_restore(&app, &staging_path, safety_backup.as_deref())?;
+        return Ok(RestoreDatabaseResult {
+            restored_from: source.display().to_string(),
+            replaced_database: target.display().to_string(),
+            safety_backup,
+            restart_required: true,
+        });
+    }
+
+    restore_preserved_local_setup(&target, safety_backup.as_deref()).await?;
+
+    Ok(RestoreDatabaseResult {
+        restored_from: source.display().to_string(),
+        replaced_database: target.display().to_string(),
+        safety_backup,
+        restart_required: false,
+    })
+}
+
 #[tauri::command]
-pub async fn restore_latest_local_backup(app: AppHandle) -> Result<String, String> {
+pub async fn restore_latest_local_backup(app: AppHandle) -> Result<RestoreDatabaseResult, String> {
     let backup = latest_local_backup(app.clone())
         .await?
         .ok_or_else(|| "No local backup is available".to_string())?;
-    let target = local_db_path(&app)?;
-    fs::copy(&backup, &target).map_err(|e| e.to_string())?;
-    Ok(backup)
+    restore_local_database_from_path_impl(app, PathBuf::from(backup)).await
+}
+
+#[tauri::command]
+pub async fn restore_local_database_from_path(
+    app: AppHandle,
+    source_path: String,
+) -> Result<RestoreDatabaseResult, String> {
+    let source = restore_source_path(&source_path)?;
+    restore_local_database_from_path_impl(app, source).await
 }
 
 #[cfg(test)]
