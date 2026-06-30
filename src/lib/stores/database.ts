@@ -3320,6 +3320,7 @@ const LOCAL_UPSERT_COMPARE_TABLES = new Set([
     ...PROMOTION_SYNC_TABLES,
 ]);
 const TRANSACTION_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
+const PRODUCT_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
 
 /** All tables — synced every 10s so product and pricing changes appear quickly. */
 const ALL_SYNC_TABLES = [
@@ -3334,10 +3335,16 @@ const ALL_SYNC_TABLES = [
 ];
 
 function overlapWatermark(table: string, since: string | null): string | null {
-    if (!since || !TRANSACTION_SYNC_TABLES.has(table)) return since;
+    if (!since) return since;
+    const overlapMs = table === 'products'
+        ? PRODUCT_SYNC_OVERLAP_MS
+        : TRANSACTION_SYNC_TABLES.has(table)
+            ? TRANSACTION_SYNC_OVERLAP_MS
+            : 0;
+    if (overlapMs <= 0) return since;
     const time = new Date(since).getTime();
     if (!Number.isFinite(time)) return since;
-    return new Date(Math.max(0, time - TRANSACTION_SYNC_OVERLAP_MS)).toISOString();
+    return new Date(Math.max(0, time - overlapMs)).toISOString();
 }
 
 async function filterRowsNeedingLocalUpsert(table: string, rows: any[], idKey = 'id'): Promise<any[]> {
@@ -3365,6 +3372,17 @@ async function filterRowsNeedingLocalUpsert(table: string, rows: any[], idKey = 
 async function filterPendingLocalDeletes(table: string, rows: any[], idKey = 'id'): Promise<any[]> {
     if (rows.length === 0 || idKey !== 'id') return rows;
     const d = await sqlite.getDb();
+    if (PROMOTION_SYNC_TABLE_SET.has(table) && await pendingPromotionQueueCount() === 0) {
+        const rowIds = Array.from(new Set(rows.map(row => String(row?.[idKey] || '')).filter(Boolean)));
+        if (rowIds.length > 0) {
+            const placeholders = rowIds.map(() => '?').join(', ');
+            await d.execute(
+                `DELETE FROM tombstones WHERE table_name = ? AND row_id IN (${placeholders})`,
+                [table, ...rowIds],
+            );
+        }
+        return rows;
+    }
     const tombstones: any[] = await d.select(
         `SELECT row_id FROM tombstones WHERE table_name = ?`,
         [table],
