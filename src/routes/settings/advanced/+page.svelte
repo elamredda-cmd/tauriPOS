@@ -264,7 +264,12 @@
                     'success',
                     100,
                     'Restore ready to finish',
-                    `Windows is still using the current database. Close and reopen the app to finish restore. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                    `Windows is still using the current database. Close and reopen the app, then finish the MariaDB restore from Setup. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                );
+                saveRestoreNotice(
+                    'success',
+                    'Local database restore is ready. Reopen the app, then finish MariaDB restore from Setup.',
+                    `Safety backup: ${result.safetyBackup || 'not needed'}.`
                 );
                 busy = false;
                 restoreConfirmed = false;
@@ -278,10 +283,10 @@
             );
             saveRestoreNotice(
                 'success',
-                'Database restored. Continue setup or connect MariaDB to finish.',
+                'Local database restored. Finish MariaDB restore from Setup before using the POS.',
                 `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
             );
-            setTimeout(() => window.location.reload(), 700);
+            setTimeout(() => window.location.assign('/setup'), 700);
         } catch (error) {
             stopRestoreWithError(cleanError(error));
             busy = false;
@@ -316,7 +321,12 @@
                     'success',
                     100,
                     'Restore ready to finish',
-                    `Windows is still using the current database. Close and reopen the app to finish restore. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                    `Windows is still using the current database. Close and reopen the app, then finish the MariaDB restore from Setup. Safety backup: ${result.safetyBackup || 'not needed'}.`
+                );
+                saveRestoreNotice(
+                    'success',
+                    'Local database restore is ready. Reopen the app, then finish MariaDB restore from Setup.',
+                    `Safety backup: ${result.safetyBackup || 'not needed'}.`
                 );
                 busy = false;
                 restoreFileConfirmed = false;
@@ -330,10 +340,10 @@
             );
             saveRestoreNotice(
                 'success',
-                'Database restored. Continue setup or connect MariaDB to finish.',
+                'Local database restored. Finish MariaDB restore from Setup before using the POS.',
                 `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
             );
-            setTimeout(() => window.location.reload(), 700);
+            setTimeout(() => window.location.assign('/setup'), 700);
         } catch (error) {
             stopRestoreWithError(cleanError(error));
             busy = false;

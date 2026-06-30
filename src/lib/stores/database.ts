@@ -72,8 +72,8 @@ const IGNORED_AUDIT_SETTING_KEYS = new Set([
 ]);
 const IGNORED_AUDIT_SETTING_PREFIXES = ['sync_ts_'];
 const RESTORE_PENDING_MARIADB_REPLACE_KEY = 'restore_pending_mariadb_replace';
-const RESTORE_PENDING_MARIADB_REPLACE_MESSAGE =
-    'Restore is waiting to replace MariaDB. Use Database Repair -> Replace MariaDB From Restore before normal sync.';
+export const RESTORE_PENDING_MARIADB_REPLACE_MESSAGE =
+    'Restore is waiting to replace MariaDB. Open Setup and finish the MariaDB connection before normal sync.';
 
 export async function hasRestorePendingMariaDbReplace(): Promise<boolean> {
     try {
@@ -1322,14 +1322,33 @@ async function forcePushTables(
         console.log(`database: uploading ${rows.length} rows to MariaDB ${table}…`);
         if (table === 'products') {
             const chunkSize = 500;
-            for (let i = 0; i < rows.length; i += chunkSize) {
+            const fullChunkEnd = Math.floor(rows.length / chunkSize) * chunkSize;
+            for (let i = 0; i < fullChunkEnd; i += chunkSize) {
                 await mysql.mysqlBulkAddProducts(rows.slice(i, i + chunkSize));
             }
+            const tail = rows.slice(fullChunkEnd);
+            if (tail.length > 0) {
+                console.log(`database: uploading final ${tail.length} MariaDB products individually…`);
+                await mysql.mysqlUploadProductsIndividually(tail);
+            }
+            await repairMissingProductsAfterUpload(rows);
         } else {
             const idKey = table === 'settings' ? 'key' : 'id';
             for (const row of rows) await mysql.mysqlUpsert(table, row, idKey);
         }
     }
+}
+
+async function repairMissingProductsAfterUpload(localProducts: any[]): Promise<void> {
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('MariaDB is unavailable after product upload');
+    const remoteRows: any[] = await remote.select('SELECT id FROM products');
+    const remoteIds = new Set(remoteRows.map((row) => String(row.id)));
+    const missing = localProducts.filter((product) => product?.id && !remoteIds.has(String(product.id)));
+    if (missing.length === 0) return;
+
+    console.warn(`database: MariaDB missed ${missing.length} products after bulk upload; repairing individually…`);
+    await mysql.mysqlUploadProductsIndividually(missing);
 }
 
 async function verifyProductUploadCount(localDb: any): Promise<void> {

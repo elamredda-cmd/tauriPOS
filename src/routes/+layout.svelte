@@ -6,7 +6,13 @@
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
-    import { ensureDatabaseIdentityForSync, hydrateSvelteStores, startBackgroundSync } from '$lib/stores/database';
+    import {
+        ensureDatabaseIdentityForSync,
+        hasRestorePendingMariaDbReplace,
+        hydrateSvelteStores,
+        RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+        startBackgroundSync
+    } from '$lib/stores/database';
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
         settingsDB, customersDB, storeDB, registersDB, discountsDB,
@@ -26,6 +32,7 @@
     let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
     let syncStartupRunning = false;
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
+    let restorePendingMariaDbReplace = false;
     const SYNC_STARTUP_RETRY_MS = 30 * 1000;
 
     primeSoundEngine();
@@ -112,7 +119,16 @@
             console.log("POS: Hydrating stores from SQLite…");
             await hydrateSvelteStores();
 
-            if (savedMode === 'multi') {
+            restorePendingMariaDbReplace = savedMode === 'multi'
+                && await hasRestorePendingMariaDbReplace();
+
+            if (restorePendingMariaDbReplace) {
+                connectionState.update((state) => ({
+                    ...state,
+                    mysqlOnline: false,
+                    syncError: RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+                }));
+            } else if (savedMode === 'multi') {
                 // Run server schema migrations on every startup. Keep startup
                 // responsive when the server is offline, then start sync.
                 const config = get(connectionState).mysqlConfig;
@@ -145,7 +161,7 @@
             const hasActiveAdmin = get(employeesDB).some((employee) =>
                 employee.isActive && employee.role === 'admin'
             );
-            if ((!savedMode || !hasActiveAdmin) && window.location.pathname !== '/setup') {
+            if ((restorePendingMariaDbReplace || !savedMode || !hasActiveAdmin) && window.location.pathname !== '/setup') {
                 goto('/setup');
             }
         } catch (err) {
@@ -176,8 +192,10 @@
         const hasActiveAdmin = get(employeesDB).some((employee) =>
             employee.isActive && employee.role === 'admin'
         );
-        const setupAllowed = $page.url.pathname === '/setup' && !hasActiveAdmin;
-        if (!hasActiveAdmin && $page.url.pathname !== '/setup') {
+        const setupAllowed = $page.url.pathname === '/setup' && (!hasActiveAdmin || restorePendingMariaDbReplace);
+        if (restorePendingMariaDbReplace && $page.url.pathname !== '/setup') {
+            goto('/setup');
+        } else if (!hasActiveAdmin && $page.url.pathname !== '/setup') {
             goto('/setup');
         } else if (!allowedForCashier.includes($page.url.pathname) && !setupAllowed && !canManage($currentEmployee)) {
             goto('/');

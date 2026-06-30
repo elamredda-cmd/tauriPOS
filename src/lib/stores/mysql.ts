@@ -134,8 +134,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             sku TEXT,
             barcode TEXT,
             scalePlu TEXT,
-            price INT NOT NULL,
-            costPrice INT DEFAULT 0,
+            price BIGINT NOT NULL,
+            costPrice BIGINT DEFAULT 0,
             stockLevel INT DEFAULT 0,
             trackStock INT DEFAULT 0,
             allowPriceOverride INT DEFAULT 0,
@@ -225,15 +225,15 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             type TEXT,
             status TEXT,
             originalOrderId VARCHAR(36),
-            subtotal INT DEFAULT 0,
+            subtotal BIGINT DEFAULT 0,
             discountId VARCHAR(36),
-            discountAmount INT DEFAULT 0,
-            taxTotal INT DEFAULT 0,
-            total INT DEFAULT 0,
+            discountAmount BIGINT DEFAULT 0,
+            taxTotal BIGINT DEFAULT 0,
+            total BIGINT DEFAULT 0,
             notes TEXT,
             tillNumber TEXT DEFAULT '',
             paymentMethod TEXT DEFAULT '',
-            amountTendered INT DEFAULT 0,
+            amountTendered BIGINT DEFAULT 0,
             updatedAt TEXT,
             createdAt TEXT,
             completedAt TEXT
@@ -248,15 +248,15 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             productId VARCHAR(36),
             productName TEXT,
             quantity INT DEFAULT 0,
-            unitPrice INT DEFAULT 0,
-            costPrice INT DEFAULT 0,
+            unitPrice BIGINT DEFAULT 0,
+            costPrice BIGINT DEFAULT 0,
             discountId VARCHAR(36),
-            discountAmount INT DEFAULT 0,
+            discountAmount BIGINT DEFAULT 0,
             taxRate DOUBLE DEFAULT 0,
-            taxAmount INT DEFAULT 0,
-            lineTotal INT DEFAULT 0,
+            taxAmount BIGINT DEFAULT 0,
+            lineTotal BIGINT DEFAULT 0,
             isPriceOverride INT DEFAULT 0,
-            originalPrice INT DEFAULT 0,
+            originalPrice BIGINT DEFAULT 0,
             notes TEXT,
             updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
@@ -323,9 +323,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             autoApply INT DEFAULT 0,
             groupId VARCHAR(36),
             minQuantity INT DEFAULT 1,
-            secondPrice INT DEFAULT 0,
+            secondPrice BIGINT DEFAULT 0,
             bundleQuantity INT DEFAULT 0,
-            bundlePrice INT DEFAULT 0,
+            bundlePrice BIGINT DEFAULT 0,
             maxApplications INT,
             startAt TEXT,
             endAt TEXT,
@@ -368,13 +368,13 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             closedByEmployeeId VARCHAR(36),
             openedAt TEXT,
             closedAt TEXT,
-            openingFloat INT,
-            expectedCash INT,
-            actualCash INT,
-            cashDifference INT,
-            expectedCard INT,
-            actualCard INT,
-            cardDifference INT,
+            openingFloat BIGINT,
+            expectedCash BIGINT,
+            actualCash BIGINT,
+            cashDifference BIGINT,
+            expectedCard BIGINT,
+            actualCard BIGINT,
+            cardDifference BIGINT,
             status TEXT,
             notes TEXT,
             updatedAt TEXT
@@ -387,7 +387,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             id VARCHAR(36) PRIMARY KEY,
             shiftId VARCHAR(36),
             employeeId VARCHAR(36),
-            amount INT,
+            amount BIGINT,
             reason TEXT,
             createdAt TEXT
         )
@@ -426,11 +426,11 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             id VARCHAR(36) PRIMARY KEY,
             orderId VARCHAR(36),
             method TEXT,
-            amount INT DEFAULT 0,
-            cashAmount INT DEFAULT 0,
-            cardAmount INT DEFAULT 0,
+            amount BIGINT DEFAULT 0,
+            cashAmount BIGINT DEFAULT 0,
+            cardAmount BIGINT DEFAULT 0,
             reference TEXT,
-            changeGiven INT DEFAULT 0,
+            changeGiven BIGINT DEFAULT 0,
             createdAt TEXT,
             updatedAt TEXT,
             FOREIGN KEY(orderId) REFERENCES orders(id) ON DELETE CASCADE
@@ -442,9 +442,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         CREATE TABLE IF NOT EXISTS daily_sales_summary (
             date VARCHAR(36) NOT NULL,
             tillNumber VARCHAR(36) NOT NULL DEFAULT '',
-            cashTotal INT DEFAULT 0,
-            cardTotal INT DEFAULT 0,
-            totalSales INT DEFAULT 0,
+            cashTotal BIGINT DEFAULT 0,
+            cardTotal BIGINT DEFAULT 0,
+            totalSales BIGINT DEFAULT 0,
             transactionCount INT DEFAULT 0,
             updatedAt TEXT,
             PRIMARY KEY(date, tillNumber)
@@ -462,7 +462,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             periodEnd TEXT NOT NULL,
             employeeId VARCHAR(36),
             reportText TEXT,
-            reportTotal INT DEFAULT 0,
+            reportTotal BIGINT DEFAULT 0,
             createdAt TEXT,
             updatedAt TEXT
         )
@@ -491,7 +491,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             employeeId VARCHAR(36),
             reference TEXT,
             notes TEXT,
-            totalCost INT DEFAULT 0,
+            totalCost BIGINT DEFAULT 0,
             status TEXT DEFAULT 'received',
             createdAt TEXT,
             updatedAt TEXT
@@ -505,7 +505,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             receiptId VARCHAR(36) NOT NULL,
             productId VARCHAR(36) NOT NULL,
             quantity INT DEFAULT 0,
-            unitCost INT DEFAULT 0,
+            unitCost BIGINT DEFAULT 0,
             createdAt TEXT,
             updatedAt TEXT,
             FOREIGN KEY(receiptId) REFERENCES stock_receipts(id) ON DELETE CASCADE,
@@ -520,7 +520,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             productId VARCHAR(36),
             supplierId VARCHAR(36),
             supplierSku TEXT,
-            costPrice INT DEFAULT 0,
+            costPrice BIGINT DEFAULT 0,
             isPreferred INT DEFAULT 0
         )
     `);
@@ -573,6 +573,11 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS receiptKey VARCHAR(100)`,
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS originalOrderId VARCHAR(36)`,
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS discountId VARCHAR(36)`,
+        `ALTER TABLE orders MODIFY COLUMN subtotal BIGINT DEFAULT 0`,
+        `ALTER TABLE orders MODIFY COLUMN discountAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE orders MODIFY COLUMN taxTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE orders MODIFY COLUMN total BIGINT DEFAULT 0`,
+        `ALTER TABLE orders MODIFY COLUMN amountTendered BIGINT DEFAULT 0`,
 
         // Order Lines
         `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS costPrice INT DEFAULT 0`,
@@ -584,11 +589,21 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS originalPrice INT DEFAULT 0`,
         `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS notes TEXT`,
         `ALTER TABLE order_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE order_lines MODIFY COLUMN unitPrice BIGINT DEFAULT 0`,
+        `ALTER TABLE order_lines MODIFY COLUMN costPrice BIGINT DEFAULT 0`,
+        `ALTER TABLE order_lines MODIFY COLUMN discountAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE order_lines MODIFY COLUMN taxAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE order_lines MODIFY COLUMN lineTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE order_lines MODIFY COLUMN originalPrice BIGINT DEFAULT 0`,
 
         // Payments
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cashAmount INT DEFAULT 0`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cardAmount INT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN amount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN cashAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN cardAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN changeGiven BIGINT DEFAULT 0`,
 
         // Products
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT`,
@@ -606,6 +621,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS trackStock INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS allowPriceOverride INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE products MODIFY COLUMN price BIGINT NOT NULL`,
+        `ALTER TABLE products MODIFY COLUMN costPrice BIGINT DEFAULT 0`,
         `ALTER TABLE products MODIFY COLUMN barcode VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN scalePlu VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN sku VARCHAR(255) NULL`,
@@ -623,6 +640,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS endAt TEXT`,
         `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS priority INT DEFAULT 0`,
         `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE discounts MODIFY COLUMN secondPrice BIGINT DEFAULT 0`,
+        `ALTER TABLE discounts MODIFY COLUMN bundlePrice BIGINT DEFAULT 0`,
 
         // updatedAt on every remaining synced table so delta sync works for all
         `ALTER TABLE categories ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
@@ -646,6 +665,13 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS expectedCard INT DEFAULT 0`,
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS actualCard INT DEFAULT 0`,
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS cardDifference INT DEFAULT 0`,
+        `ALTER TABLE shifts MODIFY COLUMN openingFloat BIGINT`,
+        `ALTER TABLE shifts MODIFY COLUMN expectedCash BIGINT`,
+        `ALTER TABLE shifts MODIFY COLUMN actualCash BIGINT`,
+        `ALTER TABLE shifts MODIFY COLUMN cashDifference BIGINT`,
+        `ALTER TABLE shifts MODIFY COLUMN expectedCard BIGINT DEFAULT 0`,
+        `ALTER TABLE shifts MODIFY COLUMN actualCard BIGINT DEFAULT 0`,
+        `ALTER TABLE shifts MODIFY COLUMN cardDifference BIGINT DEFAULT 0`,
         `ALTER TABLE shifts ADD COLUMN IF NOT EXISTS openRegisterId VARCHAR(36)
             AS (CASE WHEN status = 'open' THEN registerId ELSE NULL END) PERSISTENT`,
         `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS periodStart TEXT`,
@@ -654,12 +680,20 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS reportText TEXT`,
         `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS reportTotal INT DEFAULT 0`,
         `ALTER TABLE till_report_markers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE till_report_markers MODIFY COLUMN reportTotal BIGINT DEFAULT 0`,
         `ALTER TABLE cash_movements ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE cash_movements MODIFY COLUMN amount BIGINT`,
         `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE manager_approvals ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
-        `ALTER TABLE stock_receipt_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`
+        `ALTER TABLE stock_receipts MODIFY COLUMN totalCost BIGINT DEFAULT 0`,
+        `ALTER TABLE stock_receipt_lines ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE stock_receipt_lines MODIFY COLUMN unitCost BIGINT DEFAULT 0`,
+        `ALTER TABLE product_suppliers MODIFY COLUMN costPrice BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary MODIFY COLUMN cashTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary MODIFY COLUMN cardTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary MODIFY COLUMN totalSales BIGINT DEFAULT 0`
     ];
     const migrationFailures: string[] = [];
     for (const sql of migrations) {
@@ -910,8 +944,11 @@ function normalizeValue(v: any): any {
  * Generic upsert using MariaDB's `INSERT … ON DUPLICATE KEY UPDATE` syntax.
  */
 export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    if (table === 'products') {
+        await mysqlSaveProductStrict(obj);
+        return;
+    }
     const d = await getDb();
-    if (table === 'products') obj = normalizeProductIdentifiers(obj);
     const validCols = await getTableColumns(table);
 
     // Settings table uses `key` as the column name which is a reserved word
@@ -1253,33 +1290,8 @@ function sameMysqlValue(a: any, b: any): boolean {
 
 async function mysqlSaveProductStrict(product: any): Promise<void> {
     const d = await getDb();
-    const p = normalizeProductIdentifiers(product);
     const validCols = await getTableColumns('products');
-    const keys = Object.keys(p).filter((key) => validCols.includes(key) && key !== 'updatedAt');
-    const exists: any[] = await d.select('SELECT id FROM products WHERE id = ? LIMIT 1', [p.id]);
-    const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
-
-    if (exists.length > 0) {
-        const updateKeys = keys.filter((key) => key !== 'id');
-        const assignments = updateKeys.map((key) => `\`${key}\` = ?`);
-        if (validCols.includes('updatedAt')) assignments.push(`\`updatedAt\` = ${timeExpr}`);
-        await d.execute(
-            `UPDATE products SET ${assignments.join(', ')} WHERE id = ?`,
-            [...updateKeys.map((key) => normalizeValue(p[key])), p.id],
-        );
-        return;
-    }
-
-    const columns = keys.map((key) => `\`${key}\``);
-    const placeholders = keys.map(() => '?');
-    if (validCols.includes('updatedAt')) {
-        columns.push('`updatedAt`');
-        placeholders.push(timeExpr);
-    }
-    await d.execute(
-        `INSERT INTO products (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`,
-        keys.map((key) => normalizeValue(p[key])),
-    );
+    await mysqlUpsertProductById(d, product, validCols);
 }
 
 function normalizeProductIdentifiers<T extends Record<string, any>>(product: T): T {
@@ -1343,37 +1355,110 @@ export async function mysqlDeleteProduct(id: string): Promise<void> {
 export async function mysqlBulkAddProducts(products: any[]): Promise<void> {
     const d = await getDb();
     const validCols = await getTableColumns('products');
+    const failures: string[] = [];
 
-    // MariaDB supports START TRANSACTION / COMMIT
-    await d.execute('START TRANSACTION');
-    try {
-        for (const p of products) {
-            const product = normalizeProductIdentifiers(p);
-            const keys = Object.keys(product).filter(k => validCols.includes(k));
-            if (!keys.includes('id')) throw new Error(`Product upload failed: missing product id for ${product.name || 'unknown item'}`);
-            const values = keys.map(k => normalizeValue(product[k]));
-            const existing: any[] = await d.select('SELECT id FROM products WHERE id = ? LIMIT 1', [product.id]);
-
-            if (existing.length > 0) {
-                const updateKeys = keys.filter(k => k !== 'id');
-                if (updateKeys.length === 0) continue;
-                const assignments = updateKeys.map(k => `\`${k}\` = ?`).join(', ');
-                const updateValues = updateKeys.map(k => normalizeValue(product[k]));
-                await d.execute(`UPDATE products SET ${assignments} WHERE id = ?`, [...updateValues, product.id]);
-            } else {
-                const columns = keys.map(k => `\`${k}\``).join(', ');
-                const placeholders = keys.map(() => '?').join(', ');
-                try {
-                    await d.execute(`INSERT INTO products (${columns}) VALUES (${placeholders})`, values);
-                } catch (error) {
-                    throw new Error(`Product upload failed for ${product.name || product.id}: ${error}`);
-                }
-            }
+    for (const p of products) {
+        try {
+            await mysqlUpsertProductById(d, p, validCols);
+        } catch (error) {
+            const label = `${p?.name || p?.id || 'unknown product'}${p?.id ? ` (${p.id})` : ''}`;
+            failures.push(`${label}: ${error}`);
         }
-        await d.execute('COMMIT');
-    } catch (e) {
-        await d.execute('ROLLBACK');
-        throw e;
+    }
+
+    if (failures.length > 0) {
+        const preview = failures.slice(0, 8).join(' | ');
+        const suffix = failures.length > 8 ? ` | and ${failures.length - 8} more` : '';
+        throw new Error(`Product upload failed for ${failures.length} product(s): ${preview}${suffix}`);
+    }
+}
+
+function isTransientMysqlWriteConflict(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return message.includes('1020')
+        || message.includes('record has been changed since the last read')
+        || message.includes('1213')
+        || message.includes('deadlock')
+        || message.includes('1205')
+        || message.includes('lock wait timeout');
+}
+
+function isPrimaryKeyDuplicate(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return message.includes('duplicate entry') && message.includes('primary');
+}
+
+function wait(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function mysqlUpsertProductById(d: Database, product: any, validCols: string[]): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+            await mysqlUpsertProductByIdOnce(d, product, validCols);
+            return;
+        } catch (error) {
+            lastError = error;
+            if (attempt < 5 && (isTransientMysqlWriteConflict(error) || isPrimaryKeyDuplicate(error))) {
+                await wait(75 * attempt);
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw lastError;
+}
+
+async function mysqlUpsertProductByIdOnce(d: Database, product: any, validCols: string[]): Promise<void> {
+    const p = normalizeProductIdentifiers(product);
+    const keys = Object.keys(p).filter((key) => validCols.includes(key) && key !== 'updatedAt');
+    if (!keys.includes('id')) {
+        throw new Error(`missing product id for ${p?.name || 'unknown item'}`);
+    }
+
+    const writeKeys = keys.filter((key) => key !== 'id');
+    const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    const updateAssignments = writeKeys.map((key) => `\`${key}\` = ?`);
+    if (validCols.includes('updatedAt')) updateAssignments.push(`\`updatedAt\` = ${timeExpr}`);
+    if (updateAssignments.length > 0) {
+        const result = await d.execute(
+            `UPDATE products SET ${updateAssignments.join(', ')} WHERE id = ?`,
+            [...writeKeys.map((key) => normalizeValue(p[key])), p.id],
+        );
+        if (result.rowsAffected > 0) return;
+    }
+
+    const columns = keys.map((key) => `\`${key}\``);
+    const placeholders = keys.map(() => '?');
+    const values = keys.map((key) => normalizeValue(p[key]));
+    if (validCols.includes('updatedAt')) {
+        columns.push('`updatedAt`');
+        placeholders.push(timeExpr);
+    }
+
+    await d.execute(
+        `INSERT INTO products (${columns.join(', ')})
+         VALUES (${placeholders.join(', ')})`,
+        values,
+    );
+}
+
+export async function mysqlUploadProductsIndividually(products: any[]): Promise<void> {
+    const failures: string[] = [];
+    for (const product of products) {
+        try {
+            await mysqlSaveProductStrict(product);
+        } catch (error) {
+            const label = `${product?.name || product?.id || 'unknown product'}${product?.id ? ` (${product.id})` : ''}`;
+            failures.push(`${label}: ${error}`);
+        }
+    }
+
+    if (failures.length > 0) {
+        const preview = failures.slice(0, 8).join(' | ');
+        const suffix = failures.length > 8 ? ` | and ${failures.length - 8} more` : '';
+        throw new Error(`Product upload failed for ${failures.length} product(s): ${preview}${suffix}`);
     }
 }
 

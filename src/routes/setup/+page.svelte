@@ -12,6 +12,7 @@
         hydrateSvelteStores,
         migrateLocalDataToServer,
         replaceMariaDbDataFromThisTill,
+        RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
         wipeAndPullFromServer
     } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
@@ -39,6 +40,7 @@
     let needsAdmin = false;
     let needsShopDetails = true;
     let stockTrackingEnabled = true;
+    let restorePendingMariaDbReplace = false;
     const RESTORE_NOTICE_KEY = 'pos_restore_notice';
 
     type SetupProgressState = 'idle' | 'running' | 'success' | 'error';
@@ -102,13 +104,31 @@
         }
     }
 
-    onMount(() => {
+    onMount(async () => {
         try {
             const raw = sessionStorage.getItem(RESTORE_NOTICE_KEY);
-            if (!raw) return;
-            restoreNotice = JSON.parse(raw) as RestoreNotice;
+            if (raw) {
+                restoreNotice = JSON.parse(raw) as RestoreNotice;
+            }
         } catch {
             restoreNotice = null;
+        }
+
+        const state = get(connectionState);
+        if (state.mode) selectedMode = state.mode;
+        if (state.mysqlConfig) {
+            host = state.mysqlConfig.host;
+            port = state.mysqlConfig.port;
+            username = state.mysqlConfig.user;
+            password = state.mysqlConfig.password;
+            database = state.mysqlConfig.database;
+        }
+
+        restorePendingMariaDbReplace = state.mode === 'multi' && await hasRestorePendingMariaDbReplace();
+        if (restorePendingMariaDbReplace) {
+            selectedMode = 'multi';
+            testResult = 'pass';
+            testMessage = RESTORE_PENDING_MARIADB_REPLACE_MESSAGE;
         }
     });
 
@@ -430,16 +450,32 @@
             </div>
         {/if}
 
+        {#if restorePendingMariaDbReplace}
+            <div class="w-full rounded-lg border border-warning bg-warning/10 p-4 text-sm text-text-main">
+                <strong class="block text-warning">Finish Restore to MariaDB</strong>
+                <p class="mt-1 text-text-muted">
+                    This till has restored local data waiting to replace MariaDB. Normal sync is paused until you connect below and finish the restore.
+                </p>
+            </div>
+        {/if}
+
         {#if !needsAdmin}
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 w-full">
 
             <!-- Single POS -->
             <button
+                disabled={restorePendingMariaDbReplace}
                 class="group relative flex flex-col items-center gap-4 p-8 rounded-lg border-2 transition-all duration-200 cursor-pointer
                     {selectedMode === 'single'
                         ? 'border-accent-primary bg-bg-card shadow-lg shadow-accent-primary/10'
-                        : 'border-border-flat bg-bg-card hover:border-accent-primary/50 hover:bg-bg-card-hover'}"
-                on:click={() => { selectedMode = 'single'; testResult = 'idle'; testMessage = ''; }}
+                        : 'border-border-flat bg-bg-card hover:border-accent-primary/50 hover:bg-bg-card-hover'}
+                    {restorePendingMariaDbReplace ? 'opacity-45 cursor-not-allowed' : ''}"
+                on:click={() => {
+                    if (restorePendingMariaDbReplace) return;
+                    selectedMode = 'single';
+                    testResult = 'idle';
+                    testMessage = '';
+                }}
             >
                 {#if selectedMode === 'single'}
                     <span class="absolute top-3 right-3 w-5 h-5 rounded-full bg-accent-primary flex items-center justify-center text-[0.7rem] text-white font-bold">✓</span>
@@ -565,10 +601,14 @@
 
                     <button
                         class="btn btn-primary"
-                        disabled={testResult !== 'pass' || connecting}
+                        disabled={(!restorePendingMariaDbReplace && testResult !== 'pass') || connecting}
                         on:click={handleConnect}
                     >
-                        {connecting ? 'Connecting…' : 'Connect'}
+                        {connecting
+                            ? 'Connecting…'
+                            : restorePendingMariaDbReplace
+                                ? 'Finish Restore to MariaDB'
+                                : 'Connect'}
                     </button>
                 </div>
             </div>
