@@ -43,9 +43,15 @@
         .filter(Boolean);
     $: availableProducts = weighableProducts.filter((product) =>
         !selectedIds.includes(product.id) &&
-        (product.name.toLowerCase().includes(search.toLowerCase()) ||
-            product.scalePlu?.includes(search)),
+        productMatchesSearch(product, search),
     );
+
+    function productMatchesSearch(product: { name: string; sku?: string; barcode?: string; scalePlu?: string }, rawQuery: string): boolean {
+        const q = rawQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [product.name, product.sku, product.barcode, product.scalePlu]
+            .some((value) => String(value || "").toLowerCase().includes(q));
+    }
 
     async function save(nextPages: ScaleTilePage[], message: string) {
         pages = nextPages;
@@ -176,7 +182,7 @@
         <section class="designer-panel">
             <div class="section-heading">
                 <div><span>Available products</span><h3>Add a Scale Tile</h3></div>
-                <input bind:value={search} placeholder="Search by name or PLU..." />
+                <input class="search-input" bind:value={search} placeholder="Search name, SKU, barcode, or PLU..." />
             </div>
             {#if availableProducts.length}
                 <div class="available-grid">

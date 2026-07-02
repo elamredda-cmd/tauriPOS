@@ -11,6 +11,7 @@
         sendLabelPrinterTest,
         sendReceiptPrinterTest,
         type PrinterConnectionType,
+        type ReceiptPrinterModel,
     } from '$lib/printers';
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
 
@@ -61,6 +62,17 @@
         await updateSetting('cash_drawer_printer_device_path', '');
         drawerTestStatus = 'Drawer will use the configured receipt printer.';
         toast('Drawer set to receipt printer', 'success');
+    }
+
+    async function useStarTsp100Preset() {
+        await updateSetting('receipt_printer_model', 'star_tsp100');
+        await updateSetting('receipt_printer_connection', 'usb_raw');
+        await updateSetting('receipt_printer_paper_width', '80mm');
+        await updateSetting('receipt_printer_encoding', 'latin1');
+        await updateSetting('receipt_printer_cut_paper', 'true');
+        await updateSetting('receipt_printer_cut_feed_lines', '8');
+        receiptTestStatus = 'Star TSP100 preset applied. Choose the exact Windows printer name, then send a test receipt.';
+        toast('Star TSP100 preset applied', 'success');
     }
 
     async function setSeparateDrawerTarget(kind: 'network' | 'printer' | 'device', value: string) {
@@ -125,7 +137,7 @@
     }
 
     function isLikelyThermalPrinter(printer: SystemPrinterInfo): boolean {
-        return /xprinter|receipt|thermal|pos|epson|star|bixolon|citizen|tm-|zebra|tsc/i.test(
+        return /xprinter|receipt|thermal|pos|epson|star|tsp100|tsp143|futureprnt|bixolon|citizen|tm-|zebra|tsc/i.test(
             `${printer.name} ${printer.driverName || ''} ${printer.portName || ''}`
         );
     }
@@ -222,6 +234,11 @@
         { label: 'UTF-8', value: 'utf8' },
     ];
 
+    const receiptModelOptions: Array<{ label: string; value: ReceiptPrinterModel }> = [
+        { label: 'Generic ESC/POS thermal printer', value: 'generic_escpos' },
+        { label: 'Star TSP100 / TSP143', value: 'star_tsp100' },
+    ];
+
     const drawerPinOptions = [
         { label: 'Pin 2 / drawer 1', value: '0' },
         { label: 'Pin 5 / drawer 2', value: '1' },
@@ -288,12 +305,20 @@
                                 Network ESC/POS is fastest for Ethernet printers. USB raw is best for silent Windows USB printing.
                             </p>
                         </div>
-                        <button
-                            class="rounded-full border px-4 py-2 text-sm font-black transition-all {receipt.enabled ? 'border-success bg-success/10 text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
-                            on:click={() => updateSetting('receipt_printer_enabled', receipt.enabled ? 'false' : 'true')}
-                        >
-                            Receipt {receipt.enabled ? 'Enabled' : 'Disabled'}
-                        </button>
+                        <div class="flex flex-wrap gap-2">
+                            <button
+                                class="rounded-full border px-4 py-2 text-sm font-black transition-all {receipt.model === 'star_tsp100' ? 'border-warning bg-warning/10 text-warning' : 'border-border-flat bg-bg-panel text-text-muted hover:border-warning hover:text-warning'}"
+                                on:click={useStarTsp100Preset}
+                            >
+                                Star TSP100 preset
+                            </button>
+                            <button
+                                class="rounded-full border px-4 py-2 text-sm font-black transition-all {receipt.enabled ? 'border-success bg-success/10 text-success' : 'border-border-flat bg-bg-panel text-text-muted'}"
+                                on:click={() => updateSetting('receipt_printer_enabled', receipt.enabled ? 'false' : 'true')}
+                            >
+                                Receipt {receipt.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                        </div>
                     </div>
 
                     <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
@@ -392,6 +417,12 @@
                                     </div>
                                 {/if}
                                 <CustomSelect
+                                    label="Printer Model"
+                                    value={receipt.model}
+                                    options={receiptModelOptions}
+                                    on:change={(event) => updateSetting('receipt_printer_model', String(event.detail))}
+                                />
+                                <CustomSelect
                                     label="Paper Width"
                                     value={receipt.paperWidth}
                                     options={paperWidthOptions}
@@ -404,6 +435,12 @@
                                     on:change={(event) => updateSetting('receipt_printer_encoding', String(event.detail))}
                                 />
                             </div>
+                            {#if receipt.model === 'star_tsp100'}
+                                <div class="mt-4 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-text-muted">
+                                    <b class="block text-text-main">Star TSP100 note</b>
+                                    Install the Star TSP100/FuturePRNT Windows driver, select the exact Windows printer name, and enable ESC/POS emulation in the Star utility if direct raw printing does not respond.
+                                </div>
+                            {/if}
                         </div>
                     </div>
 

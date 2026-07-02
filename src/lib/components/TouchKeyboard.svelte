@@ -4,6 +4,7 @@
     export let title = "Touch Keyboard";
     export let placeholder = "";
     export let masked = false;
+    export let maxLength = 120;
     export let onDone: () => void = () => {};
 
     let shift = true;
@@ -17,8 +18,10 @@
         ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
         ["-", "/", ":", ";", "(", ")", "£", "&", "@", "\""],
         [".", ",", "?", "!", "'", "#", "%", "+", "="],
+        ["_", "*", "[", "]", "{", "}", "\\", "|", "~"],
     ];
     $: rows = symbols ? symbolRows : letterRows;
+    $: effectiveMaxLength = maxLength && maxLength > 0 ? maxLength : 120;
 
     function press(key: string) {
         if (key === "shift") {
@@ -28,11 +31,16 @@
         } else if (key === "clear") {
             value = "";
         } else if (key === "space") {
-            value += " ";
+            append(" ");
         } else {
-            value += !symbols && shift ? key.toUpperCase() : key;
+            append(!symbols && shift ? key.toUpperCase() : key);
             if (!symbols && shift) shift = false;
         }
+    }
+
+    function append(text: string) {
+        if (value.length >= effectiveMaxLength) return;
+        value = `${value}${text}`.slice(0, effectiveMaxLength);
     }
 
     function finish() {
@@ -72,7 +80,7 @@
                             on:click={() => press(key)}
                         >{!symbols && shift ? key.toUpperCase() : key}</button>
                     {/each}
-                    {#if rowIndex === 2}
+                    {#if rowIndex === rows.length - 1}
                         <button
                             type="button"
                             class="grid h-[43px] min-w-0 flex-[1.7_1_0] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-[.72rem] font-extrabold text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:720px)]:h-9"

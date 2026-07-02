@@ -100,7 +100,7 @@
             <div class="relative mt-4">
                 <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                 <input
-                    class="w-full min-h-[56px] rounded-lg border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                    class="search-input !min-h-[56px] !pl-12 !pr-4"
                     bind:this={searchInput}
                     bind:value={search}
                     data-touch-keyboard="off"

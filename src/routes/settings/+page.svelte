@@ -6,6 +6,7 @@
     import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
     import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import { appFontOptions, appFontSizeOptions, type AppFontSizeChoice } from '$lib/typography';
 
     let store = { ...$storeDB };
     let editTillName = '';
@@ -17,6 +18,11 @@
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
     $: trainingModeEnabled = ($settingsDB.find(s => s.key === 'training_mode_enabled')?.value ?? 'false') === 'true';
+    $: selectedAppFont = getSettingValue('ui_font_family') || 'inter';
+    $: selectedPosFontSize = getSettingValue('ui_font_size_pos') || 'normal';
+    $: selectedManagementFontSize = getSettingValue('ui_font_size_management') || 'normal';
+    $: selectedSettingsFontSize = getSettingValue('ui_font_size_settings') || 'normal';
+    $: selectedModalFontSize = getSettingValue('ui_font_size_modal') || 'normal';
 
     onMount(async () => {
         editTillName = await getTillName();
@@ -67,6 +73,15 @@
     async function saveTillName() {
         await setTillNameDb(editTillName);
         toast('Till name saved');
+    }
+
+    function fontSizeButtonClass(current: string, option: AppFontSizeChoice): string {
+        return [
+            'rounded-lg border px-3 py-2 text-sm font-black transition-all',
+            current === option
+                ? 'border-accent-primary bg-accent-primary text-white shadow-[0_10px_24px_var(--shadow)]'
+                : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
+        ].join(' ');
     }
 </script>
 
@@ -180,6 +195,78 @@
                 </a>
             {/if}
         </nav>
+
+        <section class="settings-section">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                    <h3 class="settings-section-title">Fonts &amp; Screen Size</h3>
+                    <p class="mb-4 text-sm text-text-muted">
+                        Choose a shop-wide font and tune the text size by area. Windows native uses Segoe UI, which is the safest choice on older Windows POS terminals.
+                    </p>
+                </div>
+            </div>
+            <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.8fr)]">
+                <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {#each appFontOptions as option}
+                        <button
+                            class={switchCardClass(selectedAppFont === option.value)}
+                            on:click={() => updateSetting('ui_font_family', option.value)}
+                        >
+                            <span class="font-extrabold">{option.label}</span>
+                            <small class="mt-1 block text-text-muted">{option.note}</small>
+                            <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {selectedAppFont === option.value ? 'text-success' : 'text-text-muted'}">
+                                {selectedAppFont === option.value ? 'On' : 'Pick'}
+                            </b>
+                        </button>
+                    {/each}
+                </div>
+                <div class="rounded-2xl border border-border-flat bg-bg-panel p-4">
+                    <p class="mb-3 text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Section text sizes</p>
+                    <div class="flex flex-col gap-4">
+                        <div>
+                            <label class="mb-2 block text-sm font-black text-text-main">POS selling screen</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                {#each appFontSizeOptions as option}
+                                    <button class={fontSizeButtonClass(selectedPosFontSize, option.value)} on:click={() => updateSetting('ui_font_size_pos', option.value)}>
+                                        {option.label}
+                                    </button>
+                                {/each}
+                            </div>
+                        </div>
+                        <div>
+                            <label class="mb-2 block text-sm font-black text-text-main">Management pages</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                {#each appFontSizeOptions as option}
+                                    <button class={fontSizeButtonClass(selectedManagementFontSize, option.value)} on:click={() => updateSetting('ui_font_size_management', option.value)}>
+                                        {option.label}
+                                    </button>
+                                {/each}
+                            </div>
+                        </div>
+                        <div>
+                            <label class="mb-2 block text-sm font-black text-text-main">Settings pages</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                {#each appFontSizeOptions as option}
+                                    <button class={fontSizeButtonClass(selectedSettingsFontSize, option.value)} on:click={() => updateSetting('ui_font_size_settings', option.value)}>
+                                        {option.label}
+                                    </button>
+                                {/each}
+                            </div>
+                        </div>
+                        <div>
+                            <label class="mb-2 block text-sm font-black text-text-main">Dialogs and popups</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                {#each appFontSizeOptions as option}
+                                    <button class={fontSizeButtonClass(selectedModalFontSize, option.value)} on:click={() => updateSetting('ui_font_size_modal', option.value)}>
+                                        {option.label}
+                                    </button>
+                                {/each}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <section class="settings-section">
             <h3 class="settings-section-title">Store Information</h3>

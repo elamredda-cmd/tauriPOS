@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-serif: "Outfit", ui-serif, Georgia, serif;
+  --font-sans: var(--app-font-main);
+  --font-serif: var(--app-font-heading);
 
   --color-bg-base: var(--bg-base);
   --color-bg-panel: var(--bg-panel);
@@ -30,6 +30,13 @@
 }
 
 :root {
+  --app-font-main: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --app-font-heading: "Outfit", ui-serif, Georgia, serif;
+  --font-size-pos: 16px;
+  --font-size-management: 16px;
+  --font-size-settings: 16px;
+  --font-size-modal: 16px;
+
   /* Midnight Theme (Default) */
   --bg-base: #080f1e;
   --bg-panel: #101b33;
@@ -181,10 +188,12 @@
   *, *::before, *::after { box-sizing: border-box; }
   body {
     @apply font-sans bg-bg-base text-text-main h-screen w-screen overflow-hidden select-none;
+    font-family: var(--app-font-main);
     font-variant-numeric: tabular-nums;
   }
   input, textarea, select {
     @apply font-sans text-text-main;
+    font-family: var(--app-font-main);
     min-width: 0;
     font-variant-numeric: tabular-nums;
   }
@@ -221,6 +230,7 @@
   h1, h2, h3, h4, h5, h6 { @apply font-serif font-semibold; }
   button {
     @apply font-sans cursor-pointer border-0 outline-none text-text-main transition-colors;
+    font-family: var(--app-font-main);
     font-variant-numeric: tabular-nums;
   }
   a { @apply no-underline text-inherit; }
@@ -238,6 +248,49 @@
   }
   ::-webkit-scrollbar-thumb:hover { background: var(--accent-primary); }
   ::-webkit-scrollbar-corner { background: var(--bg-card); }
+}
+
+.font-ui-inter {
+  --app-font-main: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --app-font-heading: "Outfit", ui-serif, Georgia, serif;
+}
+
+.font-ui-windows {
+  --app-font-main: "Segoe UI", "Segoe UI Variable Text", Tahoma, Arial, sans-serif;
+  --app-font-heading: "Segoe UI Variable Display", "Segoe UI", Tahoma, Arial, sans-serif;
+}
+
+.font-ui-system {
+  --app-font-main: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --app-font-heading: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.font-ui-readable {
+  --app-font-main: Arial, Helvetica, "Segoe UI", sans-serif;
+  --app-font-heading: Arial, Helvetica, "Segoe UI", sans-serif;
+}
+
+.pos-checkout-shell {
+  font-size: var(--font-size-pos);
+}
+
+.management-page,
+.items-management-page,
+.tiles-management-page {
+  font-size: var(--font-size-management);
+}
+
+.settings-page-shell,
+.settings-section,
+.settings-hero {
+  font-size: var(--font-size-settings);
+}
+
+.modal-overlay,
+.modal-box,
+.app-modal-panel,
+.touch-input-panel {
+  font-size: var(--font-size-modal);
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -266,7 +319,8 @@
   .field input:focus-visible,
   .field select:focus-visible,
   .field textarea:focus-visible,
-  .flat-input:focus-visible {
+  .flat-input:focus-visible,
+  .search-input:focus-visible {
     outline: 3px solid rgba(59, 130, 246, .35);
     outline-offset: 2px;
   }
@@ -474,6 +528,13 @@
     @apply bg-bg-panel border border-border-flat text-text-main px-4 py-3 rounded-lg text-base outline-none focus:border-accent-primary transition-all duration-150;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05), 0 8px 18px var(--shadow);
   }
+  .search-input {
+    @apply w-full min-h-[52px] rounded-lg border border-border-flat bg-bg-base px-4 py-2.5 text-base font-semibold text-text-main outline-none transition-all duration-150 placeholder:text-text-muted focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 10px 24px var(--shadow);
+  }
+  .search-input:hover {
+    @apply border-accent-primary;
+  }
   .input-group       { @apply flex flex-col gap-2; }
   .input-group label { @apply text-[0.9rem] font-semibold text-text-muted; }
 
@@ -524,6 +585,31 @@
     font-size: clamp(.68rem, 1.45vw, 1.15rem);
     letter-spacing: clamp(.02em, .15vw, .09em);
     white-space: nowrap;
+}
+
+.pos-toolbar-action {
+    height: 100%;
+    min-height: 44px;
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-flat);
+    border-radius: .375rem;
+    background: var(--bg-card);
+    color: var(--text-main);
+    padding: .35rem .45rem;
+    text-align: center;
+    font-size: clamp(.72rem, 1.2vw, .92rem);
+    font-weight: 900;
+    line-height: 1.08;
+    letter-spacing: .02em;
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.pos-toolbar-action:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent-primary);
 }
 
 .sync-pill {
@@ -1063,11 +1149,14 @@
         }
 
         .pos-toolbar {
-            @apply !h-11 !gap-1.5;
+            @apply !h-14 !gap-2;
         }
 
-        .pos-toolbar button {
-            @apply !text-[10px];
+        .pos-toolbar-action {
+            min-height: 56px !important;
+            padding-inline: .6rem !important;
+            font-size: .82rem !important;
+            line-height: 1.08 !important;
         }
 
         .pos-cart {

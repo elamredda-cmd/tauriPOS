@@ -69,7 +69,7 @@
                         <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                     </svg>
                     <input
-                        class="w-full min-h-[56px] rounded-md border border-border-flat bg-bg-base pl-12 pr-4 text-base font-semibold text-text-main outline-none transition focus:border-accent-primary focus:ring-2 focus:ring-accent-primary/25"
+                        class="search-input !min-h-[56px] !pl-12 !pr-4"
                         bind:value={searchQuery}
                         placeholder="Search customers..."
                     />

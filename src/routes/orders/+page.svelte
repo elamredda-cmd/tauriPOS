@@ -273,7 +273,7 @@
                     </svg>
                 </div>
                 <input
-                    class="h-11 w-full rounded-sm border border-border-flat bg-bg-card pl-10 pr-16 text-sm font-semibold text-text-main outline-none transition placeholder:text-text-muted focus:border-accent-primary"
+                    class="search-input !h-11 !min-h-11 !rounded-md !bg-bg-card !pl-10 !pr-16 !text-sm"
                     bind:value={searchQuery}
                     placeholder="Search receipt..."
                 />

@@ -10,6 +10,8 @@
     let decimal = false;
     let masked = false;
     let title = "Enter text";
+    let maxLength = 120;
+    let maxValue: number | null = null;
     let lastAppliedValue = "";
     let lastPointerTarget: Element | null = null;
     let focusTimer: number | undefined;
@@ -57,6 +59,8 @@
         decimal = element instanceof HTMLInputElement &&
             (element.inputMode === "decimal" || element.type === "number" && (element.step === "any" || element.step.includes(".")));
         masked = element instanceof HTMLInputElement && element.type === "password";
+        maxLength = element.maxLength && element.maxLength > 0 ? element.maxLength : 120;
+        maxValue = element instanceof HTMLInputElement && element.max !== "" && Number.isFinite(Number(element.max)) ? Number(element.max) : null;
         title = fieldTitle(element);
         visible = true;
         updateTargetRect();
@@ -80,7 +84,7 @@
 
     function done() {
         const finishedTarget = target;
-        applyValue();
+        if (finishedTarget?.isConnected) applyValue();
         finishedTarget?.dispatchEvent(new Event("change", { bubbles: true }));
         visible = false;
         finishedTarget?.classList.remove(...activeInputClasses);
@@ -117,6 +121,7 @@
 
     function updateTargetRect() {
         if (!target?.isConnected) {
+            if (visible) done();
             targetRectStyle = "";
             return;
         }
@@ -144,15 +149,23 @@
     onMount(() => {
         const handlePointer = (event: PointerEvent) => { lastPointerTarget = event.target as Element | null; };
         const handleClose = () => done();
+        const handleKeydown = (event: KeyboardEvent) => {
+            if (event.key === "Escape" && visible) {
+                event.preventDefault();
+                done();
+            }
+        };
         document.addEventListener("pointerdown", handlePointer, true);
         document.addEventListener("focusin", handleFocus, true);
         document.addEventListener("close-touch-keyboard", handleClose);
+        document.addEventListener("keydown", handleKeydown, true);
         window.addEventListener("resize", updateTargetRect);
         window.addEventListener("scroll", updateTargetRect, true);
         return () => {
             document.removeEventListener("pointerdown", handlePointer, true);
             document.removeEventListener("focusin", handleFocus, true);
             document.removeEventListener("close-touch-keyboard", handleClose);
+            document.removeEventListener("keydown", handleKeydown, true);
             window.removeEventListener("resize", updateTargetRect);
             window.removeEventListener("scroll", updateTargetRect, true);
             target?.classList.remove(...activeInputClasses);
@@ -164,7 +177,11 @@
 {#if visible}
     <div
         class="touch-input-backdrop fixed inset-0 z-[1900]"
+        role="button"
+        tabindex="0"
+        aria-label="Close touch keyboard"
         on:click={done}
+        on:keydown={(event) => (event.key === "Enter" || event.key === " ") && done()}
     ></div>
     {#if targetRectStyle}
         <div
@@ -179,8 +196,13 @@
     {/if}
     <div
         class="touch-input-panel fixed bottom-2 left-1/2 z-[1902] w-[min(980px,calc(100%_-_1rem))] -translate-x-1/2 overflow-hidden rounded-xl border border-border-flat bg-bg-panel shadow-[0_-15px_55px_var(--shadow)]"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label={title}
         on:pointerdown={keepTargetFocused}
         on:click|stopPropagation
+        on:keydown={(event) => event.key === "Escape" && done()}
     >
         {#if numeric}
             <div class="flex items-center justify-between gap-2 px-[.8rem] pb-0 pt-[.7rem]">
@@ -196,6 +218,7 @@
                     {masked}
                     allowDecimal={decimal}
                     maxLength={target?.maxLength && target.maxLength > 0 ? target.maxLength : 32}
+                    max={maxValue}
                     placeholder={title}
                     submitLabel="Done"
                     onSubmit={done}
@@ -207,6 +230,7 @@
                 bind:visible
                 {masked}
                 {title}
+                {maxLength}
                 placeholder={target?.placeholder || "Touch the keys to enter text"}
                 onDone={done}
             />

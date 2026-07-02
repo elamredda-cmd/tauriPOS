@@ -7,6 +7,7 @@ import { getScaleSaleDisplay } from '$lib/scaleSale';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
 export type ReceiptPaperWidth = '58mm' | '80mm';
+export type ReceiptPrinterModel = 'generic_escpos' | 'star_tsp100';
 export type LabelPrinterProtocol = 'system' | 'escpos' | 'zpl' | 'tspl';
 
 export interface ReceiptPrinterConfig {
@@ -18,6 +19,7 @@ export interface ReceiptPrinterConfig {
     devicePath: string;
     baudRate: number;
     paperWidth: ReceiptPaperWidth;
+    model: ReceiptPrinterModel;
     autoPrintAfterPayment: boolean;
     cutPaper: boolean;
     cutFeedLines: number;
@@ -74,6 +76,10 @@ function normalizePrinterConnection(value: string, fallback: PrinterConnectionTy
     return fallback;
 }
 
+function normalizeReceiptPrinterModel(value: string): ReceiptPrinterModel {
+    return value === 'star_tsp100' ? 'star_tsp100' : 'generic_escpos';
+}
+
 export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): ReceiptPrinterConfig {
     const host = setting(settings, 'receipt_printer_host');
     const printerName = setting(settings, 'receipt_printer_name');
@@ -99,6 +105,7 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
         devicePath,
         baudRate: portSetting(settings, 'receipt_printer_baud_rate', 9600),
         paperWidth: setting(settings, 'receipt_printer_paper_width', '80mm') === '58mm' ? '58mm' : '80mm',
+        model: normalizeReceiptPrinterModel(setting(settings, 'receipt_printer_model', 'generic_escpos')),
         autoPrintAfterPayment: boolSetting(settings, 'receipt_printer_auto_print_after_payment', false),
         cutPaper: boolSetting(settings, 'receipt_printer_cut_paper', true),
         cutFeedLines: intSetting(settings, 'receipt_printer_cut_feed_lines', 8, 0, 20),
@@ -237,7 +244,8 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
         ...line(new Date().toLocaleString('en-GB'), config.encoding),
         ...leftOn,
         ...line(divider, config.encoding),
-        ...line('Connection: ESC/POS network', config.encoding),
+        ...line(`Connection: ${config.connection}`, config.encoding),
+        ...line(`Model: ${config.model === 'star_tsp100' ? 'Star TSP100' : 'Generic ESC/POS'}`, config.encoding),
         ...line(`Paper: ${config.paperWidth}`, config.encoding),
         ...line('If you can read this, printing works.', config.encoding),
         ...line(divider, config.encoding),

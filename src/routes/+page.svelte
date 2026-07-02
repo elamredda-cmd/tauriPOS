@@ -304,7 +304,7 @@
             ? allWeighableProducts
             : [];
     $: visibleScaleProducts = configuredScaleProducts.filter((product) =>
-        product && (product.name.toLowerCase().includes(scaleSearch.toLowerCase()) || product.scalePlu?.includes(scaleSearch)),
+        product && productMatchesScaleSearch(product, scaleSearch),
     );
     $: scalePageCount = Math.max(1, Math.ceil(visibleScaleProducts.length / SCALE_PRODUCTS_PER_PAGE));
     $: if (scalePage >= scalePageCount) scalePage = scalePageCount - 1;
@@ -1018,6 +1018,13 @@
         showScaleModal = false;
         stopScalePolling();
         scalePollingSignature = "";
+    }
+
+    function productMatchesScaleSearch(product: Product, rawQuery: string): boolean {
+        const q = rawQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [product.name, product.sku, product.barcode, product.scalePlu]
+            .some((value) => String(value || "").toLowerCase().includes(q));
     }
 
     function openScale() {
@@ -2846,18 +2853,18 @@
                 <div class="flex-1"></div>
                 {#each toolbarLayout as btn}
                     {#if btn === 'scale'}
-                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={openScale}>SCALE</button>
+                        <button class="pos-toolbar-action" on:click={openScale}>SCALE</button>
                     {:else if btn === 'label_print'}
-                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={() => goto('/label-print')}>LABEL PRINT</button>
+                        <button class="pos-toolbar-action" on:click={() => goto('/label-print')}>LABEL PRINT</button>
                     {:else if btn === 'discount'}
-                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={openDiscounts}>DISCOUNT</button>
+                        <button class="pos-toolbar-action" on:click={openDiscounts}>DISCOUNT</button>
                     {:else if btn === 'goods'}
-                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[10px] md:text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors flex items-center justify-center" on:click={openGoodsModal}>GOODS</button>
+                        <button class="pos-toolbar-action" on:click={openGoodsModal}>GOODS</button>
                     {:else if btn === 'recent_trans'}
-                        <button class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[8px] md:text-[8px] md:text-[10px] lg:text-xs font-bold leading-tight hover:bg-bg-card-hover transition-colors flex items-center justify-center text-center" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
+                        <button class="pos-toolbar-action" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
                     {:else if btn === 'change_price'}
                         <button
-                            class="h-full flex-1 bg-bg-card border border-border-flat rounded-md text-[8px] md:text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors flex items-center justify-center text-center disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
+                            class="pos-toolbar-action disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
                             disabled={!hasSelectedCartItem}
                             on:click={openChangePrice}>CHANGE<br class="hidden md:inline"/>PRICE</button>
                     {/if}
@@ -3276,7 +3283,7 @@
                             </button>
                         {/each}
                     </div>
-                    <input class="flat-input" value={scaleSearch} on:input={(event) => { scaleSearch = event.currentTarget.value; scalePage = 0; }} placeholder="Search weighable products or PLU..." />
+                    <input class="search-input" value={scaleSearch} on:input={(event) => { scaleSearch = event.currentTarget.value; scalePage = 0; }} placeholder="Search weighable products, SKU, barcode, or PLU..." />
                     {#if visibleScaleProducts.length}
                         <div class="scale-product-grid">
                             {#each pagedScaleProducts as product}
@@ -4256,7 +4263,7 @@
     .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 38px; padding-bottom: .1rem; }
     .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
-    .scale-products .flat-input { padding-top: .65rem; padding-bottom: .65rem; }
+    .scale-products .flat-input, .scale-products .search-input { padding-top: .65rem; padding-bottom: .65rem; }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
     .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
@@ -4316,7 +4323,7 @@
         .scale-entry { padding: .5rem; grid-template-rows: 48px 38px 50px 50px minmax(160px, 1fr) 42px 44px; gap: .3rem; }
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
-        .scale-products .flat-input { padding-top: .45rem; padding-bottom: .45rem; }
+        .scale-products .flat-input, .scale-products .search-input { padding-top: .45rem; padding-bottom: .45rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
         .scale-numpad button { min-height: 38px; font-size: 1.05rem; }
         .scale-add { min-height: 42px; }

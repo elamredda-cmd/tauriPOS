@@ -3,7 +3,7 @@
     import Modal from '$lib/components/Modal.svelte';
     import {
         discountsDB, promoGroupsDB, promoGroupItemsDB, productsDB,
-        type Discount, type PromoGroup, type PromoGroupItem,
+        type Discount, type Product, type PromoGroup, type PromoGroupItem,
         uuid, now, formatMoney
     } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
@@ -321,16 +321,18 @@
         return $productsDB.some(p => p.id === productId && p.isActive && p.showInPos !== false);
     }
 
+    function productMatchesSearch(product: Product, rawQuery: string): boolean {
+        const q = rawQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [product.name, product.sku, product.barcode, product.scalePlu]
+            .some(value => String(value || '').toLowerCase().includes(q));
+    }
+
     $: filteredTemporaryProducts = (() => {
         const q = temporaryProductSearch.trim().toLowerCase();
         const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
         if (!q) return all.slice(0, 200);
-        return all.filter(p =>
-            p.name.toLowerCase().includes(q) ||
-            (p.sku || '').toLowerCase().includes(q) ||
-            (p.barcode || '').toLowerCase().includes(q) ||
-            (p.scalePlu || '').toLowerCase().includes(q)
-        ).slice(0, 200);
+        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();
 
     $: selectedTemporaryProduct = $productsDB.find(p => p.id === temporaryProductId);
@@ -664,11 +666,7 @@
         const q = productSearch.trim().toLowerCase();
         const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
         if (!q) return all.slice(0, 200);
-        return all.filter(p =>
-            p.name.toLowerCase().includes(q) ||
-            (p.sku || '').toLowerCase().includes(q) ||
-            (p.barcode || '').toLowerCase().includes(q)
-        ).slice(0, 200);
+        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();
     $: selectedBundleProducts = $productsDB.filter(p => curProductIds.has(p.id));
 
@@ -689,9 +687,7 @@
         const q = bogoProductSearch.trim().toLowerCase();
         const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
         if (!q) return all.slice(0, 200);
-        return all.filter(p => p.name.toLowerCase().includes(q) ||
-            (p.sku || '').toLowerCase().includes(q) ||
-            (p.barcode || '').toLowerCase().includes(q)).slice(0, 200);
+        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();
     $: selectedBogoProducts = $productsDB.filter(p => bogoProductIds.has(p.id));
 
@@ -883,7 +879,7 @@
         <div class="field span-2 mt-2">
             <label>Find Products</label>
             <div class="relative">
-                <input bind:value={productSearch} placeholder="Search products..." class="pr-10" />
+                <input bind:value={productSearch} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-10" />
                 {#if productSearch}
                     <button class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => productSearch=''}>✕</button>
                 {/if}
@@ -955,7 +951,7 @@
         </div>
         <div class="field span-2 mt-2">
             <label>Find Products</label>
-            <input bind:value={bogoProductSearch} placeholder="Search products..." />
+            <input class="search-input" bind:value={bogoProductSearch} placeholder="Search name, SKU, barcode, or PLU..." />
         </div>
         <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
             {#each filteredBogoProducts as p (p.id)}
@@ -1047,7 +1043,7 @@
         </div>
         <div class="field span-2">
             <label>Find Item *</label>
-            <input bind:value={temporaryProductSearch} placeholder="Search by item name, SKU, barcode or PLU..." />
+            <input class="search-input" bind:value={temporaryProductSearch} placeholder="Search by item name, SKU, barcode or PLU..." />
         </div>
         <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
             {#each filteredTemporaryProducts as product (product.id)}

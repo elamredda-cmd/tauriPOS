@@ -38,7 +38,7 @@
     $: goodsMenuCount = $productsDB.filter((p) => p.isActive && p.showInPos !== false && p.showInGoods).length;
     $: availableGoodsDraft = goodsMenuDraft
         .filter((p) => !p.showInGoods)
-        .filter((p) => p.name.toLowerCase().includes(goodsMenuSearch.toLowerCase()))
+        .filter((p) => productMatchesSearch(p, goodsMenuSearch))
         .slice(0, 100);
 
 
@@ -69,16 +69,11 @@
     let imageUploadError = "";
 
     $: filteredItems = $productsDB.filter((p) => {
+        const q = searchQuery.trim().toLowerCase();
         const matchesStatus = selectedStatus === "all"
             || (selectedStatus === "active" && p.isActive)
             || (selectedStatus === "deactivated" && !p.isActive);
-        const matchesSearch =
-            p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            (p.sku || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-            (p.scalePlu &&
-                p.scalePlu.toLowerCase().includes(searchQuery.toLowerCase())) ||
-            (p.barcode &&
-                p.barcode.toLowerCase().includes(searchQuery.toLowerCase()));
+        const matchesSearch = !q || productMatchesSearch(p, q);
         const matchesCategory =
             selectedCategoryId === "all" || p.categoryId === selectedCategoryId;
         return matchesStatus && matchesSearch && matchesCategory;
@@ -95,6 +90,18 @@
             previousFilterKey = filterKey;
             itemPage = 0;
         }
+    }
+
+    function productMatchesSearch(product: Product, rawQuery: string): boolean {
+        const q = rawQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [
+            product.name,
+            product.sku,
+            product.barcode,
+            product.scalePlu,
+            getCategoryName(product.categoryId),
+        ].some((value) => String(value || "").toLowerCase().includes(q));
     }
 
     function openAddModal() {
@@ -511,10 +518,10 @@
                     <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
                         ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     <input
-                        class="w-full py-2.5 pr-3 pl-10 bg-bg-card border border-border-flat rounded-sm text-text-main text-[0.9rem] outline-none focus:border-accent-primary"
+                        class="search-input !min-h-11 !pl-10 !pr-3"
                         type="text"
                         bind:value={searchQuery}
-                        placeholder="Search items..."
+                        placeholder="Search name, SKU, barcode, PLU..."
                     />
                 </div>
                 <div class="min-w-[200px]">
@@ -860,8 +867,8 @@
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Available Items</h3>
                     <input
                         type="text"
-                        class="w-full h-10 px-3 bg-bg-panel border border-border-flat rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-accent-primary shrink-0"
-                        placeholder="Search items..."
+                        class="search-input !min-h-10 shrink-0"
+                        placeholder="Search name, SKU, barcode, PLU..."
                         bind:value={goodsMenuSearch}
                     />
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
@@ -876,7 +883,7 @@
                                 <span class="text-text-muted text-xs">{getCategoryName(item.categoryId)}</span>
                             </button>
                         {/each}
-                        {#if goodsMenuDraft.filter((p) => !p.showInGoods && p.name.toLowerCase().includes(goodsMenuSearch.toLowerCase())).length > 100}
+                        {#if goodsMenuDraft.filter((p) => !p.showInGoods && productMatchesSearch(p, goodsMenuSearch)).length > 100}
                             <p class="text-center text-text-muted p-2 text-xs shrink-0">Showing first 100 matches. Use search to narrow results.</p>
                         {/if}
                     </div>

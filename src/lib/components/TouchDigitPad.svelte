@@ -6,6 +6,7 @@
     export let submitDisabled = false;
     export let allowDecimal = false;
     export let placeholder = "Enter number";
+    export let max: number | null = null;
     export let onSubmit: () => void = () => {};
 
     function press(key: string) {
@@ -13,9 +14,25 @@
             value = "";
         } else if (key === "backspace") {
             value = value.slice(0, -1);
+        } else if (key === "." && (!allowDecimal || value.includes("."))) {
+            return;
         } else if (value.length < maxLength) {
-            value += key;
+            append(key);
         }
+    }
+
+    function append(key: string) {
+        const next = `${value}${key}`;
+        if (!isWithinBounds(next)) return;
+        value = next;
+    }
+
+    function isWithinBounds(next: string): boolean {
+        if (!next || next === ".") return true;
+        const numeric = Number(next);
+        if (!Number.isFinite(numeric)) return false;
+        if (max !== null && numeric > max) return false;
+        return true;
     }
 </script>
 
@@ -52,7 +69,7 @@
             <button
                 type="button"
                 class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
-                on:click={() => !value.includes(".") && press(".")}
+                on:click={() => press(".")}
             >.</button>
             <button
                 type="button"

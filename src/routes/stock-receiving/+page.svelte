@@ -178,7 +178,7 @@
                 <div class="mb-4 grid gap-3 lg:grid-cols-[1fr_180px]">
                     <div class="field">
                         <label>Find Product</label>
-                        <input bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
+                        <input class="search-input !min-h-11" bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
                     </div>
                     <div class="rounded-xl border border-border-flat bg-bg-panel p-3 text-right">
                         <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Receipt Total Cost</span>

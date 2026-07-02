@@ -21,6 +21,7 @@
     } from '$lib/stores/db';
     import { get } from 'svelte/store';
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
+    import { applyTypography } from '$lib/typography';
     import { page } from '$app/stores';
     import { canManage, currentEmployee } from '$lib/stores/session';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
@@ -186,6 +187,8 @@
             el.dataset.theme = $activeTheme;
         }
     }
+
+    $: applyTypography($settingsDB);
 
     $: if (dbReady && typeof window !== 'undefined') {
         const allowedForCashier = ['/', '/orders', '/shifts', '/customer-display', '/label-print'];

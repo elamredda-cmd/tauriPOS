@@ -82,11 +82,16 @@
         .filter(
             (p) =>
                 !tileProductIds.has(p.id) &&
-                (searchTerm === "" ||
-                    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    p.sku.toLowerCase().includes(searchTerm.toLowerCase())),
+                productMatchesTileSearch(p, searchTerm),
         )
         .slice(0, 50);
+
+    function productMatchesTileSearch(product: { name: string; sku?: string; barcode?: string; scalePlu?: string }, rawQuery: string): boolean {
+        const q = rawQuery.trim().toLowerCase();
+        if (!q) return true;
+        return [product.name, product.sku, product.barcode, product.scalePlu]
+            .some((value) => String(value || "").toLowerCase().includes(q));
+    }
 
     function openAddPage() {
         if ($activePosPages.length >= 8) {
@@ -382,8 +387,8 @@
                 <input
                     type="text"
                     bind:value={searchTerm}
-                    placeholder="Search by name or SKU..."
-                    class="flat-input w-full mb-3"
+                    placeholder="Search by name, SKU, barcode, or PLU..."
+                    class="search-input mb-3 w-full"
                     autofocus
                 />
                 <div class="max-h-[400px] overflow-y-auto flex flex-col gap-2">
@@ -395,7 +400,7 @@
                             <div class="w-6 h-6 rounded" style="background:{p.color};"></div>
                             <div class="flex-1">
                                 <strong>{p.name}</strong><br />
-                                <span class="text-[0.8rem] text-text-muted">{p.sku}</span>
+                                <span class="text-[0.8rem] text-text-muted">{p.sku || p.barcode || p.scalePlu || 'No code'}</span>
                             </div>
                             <span class="font-bold text-success">{formatMoney(p.price)}</span>
                         </div>
