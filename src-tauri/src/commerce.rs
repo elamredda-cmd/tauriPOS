@@ -856,7 +856,185 @@ async fn validate_restore_database(source: &PathBuf) -> Result<(), String> {
         }
     }
 
+    validate_restore_schema(&pool).await?;
+    validate_restore_data(&pool).await?;
+
     pool.close().await;
+    Ok(())
+}
+
+async fn validate_restore_schema(pool: &SqlitePool) -> Result<(), String> {
+    let required_columns = [
+        ("settings", vec!["key", "value"]),
+        ("products", vec!["id", "name", "price", "costPrice"]),
+        ("categories", vec!["id", "name"]),
+        ("customers", vec!["id", "name"]),
+        ("orders", vec!["id", "receiptKey", "total"]),
+        ("order_lines", vec!["id", "orderId", "productId", "lineTotal"]),
+        ("payments", vec!["id", "orderId", "amount"]),
+    ];
+
+    for (table, columns) in required_columns {
+        if !table_exists(pool, "main", table).await? {
+            // Older backups may not contain every optional table, but the core
+            // tables above must have the columns they advertise when present.
+            continue;
+        }
+        let actual: std::collections::HashSet<_> =
+            table_columns(pool, "main", table).await?.into_iter().collect();
+        for column in columns {
+            if !actual.contains(column) {
+                return Err(format!(
+                    "The selected database is missing required column {table}.{column}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn count_rows(pool: &SqlitePool, sql: &str) -> Result<i64, String> {
+    sqlx::query_scalar(sql)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Could not validate restore data: {e}"))
+}
+
+async fn restore_example_rows(pool: &SqlitePool, sql: &str) -> Result<String, String> {
+    let rows = sqlx::query(sql)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Could not read restore validation examples: {e}"))?;
+    let examples: Vec<String> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.try_get::<String, _>("id").ok()?;
+            let name = row.try_get::<String, _>("name").unwrap_or_default();
+            Some(format!("{name} ({id})"))
+        })
+        .collect();
+    Ok(examples.join(", "))
+}
+
+async fn add_issue_for_count(
+    pool: &SqlitePool,
+    issues: &mut Vec<String>,
+    label: &str,
+    count_sql: &str,
+    example_sql: Option<&str>,
+) -> Result<(), String> {
+    let count = count_rows(pool, count_sql).await?;
+    if count == 0 {
+        return Ok(());
+    }
+    let examples = match example_sql {
+        Some(sql) => restore_example_rows(pool, sql).await?,
+        None => String::new(),
+    };
+    if examples.is_empty() {
+        issues.push(format!("{label}: {count} row(s)"));
+    } else {
+        issues.push(format!("{label}: {count} row(s). Examples: {examples}"));
+    }
+    Ok(())
+}
+
+async fn validate_restore_data(pool: &SqlitePool) -> Result<(), String> {
+    let mut issues = Vec::new();
+
+    add_issue_for_count(
+        pool,
+        &mut issues,
+        "Products with missing id/name",
+        "SELECT COUNT(*) FROM products WHERE id IS NULL OR TRIM(id) = '' OR name IS NULL OR TRIM(name) = ''",
+        Some("SELECT id, name FROM products WHERE id IS NULL OR TRIM(id) = '' OR name IS NULL OR TRIM(name) = '' LIMIT 5"),
+    )
+    .await?;
+    add_issue_for_count(
+        pool,
+        &mut issues,
+        "Products with impossible prices",
+        "SELECT COUNT(*) FROM products WHERE price IS NULL OR price < 0 OR COALESCE(costPrice, 0) < 0 OR price > 1000000 OR COALESCE(costPrice, 0) > 1000000",
+        Some("SELECT id, name FROM products WHERE price IS NULL OR price < 0 OR COALESCE(costPrice, 0) < 0 OR price > 1000000 OR COALESCE(costPrice, 0) > 1000000 LIMIT 5"),
+    )
+    .await?;
+
+    for column in ["barcode", "sku", "scalePlu"] {
+        if !table_columns(pool, "main", "products")
+            .await?
+            .iter()
+            .any(|name| name == column)
+        {
+            continue;
+        }
+        let duplicate_sql = format!(
+            "SELECT COUNT(*) FROM (
+                SELECT {column} FROM products
+                WHERE {column} IS NOT NULL AND TRIM({column}) <> ''
+                GROUP BY {column} HAVING COUNT(*) > 1
+             )"
+        );
+        add_issue_for_count(
+            pool,
+            &mut issues,
+            &format!("Duplicate product {column} values"),
+            &duplicate_sql,
+            None,
+        )
+        .await?;
+    }
+
+    let orphan_checks = [
+        (
+            "POS tiles pointing to missing products",
+            vec!["pos_tiles", "products"],
+            "SELECT COUNT(*) FROM pos_tiles t LEFT JOIN products p ON p.id = t.productId WHERE p.id IS NULL",
+        ),
+        (
+            "POS tiles pointing to missing pages",
+            vec!["pos_tiles", "pos_pages"],
+            "SELECT COUNT(*) FROM pos_tiles t LEFT JOIN pos_pages p ON p.id = t.pageId WHERE p.id IS NULL",
+        ),
+        (
+            "Promotion items pointing to missing products",
+            vec!["promo_group_items", "products"],
+            "SELECT COUNT(*) FROM promo_group_items i LEFT JOIN products p ON p.id = i.productId WHERE p.id IS NULL",
+        ),
+        (
+            "Promotion items pointing to missing groups",
+            vec!["promo_group_items", "promo_groups"],
+            "SELECT COUNT(*) FROM promo_group_items i LEFT JOIN promo_groups g ON g.id = i.groupId WHERE g.id IS NULL",
+        ),
+        (
+            "Order lines pointing to missing orders",
+            vec!["order_lines", "orders"],
+            "SELECT COUNT(*) FROM order_lines l LEFT JOIN orders o ON o.id = l.orderId WHERE o.id IS NULL",
+        ),
+        (
+            "Payments pointing to missing orders",
+            vec!["payments", "orders"],
+            "SELECT COUNT(*) FROM payments p LEFT JOIN orders o ON o.id = p.orderId WHERE o.id IS NULL",
+        ),
+    ];
+    for (label, tables, sql) in orphan_checks {
+        let mut has_all_tables = true;
+        for table in tables {
+            if !table_exists(pool, "main", table).await? {
+                has_all_tables = false;
+                break;
+            }
+        }
+        if has_all_tables {
+            add_issue_for_count(pool, &mut issues, label, sql, None).await?;
+        }
+    }
+
+    if !issues.is_empty() {
+        return Err(format!(
+            "Restore stopped before changing data. The selected database has unsafe data: {}",
+            issues.join(" | ")
+        ));
+    }
     Ok(())
 }
 

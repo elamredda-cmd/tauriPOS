@@ -72,6 +72,8 @@ const IGNORED_AUDIT_SETTING_KEYS = new Set([
 ]);
 const IGNORED_AUDIT_SETTING_PREFIXES = ['sync_ts_'];
 const RESTORE_PENDING_MARIADB_REPLACE_KEY = 'restore_pending_mariadb_replace';
+const SERVER_DATA_EPOCH_KEY = 'server_data_epoch';
+const SERVER_DATA_EPOCH_SEEN_KEY = 'server_data_epoch_seen';
 export const RESTORE_PENDING_MARIADB_REPLACE_MESSAGE =
     'Restore is waiting to replace MariaDB. Open Setup and finish the MariaDB connection before normal sync.';
 
@@ -851,7 +853,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
     'scale_hardware_poll_ms',
     // Server-side control rows — never copy between tills.
-    'till_seq_counter', 'bootstrap_done',
+    'till_seq_counter', 'bootstrap_done', SERVER_DATA_EPOCH_SEEN_KEY,
 ]);
 
 function isSyncableSetting(key: string): boolean {
@@ -859,6 +861,13 @@ function isSyncableSetting(key: string): boolean {
     if (key.startsWith('sync_ts_')) return false;
     if (key.startsWith('migration_')) return false;
     return true;
+}
+
+function isPushableSetting(key: string): boolean {
+    // The epoch is authored by MariaDB replacement/bootstrap only. Other tills
+    // may read it, but ordinary settings pushes must never move it backwards.
+    if (key === SERVER_DATA_EPOCH_KEY) return false;
+    return isSyncableSetting(key);
 }
 
 // ─── Shop / database identity guard ─────────────────────────────────────────
@@ -1316,7 +1325,7 @@ async function forcePushTables(
     for (const table of PUSH_TABLES) {
         if (options.skipTables?.has(table)) continue;
         let rows: any[] = await localDb.select(`SELECT * FROM ${table}`);
-        if (table === 'settings') rows = rows.filter((r: any) => isSyncableSetting(r.key));
+        if (table === 'settings') rows = rows.filter((r: any) => isPushableSetting(r.key));
         if (rows.length === 0) continue;
 
         console.log(`database: uploading ${rows.length} rows to MariaDB ${table}…`);
@@ -1365,6 +1374,247 @@ async function verifyProductUploadCount(localDb: any): Promise<void> {
     }
 }
 
+const RESTORE_PRODUCT_PRICE_LIMIT = 1_000_000; // £10,000.00 in pennies
+const COUNT_VERIFY_SKIP_TABLES = new Set(['settings']);
+const REMOTE_COMPLETENESS_CORE_TABLES = [
+    'products',
+    'categories',
+    'customers',
+    'tax_rates',
+    'registers',
+] as const;
+
+type RemoteCompletenessTable = typeof REMOTE_COMPLETENESS_CORE_TABLES[number];
+type RemoteCompletenessCounts = Record<RemoteCompletenessTable, number>;
+
+async function localTableExists(localDb: any, table: string): Promise<boolean> {
+    const rows: any[] = await localDb.select(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`,
+        [table],
+    );
+    return rows.length > 0;
+}
+
+async function localTableHasColumn(localDb: any, table: string, column: string): Promise<boolean> {
+    const rows: any[] = await localDb.select(`PRAGMA table_info(${table})`);
+    return rows.some((row) => row.name === column);
+}
+
+async function localCount(localDb: any, sql: string): Promise<number> {
+    const rows: any[] = await localDb.select(sql);
+    return Number(rows[0]?.count || 0);
+}
+
+function normalizeRemoteCompletenessCounts(row: any): RemoteCompletenessCounts {
+    return {
+        products: Number(row.products || 0),
+        categories: Number(row.categories || 0),
+        customers: Number(row.customers || 0),
+        tax_rates: Number(row.tax_rates || 0),
+        registers: Number(row.registers || 0),
+    };
+}
+
+async function localCompletenessCounts(localDb: any): Promise<RemoteCompletenessCounts> {
+    const rows: any[] = await localDb.select(
+        `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
+                (SELECT COUNT(*) FROM customers) AS customers,
+                (SELECT COUNT(*) FROM tax_rates) AS tax_rates,
+                (SELECT COUNT(*) FROM registers) AS registers`
+    );
+    return normalizeRemoteCompletenessCounts(rows[0] || {});
+}
+
+async function remoteCompletenessCounts(remote: any): Promise<RemoteCompletenessCounts> {
+    const rows: any[] = await remote.select(
+        `SELECT (SELECT COUNT(*) FROM products) AS products,
+                (SELECT COUNT(*) FROM categories) AS categories,
+                (SELECT COUNT(*) FROM customers) AS customers,
+                (SELECT COUNT(*) FROM tax_rates) AS tax_rates,
+                (SELECT COUNT(*) FROM registers) AS registers`
+    );
+    return normalizeRemoteCompletenessCounts(rows[0] || {});
+}
+
+function formatCompletenessIssue(
+    table: RemoteCompletenessTable,
+    localCounts: RemoteCompletenessCounts,
+    remoteCounts: RemoteCompletenessCounts,
+): string {
+    return `${table}: SQLite ${localCounts[table].toLocaleString()}, MariaDB ${remoteCounts[table].toLocaleString()}`;
+}
+
+async function assertMariaDbSafeForPull(remote: any): Promise<void> {
+    if (!remote) throw new Error('MariaDB is unavailable');
+    const localDb = await sqlite.getDb();
+    const localCounts = await localCompletenessCounts(localDb);
+    const remoteCounts = await remoteCompletenessCounts(remote);
+    const localHasData = REMOTE_COMPLETENESS_CORE_TABLES.some(table => localCounts[table] > 0);
+    const remoteHasData = REMOTE_COMPLETENESS_CORE_TABLES.some(table => remoteCounts[table] > 0);
+    if (!localHasData || !remoteHasData) return;
+
+    const missingCriticalTables = REMOTE_COMPLETENESS_CORE_TABLES.filter((table) =>
+        localCounts[table] > 0 && remoteCounts[table] === 0
+    );
+    const remoteHasFewerProducts = localCounts.products > 0
+        && remoteCounts.products > 0
+        && remoteCounts.products < localCounts.products;
+    const looksLikePartialUpload = localCounts.products > 0
+        && remoteCounts.products > 0
+        && missingCriticalTables.length > 0;
+
+    if (!looksLikePartialUpload) return;
+
+    const details = [
+        ...(remoteHasFewerProducts ? [formatCompletenessIssue('products', localCounts, remoteCounts)] : []),
+        ...missingCriticalTables.map(table => formatCompletenessIssue(table, localCounts, remoteCounts)),
+    ];
+    throw new Error(
+        `MariaDB appears incomplete, so sync was stopped before downloading from it. ` +
+        `${details.join('; ')}. Finish Restore to MariaDB or use Force Push from the complete till before syncing.`
+    );
+}
+
+async function addRestoreIssueForCount(
+    localDb: any,
+    issues: string[],
+    label: string,
+    sql: string,
+): Promise<void> {
+    const count = await localCount(localDb, sql);
+    if (count > 0) issues.push(`${label}: ${count.toLocaleString()} row${count === 1 ? '' : 's'}`);
+}
+
+async function validateLocalDataForRestore(localDb: any): Promise<void> {
+    const issues: string[] = [];
+
+    await addRestoreIssueForCount(
+        localDb,
+        issues,
+        'Products with missing id or name',
+        `SELECT COUNT(*) AS count FROM products
+         WHERE id IS NULL OR TRIM(id) = '' OR name IS NULL OR TRIM(name) = ''`,
+    );
+    await addRestoreIssueForCount(
+        localDb,
+        issues,
+        'Products with impossible prices',
+        `SELECT COUNT(*) AS count FROM products
+         WHERE price IS NULL
+            OR price < 0
+            OR COALESCE(costPrice, 0) < 0
+            OR price > ${RESTORE_PRODUCT_PRICE_LIMIT}
+            OR COALESCE(costPrice, 0) > ${RESTORE_PRODUCT_PRICE_LIMIT}`,
+    );
+
+    for (const column of ['barcode', 'sku', 'scalePlu']) {
+        if (!await localTableHasColumn(localDb, 'products', column)) continue;
+        await addRestoreIssueForCount(
+            localDb,
+            issues,
+            `Duplicate product ${column} values`,
+            `SELECT COUNT(*) AS count FROM (
+                SELECT ${column}
+                FROM products
+                WHERE ${column} IS NOT NULL AND TRIM(${column}) <> ''
+                GROUP BY ${column}
+                HAVING COUNT(*) > 1
+            ) duplicate_values`,
+        );
+    }
+
+    const orphanChecks = [
+        {
+            label: 'POS tiles pointing to missing products',
+            tables: ['pos_tiles', 'products'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM pos_tiles t LEFT JOIN products p ON p.id = t.productId
+                  WHERE p.id IS NULL`,
+        },
+        {
+            label: 'POS tiles pointing to missing pages',
+            tables: ['pos_tiles', 'pos_pages'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM pos_tiles t LEFT JOIN pos_pages p ON p.id = t.pageId
+                  WHERE p.id IS NULL`,
+        },
+        {
+            label: 'Promotion items pointing to missing products',
+            tables: ['promo_group_items', 'products'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM promo_group_items i LEFT JOIN products p ON p.id = i.productId
+                  WHERE p.id IS NULL`,
+        },
+        {
+            label: 'Promotion items pointing to missing groups',
+            tables: ['promo_group_items', 'promo_groups'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM promo_group_items i LEFT JOIN promo_groups g ON g.id = i.groupId
+                  WHERE g.id IS NULL`,
+        },
+        {
+            label: 'Order lines pointing to missing orders',
+            tables: ['order_lines', 'orders'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM order_lines l LEFT JOIN orders o ON o.id = l.orderId
+                  WHERE o.id IS NULL`,
+        },
+        {
+            label: 'Payments pointing to missing orders',
+            tables: ['payments', 'orders'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM payments p LEFT JOIN orders o ON o.id = p.orderId
+                  WHERE o.id IS NULL`,
+        },
+    ];
+
+    for (const check of orphanChecks) {
+        const hasTables = await Promise.all(check.tables.map((table) => localTableExists(localDb, table)));
+        if (hasTables.every(Boolean)) {
+            await addRestoreIssueForCount(localDb, issues, check.label, check.sql);
+        }
+    }
+
+    if (issues.length > 0) {
+        const preview = issues.slice(0, 10).join('; ');
+        const suffix = issues.length > 10 ? `; and ${issues.length - 10} more issue(s)` : '';
+        throw new Error(`Restore data check failed: ${preview}${suffix}`);
+    }
+}
+
+async function verifyPushedTableCounts(
+    localDb: any,
+    options: { skipTables?: Set<string>; exact?: boolean; label?: string } = {},
+): Promise<void> {
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('MariaDB is unavailable after upload');
+    const mismatches: string[] = [];
+
+    for (const table of PUSH_TABLES) {
+        if (options.skipTables?.has(table) || COUNT_VERIFY_SKIP_TABLES.has(table)) continue;
+        if (!await localTableExists(localDb, table)) continue;
+
+        const localRows: any[] = await localDb.select(`SELECT COUNT(*) AS count FROM ${table}`);
+        const remoteRows: any[] = await remote.select(`SELECT COUNT(*) AS count FROM ${table}`);
+        const localRowsCount = Number(localRows[0]?.count || 0);
+        const remoteRowsCount = Number(remoteRows[0]?.count || 0);
+        const failed = options.exact
+            ? remoteRowsCount !== localRowsCount
+            : remoteRowsCount < localRowsCount;
+        if (failed) {
+            mismatches.push(`${table}: SQLite ${localRowsCount.toLocaleString()}, MariaDB ${remoteRowsCount.toLocaleString()}`);
+        }
+    }
+
+    if (mismatches.length > 0) {
+        const title = options.label || 'MariaDB upload verification';
+        const preview = mismatches.slice(0, 12).join('; ');
+        const suffix = mismatches.length > 12 ? `; and ${mismatches.length - 12} more table(s)` : '';
+        throw new Error(`${title} failed: ${preview}${suffix}`);
+    }
+}
+
 /**
  * One-time initial upload: only when the server is genuinely empty AND no
  * device has already claimed the bootstrap. A server-side flag prevents two
@@ -1389,8 +1639,11 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
         if (Number(row.p) > 0 || Number(row.c) > 0 || Number(row.o) > 0) return;
 
         console.log('database: server is empty — performing one-time initial upload…');
+        await validateLocalDataForRestore(localDb);
         await forcePushTables(localDb);
         await verifyProductUploadCount(localDb);
+        await verifyPushedTableCounts(localDb, { exact: true, label: 'Initial MariaDB upload verification' });
+        await publishServerDataEpoch(localDb);
 
         await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
         await sqlite.upsert('settings', { key: 'bootstrap_uploaded', value: '1', updatedAt: new Date().toISOString() }, 'key');
@@ -2966,8 +3219,11 @@ export async function migrateLocalDataToServer(): Promise<void> {
     const validation = await validateDatabaseSchemas();
     if (!validation.ok) throw new Error(validation.issues.join('; '));
     const localDb = await sqlite.getDb();
+    await validateLocalDataForRestore(localDb);
     await forcePushTables(localDb);
     await verifyProductUploadCount(localDb);
+    await verifyPushedTableCounts(localDb, { exact: true, label: 'Migration upload verification' });
+    await publishServerDataEpoch(localDb);
     await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
     await sqlite.upsert('settings', {
         key: 'bootstrap_uploaded',
@@ -3014,6 +3270,107 @@ async function clearRemoteTombstones(remote: any): Promise<void> {
     await remote.execute('DELETE FROM tombstones');
 }
 
+const LOCAL_CACHE_RESET_TABLES = [
+    'categories', 'products', 'pos_pages', 'pos_tiles',
+    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+    'employees', 'customers', 'registers',
+    'suppliers', 'product_suppliers', 'inventory_logs',
+    'orders', 'order_lines', 'payments',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines',
+    'daily_sales_summary', 'tombstones',
+];
+
+async function readRemoteServerDataEpoch(remote: any): Promise<string | null> {
+    const rows: any[] = await remote.select(
+        `SELECT value FROM settings WHERE \`key\` = ? LIMIT 1`,
+        [SERVER_DATA_EPOCH_KEY],
+    );
+    const value = String(rows[0]?.value || '').trim();
+    return value || null;
+}
+
+async function rememberLocalServerDataEpoch(localDb: any, epoch: string): Promise<void> {
+    await sqlite.upsert('settings', {
+        key: SERVER_DATA_EPOCH_KEY,
+        value: epoch,
+        updatedAt: epoch,
+    }, 'key');
+    await sqlite.upsert('settings', {
+        key: SERVER_DATA_EPOCH_SEEN_KEY,
+        value: epoch,
+        updatedAt: epoch,
+    }, 'key');
+}
+
+async function publishServerDataEpoch(localDb: any): Promise<string> {
+    const epoch = await mysql.mysqlGetServerTime();
+    await mysql.mysqlUpsert('settings', {
+        key: SERVER_DATA_EPOCH_KEY,
+        value: epoch,
+        updatedAt: epoch,
+    }, 'key');
+    await rememberLocalServerDataEpoch(localDb, epoch);
+    return epoch;
+}
+
+async function quarantineOfflineQueueForServerEpoch(localDb: any, epoch: string): Promise<number> {
+    const rows: any[] = await localDb.select(`SELECT * FROM _offline_queue ORDER BY created_at ASC, id ASC`);
+    if (rows.length === 0) return 0;
+    const stamp = new Date().toISOString();
+    for (const row of rows) {
+        await localDb.execute(
+            `INSERT OR REPLACE INTO _sync_conflicts (id, table_name, operation, data, reason, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+                `server-epoch:${epoch}:${row.id}`,
+                row.table_name,
+                row.operation,
+                row.data,
+                `MariaDB was restored/replaced at ${epoch}; this offline change was not replayed automatically.`,
+                stamp,
+            ],
+        );
+    }
+    await localDb.execute(`DELETE FROM _offline_queue`);
+    return rows.length;
+}
+
+async function wipeLocalCacheForServerEpoch(localDb: any): Promise<void> {
+    for (const table of LOCAL_CACHE_RESET_TABLES) {
+        if (await localTableExists(localDb, table)) {
+            await localDb.execute(`DELETE FROM ${table}`);
+        }
+    }
+    await localDb.execute(
+        `DELETE FROM settings WHERE key LIKE 'sync_ts_%'
+            OR key IN ('last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded', 'transaction_purge_applied_at')`
+    );
+}
+
+async function resetLocalCacheIfServerEpochChanged(remote: any): Promise<boolean> {
+    const remoteEpoch = await readRemoteServerDataEpoch(remote);
+    if (!remoteEpoch) return false;
+
+    const localDb = await sqlite.getDb();
+    const rows: any[] = await localDb.select(
+        `SELECT value FROM settings WHERE key = ? LIMIT 1`,
+        [SERVER_DATA_EPOCH_SEEN_KEY],
+    );
+    const seenEpoch = String(rows[0]?.value || '').trim();
+    if (seenEpoch === remoteEpoch) return false;
+
+    const quarantined = await quarantineOfflineQueueForServerEpoch(localDb, remoteEpoch);
+    await wipeLocalCacheForServerEpoch(localDb);
+    await rememberLocalServerDataEpoch(localDb, remoteEpoch);
+    console.warn(
+        `database: MariaDB data epoch changed (${seenEpoch || 'none'} -> ${remoteEpoch}); ` +
+        `local cache reset${quarantined ? ` and ${quarantined} offline change(s) quarantined` : ''}.`,
+    );
+    return true;
+}
+
 /**
  * Destructive repair for old-till imports:
  * keep MariaDB employees/settings/shop identity, replace business data with
@@ -3042,6 +3399,7 @@ export async function replaceMariaDbDataFromThisTill(): Promise<void> {
         if (Number(localCounts[0]?.products || 0) === 0) {
             throw new Error('This till has no restored products to upload');
         }
+        await validateLocalDataForRestore(localDb);
 
         await adoptRemoteIdentityLocally(remote);
         await replaceLocalEmployeesFromServer(remote, localDb);
@@ -3053,8 +3411,14 @@ export async function replaceMariaDbDataFromThisTill(): Promise<void> {
 
         await forcePushTables(localDb, { skipTables: PRESERVE_DURING_RESTORE_TABLES });
         await verifyProductUploadCount(localDb);
+        await verifyPushedTableCounts(localDb, {
+            skipTables: PRESERVE_DURING_RESTORE_TABLES,
+            exact: true,
+            label: 'MariaDB replace verification',
+        });
         await clearRemoteTombstones(remote);
         await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
+        await publishServerDataEpoch(localDb);
         await clearLocalSyncMarkers(localDb);
         await hydrateSvelteStores();
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
@@ -3449,13 +3813,15 @@ export async function runFastSyncCycle(): Promise<void> {
             return;
         }
         await ensureDatabaseIdentityForSync();
+        const serverEpochChanged = await resetLocalCacheIfServerEpochChanged(mysqlDb);
+        if (!serverEpochChanged) await assertMariaDbSafeForPull(mysqlDb);
 
         const preFlushSyncTime = await mysql.mysqlGetServerTime();
         const removedBeforeFlush = await applyTombstones(preFlushSyncTime);
         const pendingBeforeFlush = await pendingOfflineQueueCount();
         const flushed = pendingBeforeFlush > 0 ? await flushOfflineQueue() : 0;
         const repairedPromotions = await pushNewerLocalPromotionPackages();
-        const shouldCatchUpEverything = !wasOnline || flushed > 0 || removedBeforeFlush > 0;
+        const shouldCatchUpEverything = serverEpochChanged || !wasOnline || flushed > 0 || removedBeforeFlush > 0;
         const tablesToPull = shouldCatchUpEverything ? ALL_SYNC_TABLES : FAST_SYNC_TABLES;
 
         // Server clock is the authority for delta sync; read it once per cycle.
@@ -3530,6 +3896,8 @@ export async function runSyncCycle(): Promise<void> {
             return;
         }
         await ensureDatabaseIdentityForSync();
+        const serverEpochChanged = await resetLocalCacheIfServerEpochChanged(mysqlDb);
+        if (!serverEpochChanged) await assertMariaDbSafeForPull(mysqlDb);
 
         // Pull deletes first so an offline till cannot resurrect an old
         // promotion that another till already removed.
@@ -3729,6 +4097,10 @@ export async function forceFullSync(): Promise<void> {
 
     try {
         await ensureDatabaseIdentityForSync();
+        const mysqlDb = await getMysqlDb();
+        if (!mysqlDb) throw new Error('MariaDB is unavailable');
+        const serverEpochChanged = await resetLocalCacheIfServerEpochChanged(mysqlDb);
+        if (!serverEpochChanged) await assertMariaDbSafeForPull(mysqlDb);
         const localDb = await sqlite.getDb();
         // Clear every per-table watermark so the next cycle re-pulls all tables.
         await localDb.execute(
@@ -3736,6 +4108,7 @@ export async function forceFullSync(): Promise<void> {
         );
 
         // This will now download everything from scratch since there are no watermarks
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
         await runSyncCycle();
 
         console.log('database: full sync repair complete, rehydrating stores...');
@@ -3765,9 +4138,11 @@ export async function forcePushToServer(): Promise<void> {
     try {
         await ensureDatabaseIdentityForSync();
         const localDb = await sqlite.getDb();
+        await validateLocalDataForRestore(localDb);
         // Reuse the shared push helper (skips device-local settings keys).
         await forcePushTables(localDb);
         await verifyProductUploadCount(localDb);
+        await verifyPushedTableCounts(localDb, { exact: false, label: 'Force push verification' });
         console.log('database: Force push complete.');
     } catch (e) {
         console.error('database: force push failed:', e);
@@ -3792,6 +4167,10 @@ export async function wipeAndPullFromServer(): Promise<void> {
 
     try {
         await ensureDatabaseIdentityForSync();
+        const remote = await getMysqlDb();
+        if (!remote) throw new Error('MariaDB is unavailable');
+        const serverEpochChanged = await resetLocalCacheIfServerEpochChanged(remote);
+        if (!serverEpochChanged) await assertMariaDbSafeForPull(remote);
         const localDb = await sqlite.getDb();
 
         // Wipe local tables

@@ -266,7 +266,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // 9. Settings
     await d.execute(`
         CREATE TABLE IF NOT EXISTS settings (
-            \`key\` VARCHAR(36) PRIMARY KEY,
+            \`key\` VARCHAR(191) PRIMARY KEY,
             value TEXT,
             updatedAt TEXT
         )
@@ -626,6 +626,10 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products MODIFY COLUMN barcode VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN scalePlu VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN sku VARCHAR(255) NULL`,
+
+        // Settings keys grew as more device/receipt/printer options were added.
+        // 191 keeps the primary key safe on older utf8mb4 InnoDB limits.
+        `ALTER TABLE settings MODIFY COLUMN \`key\` VARCHAR(191)`,
 
         // Discounts
         `ALTER TABLE discounts ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'manual_percent'`,
