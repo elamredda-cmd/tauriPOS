@@ -1,5 +1,6 @@
 <script lang="ts">
-    import { goBack } from '$lib/navigation';
+    import PageBackButton from '$lib/components/PageBackButton.svelte';
+
     const tools = [
         {
             href: "/tiles",
@@ -38,12 +39,7 @@
 
 <div class="studio-shell">
     <header class="studio-header">
-        <button type="button" class="btn-icon" aria-label="Go back" on:click={() => goBack('/')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
-                <line x1="19" y1="12" x2="5" y2="12"></line>
-                <polyline points="12 19 5 12 12 5"></polyline>
-            </svg>
-        </button>
+        <PageBackButton fallback="/" />
         <div class="studio-heading">
             <span class="studio-kicker">L&amp;Bj POS</span>
             <h1>Design Studio</h1>
@@ -77,12 +73,12 @@
     .studio-shell {
         min-height: 100vh;
         height: 100vh;
-        padding: clamp(1rem, 2vw, 1.75rem);
+        padding: var(--app-page-gutter, 1.5rem);
         overflow-y: auto;
         color: var(--text-main);
         background: var(--bg-base);
     }
-    .studio-header { max-width: 1100px; margin: 0 auto 1rem; display: flex; align-items: flex-start; gap: 1rem; }
+    .studio-header { width: 100%; margin: 0 0 1rem; display: flex; align-items: center; gap: 1rem; }
     .studio-heading { min-width: 0; }
     .studio-header h1 { margin: .15rem 0 .3rem; font-size: clamp(1.7rem, 3.5vw, 2.6rem); line-height: 1; }
     .studio-header p { max-width: 620px; margin: 0; color: var(--text-muted); font-size: .9rem; }

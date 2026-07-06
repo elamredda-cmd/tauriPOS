@@ -46,10 +46,6 @@ function setting(settings: Setting[], key: string, fallback = ''): string {
     return settings.find((item) => item.key === key)?.value || fallback;
 }
 
-function hasSetting(settings: Setting[], key: string): boolean {
-    return settings.some((item) => item.key === key);
-}
-
 function boolSetting(settings: Setting[], key: string, fallback: boolean): boolean {
     return setting(settings, key, fallback ? 'true' : 'false') !== 'false';
 }
@@ -120,28 +116,21 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
 
 export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): LabelPrinterConfig {
     const receipt = getReceiptPrinterConfig(settings);
-    const hasOwnConnection = hasSetting(settings, 'label_printer_connection');
     const labelHost = setting(settings, 'label_printer_host');
     const labelPrinterName = setting(settings, 'label_printer_name');
     const labelDevicePath = setting(settings, 'label_printer_device_path');
-    const hasOwnLabelTarget = Boolean(labelHost.trim() || labelPrinterName.trim() || labelDevicePath.trim());
     const configuredConnection = setting(settings, 'label_printer_connection', '');
-    const shouldInheritReceipt = isDirectConnection(receipt.connection)
-        && (!hasOwnConnection || (configuredConnection === 'system' && !labelHost.trim() && !labelPrinterName.trim() && !labelDevicePath.trim()));
-    const fallbackConnection = shouldInheritReceipt
-        ? receipt.connection
-        : labelHost.trim()
-            ? 'network_escpos'
-            : labelPrinterName.trim()
-                ? 'usb_raw'
-                : labelDevicePath.trim()
-                    ? 'serial'
-                    : 'system';
+    const fallbackConnection = labelHost.trim()
+        ? 'network_escpos'
+        : labelPrinterName.trim()
+            ? 'usb_raw'
+            : labelDevicePath.trim()
+                ? 'serial'
+                : 'system';
     const connection = normalizePrinterConnection(
-        shouldInheritReceipt ? fallbackConnection : setting(settings, 'label_printer_connection', fallbackConnection),
+        configuredConnection || fallbackConnection,
         fallbackConnection
     );
-    const canInheritReceiptDetails = isDirectConnection(receipt.connection) && connection === receipt.connection && !hasOwnLabelTarget;
     const protocolRaw = setting(settings, 'label_printer_protocol', '');
     const directProtocol = protocolRaw === 'escpos' || protocolRaw === 'zpl' || protocolRaw === 'tspl'
         ? protocolRaw
@@ -150,10 +139,10 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
         protocol: DIRECT_CONNECTIONS.has(connection) ? directProtocol : 'system',
-        host: labelHost || (canInheritReceiptDetails ? receipt.host : ''),
+        host: labelHost,
         port: portSetting(settings, 'label_printer_port', receipt.port || 9100),
-        printerName: labelPrinterName || (canInheritReceiptDetails ? receipt.printerName : ''),
-        devicePath: labelDevicePath || (canInheritReceiptDetails ? receipt.devicePath : ''),
+        printerName: labelPrinterName,
+        devicePath: labelDevicePath,
         baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
         cutPaper: boolSetting(settings, 'label_printer_cut_paper', false),
         gapLines: intSetting(settings, 'label_printer_gap_lines', directProtocol === 'tspl' ? 2 : 0, 0, 12),
@@ -179,7 +168,12 @@ function feedLines(count: number): number[] {
 }
 
 function receiptCut(config: ReceiptPrinterConfig): number[] {
-    return config.cutPaper ? [...feedLines(config.cutFeedLines), 0x1d, 0x56, 0x00] : [];
+    if (!config.cutPaper) return [];
+    const escposCutCommand = [0x1d, 0x56, 0x00];
+    const starCutFallback = config.model === 'star_tsp100'
+        ? [0x1b, 0x64, 0x02]
+        : [];
+    return [...feedLines(config.cutFeedLines), ...escposCutCommand, ...starCutFallback];
 }
 
 function money(pence: number): string {

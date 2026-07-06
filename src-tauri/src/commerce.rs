@@ -171,17 +171,7 @@ struct PendingRestoreMarker {
 fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let profile = std::env::var("POS_PROFILE").unwrap_or_else(|_| "default".into());
-    let profile: String = profile
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    Ok(dir.join(if profile.is_empty() || profile == "default" {
-        "pos.db".into()
-    } else {
-        format!("pos-{profile}.db")
-    }))
+    Ok(dir.join("pos.db"))
 }
 
 fn local_backup_dir(app: &AppHandle) -> Result<PathBuf, String> {

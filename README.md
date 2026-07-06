@@ -28,14 +28,3 @@ Restrict MariaDB and the host firewall to the shop's trusted local network. The 
 5. Connect additional tills normally. They download the shared shop data.
 
 The migration refuses to overwrite a MariaDB database that already contains products, orders, or customers.
-
-## Two-Till Development Simulation
-
-The repository includes isolated till profiles:
-
-```bash
-npm run tauri:till1
-npm run tauri:till2
-```
-
-Each profile has a separate local SQLite cache and application identity while both can connect to the same MariaDB server.

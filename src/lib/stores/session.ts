@@ -1,8 +1,68 @@
 import { writable, get } from 'svelte/store';
+import { isTauri } from '@tauri-apps/api/core';
 import { employeesDB, type Employee } from './db';
 
 export const currentEmployee = writable<Employee | null>(null);
 export const currentShiftId = writable<string>('');
+
+export const REMEMBERED_EMPLOYEE_SESSION_KEY = 'pos_remembered_employee_session_v1';
+const REMEMBERED_EMPLOYEE_SESSION_MS = 12 * 60 * 60 * 1000;
+
+type RememberedEmployeeSession = {
+    employeeId: string;
+    expiresAt: number;
+};
+
+function readRememberedEmployeeSession(): RememberedEmployeeSession | null {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+        const raw = localStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        if (!raw) return null;
+        const saved = JSON.parse(raw) as Partial<RememberedEmployeeSession>;
+        if (!saved.employeeId || typeof saved.expiresAt !== 'number') return null;
+        if (Date.now() > saved.expiresAt) {
+            clearRememberedEmployeeSession();
+            return null;
+        }
+        return { employeeId: saved.employeeId, expiresAt: saved.expiresAt };
+    } catch {
+        clearRememberedEmployeeSession();
+        return null;
+    }
+}
+
+function rememberEmployeeSession(employee: Employee): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+        localStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, JSON.stringify({
+            employeeId: employee.id,
+            expiresAt: Date.now() + REMEMBERED_EMPLOYEE_SESSION_MS,
+        }));
+    } catch {
+        // If storage is unavailable, keep the normal in-memory session behavior.
+    }
+}
+
+export function clearRememberedEmployeeSession(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+        localStorage.removeItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+    } catch {
+        // Nothing else to do; the active in-memory session is still controlled below.
+    }
+}
+
+export function restoreRememberedEmployeeSession(): Employee | null {
+    const saved = readRememberedEmployeeSession();
+    if (!saved) return null;
+    const employee = get(employeesDB).find((e) => e.id === saved.employeeId && e.isActive) || null;
+    if (!employee) {
+        clearRememberedEmployeeSession();
+        return null;
+    }
+    currentEmployee.set(employee);
+    return employee;
+}
 
 function writeSessionAudit(action: 'employee_login' | 'employee_logout', employee: Employee | null): void {
     if (!employee) return;
@@ -55,10 +115,13 @@ async function finishAuthentication(employee: Employee | null, hash: string): Pr
     if (employee && !employee.pinHash) {
         employee = { ...employee, pinHash: hash, pin: '' };
         employeesDB.update((list) => list.map((e) => e.id === employee?.id ? employee! : e));
-        const { upsert } = await import('./database');
-        await upsert('employees', employee);
+        if (isTauri()) {
+            const { upsert } = await import('./database');
+            await upsert('employees', employee);
+        }
     }
     currentEmployee.set(employee);
+    if (employee) rememberEmployeeSession(employee);
     writeSessionAudit('employee_login', employee);
     return employee;
 }
@@ -66,6 +129,7 @@ async function finishAuthentication(employee: Employee | null, hash: string): Pr
 export function logout(): void {
     const employee = get(currentEmployee);
     writeSessionAudit('employee_logout', employee);
+    clearRememberedEmployeeSession();
     currentEmployee.set(null);
     currentShiftId.set('');
 }

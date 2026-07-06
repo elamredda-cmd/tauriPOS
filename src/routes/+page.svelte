@@ -2,7 +2,7 @@
     import { onDestroy, onMount, tick } from "svelte";
     import { get } from "svelte/store";
     import { goto } from "$app/navigation";
-    import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { isTauri } from "@tauri-apps/api/core";
     import { playErrorSound, playItemAddedSound, playSuccessSound } from "$lib/sounds";
     import {
         productsDB,
@@ -21,7 +21,6 @@
         loyaltyLogDB,
         auditLogDB,
         registersDB,
-        heldOrders,
         discountsDB,
         promoGroupsDB,
         promoGroupItemsDB,
@@ -33,6 +32,9 @@
         type Customer,
         type Discount,
         type Employee,
+        type Order,
+        type OrderLine,
+        type Payment,
         type Product,
     } from "$lib/stores/db";
     import { toast } from "$lib/stores/toast";
@@ -47,12 +49,16 @@
         getTillName,
         triggerSync,
         commitSale,
-        hydrateSvelteStores,
         ensureOpenShift,
         findOpenShiftForRegister,
         retireOpenShiftsBefore,
         ensureTillReceiptSequence,
         recordManagerApproval,
+        getPosHeldOrders,
+        getPosRecentReceipts,
+        getLatestTillReceipt,
+        getOrderDetails,
+        getOrderReversalContext,
         type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
@@ -61,7 +67,7 @@
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
     import { getReceiptDesign } from "$lib/receipt";
-    import { authenticateEmployeePin, canManage, currentEmployee, currentShiftId, logout, verifyEmployeePin } from "$lib/stores/session";
+    import { authenticateEmployeePin, currentEmployee, currentShiftId, logout, restoreRememberedEmployeeSession, verifyEmployeePin } from "$lib/stores/session";
     import { connectionState } from "$lib/stores/connection";
     import { getBarcodeRules, parseScaleBarcode } from "$lib/barcodeRules";
     import { getScaleSaleDisplay } from "$lib/scaleSale";
@@ -75,6 +81,12 @@
     import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
+
+    type PosOrderSummary = Order & {
+        cashierName?: string;
+        tillName?: string;
+        customerName?: string;
+    };
 
     let activePageId = "";
     let currentPageIndex = 0;
@@ -111,7 +123,6 @@
 
     let showGoodsModal = false;
     let goodsPriceString = "0";
-    let showMenu = false;
     let showHeldOrders = false;
     let showPaymentModal = false;
     let showDiscountModal = false;
@@ -120,6 +131,8 @@
     let amountTenderedString = "0";
     let hasTypedPayment = false;
     let cartItemEls: HTMLElement[] = [];
+    let cartScrollFrame: number | undefined;
+    let lastCartScrollIndex = -1;
     let customerSearch = "";
     let selectedCustomerId = "";
     let useLoyaltyCredit = false;
@@ -178,8 +191,6 @@
     let isReversingOrder = false;
     let isCompletingSale = false;
     let isHoldingOrder = false;
-    let isFullscreen = false;
-    let fullscreenBusy = false;
     let drawerBusy = false;
     let selectedLoginEmployeeId = "";
     let loginPin = "";
@@ -197,6 +208,8 @@
     let pendingShiftEmployee: Employee | null = null;
     let openingFloatString = "0";
     let lastRevokedEmployeeId = "";
+    let rememberedSessionChecked = false;
+    let restoringRememberedSession = false;
     $: activeLoginEmployees = $employeesDB
         .filter((employee) => employee.isActive)
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -222,6 +235,10 @@
                 if (latestEmployee !== sessionEmployee) currentEmployee.set(latestEmployee);
             }
         }
+    }
+    $: if (!rememberedSessionChecked && !$currentEmployee && $employeesDB.length > 0) {
+        rememberedSessionChecked = true;
+        void restoreLastEmployeeSession();
     }
     $: syncLabel = $connectionState.mode === "single"
         ? "Local"
@@ -347,7 +364,6 @@
             showNumpad ||
             showChangePricePad ||
             showGoodsModal ||
-            showMenu ||
             showHeldOrders ||
             showPaymentModal ||
             showDiscountModal ||
@@ -422,12 +438,24 @@
         focusScannerSoon();
     }
 
-    $: {
-        if (selectedCartIndex >= 0 && cartItemEls[selectedCartIndex]) {
-            cartItemEls[selectedCartIndex].scrollIntoView({
-                behavior: "smooth",
+    function scheduleSelectedCartScroll(index: number) {
+        if (typeof requestAnimationFrame === "undefined") return;
+        if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
+        cartScrollFrame = requestAnimationFrame(() => {
+            cartScrollFrame = undefined;
+            cartItemEls[index]?.scrollIntoView({
+                behavior: "auto",
                 block: "nearest",
             });
+        });
+    }
+
+    $: {
+        if (cart.length === 0) {
+            lastCartScrollIndex = -1;
+        } else if (selectedCartIndex >= 0 && selectedCartIndex !== lastCartScrollIndex && cartItemEls[selectedCartIndex]) {
+            lastCartScrollIndex = selectedCartIndex;
+            scheduleSelectedCartScroll(selectedCartIndex);
         }
     }
 
@@ -445,9 +473,23 @@
         .sort((a, b) => a.position - b.position);
     $: activeProductById = new Map($activeProducts.map((product) => [product.id, product]));
     $: productById = new Map($productsDB.map((product) => [product.id, product]));
+    $: productByBarcode = new Map(
+        $activeProducts
+            .filter((product) => product.showInPos !== false && product.barcode?.trim())
+            .map((product) => [normalizeLookupCode(product.barcode), product]),
+    );
+    $: scaleProductByPlu = new Map(
+        $activeProducts
+            .filter((product) => product.showInPos !== false && product.scalePlu?.trim())
+            .map((product) => [normalizeLookupCode(product.scalePlu || ""), product]),
+    );
     $: activeProductIds = new Set($activeProducts.map((product) => product.id));
     $: employeeById = new Map($employeesDB.map((employee) => [employee.id, employee]));
     $: registerById = new Map($registersDB.map((register) => [register.id, register]));
+
+    function normalizeLookupCode(value: string | undefined) {
+        return String(value || "").trim();
+    }
 
     $: totalPages = Math.max(
         1,
@@ -715,27 +757,24 @@
     }
 
     let promoClock = new Date().toISOString();
-    let currentTime = new Date().toLocaleTimeString("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-    });
 
     onMount(() => {
-        refreshFullscreenState();
         const timer = setInterval(() => {
             promoClock = new Date().toISOString();
-            currentTime = new Date().toLocaleTimeString("en-US", {
-                hour: "2-digit",
-                minute: "2-digit",
-            });
         }, 60000);
 
         // Auto-generate and cache till identity for this machine
-        getOrCreateTillId().then(async id => {
-            tillId = id;
-            await ensureTillReceiptSequence();
-        });
-        getTillName().then(name => { tillName = name; });
+        if (isTauri()) {
+            getOrCreateTillId().then(async id => {
+                tillId = id;
+                await ensureTillReceiptSequence();
+            });
+            getTillName().then(name => { tillName = name; });
+        } else {
+            tillId = "browser-preview-till";
+            tillName = "Browser Preview";
+            if (!get(currentShiftId)) currentShiftId.set("browser-preview-shift");
+        }
         document.addEventListener("pointerup", handlePosPointerUp);
         document.addEventListener("keydown", handleGlobalScannerKeydown, true);
         focusScannerSoon();
@@ -751,6 +790,7 @@
 
     onDestroy(() => {
         stopScalePolling();
+        if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
     });
 
     let tillId = '';
@@ -768,21 +808,7 @@
                 loginPin = "";
                 return;
             }
-            const registerId = tillId || await getOrCreateTillId();
-            tillId = registerId;
-            const cashUpActivationTime = $settingsDB.find((s) => s.key === "cash_up_activation_time")?.value || "";
-            await retireOpenShiftsBefore(employee.id, registerId, cashUpActivationTime);
-            const existingShiftId = (await findOpenShiftForRegister(registerId))?.id || null;
-            const cashUpEnabled = ($settingsDB.find((s) => s.key === "cash_up_enabled")?.value ?? "false") === "true";
-            const openingFloatRequired = ($settingsDB.find((s) => s.key === "cash_up_require_opening_float")?.value ?? "true") !== "false";
-            if (!existingShiftId && cashUpEnabled && openingFloatRequired) {
-                pendingShiftEmployee = employee;
-                openingFloatString = "0";
-                loginPin = "";
-                loginError = "";
-                return;
-            }
-            currentShiftId.set(existingShiftId || await ensureOpenShift(employee.id, registerId));
+            await prepareEmployeeSession(employee);
             loginPin = "";
             loginError = "";
         } catch (error) {
@@ -790,6 +816,42 @@
             logout();
             loginPin = "";
             loginError = "Could not open this till shift. Check the database connection and try again.";
+        }
+    }
+
+    async function prepareEmployeeSession(employee: Employee) {
+        const registerId = tillId || await getOrCreateTillId();
+        tillId = registerId;
+        const cashUpActivationTime = $settingsDB.find((s) => s.key === "cash_up_activation_time")?.value || "";
+        await retireOpenShiftsBefore(employee.id, registerId, cashUpActivationTime);
+        const existingShiftId = (await findOpenShiftForRegister(registerId))?.id || null;
+        const cashUpEnabled = ($settingsDB.find((s) => s.key === "cash_up_enabled")?.value ?? "false") === "true";
+        const openingFloatRequired = ($settingsDB.find((s) => s.key === "cash_up_require_opening_float")?.value ?? "true") !== "false";
+        if (!existingShiftId && cashUpEnabled && openingFloatRequired) {
+            pendingShiftEmployee = employee;
+            openingFloatString = "0";
+            loginPin = "";
+            loginError = "";
+            return;
+        }
+        currentShiftId.set(existingShiftId || await ensureOpenShift(employee.id, registerId));
+    }
+
+    async function restoreLastEmployeeSession() {
+        const employee = restoreRememberedEmployeeSession();
+        if (!employee) return;
+        restoringRememberedSession = true;
+        try {
+            await prepareEmployeeSession(employee);
+            selectedLoginEmployeeId = "";
+            loginPin = "";
+            loginError = "";
+        } catch (error) {
+            console.error("Could not restore previous staff session:", error);
+            logout();
+            loginError = "Could not reopen the previous staff session. Sign in again.";
+        } finally {
+            restoringRememberedSession = false;
         }
     }
 
@@ -827,14 +889,12 @@
     function logoutEmployee() {
         if (cart.length > 0) {
             toast("Complete or clear the current order before changing user", "error");
-            showMenu = false;
             return;
         }
         logout();
         selectedLoginEmployeeId = "";
         loginPin = "";
         loginError = "";
-        showMenu = false;
     }
 
     function moveSelectionUp() {
@@ -1099,7 +1159,7 @@
         searchQuery = "";
 
         try {
-            const found = await searchProduct(query);
+            const found = productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
 
             if (found) {
                 if (found.isWeighable) {
@@ -1115,7 +1175,7 @@
             }
             const parsed = parseScaleBarcode(query, getBarcodeRules($settingsDB));
             if (parsed) {
-                const scaleProduct = await searchProductByScalePlu(parsed.scalePlu);
+                const scaleProduct = scaleProductByPlu.get(normalizeLookupCode(parsed.scalePlu)) || await searchProductByScalePlu(parsed.scalePlu);
                 if (!scaleProduct) {
                     toast(`No active product has Scale PLU ${parsed.scalePlu}`, "error");
                     playErrorSound();
@@ -1261,7 +1321,6 @@
     }
 
     function handlePosBackgroundClick(event: MouseEvent) {
-        showMenu = false;
         const element = event.target as Element | null;
         if (!element || scannerFocusBlocked()) return;
         if (element.closest("button, input, textarea, select, a, [role='button'], [contenteditable='true'], .cursor-pointer")) return;
@@ -1340,8 +1399,10 @@
             isHoldingOrder = true;
             await upsert("orders", newOrder);
             for (const line of lines) await upsert("order_lines", line);
-            ordersDB.update((orders) => [...orders, newOrder]);
-            orderLinesDB.update((existing) => [...existing, ...lines]);
+            if (!newOrder.tillNumber || newOrder.tillNumber === tillId) {
+                heldOrdersForTill = [enrichOrderSummary(newOrder as Order), ...heldOrdersForTill];
+                heldOrderLinesByOrder = new Map(heldOrderLinesByOrder).set(orderId, lines as OrderLine[]);
+            }
             cart = [];
             selectedCartIndex = 0;
             toast("Receipt held successfully");
@@ -1366,8 +1427,8 @@
             );
             return;
         }
-        const heldOrder = $ordersDB.find((order) => order.id === orderId);
-        const lines = $orderLinesDB.filter((l) => l.orderId === orderId);
+        const heldOrder = heldOrdersForTill.find((order) => order.id === orderId);
+        const lines = heldOrderLinesByOrder.get(orderId) || [];
         if (lines.length === 0) {
             toast("This held order has no item lines. Sync and try again.", "error");
             return;
@@ -1396,8 +1457,10 @@
             discount.id === heldOrder?.discountId && discount.kind === "manual_percent" && discount.isActive
         ) ? heldOrder!.discountId : "";
         selectedCartIndex = 0;
-        ordersDB.update((o) => o.filter((x) => x.id !== orderId));
-        orderLinesDB.update((l) => l.filter((x) => x.orderId !== orderId));
+        heldOrdersForTill = heldOrdersForTill.filter((order) => order.id !== orderId);
+        const nextHeldLines = new Map(heldOrderLinesByOrder);
+        nextHeldLines.delete(orderId);
+        heldOrderLinesByOrder = nextHeldLines;
         showHeldOrders = false;
         toast("Order retrieved");
     }
@@ -1550,7 +1613,56 @@
         showGoodsModal = false;
         goodsPriceString = "0";
     }
-    $: heldOrdersForTill = tillId ? $heldOrders.filter((order) => !order.tillNumber || order.tillNumber === tillId) : $heldOrders;
+    let heldOrdersForTill: PosOrderSummary[] = [];
+    let heldOrderLinesByOrder = new Map<string, OrderLine[]>();
+    let heldOrdersLoading = false;
+    let posSummaryTillKey = "";
+    let posSummaryLoadToken = 0;
+    let latestTillReceiptOrder: PosOrderSummary | null = null;
+
+    function groupLinesByOrderId(lines: OrderLine[]): Map<string, OrderLine[]> {
+        const grouped = new Map<string, OrderLine[]>();
+        for (const line of lines) {
+            const existing = grouped.get(line.orderId) || [];
+            existing.push(line);
+            grouped.set(line.orderId, existing);
+        }
+        return grouped;
+    }
+
+    function enrichOrderSummary(order: Order): PosOrderSummary {
+        return {
+            ...order,
+            cashierName: employeeById.get(order.employeeId)?.name || "",
+            tillName: registerById.get(order.tillNumber)?.name || tillName || order.tillNumber || "",
+            customerName: $customersDB.find((customer) => customer.id === order.customerId)?.name || "",
+        };
+    }
+
+    async function refreshPosOrderSummaries() {
+        if (!tillId) return;
+        const token = ++posSummaryLoadToken;
+        heldOrdersLoading = true;
+        try {
+            const [heldResult, latestReceipt] = await Promise.all([
+                getPosHeldOrders(tillId),
+                getLatestTillReceipt(tillId),
+            ]);
+            if (token !== posSummaryLoadToken) return;
+            heldOrdersForTill = heldResult.orders as PosOrderSummary[];
+            heldOrderLinesByOrder = groupLinesByOrderId(heldResult.lines as OrderLine[]);
+            latestTillReceiptOrder = latestReceipt as PosOrderSummary | null;
+        } catch (error) {
+            console.warn("Could not refresh POS order summaries:", error);
+        } finally {
+            if (token === posSummaryLoadToken) heldOrdersLoading = false;
+        }
+    }
+
+    $: if (tillId && tillId !== posSummaryTillKey) {
+        posSummaryTillKey = tillId;
+        void refreshPosOrderSummaries();
+    }
     $: isMenuDisabled = cart.length > 0 || heldOrdersForTill.length > 0;
 
     function handleMenuClick(path: string) {
@@ -1560,11 +1672,9 @@
                     ? "You have products in the trolley"
                     : "You have held orders";
             toast(msg, "error");
-            showMenu = false;
             return;
         }
         if ($employeesDB.length === 0) {
-            showMenu = false;
             goto("/setup");
             return;
         }
@@ -1587,7 +1697,6 @@
         const permission = permissionByPath[path];
         if (permission && !hasPermission($currentEmployee, permission, $settingsDB)) {
             void requirePermission(permission, `Open ${permissionLabels[permission]}`, () => goto(path), "page", path);
-            showMenu = false;
             return;
         }
         goto(path);
@@ -1596,12 +1705,15 @@
     let showRecentTransactions = false;
     let selectedRecentOrderId: string | null = null;
     let lastReceiptPrinting = false;
+    let recentTransactionsLoading = false;
+    let recentOrders: PosOrderSummary[] = [];
+    let recentOrderLinesByOrder = new Map<string, OrderLine[]>();
+    let recentLoadToken = 0;
     const RECENT_RECEIPT_LIMIT = 10;
     $: scannerOverlayOpen =
         showNumpad ||
         showChangePricePad ||
         showGoodsModal ||
-        showMenu ||
         showHeldOrders ||
         showPaymentModal ||
         showDiscountModal ||
@@ -1617,42 +1729,6 @@
     $: if (!scannerOverlayOpen && $currentEmployee) focusScannerSoon();
     $: receiptDesign = getReceiptDesign($settingsDB);
 
-    async function refreshFullscreenState() {
-        try {
-            isFullscreen = await getCurrentWindow().isFullscreen();
-        } catch {
-            isFullscreen = false;
-        }
-    }
-
-    async function toggleFullscreenFromMenu() {
-        if (fullscreenBusy) return;
-        fullscreenBusy = true;
-        try {
-            const appWindow = getCurrentWindow();
-            const current = await appWindow.isFullscreen();
-            await appWindow.setFullscreen(!current);
-            isFullscreen = !current;
-            showMenu = false;
-        } catch (error) {
-            console.error("Could not change fullscreen mode:", error);
-            toast("Could not change full screen mode", "error");
-        } finally {
-            fullscreenBusy = false;
-        }
-    }
-    
-    $: allRecentOrders = $ordersDB
-        .filter((o) => !["hold", "open"].includes(o.status))
-        .sort(
-            (a, b) =>
-                new Date(b.completedAt).getTime() -
-                new Date(a.completedAt).getTime(),
-        );
-    $: latestTillReceiptOrder = tillId
-        ? allRecentOrders.find((order) => order.tillNumber === tillId) || null
-        : null;
-    $: recentOrders = allRecentOrders.slice(0, RECENT_RECEIPT_LIMIT);
     $: if (
         showRecentTransactions &&
         selectedRecentOrderId &&
@@ -1661,15 +1737,42 @@
         selectedRecentOrderId = recentOrders[0]?.id || null;
     }
 
+    async function refreshRecentReceipts() {
+        const token = ++recentLoadToken;
+        recentTransactionsLoading = true;
+        try {
+            const result = await getPosRecentReceipts(RECENT_RECEIPT_LIMIT);
+            if (token !== recentLoadToken) return;
+            recentOrders = result.orders as PosOrderSummary[];
+            recentOrderLinesByOrder = groupLinesByOrderId(result.lines as OrderLine[]);
+            selectedRecentOrderId = recentOrders[0]?.id || null;
+        } catch (error) {
+            console.warn("Could not load recent receipts:", error);
+            toast(`Could not load recent receipts: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            if (token === recentLoadToken) recentTransactionsLoading = false;
+        }
+    }
+
     async function openRecentTransactions() {
-        selectedRecentOrderId =
-            allRecentOrders.length > 0 ? allRecentOrders[0].id : null;
         showRecentTransactions = true;
+        await refreshRecentReceipts();
         if ($connectionState.mode === "multi" && $connectionState.mysqlOnline) {
             void triggerSync().catch((e) => {
                 console.warn("Failed to refresh recent transactions in background:", e);
             });
         }
+    }
+
+    function getCachedReceiptLines(orderId: string): OrderLine[] {
+        return recentOrderLinesByOrder.get(orderId) || heldOrderLinesByOrder.get(orderId) || [];
+    }
+
+    async function getReceiptLines(orderId: string): Promise<OrderLine[]> {
+        const cached = getCachedReceiptLines(orderId);
+        if (cached.length > 0) return cached;
+        const details = await getOrderDetails(orderId);
+        return details.lines as OrderLine[];
     }
 
     async function printStoredReceipt(selectedOrder: any, successMessage = "Receipt sent to printer") {
@@ -1678,17 +1781,16 @@
             return;
         }
         try {
+            const receiptLines = await getReceiptLines(selectedOrder.id);
             await printEscposReceipt({
                 store: $storeDB,
                 order: selectedOrder,
-                lines: $orderLinesDB
-                    .filter((line) => line.orderId === selectedOrder.id)
-                    .map((line) => ({
-                        ...line,
-                        sku: productById.get(line.productId)?.sku || "",
-                    })),
-                cashierName: employeeById.get(selectedOrder.employeeId)?.name || "",
-                tillName: registerById.get(selectedOrder.tillNumber)?.name || tillName,
+                lines: receiptLines.map((line) => ({
+                    ...line,
+                    sku: productById.get(line.productId)?.sku || "",
+                })),
+                cashierName: selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || "",
+                tillName: selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || tillName,
                 design: receiptDesign,
             }, receiptPrinterConfig);
             toast(successMessage, "success");
@@ -1804,28 +1906,22 @@
             );
             return;
         }
-        const original = get(ordersDB).find((o) => o.id === orderId);
+        const reversalContext = await getOrderReversalContext(orderId);
+        const original = reversalContext.original as Order | null;
         if (!original || original.type === "return" || !["completed", "partially_refunded"].includes(original.status)) {
             toast("Only completed or partially refunded sales can be reversed", "error");
             return;
         }
-        const originalLines = get(orderLinesDB).filter((l) => l.orderId === orderId);
-        const originalPayments = get(paymentsDB).filter((p) => p.orderId === orderId);
+        const originalLines = reversalContext.originalLines as OrderLine[];
+        const originalPayments = reversalContext.originalPayments as Payment[];
         if (originalLines.length === 0 || originalPayments.length === 0) {
             toast("This transaction is incomplete on this till. Sync and try again.", "error");
             return;
         }
-        const originalLoyaltyChanges = get(loyaltyLogDB).filter((entry) => entry.orderId === orderId);
-        const previousReversals = get(ordersDB).filter((order) =>
-            order.type === "return" && order.originalOrderId === original.id
-        );
-        const previousReversalIds = new Set(previousReversals.map((order) => order.id));
-        const previousReversalPayments = get(paymentsDB).filter((payment) =>
-            previousReversalIds.has(payment.orderId)
-        );
-        const previousLoyaltyAdjustments = get(loyaltyLogDB).filter((entry) =>
-            previousReversalIds.has(entry.orderId) && entry.reason === "refund_adjustment"
-        );
+        const originalLoyaltyChanges = reversalContext.originalLoyaltyChanges;
+        const previousReversals = reversalContext.previousReversals as Order[];
+        const previousReversalPayments = reversalContext.previousReversalPayments as Payment[];
+        const previousLoyaltyAdjustments = reversalContext.previousLoyaltyAdjustments;
         const remainingRefund = getRemainingRefundAmount(original.total, previousReversals);
         if (remainingRefund <= 0) {
             toast("This sale has already been fully refunded", "error");
@@ -1906,9 +2002,7 @@
             updatedAt: timestamp,
         };
         reversalOrder.paymentMethod = paymentAllocation.method;
-        const originalStockMovements = get(inventoryLogDB).filter((log) =>
-            log.referenceId === original.id && log.type === "sale" && log.quantityChange < 0
-        );
+        const originalStockMovements = reversalContext.originalStockMovements;
         const stockChanges = partial ? [] : originalStockMovements.map((soldMovement) => ({
                 productId: soldMovement.productId,
                 delta: Math.abs(soldMovement.quantityChange),
@@ -1930,7 +2024,7 @@
             }];
         try {
             isReversingOrder = true;
-            await commitSale({
+            const committedReversal = await commitSale({
                 order: reversalOrder,
                 lines: reversalLines,
                 payment,
@@ -1949,7 +2043,8 @@
                 originalOrderToUpdate: original.id,
                 originalStatusUpdate: status,
             });
-            await hydrateSvelteStores();
+            applyCompletedSaleToStores(committedReversal);
+            await refreshPosOrderSummaries();
             toast(voiding ? "Order voided and reversed" : "Refund recorded", "success");
             await openRecentTransactions();
         } catch (e) {
@@ -1984,16 +2079,15 @@
         else showReversalConfirm = true;
     }
 
-    function reviewPartialRefund() {
+    async function reviewPartialRefund() {
         if (!pendingReversal) return;
-        const original = get(ordersDB).find((order) => order.id === pendingReversal?.orderId);
+        const reversalContext = await getOrderReversalContext(pendingReversal.orderId);
+        const original = reversalContext.original as Order | null;
         if (!original) {
             toast("The original sale is no longer available", "error");
             return;
         }
-        const previousReversals = get(ordersDB).filter((order) =>
-            order.type === "return" && order.originalOrderId === original.id
-        );
+        const previousReversals = reversalContext.previousReversals as Order[];
         const remaining = getRemainingRefundAmount(original.total, previousReversals);
         const amount = toPence(Number(partialRefundInput));
         if (!Number.isInteger(amount) || amount <= 0 || amount >= remaining) {
@@ -2211,6 +2305,27 @@
                     ? { ...existing, status: bundle.originalStatusUpdate as any, updatedAt: order.updatedAt }
                     : existing,
             ));
+            recentOrders = recentOrders.map((existing) =>
+                existing.id === bundle.originalOrderToUpdate
+                    ? { ...existing, status: bundle.originalStatusUpdate as any, updatedAt: order.updatedAt }
+                    : existing,
+            );
+            if (latestTillReceiptOrder?.id === bundle.originalOrderToUpdate) {
+                latestTillReceiptOrder = {
+                    ...latestTillReceiptOrder,
+                    status: bundle.originalStatusUpdate as any,
+                    updatedAt: order.updatedAt,
+                };
+            }
+        }
+        if (!["hold", "open"].includes(order.status)) {
+            const summary = enrichOrderSummary(order as Order);
+            recentOrders = [
+                summary,
+                ...recentOrders.filter((existing) => existing.id !== order.id),
+            ].slice(0, RECENT_RECEIPT_LIMIT);
+            recentOrderLinesByOrder = new Map(recentOrderLinesByOrder).set(order.id, bundle.lines as OrderLine[]);
+            if (order.tillNumber === tillId) latestTillReceiptOrder = summary;
         }
     }
 
@@ -2506,6 +2621,15 @@
     </div>
 {/if}
 
+{#if restoringRememberedSession}
+    <div class="fixed inset-0 z-[1050] bg-bg-base/90 flex items-center justify-center p-4">
+        <div class="bg-bg-card border border-border-flat rounded-md px-5 py-4 shadow-[var(--shadow)] text-center">
+            <strong class="block text-text-main">Reopening staff session</strong>
+            <span class="block text-sm text-text-muted mt-1">Checking the till shift...</span>
+        </div>
+    </div>
+{/if}
+
 {#if pendingShiftEmployee}
     <div class="fixed inset-0 z-[1100] bg-bg-base flex items-center justify-center p-3 md:p-5">
         <div class="w-full max-w-[520px] max-h-[96vh] overflow-y-auto bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]">
@@ -2539,154 +2663,37 @@
             class="pos-main-header grid grid-cols-[minmax(0,1fr)_minmax(0,auto)_minmax(0,1fr)] items-center gap-3 h-12 md:h-14 lg:h-16 mb-2 md:mb-3 lg:mb-5 shrink-0"
         >
             <div class="flex min-w-0 items-center gap-4">
-                <div class="relative">
+                <div>
                     <button
-                        class="w-12 h-12 rounded-md bg-bg-card border border-border-flat flex items-center justify-center hover:bg-bg-card-hover transition-colors"
-                        on:click|stopPropagation={() => (showMenu = !showMenu)}
+                        class="h-12 min-w-[104px] rounded-md bg-bg-card border border-border-flat px-3 flex items-center justify-center gap-2 font-black text-text-main hover:bg-bg-card-hover hover:border-accent-primary transition-colors {isMenuDisabled ? 'opacity-70' : ''}"
+                        aria-disabled={isMenuDisabled}
+                        title="Open Admin"
+                        on:click|stopPropagation={() => handleMenuClick("/admin")}
                     >
                         <svg
                             viewBox="0 0 24 24"
                             fill="none"
                             stroke="currentColor"
                             stroke-width="2"
-                            width="24"
+                            width="20"
                             stroke-linecap="round"
                             stroke-linejoin="round"
-                            ><line x1="3" y1="12" x2="21" y2="12"></line><line
-                                x1="3"
-                                y1="6"
-                                x2="21"
-                                y2="6"
-                            ></line><line x1="3" y1="18" x2="21" y2="18"
-                            ></line></svg
+                            ><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect
+                                x="14"
+                                y="3"
+                                width="7"
+                                height="7"
+                                rx="1"
+                            ></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect
+                                x="14"
+                                y="14"
+                                width="7"
+                                height="7"
+                                rx="1"
+                            ></rect></svg
                         >
+                        <span>Admin</span>
                     </button>
-
-                    {#if showMenu}
-                        <div
-                            class="absolute top-14 left-0 w-[240px] flex flex-col py-2 z-50 shadow-[var(--shadow)] bg-bg-card border border-border-flat rounded-md max-h-[80vh] overflow-y-auto"
-                            on:click|stopPropagation
-                        >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/design")}
-                                >🎨 Design Studio</button
-                            >
-                            <div class="h-px bg-border-flat my-1 mx-2"></div>
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/items")}
-                                >📦 Items</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/categories")}
-                                >📂 Categories</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/customers")}
-                                >👤 Customers</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/employees")}
-                                >🧑‍💼 Employees</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/suppliers")}
-                                >🚚 Suppliers</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/discounts")}
-                                >🏷️ Discounts</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/tax-rates")}
-                                >📊 Tax Rates</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/orders")}
-                                >📋 Orders</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/shifts")}
-                                >⏱️ Shifts</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/stock-receiving")}
-                                >📥 Stock Receiving</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/reports")}
-                                >📊 Reports</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/sync")}
-                                >🔄 Sync Dashboard</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/audit")}
-                                >🧾 Audit Log</button
-                            >
-                            <button
-                                class="menu-link {isMenuDisabled
-                                    ? 'menu-link-disabled'
-                                    : ''}"
-                                on:click={() => handleMenuClick("/settings")}
-                                >⚙️ Settings</button
-                            >
-                            <div class="h-px bg-border-flat my-1 mx-2"></div>
-                            <button
-                                class="menu-link"
-                                disabled={fullscreenBusy}
-                                on:click={toggleFullscreenFromMenu}
-                                >{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</button
-                            >
-                            <button
-                                class="menu-link !text-danger hover:!bg-danger hover:!text-white"
-                                on:click={logoutEmployee}
-                                >🚪 Logout</button
-                            >
-                        </div>
-                    {/if}
                 </div>
 
                 <button
@@ -2757,7 +2764,7 @@
             <div class="pos-product-grid grid grid-cols-4 grid-rows-4 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
                     {#if slot && slot.product}
-                        {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, currentTime)}
+                        {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, promoClock)}
                         <div
                             class="relative h-full min-h-0 overflow-hidden cursor-pointer bg-[var(--tile-bg)] border border-border-flat rounded-md transition-colors hover:brightness-110 flex flex-col"
                             on:click={() => slot.product!.isWeighable ? openScaleForProduct(slot.product!.id) : addToCart(slot.product!)}
@@ -2804,7 +2811,7 @@
                     {/if}
                 {/each}
             </div>
-            <div class="pos-toolbar flex items-center gap-1.5 md:gap-2 h-11 md:h-14 shrink-0">
+            <div class="pos-toolbar flex items-center gap-1.5 md:gap-2 h-14 md:h-16 shrink-0">
                 <button
                     class="h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
                     title="Open cash drawer"
@@ -2850,25 +2857,26 @@
                     <div class="w-11 h-full md:w-14"></div>
                     <div class="w-11 h-full md:w-14"></div>
                 {/if}
-                <div class="flex-1"></div>
-                {#each toolbarLayout as btn}
-                    {#if btn === 'scale'}
-                        <button class="pos-toolbar-action" on:click={openScale}>SCALE</button>
-                    {:else if btn === 'label_print'}
-                        <button class="pos-toolbar-action" on:click={() => goto('/label-print')}>LABEL PRINT</button>
-                    {:else if btn === 'discount'}
-                        <button class="pos-toolbar-action" on:click={openDiscounts}>DISCOUNT</button>
-                    {:else if btn === 'goods'}
-                        <button class="pos-toolbar-action" on:click={openGoodsModal}>GOODS</button>
-                    {:else if btn === 'recent_trans'}
-                        <button class="pos-toolbar-action" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
-                    {:else if btn === 'change_price'}
-                        <button
-                            class="pos-toolbar-action disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
-                            disabled={!hasSelectedCartItem}
-                            on:click={openChangePrice}>CHANGE<br class="hidden md:inline"/>PRICE</button>
-                    {/if}
-                {/each}
+                <div class="pos-toolbar-actions" style="--pos-toolbar-count: {toolbarLayout.length}">
+                    {#each toolbarLayout as btn}
+                        {#if btn === 'scale'}
+                            <button class="pos-toolbar-action" on:click={openScale}>SCALE</button>
+                        {:else if btn === 'label_print'}
+                            <button class="pos-toolbar-action" on:click={() => goto('/label-print')}>LABEL PRINT</button>
+                        {:else if btn === 'discount'}
+                            <button class="pos-toolbar-action" on:click={openDiscounts}>DISCOUNT</button>
+                        {:else if btn === 'goods'}
+                            <button class="pos-toolbar-action" on:click={openGoodsModal}>GOODS</button>
+                        {:else if btn === 'recent_trans'}
+                            <button class="pos-toolbar-action" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
+                        {:else if btn === 'change_price'}
+                            <button
+                                class="pos-toolbar-action disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
+                                disabled={!hasSelectedCartItem}
+                                on:click={openChangePrice}>CHANGE<br class="hidden md:inline"/>PRICE</button>
+                        {/if}
+                    {/each}
+                </div>
             </div>
         </div>
     </main>
@@ -3785,9 +3793,7 @@
             </div>
             <div class="overflow-y-auto flex flex-col gap-2">
                 {#each heldOrdersForTill as ho}
-                    {@const lines = $orderLinesDB.filter(
-                        (l) => l.orderId === ho.id,
-                    )}
+                    {@const lines = heldOrderLinesByOrder.get(ho.id) || []}
                     <div
                         class="flat-card p-4 cursor-pointer flex flex-col gap-2 hover:border-accent-primary {cart.length >
                         0
@@ -3819,7 +3825,12 @@
                         </div>
                     </div>
                 {/each}
-                {#if heldOrdersForTill.length === 0}<p
+                {#if heldOrdersLoading}<p
+                        class="text-center text-text-muted p-5"
+                    >
+                        Loading held orders...
+                    </p>{/if}
+                {#if !heldOrdersLoading && heldOrdersForTill.length === 0}<p
                         class="text-center text-text-muted p-5"
                     >
                         No held orders
@@ -3855,6 +3866,11 @@
                 <div
                     class="flex-1 md:overflow-y-auto flex flex-col gap-2 md:border-r border-border-flat md:pr-4 max-h-[30vh] md:max-h-none"
                 >
+                    {#if recentTransactionsLoading}
+                        <p class="text-center text-text-muted p-5">
+                            Loading recent receipts...
+                        </p>
+                    {/if}
                     {#each recentOrders as ro}
                         <button
                             class="flat-card p-4 flex justify-between items-center cursor-pointer text-left hover:border-accent-primary {selectedRecentOrderId ===
@@ -3877,8 +3893,8 @@
                                     })}</span
                                 >
                                 <span class="text-[0.75rem] text-text-muted">
-                                    {registerById.get(ro.tillNumber)?.name || ro.tillNumber || "Unknown till"}
-                                    · {employeeById.get(ro.employeeId)?.name || "Unknown cashier"}
+                                    {ro.tillName || registerById.get(ro.tillNumber)?.name || ro.tillNumber || "Unknown till"}
+                                    · {ro.cashierName || employeeById.get(ro.employeeId)?.name || "Unknown cashier"}
                                 </span>
                             </div>
                             <div
@@ -3900,7 +3916,7 @@
                             </div>
                         </button>
                     {/each}
-                    {#if recentOrders.length === 0}
+                    {#if !recentTransactionsLoading && recentOrders.length === 0}
                         <p class="text-center text-text-muted p-5">
                             No recent receipts
                         </p>
@@ -3918,14 +3934,13 @@
                                     <Receipt
                                         store={$storeDB}
                                         order={selectedOrder}
-                                        lines={$orderLinesDB
-                                            .filter((line) => line.orderId === selectedRecentOrderId)
+                                        lines={getCachedReceiptLines(selectedRecentOrderId)
                                             .map((line) => ({
                                                 ...line,
                                                 sku: productById.get(line.productId)?.sku || '',
                                             }))}
-                                        cashierName={employeeById.get(selectedOrder.employeeId)?.name || ''}
-                                        tillName={registerById.get(selectedOrder.tillNumber)?.name || ''}
+                                        cashierName={selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || ''}
+                                        tillName={selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || ''}
                                         design={receiptDesign}
                                     />
                                 </div>

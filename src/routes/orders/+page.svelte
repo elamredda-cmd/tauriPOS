@@ -1,24 +1,25 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import {
-        ordersDB,
-        orderLinesDB,
-        paymentsDB,
-        employeesDB,
-        registersDB,
-        customersDB,
         formatMoney,
         type Order,
         type OrderLine,
         type Payment,
     } from '$lib/stores/db';
-    import { getDb } from '$lib/stores/database';
+    import { getOrdersPage } from '$lib/stores/database';
     import { getScaleSaleDisplay } from '$lib/scaleSale';
 
+    type OrderPageRow = Order & {
+        cashierName?: string;
+        tillName?: string;
+        customerName?: string;
+    };
+
     const PAGE_SIZE = 25;
+    const ORDER_SEARCH_DELAY_MS = 140;
     const statusFilterOptions = [
         { value: 'all', label: 'All receipts' },
         { value: 'completed', label: 'Completed sales' },
@@ -36,16 +37,16 @@
     let page = 0;
     let previousFilterKey = '';
     let previousQueryKey = '';
-    let sqlOrders: Order[] = [];
+    let sqlOrders: OrderPageRow[] = [];
     let sqlTotal = 0;
+    let ordersTotal = 0;
     let ordersLoading = false;
+    let ordersLoadError = '';
     let queryRun = 0;
-
-    $: linesByOrder = groupByOrderId<OrderLine>($orderLinesDB);
-    $: paymentsByOrder = groupByOrderId<Payment>($paymentsDB);
-    $: employeeById = new Map($employeesDB.map((employee) => [employee.id, employee]));
-    $: registerById = new Map($registersDB.map((register) => [register.id, register]));
-    $: customerById = new Map($customersDB.map((customer) => [customer.id, customer]));
+    let ordersMounted = false;
+    let ordersLoadTimer: ReturnType<typeof setTimeout> | null = null;
+    let pageLinesByOrder = new Map<string, OrderLine[]>();
+    let pagePaymentsByOrder = new Map<string, Payment[]>();
 
     $: pageCount = Math.max(1, Math.ceil(sqlTotal / PAGE_SIZE));
     $: if (page >= pageCount) page = pageCount - 1;
@@ -60,15 +61,22 @@
         }
     }
     $: {
-        const queryKey = `${searchQuery}|${statusFilter}|${page}|${$ordersDB.length}`;
-        if (queryKey !== previousQueryKey) {
+        const queryKey = `${previousFilterKey}|${page}`;
+        if (ordersMounted && queryKey !== previousQueryKey) {
             previousQueryKey = queryKey;
-            void loadOrdersFromSql();
+            scheduleOrdersLoad();
         }
     }
 
     onMount(() => {
-        void loadOrdersFromSql();
+        ordersMounted = true;
+        previousFilterKey = `${searchQuery}|${statusFilter}`;
+        previousQueryKey = `${previousFilterKey}|${page}`;
+        void loadOrdersPage();
+    });
+
+    onDestroy(() => {
+        if (ordersLoadTimer) clearTimeout(ordersLoadTimer);
     });
 
     function groupByOrderId<T extends { orderId: string }>(rows: T[]): Map<string, T[]> {
@@ -81,9 +89,15 @@
         return grouped;
     }
 
-    $: selectedOrder = $ordersDB.find((order) => order.id === selectedOrderId)
-        || sqlOrders.find((order) => order.id === selectedOrderId)
-        || null;
+    $: selectedOrder = sqlOrders.find((order) => order.id === selectedOrderId) || null;
+
+    function scheduleOrdersLoad(delay = ORDER_SEARCH_DELAY_MS) {
+        if (ordersLoadTimer) clearTimeout(ordersLoadTimer);
+        ordersLoadTimer = setTimeout(() => {
+            ordersLoadTimer = null;
+            void loadOrdersPage();
+        }, delay);
+    }
 
     function openOrder(order: Order) {
         selectedOrderId = order.id;
@@ -91,17 +105,11 @@
     }
 
     function getLines(orderId: string): OrderLine[] {
-        return linesByOrder.get(orderId) || [];
+        return pageLinesByOrder.get(orderId) || [];
     }
 
     function getPayments(orderId: string): Payment[] {
-        return paymentsByOrder.get(orderId) || [];
-    }
-
-    function orderTime(order: Order): number {
-        const raw = order.completedAt || order.createdAt || order.updatedAt;
-        const time = raw ? new Date(raw).getTime() : 0;
-        return Number.isFinite(time) ? time : 0;
+        return pagePaymentsByOrder.get(orderId) || [];
     }
 
     function formatDate(value: string): string {
@@ -117,16 +125,16 @@
         });
     }
 
-    function cashierName(order: Order): string {
-        return employeeById.get(order.employeeId)?.name || 'Unknown';
+    function cashierName(order: OrderPageRow): string {
+        return order.cashierName || 'Unknown';
     }
 
-    function tillName(order: Order): string {
-        return registerById.get(order.tillNumber)?.name || order.tillNumber || 'Unknown';
+    function tillName(order: OrderPageRow): string {
+        return order.tillName || order.tillNumber || 'Unknown';
     }
 
-    function customerName(order: Order): string {
-        return customerById.get(order.customerId)?.name || '';
+    function customerName(order: OrderPageRow): string {
+        return order.customerName || '';
     }
 
     function lineCount(orderId: string): number {
@@ -154,96 +162,32 @@
         return 'text-text-muted';
     }
 
-    function buildOrderWhere(): { whereSql: string; params: any[] } {
-        const where: string[] = [];
-        const params: any[] = [];
-
-        if (statusFilter !== 'all') {
-            if (statusFilter === 'refunds') {
-                where.push(`(o.type = 'return' OR o.status IN ('refunded', 'partially_refunded', 'voided'))`);
-            } else if (statusFilter === 'completed') {
-                where.push(`o.status = 'completed' AND o.type != 'return'`);
-            } else if (statusFilter === 'voided') {
-                where.push(`(o.status = 'voided' OR (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %'))`);
-            } else {
-                where.push(`o.status = ?`);
-                params.push(statusFilter);
-            }
-        }
-
-        const q = searchQuery.trim().toLowerCase();
-        if (q) {
-            const like = `%${q}%`;
-            where.push(`(
-                CAST(o.orderNumber AS TEXT) LIKE ?
-                OR LOWER(COALESCE(o.receiptKey, '')) LIKE ?
-                OR LOWER(COALESCE(o.status, '')) LIKE ?
-                OR LOWER(COALESCE(o.type, '')) LIKE ?
-                OR LOWER(COALESCE(o.notes, '')) LIKE ?
-                OR CAST(o.total AS TEXT) LIKE ?
-                OR LOWER(COALESCE(e.name, '')) LIKE ?
-                OR LOWER(COALESCE(r.name, o.tillNumber, '')) LIKE ?
-                OR LOWER(COALESCE(c.name, '')) LIKE ?
-                OR EXISTS (
-                    SELECT 1 FROM order_lines l
-                    WHERE l.orderId = o.id
-                      AND (
-                        LOWER(COALESCE(l.productName, '')) LIKE ?
-                        OR LOWER(COALESCE(l.productId, '')) LIKE ?
-                        OR LOWER(COALESCE(l.notes, '')) LIKE ?
-                      )
-                )
-                OR EXISTS (
-                    SELECT 1 FROM payments p
-                    WHERE p.orderId = o.id
-                      AND (
-                        LOWER(COALESCE(p.method, '')) LIKE ?
-                        OR LOWER(COALESCE(p.reference, '')) LIKE ?
-                      )
-                )
-            )`);
-            params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like);
-        }
-
-        return {
-            whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
-            params,
-        };
-    }
-
-    async function loadOrdersFromSql(): Promise<void> {
+    async function loadOrdersPage(): Promise<void> {
         const run = ++queryRun;
         ordersLoading = true;
+        ordersLoadError = '';
         try {
-            const db = await getDb();
-            const { whereSql, params } = buildOrderWhere();
-            const fromSql = `
-                FROM orders o
-                LEFT JOIN employees e ON e.id = o.employeeId
-                LEFT JOIN registers r ON r.id = o.tillNumber
-                LEFT JOIN customers c ON c.id = o.customerId
-                ${whereSql}
-            `;
-            const countRows: any[] = await db.select(`SELECT COUNT(*) AS count ${fromSql}`, params);
-            const rows: Order[] = await db.select(
-                `SELECT o.*
-                 ${fromSql}
-                 ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
-                          o.orderNumber DESC
-                 LIMIT ? OFFSET ?`,
-                [...params, PAGE_SIZE, page * PAGE_SIZE],
-            );
+            const result = await getOrdersPage({
+                query: searchQuery,
+                status: statusFilter,
+                limit: PAGE_SIZE,
+                offset: page * PAGE_SIZE,
+            });
             if (run !== queryRun) return;
-            sqlTotal = Number(countRows[0]?.count || 0);
-            sqlOrders = rows;
+            sqlTotal = result.total;
+            ordersTotal = result.overallTotal;
+            sqlOrders = result.rows as OrderPageRow[];
+            pageLinesByOrder = groupByOrderId<OrderLine>(result.lines as OrderLine[]);
+            pagePaymentsByOrder = groupByOrderId<Payment>(result.payments as Payment[]);
         } catch (error) {
-            console.warn('orders: SQL lookup failed, falling back to loaded orders:', error);
+            console.warn('orders: page lookup failed:', error);
             if (run !== queryRun) return;
-            const fallback = $ordersDB
-                .slice()
-                .sort((a, b) => orderTime(b) - orderTime(a) || Number(b.orderNumber || 0) - Number(a.orderNumber || 0));
-            sqlTotal = fallback.length;
-            sqlOrders = fallback.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+            ordersLoadError = String(error).replace(/^Error:\s*/, '');
+            sqlTotal = 0;
+            ordersTotal = 0;
+            sqlOrders = [];
+            pageLinesByOrder = new Map();
+            pagePaymentsByOrder = new Map();
         } finally {
             if (run === queryRun) ordersLoading = false;
         }
@@ -293,7 +237,7 @@
         </div>
         <div class="flex shrink-0 items-center gap-2">
             <span class="rounded-full border border-border-flat bg-bg-card px-3 py-2 text-xs font-bold text-text-muted">
-                {ordersLoading ? 'Searching...' : `${sqlTotal} / ${$ordersDB.length}`}
+                {ordersLoading ? 'Searching...' : `${sqlTotal} / ${ordersTotal}`}
             </span>
             {#if searchQuery || statusFilter !== 'all'}
                 <button class="btn btn-secondary !min-h-10 !px-3 !py-1.5 !text-xs" on:click={() => { searchQuery = ''; statusFilter = 'all'; }}>Clear</button>
@@ -327,8 +271,10 @@
                     <td class="money {o.total < 0 ? '!text-danger' : ''}">{formatMoney(o.total)}</td>
                 </tr>
             {/each}
-            {#if $ordersDB.length === 0}<tr class="empty-row"><td colspan="8">No orders yet.</td></tr>{/if}
-            {#if $ordersDB.length > 0 && sqlTotal === 0}<tr class="empty-row"><td colspan="8">No orders match your filters.</td></tr>{/if}
+            {#if ordersLoading && pagedOrders.length === 0}<tr class="empty-row"><td colspan="8">Loading orders...</td></tr>{/if}
+            {#if !ordersLoading && !ordersLoadError && ordersTotal === 0}<tr class="empty-row"><td colspan="8">No orders yet.</td></tr>{/if}
+            {#if !ordersLoading && !ordersLoadError && ordersTotal > 0 && sqlTotal === 0}<tr class="empty-row"><td colspan="8">No orders match your filters.</td></tr>{/if}
+            {#if !ordersLoading && ordersLoadError && pagedOrders.length === 0}<tr class="empty-row"><td colspan="8">Could not load orders: {ordersLoadError}</td></tr>{/if}
         </tbody>
     </table>
 

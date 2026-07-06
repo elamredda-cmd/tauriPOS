@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
-import { getReceiptPrinterConfig, type PrinterConnectionType } from '$lib/printers';
+import { getReceiptPrinterConfig, type PrinterConnectionType, type ReceiptPrinterModel } from '$lib/printers';
 
 export interface CashDrawerConfig {
     enabled: boolean;
@@ -10,6 +10,7 @@ export interface CashDrawerConfig {
     port: number;
     printerName: string;
     devicePath: string;
+    model: ReceiptPrinterModel;
     pin: 0 | 1;
     pulseOnMs: number;
     pulseOffMs: number;
@@ -47,15 +48,15 @@ export function getCashDrawerConfig(settings: Setting[] = get(settingsDB)): Cash
         ? numberSetting(settings, 'cash_drawer_printer_port', 9100)
         : receiptPrinter.port;
     const pin = Number(setting(settings, 'cash_drawer_pin', '0')) === 1 ? 1 : 0;
-    const drawerAfterPayment = setting(settings, 'receipt_printer_open_drawer_after_payment') === 'true';
     const hasDrawerTarget = Boolean(host.trim() || drawerPrinterName.trim() || drawerDevicePath.trim() || receiptPrinter.printerName.trim() || receiptPrinter.devicePath.trim());
     return {
-        enabled: drawerAfterPayment || boolSetting(settings, 'cash_drawer_enabled', hasDrawerTarget),
+        enabled: boolSetting(settings, 'cash_drawer_enabled', hasDrawerTarget),
         connection,
         host,
         port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : 9100,
         printerName: drawerPrinterName.trim() || receiptPrinter.printerName,
         devicePath: drawerDevicePath.trim() || receiptPrinter.devicePath,
+        model: receiptPrinter.model,
         pin,
         pulseOnMs: Math.min(510, Math.max(2, numberSetting(settings, 'cash_drawer_pulse_on_ms', 50))),
         pulseOffMs: Math.min(510, Math.max(2, numberSetting(settings, 'cash_drawer_pulse_off_ms', 250))),
@@ -70,6 +71,9 @@ export function cashDrawerTargetLabel(config = getCashDrawerConfig()): string {
 }
 
 function buildDrawerPulse(config: CashDrawerConfig): number[] {
+    if (config.model === 'star_tsp100') {
+        return [0x07];
+    }
     const pin = config.pin === 1 ? 1 : 0;
     const onUnits = Math.min(255, Math.max(1, Math.round(config.pulseOnMs / 2)));
     const offUnits = Math.min(255, Math.max(1, Math.round(config.pulseOffMs / 2)));

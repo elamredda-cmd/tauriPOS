@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { onDestroy, onMount } from "svelte";
     import {
         productsDB,
         tilesDB,
@@ -20,28 +21,30 @@
         removeProductTiles,
         deleteProduct,
         batchUpdateGoodsMenu,
+        findNextAvailableScalePlu,
+        getGoodsMenuCount,
+        getGoodsMenuEditorProducts,
+        getProductsPage,
     } from "$lib/stores/database";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import TouchToggle from "$lib/components/TouchToggle.svelte";
-    import TouchColorPicker from "$lib/components/TouchColorPicker.svelte";
+    import PageBackButton from "$lib/components/PageBackButton.svelte";
     import { getBarcodeRules } from "$lib/barcodeRules";
-    import { goBack } from "$lib/navigation";
 
     let showModal = false;
     let isEditing = false;
     let showGoodsMenu = false;
-    let goodsMenuDraft: Product[] = [];
+    let goodsMenuSelected: Product[] = [];
+    let availableGoodsDraft: Product[] = [];
+    let goodsMenuOriginal = new Map<string, { showInGoods: boolean; goodsSortOrder: number }>();
     let goodsMenuSearch = "";
+    let goodsMenuCount = 0;
+    let goodsMenuAvailableTotal = 0;
+    let goodsMenuLoading = false;
+    let goodsMenuSearchTimer: ReturnType<typeof setTimeout> | null = null;
+    let previousGoodsMenuSearch = "";
     $: stockTrackingEnabled = ($settingsDB.find((setting) => setting.key === "stock_tracking_enabled")?.value ?? "true") !== "false";
-
-    $: goodsMenuCount = $productsDB.filter((p) => p.isActive && p.showInPos !== false && p.showInGoods).length;
-    $: availableGoodsDraft = goodsMenuDraft
-        .filter((p) => !p.showInGoods)
-        .filter((p) => productMatchesSearch(p, goodsMenuSearch))
-        .slice(0, 100);
-
-
 
     let currentItem: Partial<Product> = {};
     let originalItem: Product | null = null;
@@ -51,6 +54,14 @@
     const ITEMS_PER_PAGE = 50;
     let itemPage = 0;
     let previousFilterKey = "";
+    let previousPageKey = "";
+    let pageItems: Product[] = [];
+    let totalItems = 0;
+    let itemsLoading = false;
+    let itemsLoadError = "";
+    let itemsMounted = false;
+    let itemsSearchTimer: ReturnType<typeof setTimeout> | null = null;
+    let itemsLoadToken = 0;
     let selectedPluLength = 5;
     $: configuredPluLengths = [...new Set(getBarcodeRules($settingsDB)
         .filter((rule) => rule.enabled)
@@ -68,27 +79,80 @@
     let productImageInput: HTMLInputElement | null = null;
     let imageUploadError = "";
 
-    $: filteredItems = $productsDB.filter((p) => {
-        const q = searchQuery.trim().toLowerCase();
-        const matchesStatus = selectedStatus === "all"
-            || (selectedStatus === "active" && p.isActive)
-            || (selectedStatus === "deactivated" && !p.isActive);
-        const matchesSearch = !q || productMatchesSearch(p, q);
-        const matchesCategory =
-            selectedCategoryId === "all" || p.categoryId === selectedCategoryId;
-        return matchesStatus && matchesSearch && matchesCategory;
-    });
-    $: itemPageCount = Math.max(1, Math.ceil(filteredItems.length / ITEMS_PER_PAGE));
-    $: if (itemPage >= itemPageCount) itemPage = itemPageCount - 1;
-    $: pagedItems = filteredItems.slice(
-        itemPage * ITEMS_PER_PAGE,
-        (itemPage + 1) * ITEMS_PER_PAGE,
-    );
+    $: itemPageCount = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
     $: {
         const filterKey = `${searchQuery}|${selectedCategoryId}|${selectedStatus}`;
         if (filterKey !== previousFilterKey) {
             previousFilterKey = filterKey;
             itemPage = 0;
+        }
+    }
+    $: {
+        const pageKey = `${previousFilterKey}|${itemPage}`;
+        if (itemsMounted && pageKey !== previousPageKey) {
+            previousPageKey = pageKey;
+            scheduleItemsLoad();
+        }
+    }
+    $: if (showGoodsMenu && goodsMenuSearch !== previousGoodsMenuSearch) {
+        previousGoodsMenuSearch = goodsMenuSearch;
+        scheduleGoodsMenuSearchLoad(goodsMenuSearch);
+    }
+
+    onMount(() => {
+        itemsMounted = true;
+        previousFilterKey = `${searchQuery}|${selectedCategoryId}|${selectedStatus}`;
+        previousPageKey = `${previousFilterKey}|${itemPage}`;
+        void loadItemsPage();
+        void refreshGoodsMenuCount();
+    });
+
+    onDestroy(() => {
+        if (itemsSearchTimer) clearTimeout(itemsSearchTimer);
+        if (goodsMenuSearchTimer) clearTimeout(goodsMenuSearchTimer);
+    });
+
+    function scheduleItemsLoad(delay = 140) {
+        if (itemsSearchTimer) clearTimeout(itemsSearchTimer);
+        itemsSearchTimer = setTimeout(() => {
+            void loadItemsPage();
+        }, delay);
+    }
+
+    async function loadItemsPage() {
+        const token = ++itemsLoadToken;
+        itemsLoading = true;
+        itemsLoadError = "";
+        try {
+            const result = await getProductsPage({
+                query: searchQuery,
+                categoryId: selectedCategoryId,
+                status: selectedStatus,
+                limit: ITEMS_PER_PAGE,
+                offset: itemPage * ITEMS_PER_PAGE,
+            });
+            if (token !== itemsLoadToken) return;
+            pageItems = result.rows as Product[];
+            totalItems = result.total;
+            const lastPage = Math.max(0, Math.ceil(result.total / ITEMS_PER_PAGE) - 1);
+            if (itemPage > lastPage) {
+                itemPage = lastPage;
+                return;
+            }
+        } catch (error) {
+            if (token !== itemsLoadToken) return;
+            itemsLoadError = String(error).replace(/^Error:\s*/, "");
+            toast(`Could not load items: ${itemsLoadError}`, "error");
+        } finally {
+            if (token === itemsLoadToken) itemsLoading = false;
+        }
+    }
+
+    async function refreshGoodsMenuCount() {
+        try {
+            goodsMenuCount = await getGoodsMenuCount();
+        } catch (error) {
+            console.warn("Could not refresh Goods Menu count:", error);
         }
     }
 
@@ -159,24 +223,20 @@
         return PALETTE[Math.floor(Math.random() * PALETTE.length)];
     }
 
-    function generateScalePlu() {
+    async function generateScalePlu() {
         const length = selectedPluLength || configuredPluLengths[0] || 5;
-        const maximum = 10 ** length - 1;
-        const used = new Set(
-            $productsDB
-                .filter((item) => item.id !== currentItem.id && item.scalePlu)
-                .map((item) => item.scalePlu!),
-        );
-        for (let number = 1; number <= maximum; number++) {
-            const candidate = String(number).padStart(length, "0");
-            if (!used.has(candidate)) {
-                currentItem.scalePlu = candidate;
-                currentItem = { ...currentItem };
-                toast(`Generated unique PLU ${candidate}`, "success");
+        try {
+            const candidate = await findNextAvailableScalePlu(length, currentItem.id || "");
+            if (!candidate) {
+                toast(`No unused ${length}-digit PLU is available`, "error");
                 return;
             }
+            currentItem.scalePlu = candidate;
+            currentItem = { ...currentItem };
+            toast(`Generated unique PLU ${candidate}`, "success");
+        } catch (error) {
+            toast(`Could not generate PLU: ${String(error).replace(/^Error:\s*/, "")}`, "error");
         }
-        toast(`No unused ${length}-digit PLU is available`, "error");
     }
 
     function blobToDataUrl(blob: Blob): Promise<string> {
@@ -266,33 +326,12 @@
             toast("Cost Price cannot be negative", "error");
             return;
         }
-        const duplicateSku = $productsDB.find(
-            (item) => item.id !== currentItem.id && currentItem.sku && item.sku?.trim() === currentItem.sku,
-        );
-        if (duplicateSku) {
-            toast(`SKU is already used by ${duplicateSku.name}`, "error");
-            return;
-        }
-        const duplicateBarcode = $productsDB.find(
-            (item) => item.id !== currentItem.id && item.barcode === currentItem.barcode,
-        );
-        if (currentItem.barcode && duplicateBarcode) {
-            toast(`Barcode is already used by ${duplicateBarcode.name}`, "error");
-            return;
-        }
         if (currentItem.scalePlu && !/^\d+$/.test(currentItem.scalePlu)) {
             toast("Scale PLU must contain digits only", "error");
             return;
         }
         if (currentItem.scalePlu && configuredPluLengths.length > 0 && !configuredPluLengths.includes(currentItem.scalePlu.length)) {
             toast(`Scale PLU must contain ${configuredPluLengths.join(" or ")} digits to match the enabled barcode rules`, "error");
-            return;
-        }
-        const duplicateScalePlu = $productsDB.find(
-            (item) => item.id !== currentItem.id && item.isActive && item.scalePlu === currentItem.scalePlu,
-        );
-        if (currentItem.scalePlu && duplicateScalePlu) {
-            toast(`Scale PLU is already used by ${duplicateScalePlu.name}`, "error");
             return;
         }
         const wasInGoods = originalItem?.showInGoods ?? false;
@@ -302,10 +341,7 @@
             return;
         }
         if (currentItem.showInGoods && !wasInGoods) {
-            currentItem.goodsSortOrder = Math.max(
-                0,
-                ...$productsDB.filter((item) => item.isActive && item.showInGoods).map((item) => item.goodsSortOrder || 0),
-            ) + 1;
+            currentItem.goodsSortOrder = 0;
         } else if (!currentItem.showInGoods) {
             currentItem.goodsSortOrder = 0;
         }
@@ -339,6 +375,7 @@
             }
             showModal = false;
             toast(isEditing ? "Item updated" : "Item added");
+            await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(String(error).replace(/^Error:\s*/, ""), "error");
         }
@@ -364,6 +401,7 @@
             tilesDB.update((tiles) => tiles.filter((tile) => tile.productId !== id));
             toast("Item deactivated", "info");
             showDelConfirm = false;
+            await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not deactivate item: ${String(error).replace(/^Error:\s*/, "")}`, "error");
         }
@@ -380,6 +418,7 @@
                 existing.id === item.id ? { ...existing, isActive: true, updatedAt: stamp } : existing
             ));
             toast(`${item.name} reactivated`, "success");
+            await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not reactivate item: ${String(error).replace(/^Error:\s*/, "")}`, "error");
         }
@@ -408,76 +447,111 @@
         return $taxRatesDB.find((t) => t.id === id)?.name || "-";
     }
 
-    function openGoodsMenu() {
-        goodsMenuDraft = $productsDB
-            .filter((p) => p.isActive && p.showInPos !== false)
-            .map((p) => ({ ...p }))
-            .sort((a, b) => a.name.localeCompare(b.name));
-        normalizeGoodsMenuOrder();
+    async function openGoodsMenu() {
         goodsMenuSearch = "";
+        previousGoodsMenuSearch = "";
         showGoodsMenu = true;
+        goodsMenuOriginal = new Map();
+        await loadGoodsMenuLists(false);
+    }
+
+    function scheduleGoodsMenuSearchLoad(query: string) {
+        if (!showGoodsMenu) return;
+        if (goodsMenuSearchTimer) clearTimeout(goodsMenuSearchTimer);
+        goodsMenuSearchTimer = setTimeout(() => {
+            void loadGoodsMenuLists(true, query);
+        }, 160);
+    }
+
+    async function loadGoodsMenuLists(preserveSelected = true, query = goodsMenuSearch) {
+        goodsMenuLoading = true;
+        try {
+            const result = await getGoodsMenuEditorProducts(query, 100);
+            if (!preserveSelected) {
+                goodsMenuSelected = result.selected.map((item) => ({ ...item, showInGoods: true }));
+                goodsMenuOriginal = new Map();
+                for (const item of goodsMenuSelected) {
+                    goodsMenuOriginal.set(item.id, {
+                        showInGoods: true,
+                        goodsSortOrder: item.goodsSortOrder || 0,
+                    });
+                }
+            }
+
+            const selectedIds = new Set(goodsMenuSelected.map((item) => item.id));
+            for (const item of result.available) {
+                if (!goodsMenuOriginal.has(item.id)) {
+                    goodsMenuOriginal.set(item.id, { showInGoods: false, goodsSortOrder: 0 });
+                }
+            }
+            availableGoodsDraft = result.available
+                .filter((item) => !selectedIds.has(item.id))
+                .map((item) => ({ ...item, showInGoods: false, goodsSortOrder: 0 }));
+            goodsMenuAvailableTotal = result.totalAvailable;
+            normalizeGoodsMenuOrder();
+        } catch (error) {
+            toast(`Could not load Goods Menu items: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            goodsMenuLoading = false;
+        }
     }
 
     function normalizeGoodsMenuOrder() {
-        const selected = goodsMenuDraft
-            .filter((p) => p.showInGoods)
+        goodsMenuSelected = goodsMenuSelected
             .sort((a, b) => {
                 const aOrder = a.goodsSortOrder || Number.MAX_SAFE_INTEGER;
                 const bOrder = b.goodsSortOrder || Number.MAX_SAFE_INTEGER;
                 return aOrder - bOrder || a.name.localeCompare(b.name);
-            });
-        selected.forEach((item, index) => (item.goodsSortOrder = index + 1));
-        goodsMenuDraft
-            .filter((p) => !p.showInGoods)
-            .forEach((item) => (item.goodsSortOrder = 0));
+            })
+            .map((item, index) => ({ ...item, showInGoods: true, goodsSortOrder: index + 1 }));
+        availableGoodsDraft = availableGoodsDraft.map((item) => ({ ...item, showInGoods: false, goodsSortOrder: 0 }));
+    }
+
+    function availableMatchesSearch(item: Product): boolean {
+        return productMatchesSearch(item, goodsMenuSearch);
     }
 
     function toggleGoodsMenuItem(item: Product) {
         if (item.showInGoods) {
-            item.showInGoods = false;
-            item.goodsSortOrder = 0;
+            goodsMenuSelected = goodsMenuSelected.filter((selected) => selected.id !== item.id);
+            const availableItem = { ...item, showInGoods: false, goodsSortOrder: 0 };
+            if (availableMatchesSearch(availableItem) && !availableGoodsDraft.some((available) => available.id === item.id)) {
+                availableGoodsDraft = [...availableGoodsDraft, availableItem].sort((a, b) => a.name.localeCompare(b.name));
+            }
         } else {
-            const selected = goodsMenuDraft.filter((p) => p.showInGoods);
-            if (selected.length >= 10) {
+            if (goodsMenuSelected.length >= 10) {
                 toast("Maximum 10 items allowed in Goods Menu", "error");
                 return;
             }
-            item.showInGoods = true;
-            item.goodsSortOrder = selected.length + 1;
+            availableGoodsDraft = availableGoodsDraft.filter((available) => available.id !== item.id);
+            goodsMenuSelected = [
+                ...goodsMenuSelected,
+                { ...item, showInGoods: true, goodsSortOrder: goodsMenuSelected.length + 1 },
+            ];
         }
         normalizeGoodsMenuOrder();
-        goodsMenuDraft = [...goodsMenuDraft];
     }
 
     function moveGoodsMenuItem(idx: number, dir: number) {
-        const selected = goodsMenuDraft.filter((p) => p.showInGoods).sort((a, b) => (a.goodsSortOrder || 0) - (b.goodsSortOrder || 0));
         const j = idx + dir;
-        if (j < 0 || j >= selected.length) return;
-        const next = [...selected];
+        if (j < 0 || j >= goodsMenuSelected.length) return;
+        const next = [...goodsMenuSelected];
         [next[idx], next[j]] = [next[j], next[idx]];
-        next.forEach((p, i) => {
-            const draft = goodsMenuDraft.find((d) => d.id === p.id);
-            if (draft) draft.goodsSortOrder = i + 1;
-        });
-        goodsMenuDraft = [...goodsMenuDraft];
+        goodsMenuSelected = next.map((item, index) => ({ ...item, goodsSortOrder: index + 1 }));
     }
 
     async function saveGoodsMenu() {
         normalizeGoodsMenuOrder();
-        // Build a lookup map once — O(n) instead of O(n²)
-        const originalMap = new Map($productsDB.map((p) => [p.id, p]));
-
-        const changes = goodsMenuDraft
-            .filter((draft) => {
-                const orig = originalMap.get(draft.id);
-                return orig && (orig.showInGoods !== draft.showInGoods || orig.goodsSortOrder !== draft.goodsSortOrder);
+        const selectedMap = new Map(goodsMenuSelected.map((item) => [item.id, item]));
+        const changes = Array.from(goodsMenuOriginal.entries())
+            .map(([id, original]) => {
+                const selected = selectedMap.get(id);
+                const showInGoods = !!selected;
+                const goodsSortOrder = selected?.goodsSortOrder || 0;
+                if (original.showInGoods === showInGoods && original.goodsSortOrder === goodsSortOrder) return null;
+                return { id, showInGoods, goodsSortOrder, updatedAt: now() };
             })
-            .map((draft) => ({
-                id: draft.id,
-                showInGoods: draft.showInGoods,
-                goodsSortOrder: draft.goodsSortOrder,
-                updatedAt: now(),
-            }));
+            .filter((change): change is { id: string; showInGoods: boolean; goodsSortOrder: number; updatedAt: string } => !!change);
 
         if (changes.length === 0) {
             showGoodsMenu = false;
@@ -497,6 +571,7 @@
             );
             showGoodsMenu = false;
             toast(`Goods Menu updated (${changes.length} items)`);
+            await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not save Goods Menu: ${String(error).replace(/^Error:\s*/, "")}`, "error");
         }
@@ -505,32 +580,29 @@
 
 <div class="items-management-page p-6 h-screen flex flex-col overflow-hidden">
     <header class="items-management-header flex justify-between items-center mb-6 gap-5">
-        <div class="flex items-center gap-4">
-            <button type="button" class="btn-icon" aria-label="Go back" on:click={() => goBack('/')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20"
-                    ><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-            </button>
-            <h1 class="text-[1.8rem] m-0">Item Management</h1>
+        <div class="items-title flex min-w-0 items-center gap-4">
+            <PageBackButton fallback="/" />
+            <h1 class="m-0 truncate text-[1.8rem]">Item Management</h1>
         </div>
-        <div class="flex items-center gap-4 flex-1 justify-end">
-            <div class="flex gap-3 flex-1 max-w-[820px]">
-                <div class="relative flex-1">
+        <div class="items-header-controls flex min-w-0 flex-1 items-center justify-end gap-4">
+            <div class="items-filter-row flex min-w-0 flex-1 gap-3 max-w-[820px]">
+                <div class="items-search relative min-w-0 flex-1">
                     <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
                         ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     <input
-                        class="search-input !min-h-11 !pl-10 !pr-3"
+                        class="search-input !pl-10 !pr-3"
                         type="text"
                         bind:value={searchQuery}
                         placeholder="Search name, SKU, barcode, PLU..."
                     />
                 </div>
-                <div class="min-w-[200px]">
+                <div class="items-category-filter min-w-[200px]">
                     <CustomSelect
                         bind:value={selectedCategoryId}
                         options={[{label: 'All Categories', value: 'all'}, ...$categoriesDB.filter(c => c.isActive).map(c => ({label: c.name, value: c.id}))]}
                     />
                 </div>
-                <div class="min-w-[170px]">
+                <div class="items-status-filter min-w-[170px]">
                     <CustomSelect
                         bind:value={selectedStatus}
                         options={[
@@ -541,35 +613,55 @@
                     />
                 </div>
             </div>
-            <button class="btn btn-primary" on:click={openAddModal}>+ Add Item</button>
-            <button class="btn btn-secondary" on:click={openGoodsMenu}>
-                Goods Menu ({goodsMenuCount}/10)
-            </button>
+            <div class="items-header-actions flex items-center gap-3">
+                <button class="btn btn-primary items-command-btn" on:click={openAddModal}>+ Add Item</button>
+                <button class="btn btn-secondary items-command-btn" on:click={openGoodsMenu}>
+                    Goods Menu ({goodsMenuCount}/10)
+                </button>
+            </div>
         </div>
     </header>
 
-    <div class="flat-panel flex-1 overflow-y-auto rounded-md p-px">
-        <table class="tbl">
+    <div class="items-table-panel flat-panel flex-1 overflow-auto rounded-md p-px">
+        <table class="items-table tbl">
             <thead>
                 <tr>
-                    <th>Tile</th>
-                    <th>Name</th>
-                    <th>Status</th>
-                    <th>SKU</th>
-                    <th>Barcode</th>
-                    <th>PLU</th>
-                    <th>Category</th>
-                    <th>Tax</th>
-                    {#if stockTrackingEnabled}<th>Stock</th>{/if}
-                    <th>Cost</th>
-                    <th>Price</th>
-                    <th>Actions</th>
+                    <th class="items-col-actions">Actions</th>
+                    <th class="items-col-tile">Tile</th>
+                    <th class="items-col-name">Name</th>
+                    <th class="items-col-status">Status</th>
+                    <th class="items-col-sku">SKU</th>
+                    <th class="items-col-barcode">Barcode</th>
+                    <th class="items-col-plu">PLU</th>
+                    <th class="items-col-category">Category</th>
+                    <th class="items-col-tax">Tax</th>
+                    {#if stockTrackingEnabled}<th class="items-col-stock">Stock</th>{/if}
+                    <th class="items-col-cost">Cost</th>
+                    <th class="items-col-price">Price</th>
                 </tr>
             </thead>
             <tbody>
-                {#each pagedItems as item}
+                {#each pageItems as item}
                     <tr>
-                        <td>
+                        <td class="items-col-actions">
+                            <div class="act-row">
+                                <button class="btn-icon act-btn" title="Edit item" aria-label="Edit item" on:click={() => openEditModal(item)}>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
+                                        ><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                                </button>
+                                {#if item.isActive}
+                                    <button class="btn-icon act-btn danger" title="Deactivate item" aria-label="Deactivate item" on:click={() => deleteItem(item.id)}>
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
+                                            ><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                                    </button>
+                                {:else}
+                                    <button class="btn-icon act-btn !text-success" title="Reactivate item" aria-label="Reactivate item" on:click={() => reactivateItem(item)}>
+                                        ↻
+                                    </button>
+                                {/if}
+                            </div>
+                        </td>
+                        <td class="items-col-tile">
                             <div
                                 class="h-11 w-11 overflow-hidden rounded-lg border border-border-flat shadow-sm"
                                 style="background-color: {item.color || '#3b82f6'}"
@@ -579,44 +671,30 @@
                                 {/if}
                             </div>
                         </td>
-                        <td class="font-semibold">{item.name}</td>
-                        <td>
+                        <td class="item-name-cell items-col-name font-semibold" title={item.name}>{item.name}</td>
+                        <td class="items-col-status">
                             <span class="tag {item.isActive ? '!text-success' : '!text-danger'}">
                                 {item.isActive ? "Active" : "Deactivated"}
                             </span>
                         </td>
-                        <td class="mono">{item.sku}</td>
-                        <td class="mono">{item.barcode || "-"}</td>
-                        <td class="mono">{item.scalePlu || "-"}</td>
-                        <td><span class="tag">{getCategoryName(item.categoryId)}</span></td>
-                        <td class="text-[0.8rem] text-text-muted">{getTaxName(item.taxRateId)}</td>
-                        {#if stockTrackingEnabled}<td>{item.trackStock ? item.stockLevel : "Not tracked"}</td>{/if}
-                        <td>{item.costPrice > 0 ? formatMoney(item.costPrice) : "-"}</td>
-                        <td class="money">{formatMoney(item.price)}</td>
-                        <td>
-                            <div class="act-row">
-                                <button class="btn-icon act-btn" on:click={() => openEditModal(item)}>
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
-                                        ><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
-                                </button>
-                                {#if item.isActive}
-                                    <button class="btn-icon act-btn danger" title="Deactivate item" on:click={() => deleteItem(item.id)}>
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
-                                            ><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
-                                    </button>
-                                {:else}
-                                    <button class="btn-icon act-btn !text-success" title="Reactivate item" on:click={() => reactivateItem(item)}>
-                                        ↻
-                                    </button>
-                                {/if}
-                            </div>
-                        </td>
+                        <td class="items-col-sku mono" title={item.sku}>{item.sku}</td>
+                        <td class="items-col-barcode mono" title={item.barcode || "-"}>{item.barcode || "-"}</td>
+                        <td class="items-col-plu mono" title={item.scalePlu || "-"}>{item.scalePlu || "-"}</td>
+                        <td class="items-col-category"><span class="tag" title={getCategoryName(item.categoryId)}>{getCategoryName(item.categoryId)}</span></td>
+                        <td class="items-col-tax text-[0.8rem] text-text-muted" title={getTaxName(item.taxRateId)}>{getTaxName(item.taxRateId)}</td>
+                        {#if stockTrackingEnabled}<td class="items-col-stock">{item.trackStock ? item.stockLevel : "Not tracked"}</td>{/if}
+                        <td class="items-col-cost">{item.costPrice > 0 ? formatMoney(item.costPrice) : "-"}</td>
+                        <td class="items-col-price money">{formatMoney(item.price)}</td>
                     </tr>
                 {/each}
-                {#if filteredItems.length === 0}
+                {#if pageItems.length === 0}
                     <tr class="empty-row">
                         <td colspan={stockTrackingEnabled ? 12 : 11}>
-                            {#if searchQuery || selectedCategoryId !== "all"}
+                            {#if itemsLoading}
+                                Loading items...
+                            {:else if itemsLoadError}
+                                {itemsLoadError}
+                            {:else if searchQuery || selectedCategoryId !== "all" || selectedStatus !== "active"}
                                 No items match your search filters.
                             {:else}
                                 No items found. Add your first item!
@@ -627,15 +705,15 @@
             </tbody>
         </table>
     </div>
-    {#if filteredItems.length > 0}
-        <div class="flex items-center justify-between gap-3 pt-3 shrink-0">
+    {#if totalItems > 0}
+        <div class="items-pagination flex items-center justify-between gap-3 pt-3 shrink-0">
             <span class="text-sm text-text-muted">
-                Showing {itemPage * ITEMS_PER_PAGE + 1}-{Math.min((itemPage + 1) * ITEMS_PER_PAGE, filteredItems.length)} of {filteredItems.length}
+                Showing {itemPage * ITEMS_PER_PAGE + 1}-{Math.min((itemPage + 1) * ITEMS_PER_PAGE, totalItems)} of {totalItems}
             </span>
-            <div class="flex items-center gap-2">
-                <button class="btn btn-secondary" disabled={itemPage === 0} on:click={() => (itemPage -= 1)}>Previous</button>
+            <div class="items-pagination-nav flex items-center gap-2">
+                <button class="btn btn-secondary items-command-btn" disabled={itemPage === 0} on:click={() => (itemPage -= 1)}>Previous</button>
                 <span class="min-w-[110px] text-center text-sm font-semibold">Page {itemPage + 1} of {itemPageCount}</span>
-                <button class="btn btn-secondary" disabled={itemPage >= itemPageCount - 1} on:click={() => (itemPage += 1)}>Next</button>
+                <button class="btn btn-secondary items-command-btn" disabled={itemPage >= itemPageCount - 1} on:click={() => (itemPage += 1)}>Next</button>
             </div>
         </div>
     {/if}
@@ -649,8 +727,8 @@
             showPricePad = false;
         }}
     >
-        <div class="flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[98vh] overflow-hidden" on:click|stopPropagation>
-            <div class="flex justify-between items-center border-b border-border-flat p-4 shrink-0">
+        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[98vh] overflow-hidden" on:click|stopPropagation>
+            <div class="item-modal-header flex justify-between items-center border-b border-border-flat p-4 shrink-0">
                 <h2>{isEditing ? "Edit Item" : "Add New Item"}</h2>
                 <button
                     class="btn-icon"
@@ -661,7 +739,7 @@
                 >
             </div>
 
-            <div class="form-grid overflow-y-auto p-4">
+            <div class="item-form-grid form-grid overflow-y-auto p-4">
                 <div class="field span-2">
                     <label for="name">Item Name *</label>
                     <input
@@ -674,9 +752,9 @@
 
                 <div class="field span-2">
                     <span class="text-sm font-medium text-text-muted">Tile Image</span>
-                    <div class="grid gap-4 rounded-xl border border-border-flat bg-bg-panel p-4 md:grid-cols-[150px_1fr]">
+                    <div class="item-image-editor grid gap-4 rounded-xl border border-border-flat bg-bg-panel p-4 md:grid-cols-[150px_1fr]">
                         <div
-                            class="relative h-[150px] overflow-hidden rounded-xl border border-border-flat shadow-sm"
+                            class="item-image-preview relative h-[150px] overflow-hidden rounded-xl border border-border-flat shadow-sm"
                             style="background-color: {currentItem.color || '#3b82f6'}"
                         >
                             {#if currentItem.image}
@@ -697,7 +775,7 @@
                                     The app resizes it to a small JPEG before saving, then syncs it through the product record.
                                 </p>
                             </div>
-                            <div class="flex flex-wrap gap-2">
+                            <div class="item-image-actions flex flex-wrap gap-2">
                                 <input
                                     class="hidden"
                                     bind:this={productImageInput}
@@ -736,7 +814,7 @@
 
                 <div class="field">
                     <label for="scalePlu">PLU / Scale Product Code</label>
-                    <div class="flex gap-2">
+                    <div class="plu-entry-row flex gap-2">
                         <input class="flex-1 min-w-0" type="text" id="scalePlu" bind:value={currentItem.scalePlu} inputmode="numeric" placeholder="Enter manually or generate" />
                         <button type="button" class="btn btn-secondary shrink-0" on:click={generateScalePlu}>Generate</button>
                     </div>
@@ -813,7 +891,7 @@
                 <div class="field"><TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" /></div>
             </div>
 
-            <div class="flex justify-end gap-3 p-4 border-t border-border-flat shrink-0 bg-bg-card">
+            <div class="item-modal-actions flex justify-end gap-3 p-4 border-t border-border-flat shrink-0 bg-bg-card">
                 <button class="btn btn-danger" on:click={() => (showModal = false)}>Cancel</button>
                 <button class="btn btn-primary" on:click={saveItem}>Save Item</button>
             </div>
@@ -851,7 +929,7 @@
 {#if showGoodsMenu}
     <div class="modal-overlay" on:click={() => (showGoodsMenu = false)}>
         <div
-            class="flat-panel w-full max-w-[800px] p-6 rounded-md flex flex-col gap-4 bg-bg-card max-h-[90vh] overflow-hidden"
+            class="goods-menu-panel flat-panel w-full max-w-[800px] p-6 rounded-md flex flex-col gap-4 bg-bg-card max-h-[90vh] overflow-hidden"
             on:click|stopPropagation
         >
             <div class="flex justify-between items-center border-b border-border-flat pb-4 shrink-0">
@@ -860,9 +938,9 @@
             </div>
             <p class="text-text-muted shrink-0">
                 Select up to 10 active items to appear in the Goods menu.
-                <strong class="text-text-main">Selected: {goodsMenuDraft.filter((p) => p.showInGoods).length}/10</strong>
+                <strong class="text-text-main">Selected: {goodsMenuSelected.length}/10</strong>
             </p>
-            <div class="grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-hidden">
+            <div class="goods-menu-columns grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-hidden">
                 <div class="flex flex-col gap-2 h-full">
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Available Items</h3>
                     <input
@@ -872,18 +950,24 @@
                         bind:value={goodsMenuSearch}
                     />
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
+                        {#if goodsMenuLoading && availableGoodsDraft.length === 0}
+                            <p class="text-center text-text-muted p-4 text-sm shrink-0">Loading items...</p>
+                        {/if}
                         {#each availableGoodsDraft as item}
                             <button
                                 class="flex items-center gap-3 p-3 bg-bg-card border border-border-flat rounded-sm text-left hover:bg-bg-card-hover transition-colors disabled:opacity-50 shrink-0"
-                                disabled={goodsMenuDraft.filter((p) => p.showInGoods).length >= 10}
+                                disabled={goodsMenuSelected.length >= 10}
                                 on:click={() => toggleGoodsMenuItem(item)}
                             >
-                                <div class="w-4 h-4 rounded border border-border-flat shrink-0 {goodsMenuDraft.filter((p) => p.showInGoods).length >= 10 ? '' : 'hover:border-accent-primary'}"></div>
+                                <div class="w-4 h-4 rounded border border-border-flat shrink-0 {goodsMenuSelected.length >= 10 ? '' : 'hover:border-accent-primary'}"></div>
                                 <span class="flex-1 font-medium">{item.name}</span>
                                 <span class="text-text-muted text-xs">{getCategoryName(item.categoryId)}</span>
                             </button>
                         {/each}
-                        {#if goodsMenuDraft.filter((p) => !p.showInGoods && productMatchesSearch(p, goodsMenuSearch)).length > 100}
+                        {#if !goodsMenuLoading && availableGoodsDraft.length === 0}
+                            <p class="text-center text-text-muted p-4 text-sm shrink-0">No available items match this search.</p>
+                        {/if}
+                        {#if goodsMenuAvailableTotal > availableGoodsDraft.length}
                             <p class="text-center text-text-muted p-2 text-xs shrink-0">Showing first 100 matches. Use search to narrow results.</p>
                         {/if}
                     </div>
@@ -891,7 +975,7 @@
                 <div class="flex flex-col gap-2 h-full">
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Selected Order</h3>
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
-                        {#each goodsMenuDraft.filter((p) => p.showInGoods).sort((a, b) => (a.goodsSortOrder || 0) - (b.goodsSortOrder || 0)) as item, i}
+                        {#each goodsMenuSelected as item, i}
                             <div class="flex items-center gap-2 p-3 bg-bg-card border border-border-flat rounded-sm shrink-0">
                                 <span class="text-text-muted font-mono w-6">{i + 1}</span>
                                 <div class="w-3 h-3 rounded-full shrink-0" style="background-color: {item.color || '#6366f1'}"></div>
@@ -903,7 +987,7 @@
                                 >
                                 <button
                                     class="w-8 h-8 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center disabled:opacity-30"
-                                    disabled={i === goodsMenuDraft.filter((p) => p.showInGoods).length - 1}
+                                    disabled={i === goodsMenuSelected.length - 1}
                                     on:click={() => moveGoodsMenuItem(i, 1)}>↓</button
                                 >
                                 <button
@@ -912,7 +996,7 @@
                                 >
                             </div>
                         {/each}
-                        {#if goodsMenuDraft.filter((p) => p.showInGoods).length === 0}
+                        {#if goodsMenuSelected.length === 0}
                             <p class="text-center text-text-muted p-4 text-sm shrink-0">No items selected.</p>
                         {/if}
                     </div>
@@ -933,3 +1017,578 @@
     variant="danger"
     on:confirm={confirmDeactivate}
 />
+
+<style>
+    .items-management-page {
+        min-width: 0;
+        background: var(--bg-base);
+        color: var(--text-main);
+    }
+
+    .items-management-header,
+    .items-title,
+    .items-header-controls,
+    .items-filter-row,
+    .items-table-panel {
+        min-width: 0;
+    }
+
+    .items-table-panel {
+        overscroll-behavior: contain;
+    }
+
+    .items-header-actions {
+        display: contents;
+    }
+
+    .items-header-controls {
+        display: grid;
+        grid-template-columns: minmax(190px, 1.28fr) repeat(4, minmax(135px, .93fr));
+        align-items: stretch;
+        gap: 0.65rem;
+    }
+
+    .items-filter-row {
+        display: contents;
+        max-width: none;
+    }
+
+    .items-search,
+    .items-category-filter,
+    .items-status-filter,
+    .items-header-actions .btn,
+    .items-pagination-nav .btn {
+        min-width: 0;
+    }
+
+    .items-search .search-input,
+    .items-filter-row :global(button[aria-haspopup="listbox"]),
+    .items-command-btn {
+        width: 100%;
+        height: 50px;
+        min-height: 50px;
+        border-radius: 0.4rem;
+        font-size: 0.96rem;
+        letter-spacing: 0;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 8px 18px var(--shadow);
+    }
+
+    .items-search .search-input {
+        background: var(--bg-card);
+        padding-block: 0.65rem;
+        font-weight: 700;
+    }
+
+    .items-filter-row :global(button[aria-haspopup="listbox"]) {
+        background: var(--bg-card);
+        padding-block: 0.65rem;
+        font-weight: 900;
+    }
+
+    .items-command-btn {
+        padding: 0.65rem 1.1rem;
+        font-weight: 900;
+    }
+
+    .items-header-actions .items-command-btn {
+        justify-content: center;
+    }
+
+    .items-pagination-nav {
+        display: grid;
+        grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
+        align-items: center;
+        gap: 0.6rem;
+    }
+
+    .items-pagination-nav .items-command-btn {
+        height: 50px;
+        min-height: 50px;
+    }
+
+    .items-table {
+        min-width: 1180px;
+    }
+
+    .items-table th,
+    .items-table td {
+        vertical-align: middle;
+    }
+
+    td.items-col-name,
+    td.items-col-sku,
+    td.items-col-barcode,
+    td.items-col-plu,
+    td.items-col-category,
+    td.items-col-tax,
+    td.items-col-stock {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    td.items-col-name {
+        min-width: 190px;
+        max-width: 260px;
+    }
+
+    td.items-col-sku,
+    td.items-col-tax {
+        max-width: 130px;
+    }
+
+    td.items-col-barcode {
+        max-width: 150px;
+    }
+
+    td.items-col-plu,
+    td.items-col-stock {
+        max-width: 110px;
+    }
+
+    td.items-col-category {
+        max-width: 160px;
+    }
+
+    .items-col-actions {
+        width: 106px;
+        min-width: 106px;
+        text-align: left;
+    }
+
+    th.items-col-actions,
+    td.items-col-actions {
+        position: sticky;
+        left: 0;
+        background: var(--bg-card);
+        box-shadow: 1px 0 0 var(--border-flat);
+    }
+
+    th.items-col-actions {
+        z-index: 8;
+    }
+
+    td.items-col-actions {
+        z-index: 4;
+    }
+
+    .items-col-actions .act-row {
+        display: grid;
+        grid-template-columns: repeat(2, 40px);
+        justify-content: start;
+        gap: 0.4rem;
+    }
+
+    .items-col-actions .act-btn {
+        width: 40px !important;
+        height: 40px !important;
+        min-width: 40px !important;
+        min-height: 40px !important;
+        padding: 0 !important;
+        border-radius: 0.45rem;
+    }
+
+    .items-col-category .tag {
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .items-pagination {
+        min-width: 0;
+    }
+
+    .item-editor-panel,
+    .goods-menu-panel {
+        max-width: min(900px, calc(100vw - 1.5rem));
+    }
+
+    .goods-menu-panel {
+        max-width: min(800px, calc(100vw - 1.5rem));
+    }
+
+    @media (min-width: 900px) and (max-width: 1180px) and (min-height: 680px) and (max-height: 900px) {
+        .items-management-page {
+            padding: var(--app-page-gutter, 1.5rem) !important;
+        }
+
+        .items-management-header {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            align-items: stretch !important;
+            gap: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
+        }
+
+        .items-title {
+            min-height: 44px;
+        }
+
+        .items-title h1 {
+            font-size: 1.35rem;
+        }
+
+        .items-header-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1.28fr) repeat(4, minmax(0, .93fr));
+            align-items: stretch;
+            gap: 0.6rem;
+        }
+
+        .items-filter-row {
+            display: contents;
+            max-width: none;
+        }
+
+        .items-category-filter,
+        .items-status-filter {
+            min-width: 0;
+        }
+
+        .items-filter-row :global(button[aria-haspopup="listbox"]),
+        .items-filter-row .search-input {
+            min-height: 48px !important;
+            height: 48px;
+            font-size: 0.9rem;
+        }
+
+        .items-header-actions {
+            display: contents;
+        }
+
+        .items-header-actions .items-command-btn,
+        .items-pagination-nav .items-command-btn {
+            width: 100%;
+            min-width: 0;
+            min-height: 48px;
+            padding: 0.6rem 0.9rem;
+            font-size: 0.9rem;
+        }
+
+        .items-table {
+            width: 100%;
+            min-width: 0;
+            table-layout: fixed;
+        }
+
+        .items-table th,
+        .items-table td {
+            height: 48px;
+            padding: 0.55rem 0.6rem;
+            font-size: 0.82rem;
+        }
+
+        .items-table th {
+            height: 40px;
+            padding-block: 0.45rem;
+            font-size: 0.68rem;
+        }
+
+        .items-col-tile {
+            width: 54px;
+        }
+
+        .items-col-name {
+            width: auto;
+            min-width: 0;
+        }
+
+        .items-col-status {
+            width: 108px;
+        }
+
+        .items-col-barcode {
+            width: 142px;
+        }
+
+        .items-col-category {
+            width: 136px;
+        }
+
+        .items-col-stock {
+            width: 92px;
+        }
+
+        .items-col-price {
+            width: 90px;
+        }
+
+        .items-col-actions {
+            width: 98px;
+            min-width: 98px;
+        }
+
+        .items-col-sku,
+        .items-col-plu,
+        .items-col-tax,
+        .items-col-cost {
+            display: none;
+        }
+
+        .items-table .tag {
+            max-width: 100%;
+            min-width: 0;
+            padding: 0.35rem 0.55rem;
+            font-size: 0.7rem;
+        }
+
+        .items-table .h-11 {
+            width: 38px;
+            height: 38px;
+            border-radius: 0.5rem;
+        }
+
+        .items-table .act-row {
+            grid-template-columns: repeat(2, 38px);
+            gap: 0.35rem;
+        }
+
+        .items-table .act-btn {
+            width: 38px !important;
+            height: 38px !important;
+            min-width: 38px !important;
+            min-height: 38px !important;
+        }
+
+        .items-pagination {
+            padding-top: 0.5rem;
+        }
+
+        .items-pagination .btn {
+            min-height: 42px;
+            padding: 0.5rem 0.85rem;
+        }
+
+        .item-editor-panel {
+            max-width: calc(100vw - 1rem);
+            max-height: calc(100vh - 0.75rem);
+        }
+
+        .item-modal-header,
+        .item-modal-actions {
+            padding: 0.75rem !important;
+        }
+
+        .item-modal-header h2 {
+            margin: 0;
+            font-size: 1.15rem;
+        }
+
+        .item-form-grid {
+            gap: 0.75rem;
+            padding: 0.75rem !important;
+        }
+
+        .item-image-editor {
+            grid-template-columns: 118px minmax(0, 1fr);
+            gap: 0.75rem;
+            padding: 0.75rem !important;
+        }
+
+        .item-image-preview {
+            height: 118px;
+            border-radius: 0.6rem;
+        }
+
+        .item-image-editor p {
+            line-height: 1.25;
+        }
+
+        .item-modal-actions .btn,
+        .plu-entry-row .btn {
+            min-height: 42px;
+            padding: 0.5rem 0.85rem;
+        }
+
+        .goods-menu-panel {
+            max-width: calc(100vw - 1rem);
+            max-height: calc(100vh - 1rem);
+            gap: 0.75rem;
+            padding: 0.9rem !important;
+        }
+    }
+
+    @media (max-width: 900px), (max-height: 679px) {
+        .items-management-page {
+            padding: var(--app-page-gutter, 1.5rem) !important;
+        }
+
+        .items-management-header {
+            flex-direction: column;
+            align-items: stretch !important;
+            gap: 0.65rem !important;
+            margin-bottom: 0.75rem !important;
+        }
+
+        .items-title h1 {
+            font-size: 1.25rem;
+        }
+
+        .items-header-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            align-items: stretch;
+            gap: 0.55rem;
+        }
+
+        .items-filter-row,
+        .items-header-actions {
+            display: contents;
+            max-width: none;
+        }
+
+        .items-category-filter,
+        .items-status-filter {
+            min-width: 0;
+        }
+
+        .items-filter-row :global(button[aria-haspopup="listbox"]),
+        .items-filter-row .search-input {
+            min-height: 46px !important;
+            height: 46px;
+            font-size: 0.9rem;
+        }
+
+        .items-header-actions .items-command-btn,
+        .items-pagination-nav .items-command-btn {
+            width: 100%;
+            min-width: 0;
+            min-height: 46px;
+            padding: 0.55rem 0.75rem;
+            font-size: 0.9rem;
+        }
+
+        .items-table {
+            min-width: 620px;
+            table-layout: fixed;
+        }
+
+        .items-table th,
+        .items-table td {
+            height: 46px;
+            padding: 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .items-table th {
+            height: 38px;
+            font-size: 0.66rem;
+        }
+
+        .items-col-tile,
+        .items-col-status,
+        .items-col-sku,
+        .items-col-plu,
+        .items-col-tax,
+        .items-col-cost {
+            display: none;
+        }
+
+        .items-col-name {
+            width: auto;
+            min-width: 0;
+        }
+
+        .items-col-barcode {
+            width: 138px;
+        }
+
+        .items-col-category {
+            width: 124px;
+        }
+
+        .items-col-stock {
+            width: 82px;
+        }
+
+        .items-col-price {
+            width: 82px;
+        }
+
+        .items-col-actions {
+            width: 90px;
+            min-width: 90px;
+        }
+
+        .items-table .tag {
+            max-width: 100%;
+            min-width: 0;
+            padding-inline: 0.45rem;
+            font-size: 0.68rem;
+        }
+
+        .items-table .act-row {
+            grid-template-columns: repeat(2, 36px);
+            gap: 0.3rem;
+        }
+
+        .items-table .act-btn {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+            min-height: 36px !important;
+        }
+
+        .items-pagination {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .items-pagination > div {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        }
+
+        .items-pagination-nav {
+            grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+        }
+
+        .items-pagination .items-command-btn {
+            min-height: 46px;
+            padding: 0.55rem 0.75rem;
+        }
+
+        .item-editor-panel,
+        .goods-menu-panel {
+            max-width: calc(100vw - 0.75rem);
+            max-height: calc(100vh - 0.75rem);
+        }
+
+        .item-modal-header,
+        .item-modal-actions {
+            padding: 0.75rem !important;
+        }
+
+        .item-form-grid {
+            padding: 0.75rem !important;
+        }
+
+        .item-image-editor,
+        .goods-menu-columns {
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .item-image-preview {
+            height: 120px;
+        }
+
+        .item-modal-actions,
+        .item-image-actions,
+        .plu-entry-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .item-modal-actions .btn,
+        .item-image-actions .btn,
+        .plu-entry-row .btn {
+            width: 100%;
+            min-height: 42px;
+        }
+
+        .goods-menu-panel {
+            gap: 0.75rem;
+            padding: 0.85rem !important;
+        }
+    }
+</style>

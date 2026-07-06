@@ -62,7 +62,14 @@
         if (totalLabels === 0) { toast('Select at least one item', 'error'); return; }
         if (printingLabels) return;
         if (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system') {
-            toast('Set Label Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            printingLabels = true;
+            try {
+                await tick();
+                window.print();
+                toast('Print dialog opened for labels', 'success');
+            } finally {
+                printingLabels = false;
+            }
             return;
         }
         printingLabels = true;

@@ -1,9 +1,13 @@
 import Database from '@tauri-apps/plugin-sql';
+import { isTauri } from '@tauri-apps/api/core';
 import { localDatabaseName } from './profile';
 
 let db: Database | null = null;
 
 export async function getDb(): Promise<Database> {
+    if (!isTauri()) {
+        throw new Error('Local SQLite is only available inside Tauri. Run `npm run tauri dev` for persistent database access.');
+    }
     if (!db) {
         db = await Database.load(`sqlite:${localDatabaseName}`);
     }
@@ -1176,6 +1180,513 @@ export async function deleteTile(id: string) {
 export async function getAll(table: string): Promise<any[]> {
     const d = await getDb();
     return await d.select(`SELECT * FROM ${table}`);
+}
+
+export type ProductStatusFilter = 'active' | 'deactivated' | 'all';
+
+export interface ProductPageOptions {
+    query?: string;
+    categoryId?: string;
+    status?: ProductStatusFilter;
+    limit?: number;
+    offset?: number;
+}
+
+export interface ProductPageResult {
+    rows: any[];
+    total: number;
+}
+
+function buildProductPageWhere(options: ProductPageOptions): { whereSql: string; params: any[] } {
+    const where: string[] = [];
+    const params: any[] = [];
+    const status = options.status || 'active';
+
+    if (status === 'active') {
+        where.push('p.isActive = 1');
+    } else if (status === 'deactivated') {
+        where.push('p.isActive = 0');
+    }
+
+    if (options.categoryId && options.categoryId !== 'all') {
+        where.push('p.categoryId = ?');
+        params.push(options.categoryId);
+    }
+
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        where.push(`(
+            LOWER(COALESCE(p.name, '')) LIKE ?
+            OR LOWER(COALESCE(p.sku, '')) LIKE ?
+            OR LOWER(COALESCE(p.barcode, '')) LIKE ?
+            OR LOWER(COALESCE(p.scalePlu, '')) LIKE ?
+            OR LOWER(COALESCE(c.name, '')) LIKE ?
+        )`);
+        const like = `%${search}%`;
+        params.push(like, like, like, like, like);
+    }
+
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+/** Fetch one management page of products without loading the full catalogue. */
+export async function getProductsPage(options: ProductPageOptions = {}): Promise<ProductPageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const { whereSql, params } = buildProductPageWhere(options);
+
+    const rows: any[] = await d.select(
+        `SELECT p.*
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.categoryId
+         ${whereSql}
+         ORDER BY LOWER(COALESCE(p.name, '')) ASC, p.id ASC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.categoryId
+         ${whereSql}`,
+        params,
+    );
+
+    return {
+        rows,
+        total: Number(countRows[0]?.count || 0),
+    };
+}
+
+export type OrderStatusFilter =
+    | 'all'
+    | 'completed'
+    | 'partially_refunded'
+    | 'refunded'
+    | 'refunds'
+    | 'hold'
+    | 'voided'
+    | string;
+
+export interface OrderPageOptions {
+    query?: string;
+    status?: OrderStatusFilter;
+    limit?: number;
+    offset?: number;
+}
+
+export interface OrderPageResult {
+    rows: any[];
+    total: number;
+    overallTotal: number;
+    lines: any[];
+    payments: any[];
+}
+
+export interface PosHeldOrdersResult {
+    orders: any[];
+    lines: any[];
+}
+
+export interface PosRecentReceiptsResult {
+    orders: any[];
+    lines: any[];
+}
+
+export interface OrderDetailsResult {
+    order: any | null;
+    lines: any[];
+    payments: any[];
+}
+
+export interface OrderReversalContext {
+    original: any | null;
+    originalLines: any[];
+    originalPayments: any[];
+    previousReversals: any[];
+    previousReversalPayments: any[];
+    originalLoyaltyChanges: any[];
+    previousLoyaltyAdjustments: any[];
+    originalStockMovements: any[];
+}
+
+function buildOrderPageWhere(options: OrderPageOptions): { whereSql: string; params: any[] } {
+    const where: string[] = [];
+    const params: any[] = [];
+    const status = options.status || 'all';
+
+    if (status !== 'all') {
+        if (status === 'refunds') {
+            where.push(`(o.type = 'return' OR o.status IN ('refunded', 'partially_refunded', 'voided'))`);
+        } else if (status === 'completed') {
+            where.push(`o.status = 'completed' AND o.type != 'return'`);
+        } else if (status === 'voided') {
+            where.push(`(o.status = 'voided' OR (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %'))`);
+        } else {
+            where.push(`o.status = ?`);
+            params.push(status);
+        }
+    }
+
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        const like = `%${search}%`;
+        where.push(`(
+            CAST(o.orderNumber AS TEXT) LIKE ?
+            OR LOWER(COALESCE(o.receiptKey, '')) LIKE ?
+            OR LOWER(COALESCE(o.status, '')) LIKE ?
+            OR LOWER(COALESCE(o.type, '')) LIKE ?
+            OR LOWER(COALESCE(o.notes, '')) LIKE ?
+            OR CAST(o.total AS TEXT) LIKE ?
+            OR LOWER(COALESCE(e.name, '')) LIKE ?
+            OR LOWER(COALESCE(r.name, o.tillNumber, '')) LIKE ?
+            OR LOWER(COALESCE(c.name, '')) LIKE ?
+            OR EXISTS (
+                SELECT 1 FROM order_lines l
+                WHERE l.orderId = o.id
+                  AND (
+                    LOWER(COALESCE(l.productName, '')) LIKE ?
+                    OR LOWER(COALESCE(l.productId, '')) LIKE ?
+                    OR LOWER(COALESCE(l.notes, '')) LIKE ?
+                  )
+            )
+            OR EXISTS (
+                SELECT 1 FROM payments p
+                WHERE p.orderId = o.id
+                  AND (
+                    LOWER(COALESCE(p.method, '')) LIKE ?
+                    OR LOWER(COALESCE(p.reference, '')) LIKE ?
+                  )
+            )
+        )`);
+        params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like);
+    }
+
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+/** Fetch one management page of orders plus details for only those visible orders. */
+export async function getOrdersPage(options: OrderPageOptions = {}): Promise<OrderPageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const { whereSql, params } = buildOrderPageWhere(options);
+    const fromSql = `
+        FROM orders o
+        LEFT JOIN employees e ON e.id = o.employeeId
+        LEFT JOIN registers r ON r.id = o.tillNumber
+        LEFT JOIN customers c ON c.id = o.customerId
+        ${whereSql}
+    `;
+
+    const rows: any[] = await d.select(
+        `SELECT o.*,
+                COALESCE(e.name, '') AS cashierName,
+                COALESCE(r.name, o.tillNumber, '') AS tillName,
+                COALESCE(c.name, '') AS customerName
+         ${fromSql}
+         ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+                  o.orderNumber DESC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count ${fromSql}`,
+        params,
+    );
+    const totalRows: any[] = await d.select(`SELECT COUNT(*) AS count FROM orders`);
+
+    const orderIds = rows.map((order) => order.id).filter(Boolean);
+    if (orderIds.length === 0) {
+        return {
+            rows,
+            total: Number(countRows[0]?.count || 0),
+            overallTotal: Number(totalRows[0]?.count || 0),
+            lines: [],
+            payments: [],
+        };
+    }
+
+    const placeholders = orderIds.map(() => '?').join(',');
+    const lines: any[] = await d.select(
+        `SELECT * FROM order_lines WHERE orderId IN (${placeholders}) ORDER BY orderId, updatedAt, id`,
+        orderIds,
+    );
+    const payments: any[] = await d.select(
+        `SELECT * FROM payments WHERE orderId IN (${placeholders}) ORDER BY orderId, createdAt, id`,
+        orderIds,
+    );
+
+    return {
+        rows,
+        total: Number(countRows[0]?.count || 0),
+        overallTotal: Number(totalRows[0]?.count || 0),
+        lines,
+        payments,
+    };
+}
+
+function orderSummarySelect(): string {
+    return `SELECT o.*,
+                   COALESCE(e.name, '') AS cashierName,
+                   COALESCE(r.name, o.tillNumber, '') AS tillName,
+                   COALESCE(c.name, '') AS customerName
+            FROM orders o
+            LEFT JOIN employees e ON e.id = o.employeeId
+            LEFT JOIN registers r ON r.id = o.tillNumber
+            LEFT JOIN customers c ON c.id = o.customerId`;
+}
+
+async function getLinesForOrderIds(d: Database, orderIds: string[]): Promise<any[]> {
+    const ids = orderIds.filter(Boolean);
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return d.select(
+        `SELECT * FROM order_lines WHERE orderId IN (${placeholders}) ORDER BY orderId, updatedAt, id`,
+        ids,
+    );
+}
+
+async function getPaymentsForOrderIds(d: Database, orderIds: string[]): Promise<any[]> {
+    const ids = orderIds.filter(Boolean);
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    return d.select(
+        `SELECT * FROM payments WHERE orderId IN (${placeholders}) ORDER BY orderId, createdAt, id`,
+        ids,
+    );
+}
+
+/** Fetch only held orders for the current till plus their lines for the POS modal. */
+export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<PosHeldOrdersResult> {
+    const d = await getDb();
+    const safeLimit = Math.max(1, Math.min(200, Number(limit || 100)));
+    const till = String(tillNumber || '').trim();
+    const orders: any[] = await d.select(
+        `${orderSummarySelect()}
+         WHERE o.status = 'hold'
+           AND (? = '' OR COALESCE(o.tillNumber, '') = '' OR o.tillNumber = ?)
+         ORDER BY COALESCE(NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+                  o.orderNumber DESC
+         LIMIT ?`,
+        [till, till, safeLimit],
+    );
+    return {
+        orders,
+        lines: await getLinesForOrderIds(d, orders.map((order) => order.id)),
+    };
+}
+
+/** Fetch the small recent-receipt set used by the POS recent transactions modal. */
+export async function getPosRecentReceipts(limit = 10): Promise<PosRecentReceiptsResult> {
+    const d = await getDb();
+    const safeLimit = Math.max(1, Math.min(50, Number(limit || 10)));
+    const orders: any[] = await d.select(
+        `${orderSummarySelect()}
+         WHERE o.status NOT IN ('hold', 'open')
+         ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+                  o.orderNumber DESC
+         LIMIT ?`,
+        [safeLimit],
+    );
+    return {
+        orders,
+        lines: await getLinesForOrderIds(d, orders.map((order) => order.id)),
+    };
+}
+
+/** Fetch only the latest printable receipt for this till. */
+export async function getLatestTillReceipt(tillNumber: string): Promise<any | null> {
+    const d = await getDb();
+    const till = String(tillNumber || '').trim();
+    if (!till) return null;
+    const rows: any[] = await d.select(
+        `${orderSummarySelect()}
+         WHERE o.status NOT IN ('hold', 'open')
+           AND o.tillNumber = ?
+         ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+                  o.orderNumber DESC
+         LIMIT 1`,
+        [till],
+    );
+    return rows[0] || null;
+}
+
+export async function getOrderDetails(orderId: string): Promise<OrderDetailsResult> {
+    const d = await getDb();
+    const id = String(orderId || '').trim();
+    if (!id) return { order: null, lines: [], payments: [] };
+    const orders: any[] = await d.select(
+        `${orderSummarySelect()}
+         WHERE o.id = ?
+         LIMIT 1`,
+        [id],
+    );
+    return {
+        order: orders[0] || null,
+        lines: await getLinesForOrderIds(d, [id]),
+        payments: await getPaymentsForOrderIds(d, [id]),
+    };
+}
+
+export async function getOrderReversalContext(orderId: string): Promise<OrderReversalContext> {
+    const d = await getDb();
+    const id = String(orderId || '').trim();
+    if (!id) {
+        return {
+            original: null,
+            originalLines: [],
+            originalPayments: [],
+            previousReversals: [],
+            previousReversalPayments: [],
+            originalLoyaltyChanges: [],
+            previousLoyaltyAdjustments: [],
+            originalStockMovements: [],
+        };
+    }
+
+    const [details, previousReversals, originalLoyaltyChanges, originalStockMovements] = await Promise.all([
+        getOrderDetails(id),
+        d.select<any[]>(
+            `SELECT * FROM orders WHERE type = 'return' AND originalOrderId = ?`,
+            [id],
+        ),
+        d.select<any[]>(
+            `SELECT * FROM loyalty_logs WHERE orderId = ?`,
+            [id],
+        ),
+        d.select<any[]>(
+            `SELECT * FROM inventory_logs
+             WHERE referenceId = ?
+               AND type = 'sale'
+               AND quantityChange < 0`,
+            [id],
+        ),
+    ]);
+    const reversalIds = previousReversals.map((order) => order.id).filter(Boolean);
+    const previousReversalPayments = await getPaymentsForOrderIds(d, reversalIds);
+    let previousLoyaltyAdjustments: any[] = [];
+    if (reversalIds.length > 0) {
+        const placeholders = reversalIds.map(() => '?').join(',');
+        previousLoyaltyAdjustments = await d.select(
+            `SELECT * FROM loyalty_logs
+             WHERE reason = 'refund_adjustment'
+               AND orderId IN (${placeholders})`,
+            reversalIds,
+        );
+    }
+
+    return {
+        original: details.order,
+        originalLines: details.lines,
+        originalPayments: details.payments,
+        previousReversals,
+        previousReversalPayments,
+        originalLoyaltyChanges,
+        previousLoyaltyAdjustments,
+        originalStockMovements,
+    };
+}
+
+export async function getGoodsMenuCount(): Promise<number> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM products
+         WHERE isActive = 1
+           AND (showInPos IS NULL OR showInPos = 1)
+           AND showInGoods = 1`,
+    );
+    return Number(rows[0]?.count || 0);
+}
+
+export interface GoodsMenuEditorResult {
+    selected: any[];
+    available: any[];
+    totalAvailable: number;
+}
+
+/** Fetch only the selected Goods items plus the first available matches. */
+export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promise<GoodsMenuEditorResult> {
+    const d = await getDb();
+    const safeLimit = Math.max(1, Math.min(150, Number(limit || 100)));
+    const search = String(query || '').trim().toLowerCase();
+    const searchSql = search
+        ? `AND (
+            LOWER(COALESCE(p.name, '')) LIKE ?
+            OR LOWER(COALESCE(p.sku, '')) LIKE ?
+            OR LOWER(COALESCE(p.barcode, '')) LIKE ?
+            OR LOWER(COALESCE(p.scalePlu, '')) LIKE ?
+            OR LOWER(COALESCE(c.name, '')) LIKE ?
+        )`
+        : '';
+    const searchParams = search ? Array(5).fill(`%${search}%`) : [];
+
+    const selected: any[] = await d.select(
+        `SELECT p.*
+         FROM products p
+         WHERE p.isActive = 1
+           AND (p.showInPos IS NULL OR p.showInPos = 1)
+           AND p.showInGoods = 1
+         ORDER BY COALESCE(NULLIF(p.goodsSortOrder, 0), 999999), LOWER(COALESCE(p.name, '')) ASC`,
+    );
+
+    const availableWhere = `
+        p.isActive = 1
+        AND (p.showInPos IS NULL OR p.showInPos = 1)
+        AND (p.showInGoods IS NULL OR p.showInGoods = 0)
+        ${searchSql}
+    `;
+    const available: any[] = await d.select(
+        `SELECT p.*
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.categoryId
+         WHERE ${availableWhere}
+         ORDER BY LOWER(COALESCE(p.name, '')) ASC, p.id ASC
+         LIMIT ?`,
+        [...searchParams, safeLimit],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.categoryId
+         WHERE ${availableWhere}`,
+        searchParams,
+    );
+
+    return {
+        selected,
+        available,
+        totalAvailable: Number(countRows[0]?.count || 0),
+    };
+}
+
+export async function findNextAvailableScalePlu(length: number, excludeId = ''): Promise<string | null> {
+    const d = await getDb();
+    const safeLength = Math.max(1, Math.min(8, Math.floor(Number(length || 5))));
+    const rows: any[] = await d.select(
+        `SELECT scalePlu
+         FROM products
+         WHERE scalePlu IS NOT NULL
+           AND scalePlu != ''
+           AND LENGTH(scalePlu) = ?
+           AND id <> ?`,
+        [safeLength, excludeId || ''],
+    );
+    const used = new Set(rows.map((row) => String(row.scalePlu || '')));
+    const maximum = 10 ** safeLength - 1;
+    for (let number = 1; number <= maximum; number++) {
+        const candidate = String(number).padStart(safeLength, '0');
+        if (!used.has(candidate)) return candidate;
+    }
+    return null;
 }
 
 /**

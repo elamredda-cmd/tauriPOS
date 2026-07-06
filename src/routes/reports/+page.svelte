@@ -177,8 +177,8 @@
             ['Loyalty Credit', pounds(breakdown.totalLoyalty), breakdown.loyaltyTxCount],
             ['Unrecorded', pounds(breakdown.unrecordedAmount), breakdown.unrecordedTxCount],
             [],
-            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Sales', 'Refund Transactions', 'Items', 'Cash', 'Card', 'Loyalty Credit'],
-            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal)]),
+            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash', 'Card', 'Loyalty Credit'],
+            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal)]),
             [],
             ['Employee', 'Net Sales', 'Gross Sales', 'Refunds', 'Sales', 'Refund Transactions', 'Average Transaction'],
             ...employeeSales.map(employee => [employee.employeeName, pounds(employee.netSales), pounds(employee.grossSales), pounds(employee.refunds), employee.transactions, employee.refundTransactions, pounds(employee.avgTransaction)]),
@@ -280,6 +280,15 @@
             cursor.setDate(cursor.getDate() + 1);
         }
         return result;
+    }
+
+    function formatDateShort(value: string) {
+        if (!value) return '';
+        return new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+        });
     }
 
     function buildCloseReportText(
@@ -408,6 +417,30 @@
     $: loyaltyPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalLoyalty) / paymentMagnitude) * 100) : 0;
     $: unrecordedPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.unrecordedAmount) / paymentMagnitude) * 100) : 0;
     $: visibleTillSummaries = selectedTill ? tillSummaries.filter((till) => till.id === selectedTill) : tillSummaries;
+    $: tillTotals = [...visibleTillSummaries].sort((a, b) => Math.abs(b.netSales) - Math.abs(a.netSales));
+    $: selectedTillLabel = allTills.find((till) => till.id === selectedTill)?.name || 'All Tills';
+    $: reportPeriodLabel = startDate === endDate ? formatDateShort(startDate) : `${formatDateShort(startDate)} to ${formatDateShort(endDate)}`;
+    $: tillNetTotal = tillTotals.reduce((sum, till) => sum + till.netSales, 0);
+    $: tillGrossTotal = tillTotals.reduce((sum, till) => sum + till.grossSales, 0);
+    $: tillRefundTotal = tillTotals.reduce((sum, till) => sum + till.refunds, 0);
+    $: tillTaxTotal = tillTotals.reduce((sum, till) => sum + till.taxTotal, 0);
+    $: tillTransactionTotal = tillTotals.reduce((sum, till) => sum + till.transactions, 0);
+    $: tillRefundTransactionTotal = tillTotals.reduce((sum, till) => sum + till.refundTransactions, 0);
+    $: tillItemTotal = tillTotals.reduce((sum, till) => sum + till.itemsSold, 0);
+    $: tillCashTotal = tillTotals.reduce((sum, till) => sum + till.cashTotal, 0);
+    $: tillCardTotal = tillTotals.reduce((sum, till) => sum + till.cardTotal, 0);
+    $: tillLoyaltyTotal = tillTotals.reduce((sum, till) => sum + till.loyaltyTotal, 0);
+    $: maxTillNetSales = Math.max(1, ...tillTotals.map((till) => Math.abs(till.netSales)));
+    $: summaryCards = [
+        { label: 'Net Sales', value: formatMoney(business.netSales), detail: 'After refunds and discounts', tone: 'text-success' },
+        { label: 'Gross Sales', value: formatMoney(business.grossSales), detail: 'Before refunds and discounts', tone: 'text-text-main' },
+        { label: 'Sales Transactions', value: String(overview.totalTransactions), detail: `${overview.refundTransactions} refund transactions`, tone: 'text-accent-primary' },
+        { label: 'Average Sale', value: formatMoney(overview.avgTransactionValue), detail: `${overview.totalItemsSold} items sold`, tone: 'text-warning' },
+        { label: 'Refunds', value: formatMoney(business.refunds), detail: `${business.voidTransactions} void transactions`, tone: 'text-danger' },
+        { label: 'Discounts', value: formatMoney(business.discountTotal), detail: `Tax collected ${formatMoney(business.taxTotal)}`, tone: 'text-warning' },
+        { label: 'Cost of Goods', value: formatMoney(business.costTotal), detail: 'Product cost total', tone: 'text-text-main' },
+        { label: 'Gross Profit', value: formatMoney(business.grossProfit), detail: 'After cost of goods', tone: business.grossProfit >= 0 ? 'text-success' : 'text-danger' },
+    ];
     $: displayDailyTrend = filledDailyTrend(startDate, endDate, dailyTrend);
     $: maxDailySales = Math.max(1, ...displayDailyTrend.map((day) => Math.abs(day.netSales)));
     $: currentReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
@@ -418,41 +451,54 @@
 </script>
 
 <MgmtPage title="Sales Reports">
-    <div class="report-page p-3 md:p-6 flex flex-col gap-6">
-        <!-- Filters -->
-        <div class="report-controls bg-bg-card border border-border-flat rounded-lg p-4 flex flex-wrap gap-4 items-end">
-            <div class="flex gap-2 self-end">
-                <button class="btn btn-secondary" on:click={() => setDatePreset('today')}>Today</button>
-                <button class="btn btn-secondary" on:click={() => setDatePreset('week')}>7 Days</button>
-                <button class="btn btn-secondary" on:click={() => setDatePreset('month')}>This Month</button>
-                <button class="btn btn-secondary" on:click={() => setDatePreset('year')}>This Year</button>
+    <div class="report-page h-full overflow-y-auto p-3 md:p-5 xl:p-6 flex flex-col gap-4 md:gap-5">
+        <section class="report-controls bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+            <div class="flex flex-col gap-4">
+                <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                    <div class="min-w-0">
+                        <div class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Sales Report</div>
+                        <h2 class="m-0 mt-1 text-2xl md:text-3xl leading-tight">{reportPeriodLabel}</h2>
+                        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                            <span class="rounded-full border border-border-flat bg-bg-panel px-3 py-1 font-bold text-text-main">{selectedTillLabel}</span>
+                            <span class="rounded-full px-3 py-1 font-bold {reportSource === 'Live MariaDB' ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}">{reportSource}</span>
+                            {#if lastRefreshed}
+                                <span class="rounded-full border border-border-flat bg-bg-panel px-3 py-1 text-text-muted">Updated {lastRefreshed}</span>
+                            {/if}
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 sm:flex gap-2">
+                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('today')}>Today</button>
+                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('week')}>7 Days</button>
+                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('month')}>This Month</button>
+                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('year')}>This Year</button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[repeat(4,minmax(0,1fr))_auto_auto_auto] gap-3 items-end">
+                    <div class="field">
+                        <label for="report-start-date">Start Date</label>
+                        <input id="report-start-date" type="date" bind:value={startDate} />
+                    </div>
+                    <div class="field">
+                        <label for="report-end-date">End Date</label>
+                        <input id="report-end-date" type="date" bind:value={endDate} />
+                    </div>
+                    <div class="min-w-0">
+                        <CustomSelect label="Till" bind:value={selectedTill} options={tillOptions} />
+                    </div>
+                    <div class="min-w-0">
+                        <CustomSelect label="Top Products" bind:value={sortBy} options={sortOptions} />
+                    </div>
+                    <button class="btn btn-primary" disabled={loading} on:click={loadData}>
+                        {loading ? 'Loading...' : 'Refresh'}
+                    </button>
+                    <button class="btn btn-secondary" disabled={!reportReady} on:click={exportCsv}>Export CSV</button>
+                    <button class="btn btn-secondary" disabled={!reportReady || reportPrintBusy} on:click={printReport}>
+                        {reportPrintBusy ? 'Printing...' : 'Print'}
+                    </button>
+                </div>
             </div>
-            <div class="field">
-                <label>Start Date</label>
-                <input type="date" bind:value={startDate} />
-            </div>
-            <div class="field">
-                <label>End Date</label>
-                <input type="date" bind:value={endDate} />
-            </div>
-            <div class="field min-w-[190px]">
-                <CustomSelect label="Till" bind:value={selectedTill} options={tillOptions} />
-            </div>
-            <div class="field min-w-[190px]">
-                <CustomSelect label="Sort Products By" bind:value={sortBy} options={sortOptions} />
-            </div>
-            <button class="btn btn-primary" disabled={loading} on:click={loadData}>
-                {loading ? 'Loading…' : 'Refresh'}
-            </button>
-            <button class="btn btn-secondary" disabled={!reportReady} on:click={exportCsv}>Export CSV</button>
-            <button class="btn btn-secondary" disabled={!reportReady || reportPrintBusy} on:click={printReport}>
-                {reportPrintBusy ? 'Printing...' : 'Print'}
-            </button>
-            <div class="ml-auto flex flex-col items-end text-xs">
-                <span class="font-bold {reportSource === 'Live MariaDB' ? 'text-success' : 'text-warning'}">{reportSource}</span>
-                {#if lastRefreshed}<span class="text-text-muted">Updated {lastRefreshed}</span>{/if}
-            </div>
-        </div>
+        </section>
 
         {#if reportError}
             <div class="bg-danger/10 border border-danger/40 text-danger rounded-lg p-4">
@@ -466,296 +512,352 @@
             </div>
         {/if}
 
-        <!-- Overview Cards -->
-        <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Net Sales</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-success">{formatMoney(business.netSales)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Gross Sales</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-text-main">{formatMoney(business.grossSales)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Customer Refunds</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-danger">{formatMoney(business.refunds)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Voids</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-warning">{formatMoney(business.voids)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Sales Transactions</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-accent-primary">{overview.totalTransactions}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Refund Transactions</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-danger">{overview.refundTransactions}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Void Transactions</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-warning">{business.voidTransactions}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Avg Transaction</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-warning">{formatMoney(overview.avgTransactionValue)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Items Sold</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-text-main">{overview.totalItemsSold}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Tax Total</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-warning">{formatMoney(business.taxTotal)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Discounts Issued</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-warning">{formatMoney(business.discountTotal)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Cost of Goods</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight text-text-main">{formatMoney(business.costTotal)}</div>
-            </div>
-            <div class="bg-bg-card border border-border-flat rounded-lg p-5 px-6 flex flex-col gap-1">
-                <div class="text-xs font-semibold text-text-muted uppercase tracking-wider">Gross Profit After Tax</div>
-                <div class="text-[1.8rem] font-extrabold font-serif leading-tight {business.grossProfit >= 0 ? 'text-success' : 'text-danger'}">{formatMoney(business.grossProfit)}</div>
-            </div>
-        </div>
-
-        <!-- Sales by Till -->
-        <section class="bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">Sales by Till</h3>
-            {#if visibleTillSummaries.length === 0}
-                <div class="p-8 text-center text-text-muted">No till sales for the selected period.</div>
-            {:else}
-                <div class="overflow-x-auto">
-                    <table class="w-full border-collapse text-left">
-                        <thead>
-                            <tr class="text-text-muted text-sm">
-                                <th class="px-3 py-3 border-b border-border-flat">Till Name</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Net Sales</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Gross</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Refunds</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Transactions</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Refund Tx</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Items</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Cash</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Card</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Loyalty</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {#each visibleTillSummaries as till}
-                                <tr class="hover:bg-bg-card-hover">
-                                    <td class="px-3 py-3 border-b border-border-flat font-bold">{till.name}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat font-bold text-success">{formatMoney(till.netSales)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(till.grossSales)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-danger">{formatMoney(till.refunds)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{till.transactions}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{till.refundTransactions}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{till.itemsSold}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(till.cashTotal)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(till.cardTotal)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(till.loyaltyTotal)}</td>
-                                </tr>
-                            {/each}
-                        </tbody>
-                    </table>
-                </div>
-            {/if}
+        <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+            {#each summaryCards as card}
+                <article class="bg-bg-card border border-border-flat rounded-lg p-4 min-w-0">
+                    <div class="text-[0.72rem] font-black uppercase tracking-[0.12em] text-text-muted">{card.label}</div>
+                    <div class="mt-2 text-[1.55rem] md:text-[1.8rem] font-extrabold font-serif leading-tight {card.tone}">{card.value}</div>
+                    <div class="mt-1 text-xs text-text-muted truncate">{card.detail}</div>
+                </article>
+            {/each}
         </section>
 
-        <!-- Sales by Employee -->
-        <section class="bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">Sales by Employee</h3>
-            {#if employeeSales.length === 0}
-                <div class="p-8 text-center text-text-muted">No employee sales for the selected period.</div>
-            {:else}
-                <div class="overflow-x-auto">
-                    <table class="w-full border-collapse text-left">
-                        <thead>
-                            <tr class="text-text-muted text-sm">
-                                <th class="px-3 py-3 border-b border-border-flat">Employee</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Net Sales</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Gross Sales</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Refunds</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Transactions</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Refund Tx</th>
-                                <th class="px-3 py-3 border-b border-border-flat">Average</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {#each employeeSales as employee}
-                                <tr class="hover:bg-bg-card-hover">
-                                    <td class="px-3 py-3 border-b border-border-flat font-bold">{employee.employeeName}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-success font-bold">{formatMoney(employee.netSales)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(employee.grossSales)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-danger">{formatMoney(employee.refunds)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{employee.transactions}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{employee.refundTransactions}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat">{formatMoney(employee.avgTransaction)}</td>
-                                </tr>
-                            {/each}
-                        </tbody>
-                    </table>
+        <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+            <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+                <div class="min-w-0">
+                    <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Till Totals</div>
+                    <h3 class="m-0 mt-1 text-xl leading-tight">Total sales by each till</h3>
+                    <p class="m-0 mt-1 text-sm text-text-muted">Compare every till for the selected period, with exact totals below.</p>
                 </div>
-            {/if}
-        </section>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
+                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Net Total</div>
+                        <div class="font-extrabold text-success">{formatMoney(tillNetTotal)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
+                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Gross</div>
+                        <div class="font-extrabold">{formatMoney(tillGrossTotal)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
+                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Transactions</div>
+                        <div class="font-extrabold text-accent-primary">{tillTransactionTotal}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
+                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Items</div>
+                        <div class="font-extrabold">{tillItemTotal}</div>
+                    </div>
+                </div>
+            </div>
 
-        <!-- Daily Sales Trend -->
-        <section class="bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">Daily Sales Trend</h3>
-            {#if dailyTrend.length === 0}
-                <div class="p-8 text-center text-text-muted">No daily sales for the selected period.</div>
+            {#if tillTotals.length === 0}
+                <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No till sales for the selected period.</div>
             {:else}
-                <div class="flex items-end gap-2 h-48 overflow-x-auto pb-2">
-                    {#each displayDailyTrend as day}
-                        <div class="min-w-[54px] flex-1 h-full flex flex-col justify-end items-center gap-2" title={`${day.date}: ${formatMoney(day.netSales)} · ${day.transactions} transactions`}>
-                            <span class="text-[10px] font-bold text-text-muted">{formatMoney(day.netSales)}</span>
-                            <div class="w-full max-w-12 min-h-[3px] rounded-t {day.netSales < 0 ? 'bg-danger' : day.netSales === 0 ? 'bg-border-flat' : 'bg-accent-primary'}" style="height: {Math.max(2, (Math.abs(day.netSales) / maxDailySales) * 130)}px"></div>
-                            <span class="text-[10px] text-text-muted">{new Date(`${day.date}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
-                        </div>
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {#each tillTotals as till}
+                        <article class="rounded-lg border border-border-flat bg-bg-panel p-4 min-w-0">
+                            <div class="flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                    <div class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Till</div>
+                                    <div class="mt-1 truncate text-lg font-extrabold">{till.name}</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-xs text-text-muted">Net</div>
+                                    <div class="font-serif text-xl font-extrabold {till.netSales >= 0 ? 'text-success' : 'text-danger'}">{formatMoney(till.netSales)}</div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4 h-2 overflow-hidden rounded-full bg-bg-card border border-border-flat">
+                                <div
+                                    class="h-full rounded-full {till.netSales < 0 ? 'bg-danger' : 'bg-accent-primary'}"
+                                    style="width: {till.netSales === 0 ? 0 : Math.max(6, (Math.abs(till.netSales) / maxTillNetSales) * 100)}%"
+                                ></div>
+                            </div>
+
+                            <div class="mt-4 grid grid-cols-3 gap-2 text-sm">
+                                <div>
+                                    <div class="text-[0.7rem] text-text-muted">Sales</div>
+                                    <div class="font-bold">{till.transactions}</div>
+                                </div>
+                                <div>
+                                    <div class="text-[0.7rem] text-text-muted">Refunds</div>
+                                    <div class="font-bold text-danger">{formatMoney(till.refunds)}</div>
+                                </div>
+                                <div>
+                                    <div class="text-[0.7rem] text-text-muted">Items</div>
+                                    <div class="font-bold">{till.itemsSold}</div>
+                                </div>
+                            </div>
+
+                            <div class="mt-3 grid grid-cols-3 gap-2 text-xs text-text-muted">
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Cash</span>
+                                    <strong class="text-success">{formatMoney(till.cashTotal)}</strong>
+                                </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Card</span>
+                                    <strong class="text-accent-primary">{formatMoney(till.cardTotal)}</strong>
+                                </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Loyalty</span>
+                                    <strong class="text-text-main">{formatMoney(till.loyaltyTotal)}</strong>
+                                </div>
+                            </div>
+                        </article>
                     {/each}
                 </div>
+
+                <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                    <table class="tbl">
+                        <thead>
+                            <tr>
+                                <th>Till</th>
+                                <th>Net Sales</th>
+                                <th>Gross</th>
+                                <th>Refunds</th>
+                                <th>Tax</th>
+                                <th>Sales Tx</th>
+                                <th>Refund Tx</th>
+                                <th>Items</th>
+                                <th>Cash</th>
+                                <th>Card</th>
+                                <th>Loyalty</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {#each tillTotals as till}
+                                <tr>
+                                    <td class="font-bold">{till.name}</td>
+                                    <td class="font-bold text-success">{formatMoney(till.netSales)}</td>
+                                    <td>{formatMoney(till.grossSales)}</td>
+                                    <td class="text-danger">{formatMoney(till.refunds)}</td>
+                                    <td>{formatMoney(till.taxTotal)}</td>
+                                    <td>{till.transactions}</td>
+                                    <td>{till.refundTransactions}</td>
+                                    <td>{till.itemsSold}</td>
+                                    <td>{formatMoney(till.cashTotal)}</td>
+                                    <td>{formatMoney(till.cardTotal)}</td>
+                                    <td>{formatMoney(till.loyaltyTotal)}</td>
+                                </tr>
+                            {/each}
+                            <tr class="bg-bg-panel font-extrabold">
+                                <td>Total</td>
+                                <td class="text-success">{formatMoney(tillNetTotal)}</td>
+                                <td>{formatMoney(tillGrossTotal)}</td>
+                                <td class="text-danger">{formatMoney(tillRefundTotal)}</td>
+                                <td>{formatMoney(tillTaxTotal)}</td>
+                                <td>{tillTransactionTotal}</td>
+                                <td>{tillRefundTransactionTotal}</td>
+                                <td>{tillItemTotal}</td>
+                                <td>{formatMoney(tillCashTotal)}</td>
+                                <td>{formatMoney(tillCardTotal)}</td>
+                                <td>{formatMoney(tillLoyaltyTotal)}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             {/if}
         </section>
 
-        <!-- Payment Method Breakdown -->
-        <section class="bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">💳 Payment Breakdown</h3>
-            <div class="flex flex-col xl:flex-row gap-8 items-stretch xl:items-start">
-                <!-- Bar Chart -->
-                <div class="flex-1 flex flex-col gap-3">
-                    <div class="flex items-center gap-3">
-                        <span class="w-20 text-[0.9rem] font-semibold text-text-muted">💵 Cash</span>
-                        <div class="flex-1 h-7 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-[linear-gradient(90deg,#10b981,#34d399)]" style="width: {cashPercent}%"></div>
-                        </div>
-                        <span class="w-12 text-right text-[0.9rem] font-bold text-text-main">{cashPercent}%</span>
+        <div class="grid grid-cols-1 lg:grid-cols-[1.15fr_0.85fr] gap-4 md:gap-5">
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+                <div class="flex items-start justify-between gap-3">
+                    <div>
+                        <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Trend</div>
+                        <h3 class="m-0 mt-1 text-xl">Daily sales</h3>
                     </div>
-                    <div class="flex items-center gap-3">
-                        <span class="w-20 text-[0.9rem] font-semibold text-text-muted">💳 Card</span>
-                        <div class="flex-1 h-7 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-[linear-gradient(90deg,#3b82f6,#60a5fa)]" style="width: {cardPercent}%"></div>
+                    <span class="rounded-full bg-bg-panel border border-border-flat px-3 py-1 text-xs text-text-muted">{displayDailyTrend.length} days</span>
+                </div>
+                {#if dailyTrend.length === 0}
+                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No daily sales for the selected period.</div>
+                {:else}
+                    <div class="mt-4 flex items-end gap-2 h-48 2xl:h-56 overflow-x-auto pb-2">
+                        {#each displayDailyTrend as day}
+                            <div class="min-w-[58px] flex-1 h-full flex flex-col justify-end items-center gap-2" title={`${day.date}: ${formatMoney(day.netSales)} · ${day.transactions} transactions`}>
+                                <span class="text-[10px] font-bold text-text-muted">{formatMoney(day.netSales)}</span>
+                                <div class="w-full max-w-12 min-h-[3px] rounded-t {day.netSales < 0 ? 'bg-danger' : day.netSales === 0 ? 'bg-border-flat' : 'bg-accent-primary'}" style="height: {Math.max(2, (Math.abs(day.netSales) / maxDailySales) * 150)}px"></div>
+                                <span class="text-[10px] text-text-muted">{new Date(`${day.date}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </section>
+
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Payments</div>
+                <h3 class="m-0 mt-1 text-xl">Payment mix</h3>
+                <div class="mt-4 flex flex-col gap-3">
+                    <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
+                        <span class="text-sm font-bold text-text-muted">Cash</span>
+                        <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-success" style="width: {cashPercent}%"></div>
                         </div>
-                        <span class="w-12 text-right text-[0.9rem] font-bold text-text-main">{cardPercent}%</span>
+                        <span class="text-right text-sm font-bold">{cashPercent}%</span>
+                    </div>
+                    <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
+                        <span class="text-sm font-bold text-text-muted">Card</span>
+                        <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-accent-primary" style="width: {cardPercent}%"></div>
+                        </div>
+                        <span class="text-right text-sm font-bold">{cardPercent}%</span>
                     </div>
                     {#if breakdown.totalLoyalty !== 0}
-                        <div class="flex items-center gap-3">
-                            <span class="w-20 text-[0.9rem] font-semibold text-text-muted">Loyalty</span>
-                            <div class="flex-1 h-7 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-[linear-gradient(90deg,#8b5cf6,#a78bfa)]" style="width: {Math.max(0, loyaltyPercent)}%"></div>
+                        <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
+                            <span class="text-sm font-bold text-text-muted">Loyalty</span>
+                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-warning" style="width: {Math.max(0, loyaltyPercent)}%"></div>
                             </div>
-                            <span class="w-12 text-right text-[0.9rem] font-bold text-text-main">{loyaltyPercent}%</span>
+                            <span class="text-right text-sm font-bold">{loyaltyPercent}%</span>
                         </div>
                     {/if}
                     {#if breakdown.unrecordedAmount !== 0}
-                        <div class="flex items-center gap-3">
-                            <span class="w-20 text-[0.9rem] font-semibold text-text-muted">❓ Unrec.</span>
-                            <div class="flex-1 h-7 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-[linear-gradient(90deg,#9ca3af,#d1d5db)]" style="width: {unrecordedPercent}%"></div>
+                        <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
+                            <span class="text-sm font-bold text-text-muted">Missing</span>
+                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-border-flat" style="width: {unrecordedPercent}%"></div>
                             </div>
-                            <span class="w-12 text-right text-[0.9rem] font-bold text-text-main">{unrecordedPercent}%</span>
+                            <span class="text-right text-sm font-bold">{unrecordedPercent}%</span>
                         </div>
                     {/if}
                 </div>
-                <!-- Stats -->
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full xl:w-[340px]">
-                    <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                        <div class="text-xs font-semibold text-text-muted">Cash Sales</div>
-                        <div class="text-[1.3rem] font-extrabold font-serif text-success">{formatMoney(breakdown.totalCash)}</div>
-                        <div class="text-[0.75rem] text-text-muted">{breakdown.cashTxCount} transactions</div>
+
+                <div class="mt-5 grid grid-cols-2 gap-3">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Cash Sales</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-success">{formatMoney(breakdown.totalCash)}</div>
+                        <div class="text-xs text-text-muted">{breakdown.cashTxCount} transactions</div>
                     </div>
-                    <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                        <div class="text-xs font-semibold text-text-muted">Card Sales</div>
-                        <div class="text-[1.3rem] font-extrabold font-serif text-accent-primary">{formatMoney(breakdown.totalCard)}</div>
-                        <div class="text-[0.75rem] text-text-muted">{breakdown.cardTxCount} transactions</div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Card Sales</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-accent-primary">{formatMoney(breakdown.totalCard)}</div>
+                        <div class="text-xs text-text-muted">{breakdown.cardTxCount} transactions</div>
                     </div>
                     {#if breakdown.totalLoyalty !== 0}
-                        <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                            <div class="text-xs font-semibold text-text-muted">Loyalty Credit</div>
-                            <div class="text-[1.3rem] font-extrabold font-serif text-accent-primary">{formatMoney(breakdown.totalLoyalty)}</div>
-                            <div class="text-[0.75rem] text-text-muted">{breakdown.loyaltyTxCount} transactions</div>
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                            <div class="text-xs font-bold text-text-muted">Loyalty Credit</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.totalLoyalty)}</div>
+                            <div class="text-xs text-text-muted">{breakdown.loyaltyTxCount} transactions</div>
                         </div>
                     {/if}
                     {#if breakdown.splitTxCount > 0}
-                        <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5">
-                            <div class="text-xs font-semibold text-text-muted">Split Payments</div>
-                            <div class="text-[0.75rem] text-text-muted">{breakdown.splitTxCount} transactions (cash+card combined)</div>
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                            <div class="text-xs font-bold text-text-muted">Split Payments</div>
+                            <div class="mt-1 font-bold">{breakdown.splitTxCount}</div>
+                            <div class="text-xs text-text-muted">cash and card combined</div>
                         </div>
                     {/if}
                     {#if breakdown.unrecordedAmount !== 0}
-                        <div class="bg-bg-panel border border-border-flat rounded-lg p-4 flex flex-col gap-0.5 {breakdown.splitTxCount > 0 ? '' : 'col-span-2'}">
-                            <div class="text-xs font-semibold text-text-muted">Unrecorded</div>
-                            <div class="text-[1.3rem] font-extrabold font-serif text-text-muted">{formatMoney(breakdown.unrecordedAmount)}</div>
-                            <div class="text-[0.75rem] text-text-muted">{breakdown.unrecordedTxCount} transactions (missing payment records)</div>
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3 col-span-2">
+                            <div class="text-xs font-bold text-text-muted">Missing Payment Records</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold text-text-muted">{formatMoney(breakdown.unrecordedAmount)}</div>
+                            <div class="text-xs text-text-muted">{breakdown.unrecordedTxCount} transactions need payment records</div>
                         </div>
                     {/if}
                 </div>
-            </div>
-        </section>
+            </section>
+        </div>
 
-        <!-- Section B: Top Products -->
-        <section class="bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">🏆 Top 10 Products</h3>
-            {#if topProducts.length === 0}
-                <div class="p-12 text-center text-text-muted text-base">No sales data for the selected period.</div>
-            {:else}
-                <div class="overflow-x-auto">
-                    <table class="w-full border-collapse text-left">
-                        <thead>
-                            <tr>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">#</th>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Product Name</th>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">SKU</th>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Qty Sold</th>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Total Revenue</th>
-                                <th class="px-3 py-3.5 text-text-muted font-medium text-[0.85rem] border-b border-border-flat bg-bg-card sticky top-0 z-[5]">Avg Price</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {#each topProducts as product, i}
-                                <tr class="hover:bg-bg-card-hover">
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold text-accent-primary">{i + 1}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-semibold">{product.name}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-mono text-[0.85rem] text-text-muted">{product.sku || '—'}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold">{product.qtySold}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem] font-bold text-success">{formatMoney(product.totalRevenue)}</td>
-                                    <td class="px-3 py-3 border-b border-border-flat text-[0.9rem]">{formatMoney(product.avgPrice)}</td>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Products</div>
+                <h3 class="m-0 mt-1 text-xl">Top products by {sortBy === 'revenue' ? 'revenue' : 'quantity'}</h3>
+                {#if topProducts.length === 0}
+                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No sales data for the selected period.</div>
+                {:else}
+                    <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                        <table class="tbl">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Product</th>
+                                    <th>SKU</th>
+                                    <th>Qty</th>
+                                    <th>Revenue</th>
+                                    <th>Avg Price</th>
                                 </tr>
-                            {/each}
-                        </tbody>
-                    </table>
-                </div>
-            {/if}
-        </section>
+                            </thead>
+                            <tbody>
+                                {#each topProducts as product, i}
+                                    <tr>
+                                        <td class="font-bold text-accent-primary">{i + 1}</td>
+                                        <td class="font-semibold">{product.name}</td>
+                                        <td class="font-mono text-text-muted">{product.sku || '-'}</td>
+                                        <td class="font-bold">{product.qtySold}</td>
+                                        <td class="font-bold text-success">{formatMoney(product.totalRevenue)}</td>
+                                        <td>{formatMoney(product.avgPrice)}</td>
+                                    </tr>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
+                {/if}
+            </section>
 
-        <!-- Close Reports -->
-        <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-6">
-            <h3 class="text-[1.15rem] mb-4 text-accent-primary">Period Close / Z Reports</h3>
-            <div class="flex flex-wrap gap-4">
-                <button class="btn btn-primary" disabled={!tillId} on:click={runTillDayReport}>
-                    Close Period: This Till
-                </button>
-                <button class="btn btn-primary" on:click={runSystemDayReport}>
-                    Close Period: Whole System
-                </button>
-                <button class="btn btn-secondary" disabled={!tillId} on:click={runTillFullReport}>
-                    Preview This Till All-Time
-                </button>
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Staff</div>
+                <h3 class="m-0 mt-1 text-xl">Sales by employee</h3>
+                {#if employeeSales.length === 0}
+                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No employee sales for the selected period.</div>
+                {:else}
+                    <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                        <table class="tbl">
+                            <thead>
+                                <tr>
+                                    <th>Employee</th>
+                                    <th>Net Sales</th>
+                                    <th>Gross Sales</th>
+                                    <th>Refunds</th>
+                                    <th>Sales Tx</th>
+                                    <th>Refund Tx</th>
+                                    <th>Average</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {#each employeeSales as employee}
+                                    <tr>
+                                        <td class="font-bold">{employee.employeeName}</td>
+                                        <td class="text-success font-bold">{formatMoney(employee.netSales)}</td>
+                                        <td>{formatMoney(employee.grossSales)}</td>
+                                        <td class="text-danger">{formatMoney(employee.refunds)}</td>
+                                        <td>{employee.transactions}</td>
+                                        <td>{employee.refundTransactions}</td>
+                                        <td>{formatMoney(employee.avgTransaction)}</td>
+                                    </tr>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
+                {/if}
+            </section>
+        </div>
+
+        <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                <div>
+                    <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Close Reports</div>
+                    <h3 class="m-0 mt-1 text-xl">Period close / Z reports</h3>
+                    <p class="m-0 mt-1 text-sm text-text-muted">Close uses the time from the last close to now, not automatically today's calendar sales.</p>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <button class="btn btn-primary" disabled={!tillId} on:click={runTillDayReport}>
+                        Close This Till
+                    </button>
+                    <button class="btn btn-primary" on:click={runSystemDayReport}>
+                        Close Whole System
+                    </button>
+                    <button class="btn btn-secondary" disabled={!tillId} on:click={runTillFullReport}>
+                        Preview This Till
+                    </button>
+                </div>
             </div>
-            <p class="text-text-muted text-sm mt-2">
-                Close Period uses the time from the last close to now. It is not automatically today's calendar sales.
-                Use the whole-system close when the shop day is finished for every till.
-            </p>
         </section>
     </div>
 </MgmtPage>
 
 <!-- Till Report Modal -->
 {#if showTillReport && tillReportData}
-    <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)] p-2" on:click={() => showTillReport = false}>
-        <div class="w-[760px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-1rem)] overflow-y-auto rounded-md bg-bg-card border border-border-flat flex flex-col" on:click|stopPropagation>
+    <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)] p-2">
+        <button type="button" class="absolute inset-0 cursor-default" aria-label="Close till report" on:click={() => showTillReport = false}></button>
+        <div class="relative z-10 w-[760px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-1rem)] overflow-y-auto rounded-md bg-bg-card border border-border-flat flex flex-col">
             <div class="sticky top-0 z-10 flex justify-between items-center gap-3 border-b border-border-flat bg-bg-card p-3 md:p-4">
                 <div class="min-w-0">
                     <h3 class="m-0 truncate text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>

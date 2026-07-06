@@ -23,6 +23,35 @@ import { currentEmployee } from './session';
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
+const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/label-print', '/customer-display']);
+const LIGHT_ROUTE_TABLES = new Set([
+    'categories',
+    'products',
+    'pos_pages',
+    'pos_tiles',
+    'tax_rates',
+    'employees',
+    'settings',
+    'customers',
+    'registers',
+    'discounts',
+    'promo_groups',
+    'promo_group_items',
+    'shifts',
+    'cash_movements',
+]);
+const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
+    'orders',
+    'order_lines',
+    'payments',
+    'inventory_logs',
+    'loyalty_logs',
+    'audit_logs',
+]);
+
+function isLightStoreRoute(): boolean {
+    return typeof window !== 'undefined' && LIGHT_STORE_ROUTES.has(window.location.pathname);
+}
 
 function resetRemoteConnections(): void {
     resetMysqlConnection();
@@ -113,7 +142,10 @@ export {
 export type {
     SeedPayload, SalesOverview, PaymentBreakdown, TopProduct,
     TillReportOption, TillSalesSummary, DailySalesPoint,
-    BusinessSummary, EmployeeSalesSummary
+    BusinessSummary, EmployeeSalesSummary,
+    OrderPageOptions, OrderPageResult,
+    PosHeldOrdersResult, PosRecentReceiptsResult,
+    OrderDetailsResult, OrderReversalContext
 } from './sqlite';
 
 // ─── Offline Queue ──────────────────────────────────────────────────────────
@@ -2056,6 +2088,85 @@ export async function getTileProducts(): Promise<any[]> {
     return sqlite.getTileProducts();
 }
 
+const PRODUCT_BOOL_KEYS = ['isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'];
+
+function hydrateProducts(rows: any[]): any[] {
+    return rows.map((row) => sqlite.rehydrateBooleans(row, PRODUCT_BOOL_KEYS));
+}
+
+export async function getProductsPage(options: sqlite.ProductPageOptions = {}): Promise<sqlite.ProductPageResult> {
+    const result = await sqlite.getProductsPage(options);
+    return {
+        rows: hydrateProducts(result.rows),
+        total: result.total,
+    };
+}
+
+export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Promise<sqlite.OrderPageResult> {
+    const result = await sqlite.getOrdersPage(options);
+    return {
+        ...result,
+        lines: result.lines.map((line) => sqlite.rehydrateBooleans(line, ['isPriceOverride'])),
+    };
+}
+
+function hydrateOrderLines(rows: any[]): any[] {
+    return rows.map((line) => sqlite.rehydrateBooleans(line, ['isPriceOverride']));
+}
+
+export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<sqlite.PosHeldOrdersResult> {
+    const result = await sqlite.getPosHeldOrders(tillNumber, limit);
+    return {
+        ...result,
+        lines: hydrateOrderLines(result.lines),
+    };
+}
+
+export async function getPosRecentReceipts(limit = 10): Promise<sqlite.PosRecentReceiptsResult> {
+    const result = await sqlite.getPosRecentReceipts(limit);
+    return {
+        ...result,
+        lines: hydrateOrderLines(result.lines),
+    };
+}
+
+export async function getLatestTillReceipt(tillNumber: string): Promise<any | null> {
+    return sqlite.getLatestTillReceipt(tillNumber);
+}
+
+export async function getOrderDetails(orderId: string): Promise<sqlite.OrderDetailsResult> {
+    const result = await sqlite.getOrderDetails(orderId);
+    return {
+        ...result,
+        lines: hydrateOrderLines(result.lines),
+    };
+}
+
+export async function getOrderReversalContext(orderId: string): Promise<sqlite.OrderReversalContext> {
+    const result = await sqlite.getOrderReversalContext(orderId);
+    return {
+        ...result,
+        originalLines: hydrateOrderLines(result.originalLines),
+    };
+}
+
+export async function getGoodsMenuCount(): Promise<number> {
+    return sqlite.getGoodsMenuCount();
+}
+
+export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promise<sqlite.GoodsMenuEditorResult> {
+    const result = await sqlite.getGoodsMenuEditorProducts(query, limit);
+    return {
+        selected: hydrateProducts(result.selected),
+        available: hydrateProducts(result.available),
+        totalAvailable: result.totalAvailable,
+    };
+}
+
+export async function findNextAvailableScalePlu(length: number, excludeId = ''): Promise<string | null> {
+    return sqlite.findNextAvailableScalePlu(length, excludeId);
+}
+
 // ─── Product Helpers ────────────────────────────────────────────────────────
 
 export async function addProduct(p: any): Promise<void> {
@@ -3503,9 +3614,14 @@ import { hydrateTheme } from './theme';
  * that drive the UI. Call this at startup and after every background sync.
  */
 export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<void> {
-    const requested = tables ? new Set(tables) : null;
+    const lightRoute = isLightStoreRoute();
+    let requested = tables ? new Set(tables) : null;
+    if (!requested && lightRoute) requested = new Set(LIGHT_ROUTE_TABLES);
     if (requested && PROMOTION_SYNC_TABLES.some(table => requested.has(table))) {
         for (const table of PROMOTION_SYNC_TABLES) requested.add(table);
+    }
+    if (requested && lightRoute) {
+        for (const table of LIGHT_ROUTE_SKIP_HYDRATION_TABLES) requested.delete(table);
     }
     if (requested && requested.size === 0) return;
     console.log(requested
@@ -3690,8 +3806,7 @@ async function runHeartbeat(): Promise<void> {
 /** Tables that should appear on other tills quickly (every 5s). */
 const FAST_SYNC_TABLES = [
     'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
-    'products', 'pos_pages', 'pos_tiles', 'customers', 'loyalty_logs',
-    'discounts', 'promo_groups', 'promo_group_items',
+    'customers', 'loyalty_logs',
     'till_report_markers', 'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
 ];
 const TRANSACTION_SYNC_TABLES = new Set([
@@ -3705,7 +3820,7 @@ const LOCAL_UPSERT_COMPARE_TABLES = new Set([
 const TRANSACTION_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
 const PRODUCT_SYNC_OVERLAP_MS = 2 * 60 * 60 * 1000;
 
-/** All tables — synced every 10s so product and pricing changes appear quickly. */
+/** All tables — synced on the full cycle so product and pricing changes catch up without interrupting rapid scanning. */
 const ALL_SYNC_TABLES = [
     'products', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',

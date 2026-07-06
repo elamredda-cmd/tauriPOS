@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
     import { goto } from '$app/navigation';
+    import { isTauri } from '@tauri-apps/api/core';
     import { connectionState, loadSavedMode, type MysqlConfig } from '$lib/stores/connection';
     import { initMysqlDb } from '$lib/stores/mysql';
     import '../app.css';
@@ -16,14 +17,13 @@
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
         settingsDB, customersDB, storeDB, registersDB, discountsDB,
-        ordersDB, orderLinesDB, paymentsDB,
         promoGroupsDB, promoGroupItemsDB
     } from '$lib/stores/db';
     import { get } from 'svelte/store';
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
     import { applyTypography } from '$lib/typography';
     import { page } from '$app/stores';
-    import { canManage, currentEmployee } from '$lib/stores/session';
+    import { canManage, currentEmployee, currentShiftId, REMEMBERED_EMPLOYEE_SESSION_KEY } from '$lib/stores/session';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
@@ -35,6 +35,24 @@
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let restorePendingMariaDbReplace = false;
     const SYNC_STARTUP_RETRY_MS = 30 * 1000;
+    const POS_STARTUP_TABLES = [
+        'categories',
+        'products',
+        'pos_pages',
+        'pos_tiles',
+        'tax_rates',
+        'employees',
+        'settings',
+        'customers',
+        'registers',
+        'discounts',
+        'promo_groups',
+        'promo_group_items',
+        'shifts',
+        'cash_movements',
+    ];
+    const LIGHT_STORE_ROUTES = ['/', '/orders', '/label-print', '/customer-display'];
+    let fullStoresHydrated = false;
 
     primeSoundEngine();
 
@@ -91,8 +109,35 @@
         playCartButtonFeedback();
     }
 
+    function startBrowserPreviewMode() {
+        console.warn('POS: Running outside Tauri; using seeded in-memory preview data.');
+        connectionState.update((state) => ({
+            ...state,
+            mode: 'single',
+            mysqlOnline: false,
+            syncError: null,
+        }));
+        hydrateTheme(get(settingsDB));
+
+        const previewEmployee = get(employeesDB).find((employee) =>
+            employee.isActive && employee.role === 'admin'
+        ) || get(employeesDB).find((employee) => employee.isActive) || null;
+        if (!get(currentEmployee) && previewEmployee) {
+            currentEmployee.set(previewEmployee);
+        }
+        if (!get(currentShiftId)) {
+            currentShiftId.set('browser-preview-shift');
+        }
+        dbReady = true;
+    }
+
     onMount(async () => {
         try {
+            if (!isTauri()) {
+                startBrowserPreviewMode();
+                return;
+            }
+
             console.log("POS: Starting DB init...");
             await initDb();
             console.log("POS: DB init done.");
@@ -118,7 +163,9 @@
             // 3. Hydrate stores from the correct data source.
             // Always hydrate from local SQLite instantly first
             console.log("POS: Hydrating stores from SQLite…");
-            await hydrateSvelteStores();
+            const lightStartup = LIGHT_STORE_ROUTES.includes(window.location.pathname);
+            await hydrateSvelteStores(lightStartup ? POS_STARTUP_TABLES : undefined);
+            fullStoresHydrated = !lightStartup;
 
             restorePendingMariaDbReplace = savedMode === 'multi'
                 && await hasRestorePendingMariaDbReplace();
@@ -143,12 +190,16 @@
             // Remove legacy app data while preserving device-only preferences.
             const customerDisplayMonitor = localStorage.getItem('customer_display_monitor');
             const customerDisplayAutoOpen = localStorage.getItem('customer_display_auto_open');
+            const rememberedEmployeeSession = localStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
             localStorage.clear();
             if (customerDisplayMonitor !== null) {
                 localStorage.setItem('customer_display_monitor', customerDisplayMonitor);
             }
             if (customerDisplayAutoOpen !== null) {
                 localStorage.setItem('customer_display_auto_open', customerDisplayAutoOpen);
+            }
+            if (rememberedEmployeeSession !== null) {
+                localStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, rememberedEmployeeSession);
             }
 
             console.log("POS initialized ✅");
@@ -203,6 +254,19 @@
         } else if (!allowedForCashier.includes($page.url.pathname) && !setupAllowed && !canManage($currentEmployee)) {
             goto('/');
         }
+    }
+
+    $: if (
+        dbReady &&
+        !fullStoresHydrated &&
+        typeof window !== 'undefined' &&
+        !LIGHT_STORE_ROUTES.includes($page.url.pathname)
+    ) {
+        fullStoresHydrated = true;
+        void hydrateSvelteStores().catch((error) => {
+            fullStoresHydrated = false;
+            console.warn('POS: full store hydration failed after navigation:', error);
+        });
     }
 </script>
 

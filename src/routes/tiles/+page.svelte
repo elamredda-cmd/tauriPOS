@@ -1,6 +1,6 @@
 <script lang="ts">
-    import { goBack } from '$lib/navigation';
     import { onMount } from "svelte";
+    import PageBackButton from "$lib/components/PageBackButton.svelte";
     import {
         posPagesDB,
         activePosPages,
@@ -216,14 +216,9 @@
 </script>
 
 <div class="tiles-management-page flex flex-col h-screen w-screen bg-bg-base">
-    <div class="flat-panel flex justify-between items-center px-6 py-4 border-b border-border-flat">
+    <header class="flat-panel flex justify-between items-center px-6 py-6 border-b border-border-flat">
         <div class="flex items-center gap-4">
-            <button type="button" class="btn-icon shrink-0" aria-label="Go back" on:click={() => goBack('/design')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
-                    <line x1="19" y1="12" x2="5" y2="12"></line>
-                    <polyline points="12 19 5 12 12 5"></polyline>
-                </svg>
-            </button>
+            <PageBackButton fallback="/design" extraClass="shrink-0" />
             <div>
                 <h2 class="m-0 text-[1.4rem]">POS Layout Designer</h2>
                 <p class="m-0 text-text-muted text-[0.9rem]">
@@ -231,7 +226,7 @@
                 </p>
             </div>
         </div>
-    </div>
+    </header>
 
     <main class="flex-1 flex flex-col p-6 overflow-y-auto">
         <!-- POS Pages -->

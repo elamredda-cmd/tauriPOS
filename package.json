@@ -10,8 +10,6 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "tauri:till1": "POS_PROFILE=till1 VITE_POS_PROFILE=till1 VITE_PORT=1420 tauri dev --config src-tauri/tauri.till1.conf.json",
-    "tauri:till2": "POS_PROFILE=till2 VITE_POS_PROFILE=till2 VITE_PORT=1430 tauri dev --config src-tauri/tauri.till2.conf.json",
     "test:commerce": "cd src-tauri && cargo test commerce::tests"
   },
   "license": "MIT",

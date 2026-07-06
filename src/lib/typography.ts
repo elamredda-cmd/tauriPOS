@@ -3,11 +3,18 @@ import type { Setting } from '$lib/stores/db';
 export type AppFontChoice = 'inter' | 'windows' | 'system' | 'readable';
 export type AppFontSizeChoice = 'compact' | 'normal' | 'large' | 'extra';
 
+const FONT_STACKS: Record<AppFontChoice, string> = {
+    inter: '"Inter", "Segoe UI", system-ui, ui-sans-serif, sans-serif',
+    windows: '"Segoe UI Variable Text", "Segoe UI", Tahoma, Arial, sans-serif',
+    system: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    readable: 'Arial, Helvetica, "Segoe UI", sans-serif',
+};
+
 export const appFontOptions: Array<{ value: AppFontChoice; label: string; note: string }> = [
     {
         value: 'inter',
         label: 'L&Bj default',
-        note: 'Inter for the app and Outfit for headings.',
+        note: 'Inter across the whole app.',
     },
     {
         value: 'windows',
@@ -40,31 +47,43 @@ function setting(settings: Setting[], key: string, fallback = ''): string {
     return settings.find((item) => item.key === key)?.value || fallback;
 }
 
-function normalizeFont(value: string): AppFontChoice {
+export function normalizeAppFontChoice(value: string): AppFontChoice {
     return appFontOptions.some((option) => option.value === value)
         ? value as AppFontChoice
         : 'inter';
 }
 
-function normalizeSize(value: string, fallback: AppFontSizeChoice): AppFontSizeChoice {
+export function appFontFamily(value: string): string {
+    return FONT_STACKS[normalizeAppFontChoice(value)];
+}
+
+export function normalizeAppFontSizeChoice(value: string, fallback: AppFontSizeChoice = 'normal'): AppFontSizeChoice {
     return appFontSizeOptions.some((option) => option.value === value)
         ? value as AppFontSizeChoice
         : fallback;
 }
 
 function sizePx(settings: Setting[], key: string, fallback: AppFontSizeChoice): number {
-    const value = normalizeSize(setting(settings, key, fallback), fallback);
+    const value = normalizeAppFontSizeChoice(setting(settings, key, fallback), fallback);
     return SIZE_BY_VALUE.get(value) || SIZE_BY_VALUE.get(fallback) || 16;
 }
 
 export function applyTypography(settings: Setting[]): void {
     if (typeof document === 'undefined') return;
 
-    const fontChoice = normalizeFont(setting(settings, 'ui_font_family', 'inter'));
-    document.body.classList.remove(...FONT_CLASSES);
-    document.body.classList.add(`font-ui-${fontChoice}`);
-
+    const fontChoice = normalizeAppFontChoice(setting(settings, 'ui_font_family', 'inter'));
+    const fontFamily = appFontFamily(fontChoice);
     const root = document.documentElement;
+    const body = document.body;
+    for (const target of [root, body]) {
+        target?.classList.remove(...FONT_CLASSES);
+        target?.classList.add(`font-ui-${fontChoice}`);
+    }
+    root.dataset.appFont = fontChoice;
+    if (body) body.dataset.appFont = fontChoice;
+    root.style.setProperty('--app-font-main', fontFamily);
+    root.style.setProperty('--app-font-heading', fontFamily);
+    root.style.setProperty('--app-font-mono', fontFamily);
     root.style.setProperty('--font-size-pos', `${sizePx(settings, 'ui_font_size_pos', 'normal')}px`);
     root.style.setProperty('--font-size-management', `${sizePx(settings, 'ui_font_size_management', 'normal')}px`);
     root.style.setProperty('--font-size-settings', `${sizePx(settings, 'ui_font_size_settings', 'normal')}px`);
