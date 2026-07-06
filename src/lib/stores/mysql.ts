@@ -725,8 +725,10 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // in a try/catch so older versions silently skip duplicates.
     const indexes = [
         `CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_products_barcode_active ON products(barcode(255), isActive)`,
         `CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku(255))`,
         `CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_products_scale_plu_active ON products(scalePlu(255), isActive)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_barcode ON products(barcode)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_scale_plu ON products(scalePlu)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_products_sku ON products(sku)`,
@@ -750,6 +752,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber(255))`,
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(openRegisterId)`,
+        ...TIMESTAMP_SYNC_TABLES.map((table) =>
+            `CREATE INDEX IF NOT EXISTS idx_${table}_updated_at ON ${table}(updatedAt(255))`
+        ),
     ];
 
     for (const sql of indexes) {
@@ -1215,7 +1220,7 @@ export async function mysqlSearchProduct(query: string): Promise<any | null> {
 
     // Main POS scanner lookup: only a 100% barcode match should add an item.
     const rows: any[] = await d.select(
-        'SELECT * FROM products WHERE isActive = 1 AND showInPos = 1 AND barcode = ? LIMIT 1',
+        'SELECT * FROM products WHERE barcode = ? AND isActive = 1 LIMIT 1',
         [q],
     );
     return rows[0] || null;

@@ -34,6 +34,7 @@
     let syncStartupRunning = false;
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let restorePendingMariaDbReplace = false;
+    let lightStoreHydrationRunning = false;
     const SYNC_STARTUP_RETRY_MS = 30 * 1000;
     const POS_STARTUP_TABLES = [
         'categories',
@@ -51,7 +52,7 @@
         'shifts',
         'cash_movements',
     ];
-    const LIGHT_STORE_ROUTES = ['/', '/orders', '/label-print', '/customer-display'];
+    const LIGHT_STORE_ROUTES = ['/', '/orders', '/customer-display'];
     let fullStoresHydrated = false;
 
     primeSoundEngine();
@@ -129,6 +130,19 @@
             currentShiftId.set('browser-preview-shift');
         }
         dbReady = true;
+    }
+
+    async function hydrateLightStoresForTillRoute() {
+        if (lightStoreHydrationRunning) return;
+        lightStoreHydrationRunning = true;
+        try {
+            await hydrateSvelteStores(POS_STARTUP_TABLES);
+            fullStoresHydrated = false;
+        } catch (error) {
+            console.warn('POS: light store hydration failed after navigation:', error);
+        } finally {
+            lightStoreHydrationRunning = false;
+        }
     }
 
     onMount(async () => {
@@ -267,6 +281,15 @@
             fullStoresHydrated = false;
             console.warn('POS: full store hydration failed after navigation:', error);
         });
+    }
+
+    $: if (
+        dbReady &&
+        fullStoresHydrated &&
+        typeof window !== 'undefined' &&
+        LIGHT_STORE_ROUTES.includes($page.url.pathname)
+    ) {
+        void hydrateLightStoresForTillRoute();
     }
 </script>
 

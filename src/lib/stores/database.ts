@@ -23,7 +23,7 @@ import { currentEmployee } from './session';
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
-const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/label-print', '/customer-display']);
+const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/customer-display']);
 const LIGHT_ROUTE_TABLES = new Set([
     'categories',
     'products',
@@ -3710,7 +3710,9 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
     if (shouldHydrate('pos_pages')) posPagesDB.set(await sqlite.getAll('pos_pages'));
     if (shouldHydrate('pos_tiles')) tilesDB.set(await sqlite.getAll('pos_tiles'));
     if (shouldHydrate('products')) {
-        const rows = await sqlite.getAll('products');
+        const rows = lightRoute
+            ? await sqlite.getPosScreenProducts()
+            : await sqlite.getAll('products');
         productsDB.set(rows.map(p => sqlite.rehydrateBooleans(p, [
             'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
         ])));

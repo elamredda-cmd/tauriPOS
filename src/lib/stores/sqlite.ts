@@ -4,6 +4,17 @@ import { localDatabaseName } from './profile';
 
 let db: Database | null = null;
 
+const UPDATED_AT_INDEX_TABLES = [
+    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
+    'employees', 'settings', 'customers', 'registers',
+    'suppliers', 'product_suppliers', 'inventory_logs',
+    'orders', 'order_lines', 'payments',
+    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'till_report_markers', 'manager_approvals',
+    'stock_receipts', 'stock_receipt_lines',
+];
+
 export async function getDb(): Promise<Database> {
     if (!isTauri()) {
         throw new Error('Local SQLite is only available inside Tauri. Run `npm run tauri dev` for persistent database access.');
@@ -492,9 +503,11 @@ export async function initDb() {
 
     // Create performance indexes
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_barcode_active ON products(barcode, isActive)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_category ON products(categoryId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_active ON products(isActive)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updatedAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_tiles_page ON pos_tiles(pageId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_order_lines_order ON order_lines(orderId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(orderId)`);
@@ -519,11 +532,16 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu_active ON products(scalePlu, isActive)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_barcode ON products(barcode) WHERE barcode IS NOT NULL AND barcode <> ''`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_scale_plu ON products(scalePlu) WHERE scalePlu IS NOT NULL AND scalePlu <> ''`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_products_sku ON products(sku) WHERE sku IS NOT NULL AND sku <> ''`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_group_product ON promo_group_items(groupId, productId)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(registerId) WHERE status = 'open'`);
+
+    for (const table of UPDATED_AT_INDEX_TABLES) {
+        await d.execute(`CREATE INDEX IF NOT EXISTS idx_${table}_updated_at ON ${table}(updatedAt)`);
+    }
 
     console.log("Database initialized successfully!");
 }
@@ -972,8 +990,10 @@ export async function searchProduct(query: string) {
     if (!q) return null;
 
     // Main POS scanner lookup: only a 100% barcode match should add an item.
+    // This intentionally does not require showInPos; a cashier can scan a
+    // valid active product even when it is not pinned to a POS tile.
     const rows: any[] = await d.select(
-        'SELECT * FROM products WHERE isActive = 1 AND showInPos = 1 AND barcode = ? LIMIT 1',
+        'SELECT * FROM products WHERE barcode = ? AND isActive = 1 LIMIT 1',
         [q],
     );
     return rows[0] || null;
@@ -982,10 +1002,85 @@ export async function searchProduct(query: string) {
 export async function searchProductByScalePlu(scalePlu: string) {
     const d = await getDb();
     const rows: any[] = await d.select(
-        'SELECT * FROM products WHERE scalePlu = ? AND isActive = 1 AND showInPos = 1 LIMIT 1',
+        'SELECT * FROM products WHERE scalePlu = ? AND isActive = 1 LIMIT 1',
         [scalePlu],
     );
     return rows[0] || null;
+}
+
+function parseScaleProductIds(settings: any[]): string[] {
+    const ids = new Set<string>();
+    const pagesValue = settings.find((setting) => setting.key === 'scale_tile_pages')?.value;
+    const legacyValue = settings.find((setting) => setting.key === 'scale_tile_product_ids')?.value;
+
+    try {
+        const pages = pagesValue ? JSON.parse(pagesValue) : [];
+        if (Array.isArray(pages)) {
+            for (const page of pages) {
+                const productIds = Array.isArray(page?.productIds) ? page.productIds : [];
+                for (const id of productIds) {
+                    if (typeof id === 'string' && id.trim()) ids.add(id);
+                }
+            }
+        }
+    } catch {
+        // Ignore malformed settings; the scale modal can still use tile products.
+    }
+
+    try {
+        const legacyIds = legacyValue ? JSON.parse(legacyValue) : [];
+        if (Array.isArray(legacyIds)) {
+            for (const id of legacyIds) {
+                if (typeof id === 'string' && id.trim()) ids.add(id);
+            }
+        }
+    } catch {
+        // Ignore malformed legacy scale settings.
+    }
+
+    return [...ids];
+}
+
+export async function getProductsByIds(ids: string[]): Promise<any[]> {
+    const uniqueIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return [];
+    const d = await getDb();
+    const rows: any[] = [];
+    for (let i = 0; i < uniqueIds.length; i += 500) {
+        const chunk = uniqueIds.slice(i, i + 500);
+        const placeholders = chunk.map(() => '?').join(', ');
+        const chunkRows = await d.select(
+            `SELECT * FROM products WHERE id IN (${placeholders}) AND isActive = 1`,
+            chunk,
+        ) as any[];
+        rows.push(...chunkRows);
+    }
+    return rows;
+}
+
+export async function getPosScreenProducts(): Promise<any[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(`
+        SELECT DISTINCT p.*
+        FROM products p
+        WHERE p.isActive = 1
+          AND (
+            p.showInGoods = 1
+            OR EXISTS (
+                SELECT 1 FROM pos_tiles t
+                WHERE t.productId = p.id
+            )
+          )
+        ORDER BY p.name
+    `);
+
+    const settings: any[] = await d.select(
+        `SELECT key, value FROM settings WHERE key IN ('scale_tile_pages', 'scale_tile_product_ids')`,
+    );
+    const seenIds = new Set(rows.map((row) => row.id));
+    const scaleIds = parseScaleProductIds(settings).filter((id) => !seenIds.has(id));
+    const scaleRows = await getProductsByIds(scaleIds);
+    return [...rows, ...scaleRows.filter((row) => !seenIds.has(row.id))];
 }
 
 export async function assertProductIdentifiersUnique(product: any): Promise<void> {

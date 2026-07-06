@@ -491,6 +491,37 @@
         return String(value || "").trim();
     }
 
+    function asBoolean(value: unknown, fallback = false) {
+        if (value === undefined || value === null || value === "") return fallback;
+        if (typeof value === "boolean") return value;
+        if (typeof value === "number") return value !== 0;
+        return String(value).toLowerCase() === "true" || value === "1";
+    }
+
+    function normalizeProductForCache(product: any): Product {
+        return {
+            ...product,
+            trackStock: asBoolean(product.trackStock),
+            allowPriceOverride: asBoolean(product.allowPriceOverride),
+            isWeighable: asBoolean(product.isWeighable),
+            showInGoods: asBoolean(product.showInGoods),
+            showInPos: asBoolean(product.showInPos, true),
+            isActive: asBoolean(product.isActive, true),
+        } as Product;
+    }
+
+    function rememberProductInPosCache(product: any) {
+        if (!product?.id) return;
+        const normalized = normalizeProductForCache(product);
+        productsDB.update((items) => {
+            const index = items.findIndex((item) => item.id === normalized.id);
+            if (index === -1) return [...items, normalized];
+            const next = items.slice();
+            next[index] = { ...items[index], ...normalized };
+            return next;
+        });
+    }
+
     $: totalPages = Math.max(
         1,
         Math.ceil(
@@ -1162,14 +1193,16 @@
             const found = productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
 
             if (found) {
-                if (found.isWeighable) {
-                    openScaleForProduct(found.id);
+                const product = normalizeProductForCache({ ...found, showInPos: true });
+                rememberProductInPosCache(product);
+                if (product.isWeighable) {
+                    openScaleForProduct(product.id);
                     return;
                 }
                 addToCart({
-                    id: found.id,
-                    name: found.name,
-                    price: found.price,
+                    id: product.id,
+                    name: product.name,
+                    price: product.price,
                 });
                 return;
             }
@@ -1181,21 +1214,23 @@
                     playErrorSound();
                     return;
                 }
+                const product = normalizeProductForCache({ ...scaleProduct, showInPos: true });
+                rememberProductInPosCache(product);
                 if (parsed.rule.valueType === "weight") {
-                    const linePrice = Math.round(scaleProduct.price * parsed.value);
+                    const linePrice = Math.round(product.price * parsed.value);
                     if (linePrice <= 0) {
                         toast("Weight barcode contains an invalid weight", "error");
                         playErrorSound();
                         return;
                     }
                     addToCart({
-                        id: scaleProduct.id,
-                        name: scaleProduct.name,
+                        id: product.id,
+                        name: product.name,
                         price: linePrice,
-                        originalPrice: scaleProduct.price,
+                        originalPrice: product.price,
                         isPriceOverride: true,
                         sourceBarcode: parsed.rawBarcode,
-                        note: `Scale weight barcode: ${Math.round(parsed.value * 1000)} g at ${formatMoney(scaleProduct.price)}/kg`,
+                        note: `Scale weight barcode: ${Math.round(parsed.value * 1000)} g at ${formatMoney(product.price)}/kg`,
                         forceSeparateLine: true,
                         quantityLocked: true,
                         skipStockAdjustment: true,
@@ -1203,10 +1238,10 @@
                     return;
                 }
                 addToCart({
-                    id: scaleProduct.id,
-                    name: scaleProduct.name,
+                    id: product.id,
+                    name: product.name,
                     price: Math.round(parsed.value * 100),
-                    originalPrice: scaleProduct.price,
+                    originalPrice: product.price,
                     isPriceOverride: true,
                     sourceBarcode: parsed.rawBarcode,
                     note: `Scale price barcode: ${parsed.rawBarcode}`,
