@@ -52,7 +52,7 @@
         'shifts',
         'cash_movements',
     ];
-    const LIGHT_STORE_ROUTES = ['/', '/orders', '/customer-display'];
+    const LIGHT_STORE_ROUTES = ['/', '/orders', '/items', '/customer-display'];
     let fullStoresHydrated = false;
 
     primeSoundEngine();

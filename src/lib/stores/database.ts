@@ -23,7 +23,7 @@ import { currentEmployee } from './session';
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
-const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/customer-display']);
+const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/items', '/customer-display']);
 const LIGHT_ROUTE_TABLES = new Set([
     'categories',
     'products',
@@ -2088,7 +2088,7 @@ export async function getTileProducts(): Promise<any[]> {
     return sqlite.getTileProducts();
 }
 
-const PRODUCT_BOOL_KEYS = ['isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'];
+const PRODUCT_BOOL_KEYS = ['isActive', 'isWeighable', 'showInGoods', 'trackStock'];
 
 function hydrateProducts(rows: any[]): any[] {
     return rows.map((row) => sqlite.rehydrateBooleans(row, PRODUCT_BOOL_KEYS));
@@ -2221,8 +2221,7 @@ export async function updateProductFields(
 
 async function prepareProductGoodsMenuWrite(product: any): Promise<any> {
     if (!Object.prototype.hasOwnProperty.call(product, 'showInGoods')) return product;
-    if (!product.showInGoods || product.isActive === false || product.isActive === 0
-        || product.showInPos === false || product.showInPos === 0) {
+    if (!product.showInGoods || product.isActive === false || product.isActive === 0) {
         return { ...product, showInGoods: false, goodsSortOrder: 0 };
     }
     const d = await sqlite.getDb();
@@ -3672,7 +3671,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
         posPagesDB.set(pages);
         tilesDB.set(tiles);
         productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
-            'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
+            'isActive', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
         taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
         employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
@@ -3714,7 +3713,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             ? await sqlite.getPosScreenProducts()
             : await sqlite.getAll('products');
         productsDB.set(rows.map(p => sqlite.rehydrateBooleans(p, [
-            'isActive', 'isWeighable', 'showInGoods', 'showInPos', 'trackStock'
+            'isActive', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
     }
     if (shouldHydrate('tax_rates')) {

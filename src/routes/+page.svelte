@@ -475,12 +475,12 @@
     $: productById = new Map($productsDB.map((product) => [product.id, product]));
     $: productByBarcode = new Map(
         $activeProducts
-            .filter((product) => product.showInPos !== false && product.barcode?.trim())
+            .filter((product) => product.barcode?.trim())
             .map((product) => [normalizeLookupCode(product.barcode), product]),
     );
     $: scaleProductByPlu = new Map(
         $activeProducts
-            .filter((product) => product.showInPos !== false && product.scalePlu?.trim())
+            .filter((product) => product.scalePlu?.trim())
             .map((product) => [normalizeLookupCode(product.scalePlu || ""), product]),
     );
     $: activeProductIds = new Set($activeProducts.map((product) => product.id));
@@ -505,7 +505,6 @@
             allowPriceOverride: asBoolean(product.allowPriceOverride),
             isWeighable: asBoolean(product.isWeighable),
             showInGoods: asBoolean(product.showInGoods),
-            showInPos: asBoolean(product.showInPos, true),
             isActive: asBoolean(product.isActive, true),
         } as Product;
     }
@@ -1193,7 +1192,7 @@
             const found = productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
 
             if (found) {
-                const product = normalizeProductForCache({ ...found, showInPos: true });
+                const product = normalizeProductForCache(found);
                 rememberProductInPosCache(product);
                 if (product.isWeighable) {
                     openScaleForProduct(product.id);
@@ -1214,7 +1213,7 @@
                     playErrorSound();
                     return;
                 }
-                const product = normalizeProductForCache({ ...scaleProduct, showInPos: true });
+                const product = normalizeProductForCache(scaleProduct);
                 rememberProductInPosCache(product);
                 if (parsed.rule.valueType === "weight") {
                     const linePrice = Math.round(product.price * parsed.value);

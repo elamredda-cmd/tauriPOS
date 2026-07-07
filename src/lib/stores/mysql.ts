@@ -142,7 +142,6 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             isWeighable INT DEFAULT 0,
             showInGoods INT DEFAULT 0,
             goodsSortOrder INT DEFAULT 0,
-            showInPos INT DEFAULT 1,
             color TEXT,
             image MEDIUMTEXT,
             isActive INT DEFAULT 1,
@@ -613,7 +612,6 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS image MEDIUMTEXT`,
         `ALTER TABLE products MODIFY COLUMN image MEDIUMTEXT`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS isWeighable INT DEFAULT 0`,
-        `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInPos INT DEFAULT 1`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS showInGoods INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS goodsSortOrder INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS costPrice INT DEFAULT 0`,
@@ -626,6 +624,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products MODIFY COLUMN barcode VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN scalePlu VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN sku VARCHAR(255) NULL`,
+        `ALTER TABLE products DROP COLUMN IF EXISTS showInPos`,
 
         // Settings keys grew as more device/receipt/printer options were added.
         // 191 keeps the primary key safe on older utf8mb4 InnoDB limits.
@@ -1056,8 +1055,8 @@ async function mysqlInsertProductSnapshot(product: any): Promise<void> {
     await d.execute(
         `INSERT INTO products (
             id, name, price, costPrice, stockLevel, trackStock,
-            isActive, showInPos, createdAt, updatedAt
-        ) VALUES (?, ?, ?, ?, 0, 0, 1, 1, ${stamp}, ${stamp})
+            isActive, createdAt, updatedAt
+        ) VALUES (?, ?, ?, ?, 0, 0, 1, ${stamp}, ${stamp})
         ON DUPLICATE KEY UPDATE id = id`,
         [
             product.id,

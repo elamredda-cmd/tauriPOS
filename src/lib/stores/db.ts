@@ -118,7 +118,6 @@ export interface Product {
     isWeighable: boolean;
     showInGoods: boolean;
     goodsSortOrder: number;
-    showInPos?: boolean;
     color: string;
     image: string;
     isActive: boolean;
@@ -547,7 +546,7 @@ export const posPagesDB = writable<PosPage[]>(seedPosPages);
 
 /** Active products only */
 export const activeProducts = derived(productsDB, ($p) =>
-    $p.filter(p => p.isActive && p.showInPos !== false)
+    $p.filter(p => p.isActive)
 );
 
 /** Active categories sorted by sortOrder */

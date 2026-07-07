@@ -24,6 +24,7 @@
         upsert,
         validateDatabaseSchemas,
         wipeAndPullFromServer,
+        type DatabaseRestoreResult,
         type SyncConflict,
     } from '$lib/stores/database';
 
@@ -94,6 +95,47 @@
         } catch {
             // If session storage is unavailable, the on-screen status still shows the message.
         }
+    }
+
+    function completeRestore(result: DatabaseRestoreResult, clearConfirmation: () => void) {
+        const isMultiMode = get(connectionState).mode === 'multi';
+        const safetyDetail = `Safety backup: ${result.safetyBackup || 'not needed'}.`;
+
+        if (result.restartRequired) {
+            const detail = isMultiMode
+                ? `The operating system is still using the current database. Close and reopen the app, then finish the MariaDB restore from Setup. ${safetyDetail}`
+                : `The operating system is still using the current database. Close and reopen the app to finish the restore. ${safetyDetail}`;
+            const message = isMultiMode
+                ? 'Local database restore is ready. Reopen the app, then finish MariaDB restore from Setup.'
+                : 'Local database restore is ready. Close and reopen the app to finish it.';
+
+            setRestoreProgress('success', 100, 'Restore ready to finish', detail);
+            saveRestoreNotice('success', message, safetyDetail);
+            busy = false;
+            clearConfirmation();
+            return;
+        }
+
+        const detail = isMultiMode
+            ? `Restored ${result.restoredFrom}. ${safetyDetail} Opening Setup...`
+            : `Restored ${result.restoredFrom}. ${safetyDetail} Reloading...`;
+        const message = isMultiMode
+            ? 'Local database restored. Finish MariaDB restore from Setup before using the POS.'
+            : 'Local database restored. Reloading the app.';
+
+        setRestoreProgress('success', 100, 'Restore completed', detail);
+        saveRestoreNotice(
+            'success',
+            message,
+            `Restored from: ${result.restoredFrom}. ${safetyDetail}`
+        );
+        setTimeout(() => {
+            if (isMultiMode) {
+                window.location.assign('/setup');
+            } else {
+                window.location.reload();
+            }
+        }, 700);
     }
 
     onMount(async () => {
@@ -259,34 +301,7 @@
             setRestoreProgress('running', 20, 'Checking backup', latest);
             setRestoreProgress('running', 55, 'Creating safety backup and replacing database', 'Do not close the app while this is running.');
             const result = await restoreLatestLocalBackup();
-            if (result.restartRequired) {
-                setRestoreProgress(
-                    'success',
-                    100,
-                    'Restore ready to finish',
-                    `Windows is still using the current database. Close and reopen the app, then finish the MariaDB restore from Setup. Safety backup: ${result.safetyBackup || 'not needed'}.`
-                );
-                saveRestoreNotice(
-                    'success',
-                    'Local database restore is ready. Reopen the app, then finish MariaDB restore from Setup.',
-                    `Safety backup: ${result.safetyBackup || 'not needed'}.`
-                );
-                busy = false;
-                restoreConfirmed = false;
-                return;
-            }
-            setRestoreProgress(
-                'success',
-                100,
-                'Restore completed',
-                `Restored ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}. Reloading...`
-            );
-            saveRestoreNotice(
-                'success',
-                'Local database restored. Finish MariaDB restore from Setup before using the POS.',
-                `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
-            );
-            setTimeout(() => window.location.assign('/setup'), 700);
+            completeRestore(result, () => restoreConfirmed = false);
         } catch (error) {
             stopRestoreWithError(cleanError(error));
             busy = false;
@@ -316,34 +331,7 @@
             setRestoreProgress('running', 20, 'Checking selected database', path);
             setRestoreProgress('running', 55, 'Creating safety backup and replacing database', 'Do not close the app while this is running.');
             const result = await restoreLocalDatabaseFromPath(path);
-            if (result.restartRequired) {
-                setRestoreProgress(
-                    'success',
-                    100,
-                    'Restore ready to finish',
-                    `Windows is still using the current database. Close and reopen the app, then finish the MariaDB restore from Setup. Safety backup: ${result.safetyBackup || 'not needed'}.`
-                );
-                saveRestoreNotice(
-                    'success',
-                    'Local database restore is ready. Reopen the app, then finish MariaDB restore from Setup.',
-                    `Safety backup: ${result.safetyBackup || 'not needed'}.`
-                );
-                busy = false;
-                restoreFileConfirmed = false;
-                return;
-            }
-            setRestoreProgress(
-                'success',
-                100,
-                'Restore completed',
-                `Restored ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}. Reloading...`
-            );
-            saveRestoreNotice(
-                'success',
-                'Local database restored. Finish MariaDB restore from Setup before using the POS.',
-                `Restored from: ${result.restoredFrom}. Safety backup: ${result.safetyBackup || 'not needed'}.`
-            );
-            setTimeout(() => window.location.assign('/setup'), 700);
+            completeRestore(result, () => restoreFileConfirmed = false);
         } catch (error) {
             stopRestoreWithError(cleanError(error));
             busy = false;

@@ -60,7 +60,6 @@ export async function initDb() {
             isWeighable INTEGER DEFAULT 0,
             showInGoods INTEGER DEFAULT 0,
             goodsSortOrder INTEGER DEFAULT 0,
-            showInPos INTEGER DEFAULT 1,
             color TEXT,
             image TEXT,
             isActive INTEGER DEFAULT 1,
@@ -507,6 +506,9 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_category ON products(categoryId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_active ON products(isActive)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_active_name_nocase ON products(isActive, name COLLATE NOCASE, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_category_active_name_nocase ON products(categoryId, isActive, name COLLATE NOCASE, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_goods_active_name_nocase ON products(showInGoods, isActive, name COLLATE NOCASE, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updatedAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_tiles_page ON pos_tiles(pageId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_order_lines_order ON order_lines(orderId)`);
@@ -558,6 +560,15 @@ async function addColumnIfMissing(table: string, column: string, definition: str
     // Bust the column cache so subsequent upserts see the new column.
     delete tableColumnsCache[table];
     console.log(`Migration: added ${table}.${column}`);
+}
+
+async function dropColumnIfExists(table: string, column: string) {
+    const d = await getDb();
+    const rows: any[] = await d.select(`PRAGMA table_info(${table})`);
+    if (!rows.some(r => r.name === column)) return;
+    await d.execute(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    delete tableColumnsCache[table];
+    console.log(`Migration: dropped ${table}.${column}`);
 }
 
 /**
@@ -623,7 +634,6 @@ async function runMigrations() {
     await addColumnIfMissing('products', 'color', 'TEXT');
     await addColumnIfMissing('products', 'image', 'TEXT');
     await addColumnIfMissing('products', 'isWeighable', 'INTEGER DEFAULT 0');
-    await addColumnIfMissing('products', 'showInPos', 'INTEGER DEFAULT 1');
     await addColumnIfMissing('products', 'showInGoods', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'goodsSortOrder', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'costPrice', 'INTEGER DEFAULT 0');
@@ -631,6 +641,7 @@ async function runMigrations() {
     await addColumnIfMissing('products', 'trackStock', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'allowPriceOverride', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'updatedAt', 'TEXT');
+    await dropColumnIfExists('products', 'showInPos');
     await addColumnIfMissing('employees', 'pinHash', 'TEXT');
 
     // Till cash-up and card reconciliation fields.
@@ -990,8 +1001,8 @@ export async function searchProduct(query: string) {
     if (!q) return null;
 
     // Main POS scanner lookup: only a 100% barcode match should add an item.
-    // This intentionally does not require showInPos; a cashier can scan a
-    // valid active product even when it is not pinned to a POS tile.
+    // A cashier can scan any valid active product, even when it is not pinned
+    // to a POS tile.
     const rows: any[] = await d.select(
         'SELECT * FROM products WHERE barcode = ? AND isActive = 1 LIMIT 1',
         [q],
@@ -1209,7 +1220,7 @@ export async function getUnavailableProductTileIds(): Promise<string[]> {
         `SELECT tile.id
          FROM pos_tiles tile
          JOIN products product ON product.id = tile.productId
-         WHERE product.isActive = 0 OR product.showInPos = 0`,
+         WHERE product.isActive = 0`,
     );
     return rows.map((row) => row.id);
 }
@@ -1292,10 +1303,11 @@ export interface ProductPageResult {
     total: number;
 }
 
-function buildProductPageWhere(options: ProductPageOptions): { whereSql: string; params: any[] } {
+function buildProductPageWhere(options: ProductPageOptions): { whereSql: string; params: any[]; needsCategoryJoin: boolean } {
     const where: string[] = [];
     const params: any[] = [];
     const status = options.status || 'active';
+    let needsCategoryJoin = false;
 
     if (status === 'active') {
         where.push('p.isActive = 1');
@@ -1310,6 +1322,7 @@ function buildProductPageWhere(options: ProductPageOptions): { whereSql: string;
 
     const search = String(options.query || '').trim().toLowerCase();
     if (search) {
+        needsCategoryJoin = true;
         where.push(`(
             LOWER(COALESCE(p.name, '')) LIKE ?
             OR LOWER(COALESCE(p.sku, '')) LIKE ?
@@ -1324,6 +1337,7 @@ function buildProductPageWhere(options: ProductPageOptions): { whereSql: string;
     return {
         whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
         params,
+        needsCategoryJoin,
     };
 }
 
@@ -1332,21 +1346,22 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     const d = await getDb();
     const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
     const offset = Math.max(0, Number(options.offset || 0));
-    const { whereSql, params } = buildProductPageWhere(options);
+    const { whereSql, params, needsCategoryJoin } = buildProductPageWhere(options);
+    const categoryJoin = needsCategoryJoin ? 'LEFT JOIN categories c ON c.id = p.categoryId' : '';
 
     const rows: any[] = await d.select(
         `SELECT p.*
          FROM products p
-         LEFT JOIN categories c ON c.id = p.categoryId
+         ${categoryJoin}
          ${whereSql}
-         ORDER BY LOWER(COALESCE(p.name, '')) ASC, p.id ASC
+         ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
          LIMIT ? OFFSET ?`,
         [...params, limit, offset],
     );
     const countRows: any[] = await d.select(
         `SELECT COUNT(*) AS count
          FROM products p
-         LEFT JOIN categories c ON c.id = p.categoryId
+         ${categoryJoin}
          ${whereSql}`,
         params,
     );
@@ -1696,7 +1711,6 @@ export async function getGoodsMenuCount(): Promise<number> {
         `SELECT COUNT(*) AS count
          FROM products
          WHERE isActive = 1
-           AND (showInPos IS NULL OR showInPos = 1)
            AND showInGoods = 1`,
     );
     return Number(rows[0]?.count || 0);
@@ -1728,14 +1742,12 @@ export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promi
         `SELECT p.*
          FROM products p
          WHERE p.isActive = 1
-           AND (p.showInPos IS NULL OR p.showInPos = 1)
            AND p.showInGoods = 1
-         ORDER BY COALESCE(NULLIF(p.goodsSortOrder, 0), 999999), LOWER(COALESCE(p.name, '')) ASC`,
+         ORDER BY COALESCE(NULLIF(p.goodsSortOrder, 0), 999999), p.name COLLATE NOCASE ASC`,
     );
 
     const availableWhere = `
         p.isActive = 1
-        AND (p.showInPos IS NULL OR p.showInPos = 1)
         AND (p.showInGoods IS NULL OR p.showInGoods = 0)
         ${searchSql}
     `;
@@ -1744,7 +1756,7 @@ export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promi
          FROM products p
          LEFT JOIN categories c ON c.id = p.categoryId
          WHERE ${availableWhere}
-         ORDER BY LOWER(COALESCE(p.name, '')) ASC, p.id ASC
+         ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
          LIMIT ?`,
         [...searchParams, safeLimit],
     );

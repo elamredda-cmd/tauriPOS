@@ -18,7 +18,6 @@
         addProduct,
         updateProductFields,
         setStockLevel,
-        removeProductTiles,
         deleteProduct,
         batchUpdateGoodsMenu,
         findNextAvailableScalePlu,
@@ -188,7 +187,6 @@
             allowPriceOverride: false,
             showInGoods: false,
             goodsSortOrder: 0,
-            showInPos: true,
             isWeighable: false,
             color: "#3b82f6",
             image: "",
@@ -335,7 +333,6 @@
             return;
         }
         const wasInGoods = originalItem?.showInGoods ?? false;
-        if (currentItem.showInPos === false) currentItem.showInGoods = false;
         if (currentItem.showInGoods && !wasInGoods && goodsMenuCount >= 10) {
             toast("Goods Menu already contains the maximum 10 items", "error");
             return;
@@ -359,10 +356,6 @@
                 await updateProductFields(productPatch, expectedProduct);
                 if (desiredStock !== originalItem?.stockLevel && currentItem.id) {
                     await setStockLevel(currentItem.id, desiredStock, originalItem?.stockLevel ?? desiredStock);
-                }
-                if (originalItem?.showInPos !== false && currentItem.showInPos === false && currentItem.id) {
-                    await removeProductTiles(currentItem.id);
-                    tilesDB.update((tiles) => tiles.filter((tile) => tile.productId !== currentItem.id));
                 }
                 productsDB.update((items) => items.map((item) =>
                     item.id === currentItem.id
@@ -886,7 +879,6 @@
                     </div>
                 {/if}
                 <div class="field"><TouchToggle bind:checked={currentItem.showInGoods} label="Show in Goods Menu" /></div>
-                <div class="field"><TouchToggle bind:checked={currentItem.showInPos} label="Show on POS" /></div>
                 <div class="field"><TouchToggle bind:checked={currentItem.allowPriceOverride} label="Allow Cashier Price Override" /></div>
                 <div class="field"><TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" /></div>
             </div>

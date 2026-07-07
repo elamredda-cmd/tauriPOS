@@ -318,7 +318,7 @@
     }
 
     function isPromotionEligible(productId: string): boolean {
-        return $productsDB.some(p => p.id === productId && p.isActive && p.showInPos !== false);
+        return $productsDB.some(p => p.id === productId && p.isActive);
     }
 
     function productMatchesSearch(product: Product, rawQuery: string): boolean {
@@ -330,7 +330,7 @@
 
     $: filteredTemporaryProducts = (() => {
         const q = temporaryProductSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
+        const all = $productsDB.filter(p => p.isActive);
         if (!q) return all.slice(0, 200);
         return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();
@@ -664,7 +664,7 @@
 
     $: filteredProducts = (() => {
         const q = productSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
+        const all = $productsDB.filter(p => p.isActive);
         if (!q) return all.slice(0, 200);
         return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();
@@ -685,7 +685,7 @@
 
     $: filteredBogoProducts = (() => {
         const q = bogoProductSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive && p.showInPos !== false);
+        const all = $productsDB.filter(p => p.isActive);
         if (!q) return all.slice(0, 200);
         return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
     })();

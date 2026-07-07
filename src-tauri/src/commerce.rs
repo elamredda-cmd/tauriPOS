@@ -1154,15 +1154,29 @@ async fn restore_preserved_local_setup(target: &PathBuf, preserve_from: Option<&
     .await
     .map_err(|e| format!("Could not clear old sync markers after restore: {e}"))?;
 
-    sqlx::query(
-        "INSERT INTO settings (key, value, updatedAt)
-         VALUES ('restore_pending_mariadb_replace', '1', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt",
+    let restored_mode: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM settings WHERE key = 'pos_mode' LIMIT 1",
     )
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(&pool)
+    .fetch_optional(&pool)
     .await
-    .map_err(|e| format!("Could not mark restore for MariaDB replacement: {e}"))?;
+    .map_err(|e| format!("Could not read restored POS mode: {e}"))?;
+
+    if restored_mode.as_deref() == Some("multi") {
+        sqlx::query(
+            "INSERT INTO settings (key, value, updatedAt)
+             VALUES ('restore_pending_mariadb_replace', '1', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Could not mark restore for MariaDB replacement: {e}"))?;
+    } else {
+        sqlx::query("DELETE FROM settings WHERE key = 'restore_pending_mariadb_replace'")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Could not clear MariaDB restore marker: {e}"))?;
+    }
 
     let _ = sqlx::query("DETACH DATABASE preserved").execute(&pool).await;
     pool.close().await;
