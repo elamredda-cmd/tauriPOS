@@ -3,6 +3,7 @@ import { isTauri } from '@tauri-apps/api/core';
 import { localDatabaseName } from './profile';
 
 let db: Database | null = null;
+let productSearchIndexReady = false;
 
 const UPDATED_AT_INDEX_TABLES = [
     'products', 'categories', 'pos_pages', 'pos_tiles',
@@ -511,6 +512,7 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_goods_active_name_nocase ON products(showInGoods, isActive, name COLLATE NOCASE, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updatedAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_tiles_page ON pos_tiles(pageId)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_tiles_product ON pos_tiles(productId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_order_lines_order ON order_lines(orderId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(orderId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_inv_logs_product ON inventory_logs(productId)`);
@@ -529,6 +531,7 @@ export async function initDb() {
     await runMigrations();
     await addColumnIfMissing('products', 'goodsSortOrder', 'INTEGER DEFAULT 0');
     await runDataMigrations();
+    await ensureProductSearchIndex();
 
     // Indexes on migration-added columns must run AFTER runMigrations().
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber)`);
@@ -546,6 +549,53 @@ export async function initDb() {
     }
 
     console.log("Database initialized successfully!");
+}
+
+async function ensureProductSearchIndex(): Promise<boolean> {
+    if (productSearchIndexReady) return true;
+    const d = await getDb();
+    try {
+        await d.execute(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS product_search_fts
+            USING fts5(id UNINDEXED, name, sku, barcode, scalePlu, tokenize = 'unicode61')
+        `);
+        await d.execute(`
+            CREATE TRIGGER IF NOT EXISTS products_search_ai AFTER INSERT ON products BEGIN
+                INSERT INTO product_search_fts(rowid, id, name, sku, barcode, scalePlu)
+                VALUES (new.rowid, new.id, new.name, new.sku, new.barcode, new.scalePlu);
+            END
+        `);
+        await d.execute(`
+            CREATE TRIGGER IF NOT EXISTS products_search_ad AFTER DELETE ON products BEGIN
+                DELETE FROM product_search_fts WHERE rowid = old.rowid;
+            END
+        `);
+        await d.execute(`
+            CREATE TRIGGER IF NOT EXISTS products_search_au AFTER UPDATE ON products BEGIN
+                DELETE FROM product_search_fts WHERE rowid = old.rowid;
+                INSERT INTO product_search_fts(rowid, id, name, sku, barcode, scalePlu)
+                VALUES (new.rowid, new.id, new.name, new.sku, new.barcode, new.scalePlu);
+            END
+        `);
+
+        const counts: any[] = await d.select(`
+            SELECT
+                (SELECT COUNT(*) FROM products) AS productCount,
+                (SELECT COUNT(*) FROM product_search_fts) AS searchCount
+        `);
+        if (Number(counts[0]?.productCount || 0) !== Number(counts[0]?.searchCount || 0)) {
+            await d.execute(`DELETE FROM product_search_fts`);
+            await d.execute(`
+                INSERT INTO product_search_fts(rowid, id, name, sku, barcode, scalePlu)
+                SELECT rowid, id, name, sku, barcode, scalePlu FROM products
+            `);
+        }
+        productSearchIndexReady = true;
+        return true;
+    } catch (error) {
+        console.warn('SQLite product search index is unavailable; falling back to prefix search:', error);
+        return false;
+    }
 }
 
 /**
@@ -1071,27 +1121,41 @@ export async function getProductsByIds(ids: string[]): Promise<any[]> {
 
 export async function getPosScreenProducts(): Promise<any[]> {
     const d = await getDb();
-    const rows: any[] = await d.select(`
-        SELECT DISTINCT p.*
-        FROM products p
-        WHERE p.isActive = 1
-          AND (
-            p.showInGoods = 1
-            OR EXISTS (
-                SELECT 1 FROM pos_tiles t
-                WHERE t.productId = p.id
-            )
-          )
-        ORDER BY p.name
-    `);
+    const [tileRows, goodsRows] = await Promise.all([
+        d.select(`
+            SELECT p.*
+            FROM pos_tiles t
+            CROSS JOIN products p ON p.id = t.productId
+            WHERE p.isActive = 1
+            ORDER BY t.pageId, t.position
+        `) as Promise<any[]>,
+        d.select(`
+            SELECT p.*
+            FROM products p
+            WHERE p.isActive = 1
+              AND p.showInGoods = 1
+            ORDER BY COALESCE(NULLIF(p.goodsSortOrder, 0), 999999), p.name COLLATE NOCASE ASC
+        `) as Promise<any[]>,
+    ]);
 
     const settings: any[] = await d.select(
         `SELECT key, value FROM settings WHERE key IN ('scale_tile_pages', 'scale_tile_product_ids')`,
     );
-    const seenIds = new Set(rows.map((row) => row.id));
+    const rows: any[] = [];
+    const seenIds = new Set<string>();
+    for (const row of [...tileRows, ...goodsRows]) {
+        if (!row?.id || seenIds.has(row.id)) continue;
+        seenIds.add(row.id);
+        rows.push(row);
+    }
     const scaleIds = parseScaleProductIds(settings).filter((id) => !seenIds.has(id));
     const scaleRows = await getProductsByIds(scaleIds);
-    return [...rows, ...scaleRows.filter((row) => !seenIds.has(row.id))];
+    for (const row of scaleRows) {
+        if (!row?.id || seenIds.has(row.id)) continue;
+        seenIds.add(row.id);
+        rows.push(row);
+    }
+    return rows;
 }
 
 export async function assertProductIdentifiersUnique(product: any): Promise<void> {
@@ -1303,11 +1367,21 @@ export interface ProductPageResult {
     total: number;
 }
 
-function buildProductPageWhere(options: ProductPageOptions): { whereSql: string; params: any[]; needsCategoryJoin: boolean } {
+function productSearchQuery(raw: string): string {
+    return String(raw || '')
+        .trim()
+        .split(/[^\p{L}\p{N}]+/u)
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+        .map((part) => `${part.replace(/"/g, '""')}*`)
+        .join(' AND ');
+}
+
+function buildProductPageWhere(options: ProductPageOptions, useSearchIndex: boolean): { whereSql: string; params: any[] } {
     const where: string[] = [];
     const params: any[] = [];
     const status = options.status || 'active';
-    let needsCategoryJoin = false;
 
     if (status === 'active') {
         where.push('p.isActive = 1');
@@ -1322,22 +1396,28 @@ function buildProductPageWhere(options: ProductPageOptions): { whereSql: string;
 
     const search = String(options.query || '').trim().toLowerCase();
     if (search) {
-        needsCategoryJoin = true;
-        where.push(`(
-            LOWER(COALESCE(p.name, '')) LIKE ?
-            OR LOWER(COALESCE(p.sku, '')) LIKE ?
-            OR LOWER(COALESCE(p.barcode, '')) LIKE ?
-            OR LOWER(COALESCE(p.scalePlu, '')) LIKE ?
-            OR LOWER(COALESCE(c.name, '')) LIKE ?
-        )`);
-        const like = `%${search}%`;
-        params.push(like, like, like, like, like);
+        const fts = productSearchQuery(search);
+        if (useSearchIndex && fts) {
+            where.push(`p.id IN (
+                SELECT id FROM product_search_fts
+                WHERE product_search_fts MATCH ?
+            )`);
+            params.push(fts);
+        } else {
+            where.push(`(
+                p.name LIKE ? COLLATE NOCASE
+                OR p.sku LIKE ? COLLATE NOCASE
+                OR p.barcode LIKE ?
+                OR p.scalePlu LIKE ?
+            )`);
+            const prefix = `${search}%`;
+            params.push(prefix, prefix, prefix, prefix);
+        }
     }
 
     return {
         whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
         params,
-        needsCategoryJoin,
     };
 }
 
@@ -1346,13 +1426,13 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     const d = await getDb();
     const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
     const offset = Math.max(0, Number(options.offset || 0));
-    const { whereSql, params, needsCategoryJoin } = buildProductPageWhere(options);
-    const categoryJoin = needsCategoryJoin ? 'LEFT JOIN categories c ON c.id = p.categoryId' : '';
+    const hasSearch = Boolean(String(options.query || '').trim());
+    const useSearchIndex = hasSearch ? await ensureProductSearchIndex() : false;
+    const { whereSql, params } = buildProductPageWhere(options, useSearchIndex);
 
     const rows: any[] = await d.select(
         `SELECT p.*
          FROM products p
-         ${categoryJoin}
          ${whereSql}
          ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
          LIMIT ? OFFSET ?`,
@@ -1361,7 +1441,6 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     const countRows: any[] = await d.select(
         `SELECT COUNT(*) AS count
          FROM products p
-         ${categoryJoin}
          ${whereSql}`,
         params,
     );
@@ -1727,16 +1806,26 @@ export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promi
     const d = await getDb();
     const safeLimit = Math.max(1, Math.min(150, Number(limit || 100)));
     const search = String(query || '').trim().toLowerCase();
-    const searchSql = search
-        ? `AND (
-            LOWER(COALESCE(p.name, '')) LIKE ?
-            OR LOWER(COALESCE(p.sku, '')) LIKE ?
-            OR LOWER(COALESCE(p.barcode, '')) LIKE ?
-            OR LOWER(COALESCE(p.scalePlu, '')) LIKE ?
-            OR LOWER(COALESCE(c.name, '')) LIKE ?
-        )`
-        : '';
-    const searchParams = search ? Array(5).fill(`%${search}%`) : [];
+    const useSearchIndex = search ? await ensureProductSearchIndex() : false;
+    const fts = search ? productSearchQuery(search) : '';
+    let searchSql = '';
+    let searchParams: any[] = [];
+    if (search && useSearchIndex && fts) {
+        searchSql = `AND p.id IN (
+            SELECT id FROM product_search_fts
+            WHERE product_search_fts MATCH ?
+        )`;
+        searchParams = [fts];
+    } else if (search) {
+        searchSql = `AND (
+            p.name LIKE ? COLLATE NOCASE
+            OR p.sku LIKE ? COLLATE NOCASE
+            OR p.barcode LIKE ?
+            OR p.scalePlu LIKE ?
+        )`;
+        const prefix = `${search}%`;
+        searchParams = [prefix, prefix, prefix, prefix];
+    }
 
     const selected: any[] = await d.select(
         `SELECT p.*
@@ -1754,7 +1843,6 @@ export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promi
     const available: any[] = await d.select(
         `SELECT p.*
          FROM products p
-         LEFT JOIN categories c ON c.id = p.categoryId
          WHERE ${availableWhere}
          ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
          LIMIT ?`,
@@ -1763,7 +1851,6 @@ export async function getGoodsMenuEditorProducts(query = '', limit = 100): Promi
     const countRows: any[] = await d.select(
         `SELECT COUNT(*) AS count
          FROM products p
-         LEFT JOIN categories c ON c.id = p.categoryId
          WHERE ${availableWhere}`,
         searchParams,
     );

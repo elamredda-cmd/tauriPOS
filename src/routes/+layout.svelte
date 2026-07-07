@@ -9,6 +9,7 @@
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
     import {
         ensureDatabaseIdentityForSync,
+        getLightRouteHydrationTables,
         hasRestorePendingMariaDbReplace,
         hydrateSvelteStores,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
@@ -35,23 +36,8 @@
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let restorePendingMariaDbReplace = false;
     let lightStoreHydrationRunning = false;
+    let lastLightHydrationPath = '';
     const SYNC_STARTUP_RETRY_MS = 30 * 1000;
-    const POS_STARTUP_TABLES = [
-        'categories',
-        'products',
-        'pos_pages',
-        'pos_tiles',
-        'tax_rates',
-        'employees',
-        'settings',
-        'customers',
-        'registers',
-        'discounts',
-        'promo_groups',
-        'promo_group_items',
-        'shifts',
-        'cash_movements',
-    ];
     const LIGHT_STORE_ROUTES = ['/', '/orders', '/items', '/customer-display'];
     let fullStoresHydrated = false;
 
@@ -132,11 +118,17 @@
         dbReady = true;
     }
 
-    async function hydrateLightStoresForTillRoute() {
+    function isLightStoreRoute(pathname: string) {
+        return LIGHT_STORE_ROUTES.includes(pathname);
+    }
+
+    async function hydrateLightStoresForTillRoute(pathname = window.location.pathname) {
         if (lightStoreHydrationRunning) return;
         lightStoreHydrationRunning = true;
         try {
-            await hydrateSvelteStores(POS_STARTUP_TABLES);
+            const tables = getLightRouteHydrationTables(pathname);
+            if (!tables.includes('products')) productsDB.set([]);
+            await hydrateSvelteStores(tables);
             fullStoresHydrated = false;
         } catch (error) {
             console.warn('POS: light store hydration failed after navigation:', error);
@@ -177,9 +169,16 @@
             // 3. Hydrate stores from the correct data source.
             // Always hydrate from local SQLite instantly first
             console.log("POS: Hydrating stores from SQLite…");
-            const lightStartup = LIGHT_STORE_ROUTES.includes(window.location.pathname);
-            await hydrateSvelteStores(lightStartup ? POS_STARTUP_TABLES : undefined);
-            fullStoresHydrated = !lightStartup;
+            const startupPath = window.location.pathname;
+            const lightStartup = isLightStoreRoute(startupPath);
+            if (lightStartup) {
+                lastLightHydrationPath = startupPath;
+                await hydrateLightStoresForTillRoute(startupPath);
+            } else {
+                await hydrateSvelteStores();
+                fullStoresHydrated = true;
+                lastLightHydrationPath = '';
+            }
 
             restorePendingMariaDbReplace = savedMode === 'multi'
                 && await hasRestorePendingMariaDbReplace();
@@ -274,9 +273,10 @@
         dbReady &&
         !fullStoresHydrated &&
         typeof window !== 'undefined' &&
-        !LIGHT_STORE_ROUTES.includes($page.url.pathname)
+        !isLightStoreRoute($page.url.pathname)
     ) {
         fullStoresHydrated = true;
+        lastLightHydrationPath = '';
         void hydrateSvelteStores().catch((error) => {
             fullStoresHydrated = false;
             console.warn('POS: full store hydration failed after navigation:', error);
@@ -285,11 +285,12 @@
 
     $: if (
         dbReady &&
-        fullStoresHydrated &&
         typeof window !== 'undefined' &&
-        LIGHT_STORE_ROUTES.includes($page.url.pathname)
+        isLightStoreRoute($page.url.pathname) &&
+        $page.url.pathname !== lastLightHydrationPath
     ) {
-        void hydrateLightStoresForTillRoute();
+        lastLightHydrationPath = $page.url.pathname;
+        void hydrateLightStoresForTillRoute($page.url.pathname);
     }
 </script>
 

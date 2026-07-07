@@ -24,7 +24,7 @@ const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items']
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set(['/', '/orders', '/items', '/customer-display']);
-const LIGHT_ROUTE_TABLES = new Set([
+const POS_LIGHT_ROUTE_TABLES = [
     'categories',
     'products',
     'pos_pages',
@@ -39,7 +39,22 @@ const LIGHT_ROUTE_TABLES = new Set([
     'promo_group_items',
     'shifts',
     'cash_movements',
-]);
+] as const;
+const ITEM_LIGHT_ROUTE_TABLES = [
+    'categories',
+    'tax_rates',
+    'employees',
+    'settings',
+] as const;
+const ORDERS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'registers',
+] as const;
+const CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
 const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
     'orders',
     'order_lines',
@@ -51,6 +66,13 @@ const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
 
 function isLightStoreRoute(): boolean {
     return typeof window !== 'undefined' && LIGHT_STORE_ROUTES.has(window.location.pathname);
+}
+
+export function getLightRouteHydrationTables(pathname = typeof window !== 'undefined' ? window.location.pathname : '/'): string[] {
+    if (pathname === '/items') return [...ITEM_LIGHT_ROUTE_TABLES];
+    if (pathname === '/orders') return [...ORDERS_LIGHT_ROUTE_TABLES];
+    if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
+    return [...POS_LIGHT_ROUTE_TABLES];
 }
 
 function resetRemoteConnections(): void {
@@ -3615,7 +3637,7 @@ import { hydrateTheme } from './theme';
 export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<void> {
     const lightRoute = isLightStoreRoute();
     let requested = tables ? new Set(tables) : null;
-    if (!requested && lightRoute) requested = new Set(LIGHT_ROUTE_TABLES);
+    if (!requested && lightRoute) requested = new Set(getLightRouteHydrationTables());
     if (requested && PROMOTION_SYNC_TABLES.some(table => requested.has(table))) {
         for (const table of PROMOTION_SYNC_TABLES) requested.add(table);
     }
