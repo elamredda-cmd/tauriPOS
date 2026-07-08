@@ -46,6 +46,7 @@
     let currentItem: Partial<Product> = {};
     let originalItem: Product | null = null;
     let searchQuery = "";
+    let appliedSearchQuery = "";
     let selectedCategoryId = "all";
     let selectedStatus: "active" | "deactivated" | "all" = "active";
     const ITEMS_PER_PAGE = 50;
@@ -81,7 +82,7 @@
 
     $: itemPageCount = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
     $: {
-        const filterKey = `${searchQuery}|${selectedCategoryId}|${selectedStatus}`;
+        const filterKey = `${appliedSearchQuery}|${selectedCategoryId}|${selectedStatus}`;
         if (filterKey !== previousFilterKey) {
             previousFilterKey = filterKey;
             itemPage = 0;
@@ -101,7 +102,7 @@
 
     onMount(() => {
         itemsMounted = true;
-        previousFilterKey = `${searchQuery}|${selectedCategoryId}|${selectedStatus}`;
+        previousFilterKey = `${appliedSearchQuery}|${selectedCategoryId}|${selectedStatus}`;
         previousPageKey = `${previousFilterKey}|${itemPage}`;
         void loadItemsPage();
         void refreshGoodsMenuCount();
@@ -112,11 +113,44 @@
         if (goodsMenuSearchTimer) clearTimeout(goodsMenuSearchTimer);
     });
 
-    function scheduleItemsLoad(delay = 140) {
+    function scheduleItemsLoad(delay = 0) {
         if (itemsSearchTimer) clearTimeout(itemsSearchTimer);
         itemsSearchTimer = setTimeout(() => {
             void loadItemsPage();
         }, delay);
+    }
+
+    function handleItemsSearchInput(event: Event) {
+        searchQuery = (event.currentTarget as HTMLInputElement).value;
+    }
+
+    function runItemsSearch() {
+        const nextQuery = searchQuery.trim();
+        if (nextQuery === appliedSearchQuery && itemPage === 0) {
+            scheduleItemsLoad();
+            return;
+        }
+        appliedSearchQuery = nextQuery;
+        itemPage = 0;
+        previousFilterKey = `${appliedSearchQuery}|${selectedCategoryId}|${selectedStatus}`;
+        previousPageKey = `${previousFilterKey}|${itemPage}`;
+        scheduleItemsLoad();
+    }
+
+    function clearItemsSearch() {
+        searchQuery = "";
+        if (!appliedSearchQuery && itemPage === 0) return;
+        appliedSearchQuery = "";
+        itemPage = 0;
+        previousFilterKey = `${appliedSearchQuery}|${selectedCategoryId}|${selectedStatus}`;
+        previousPageKey = `${previousFilterKey}|${itemPage}`;
+        scheduleItemsLoad();
+    }
+
+    function handleItemsSearchKeydown(event: KeyboardEvent) {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        runItemsSearch();
     }
 
     async function loadItemsPage() {
@@ -125,7 +159,7 @@
         itemsLoadError = "";
         try {
             const result = await getProductsPage({
-                query: searchQuery,
+                query: appliedSearchQuery,
                 categoryId: selectedCategoryId,
                 status: selectedStatus,
                 limit: ITEMS_PER_PAGE,
@@ -565,10 +599,14 @@
                     <input
                         class="search-input !pl-10 !pr-3"
                         type="text"
-                        bind:value={searchQuery}
+                        value={searchQuery}
+                        on:input={handleItemsSearchInput}
+                        on:keydown={handleItemsSearchKeydown}
                         placeholder="Search name, SKU, barcode, PLU..."
                     />
                 </div>
+                <button class="btn btn-secondary items-command-btn" on:click={runItemsSearch}>Find</button>
+                <button class="btn btn-secondary items-command-btn" disabled={!searchQuery && !appliedSearchQuery} on:click={clearItemsSearch}>Clear</button>
                 <div class="items-category-filter min-w-[200px]">
                     <CustomSelect
                         bind:value={selectedCategoryId}
@@ -588,8 +626,9 @@
             </div>
             <div class="items-header-actions flex items-center gap-3">
                 <button class="btn btn-primary items-command-btn" on:click={openAddModal}>+ Add Item</button>
-                <button class="btn btn-secondary items-command-btn" on:click={openGoodsMenu}>
-                    Goods Menu ({goodsMenuCount}/10)
+                <button class="btn btn-secondary items-command-btn goods-menu-command" on:click={openGoodsMenu}>
+                    <span>Goods Menu</span>
+                    <span class="goods-menu-count">({goodsMenuCount}/10)</span>
                 </button>
             </div>
         </div>
@@ -667,7 +706,7 @@
                                 Loading items...
                             {:else if itemsLoadError}
                                 {itemsLoadError}
-                            {:else if searchQuery || selectedCategoryId !== "all" || selectedStatus !== "active"}
+                            {:else if appliedSearchQuery || selectedCategoryId !== "all" || selectedStatus !== "active"}
                                 No items match your search filters.
                             {:else}
                                 No items found. Add your first item!
@@ -1015,7 +1054,7 @@
 
     .items-header-controls {
         display: grid;
-        grid-template-columns: minmax(190px, 1.28fr) repeat(4, minmax(135px, .93fr));
+        grid-template-columns: minmax(240px, 1.7fr) repeat(6, minmax(96px, .68fr));
         align-items: stretch;
         gap: 0.65rem;
     }
@@ -1060,10 +1099,37 @@
     .items-command-btn {
         padding: 0.65rem 1.1rem;
         font-weight: 900;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .items-header-actions .items-command-btn {
         justify-content: center;
+    }
+
+    .goods-menu-command {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0;
+        line-height: 1.05;
+        padding: 0.45rem 0.5rem;
+        text-align: center;
+        white-space: normal;
+    }
+
+    .goods-menu-command span {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .goods-menu-count {
+        font-size: 0.82em;
+        opacity: 0.85;
     }
 
     .items-pagination-nav {
@@ -1202,7 +1268,7 @@
 
         .items-header-controls {
             display: grid;
-            grid-template-columns: minmax(0, 1.28fr) repeat(4, minmax(0, .93fr));
+            grid-template-columns: minmax(0, 1.7fr) repeat(6, minmax(0, .68fr));
             align-items: stretch;
             gap: 0.6rem;
         }

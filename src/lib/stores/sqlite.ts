@@ -5,6 +5,7 @@ import { localDatabaseName } from './profile';
 let db: Database | null = null;
 let productSearchIndexReady = false;
 const PRODUCT_SEARCH_COUNT_CAP = 1000;
+const PRODUCT_CONTAINS_SEARCH_MIN_LENGTH = 3;
 
 const UPDATED_AT_INDEX_TABLES = [
     'products', 'categories', 'pos_pages', 'pos_tiles',
@@ -1424,6 +1425,39 @@ function buildProductPageWhere(options: ProductPageOptions): { whereSql: string;
     };
 }
 
+async function getProductsPageByContainsSearch(
+    options: ProductPageOptions,
+    limit: number,
+    offset: number,
+): Promise<ProductPageResult> {
+    const d = await getDb();
+    const { whereSql, params } = buildProductPageWhere(options);
+    const rows: any[] = await d.select(
+        `SELECT p.*
+         FROM products p
+         ${whereSql}
+         ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
+         LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count
+         FROM (
+            SELECT 1
+            FROM products p
+            ${whereSql}
+            LIMIT ?
+         )`,
+        [...params, PRODUCT_SEARCH_COUNT_CAP + 1],
+    );
+    const limitedCount = Number(countRows[0]?.count || 0);
+    return {
+        rows,
+        total: Math.min(limitedCount, PRODUCT_SEARCH_COUNT_CAP),
+        totalIsCapped: limitedCount > PRODUCT_SEARCH_COUNT_CAP,
+    };
+}
+
 /** Fetch one management page of products without loading the full catalogue. */
 export async function getProductsPage(options: ProductPageOptions = {}): Promise<ProductPageResult> {
     const d = await getDb();
@@ -1441,7 +1475,7 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
         const rows: any[] = await d.select(
             `SELECT p.*
              FROM product_search_fts f
-             JOIN products p ON p.rowid = f.rowid
+             JOIN products p ON p.id = f.id
              WHERE product_search_fts MATCH ?
              ${filterSql}
              LIMIT ? OFFSET ?`,
@@ -1452,7 +1486,7 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
              FROM (
                 SELECT 1
                 FROM product_search_fts f
-                JOIN products p ON p.rowid = f.rowid
+                JOIN products p ON p.id = f.id
                 WHERE product_search_fts MATCH ?
                 ${filterSql}
                 LIMIT ?
@@ -1460,6 +1494,9 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
             [...searchParams, PRODUCT_SEARCH_COUNT_CAP + 1],
         );
         const limitedCount = Number(countRows[0]?.count || 0);
+        if (limitedCount === 0 && search.length >= PRODUCT_CONTAINS_SEARCH_MIN_LENGTH) {
+            return getProductsPageByContainsSearch(options, limit, offset);
+        }
         return {
             rows,
             total: Math.min(limitedCount, PRODUCT_SEARCH_COUNT_CAP),
