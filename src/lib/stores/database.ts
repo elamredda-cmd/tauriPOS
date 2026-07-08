@@ -2121,6 +2121,7 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
     return {
         rows: hydrateProducts(result.rows),
         total: result.total,
+        totalIsCapped: result.totalIsCapped,
     };
 }
 

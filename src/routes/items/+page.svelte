@@ -1,8 +1,6 @@
 <script lang="ts">
     import { onDestroy, onMount } from "svelte";
     import {
-        productsDB,
-        tilesDB,
         categoriesDB,
         taxRatesDB,
         settingsDB,
@@ -56,6 +54,7 @@
     let previousPageKey = "";
     let pageItems: Product[] = [];
     let totalItems = 0;
+    let totalItemsCapped = false;
     let itemsLoading = false;
     let itemsLoadError = "";
     let itemsMounted = false;
@@ -65,6 +64,8 @@
     $: configuredPluLengths = [...new Set(getBarcodeRules($settingsDB)
         .filter((rule) => rule.enabled)
         .map((rule) => rule.productLength))].sort((a, b) => a - b);
+    $: categoryNameById = new Map($categoriesDB.map((category) => [category.id, category.name]));
+    $: taxNameById = new Map($taxRatesDB.map((taxRate) => [taxRate.id, taxRate.name]));
     $: itemCategoryOptions = [
         ...(!$categoriesDB.some(c => c.isActive && c.id === currentItem.categoryId) && currentItem.categoryId
             ? [{ label: `${getCategoryName(currentItem.categoryId)} (Inactive)`, value: currentItem.categoryId }]
@@ -133,6 +134,7 @@
             if (token !== itemsLoadToken) return;
             pageItems = result.rows as Product[];
             totalItems = result.total;
+            totalItemsCapped = Boolean(result.totalIsCapped);
             const lastPage = Math.max(0, Math.ceil(result.total / ITEMS_PER_PAGE) - 1);
             if (itemPage > lastPage) {
                 itemPage = lastPage;
@@ -163,7 +165,6 @@
             product.sku,
             product.barcode,
             product.scalePlu,
-            getCategoryName(product.categoryId),
         ].some((value) => String(value || "").toLowerCase().includes(q));
     }
 
@@ -357,14 +358,8 @@
                 if (desiredStock !== originalItem?.stockLevel && currentItem.id) {
                     await setStockLevel(currentItem.id, desiredStock, originalItem?.stockLevel ?? desiredStock);
                 }
-                productsDB.update((items) => items.map((item) =>
-                    item.id === currentItem.id
-                        ? { ...item, ...productPatch, stockLevel: desiredStock } as Product
-                        : item,
-                ));
             } else {
                 await addProduct(currentItem);
-                productsDB.update((items) => [...items, currentItem as Product]);
             }
             showModal = false;
             toast(isEditing ? "Item updated" : "Item added");
@@ -384,14 +379,6 @@
         const id = idToDelete;
         try {
             await deleteProduct(id);
-            productsDB.update((items) =>
-                items.map((i) =>
-                    i.id === id
-                        ? { ...i, isActive: false, showInGoods: false, goodsSortOrder: 0, updatedAt: now() }
-                        : i,
-                ),
-            );
-            tilesDB.update((tiles) => tiles.filter((tile) => tile.productId !== id));
             toast("Item deactivated", "info");
             showDelConfirm = false;
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
@@ -407,9 +394,6 @@
                 { id: item.id, isActive: true, updatedAt: stamp },
                 { isActive: item.isActive },
             );
-            productsDB.update((items) => items.map((existing) =>
-                existing.id === item.id ? { ...existing, isActive: true, updatedAt: stamp } : existing
-            ));
             toast(`${item.name} reactivated`, "success");
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
@@ -433,11 +417,15 @@
     }
 
     function getCategoryName(id: string): string {
-        return $categoriesDB.find((c) => c.id === id)?.name || "Unknown";
+        return categoryNameById.get(id) || "Unknown";
     }
 
     function getTaxName(id: string): string {
-        return $taxRatesDB.find((t) => t.id === id)?.name || "-";
+        return taxNameById.get(id) || "-";
+    }
+
+    function formatResultCount(count: number, capped = false): string {
+        return `${count.toLocaleString()}${capped ? "+" : ""}`;
     }
 
     async function openGoodsMenu() {
@@ -554,14 +542,6 @@
 
         try {
             await batchUpdateGoodsMenu(changes);
-            const changeMap = new Map(changes.map((c) => [c.id, c]));
-            productsDB.update((items) =>
-                items.map((i) => {
-                    const ch = changeMap.get(i.id);
-                    if (!ch) return i;
-                    return { ...i, showInGoods: ch.showInGoods, goodsSortOrder: ch.goodsSortOrder, updatedAt: ch.updatedAt };
-                }),
-            );
             showGoodsMenu = false;
             toast(`Goods Menu updated (${changes.length} items)`);
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
@@ -701,7 +681,7 @@
     {#if totalItems > 0}
         <div class="items-pagination flex items-center justify-between gap-3 pt-3 shrink-0">
             <span class="text-sm text-text-muted">
-                Showing {itemPage * ITEMS_PER_PAGE + 1}-{Math.min((itemPage + 1) * ITEMS_PER_PAGE, totalItems)} of {totalItems}
+                Showing {itemPage * ITEMS_PER_PAGE + 1}-{Math.min((itemPage + 1) * ITEMS_PER_PAGE, totalItems)} of {formatResultCount(totalItems, totalItemsCapped)}
             </span>
             <div class="items-pagination-nav flex items-center gap-2">
                 <button class="btn btn-secondary items-command-btn" disabled={itemPage === 0} on:click={() => (itemPage -= 1)}>Previous</button>

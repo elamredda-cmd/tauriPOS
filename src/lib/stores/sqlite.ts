@@ -4,6 +4,7 @@ import { localDatabaseName } from './profile';
 
 let db: Database | null = null;
 let productSearchIndexReady = false;
+const PRODUCT_SEARCH_COUNT_CAP = 1000;
 
 const UPDATED_AT_INDEX_TABLES = [
     'products', 'categories', 'pos_pages', 'pos_tiles',
@@ -1365,6 +1366,7 @@ export interface ProductPageOptions {
 export interface ProductPageResult {
     rows: any[];
     total: number;
+    totalIsCapped?: boolean;
 }
 
 function productSearchQuery(raw: string): string {
@@ -1378,7 +1380,7 @@ function productSearchQuery(raw: string): string {
         .join(' AND ');
 }
 
-function buildProductPageWhere(options: ProductPageOptions, useSearchIndex: boolean): { whereSql: string; params: any[] } {
+function buildProductFilterWhere(options: ProductPageOptions): { whereSql: string; params: any[] } {
     const where: string[] = [];
     const params: any[] = [];
     const status = options.status || 'active';
@@ -1394,25 +1396,26 @@ function buildProductPageWhere(options: ProductPageOptions, useSearchIndex: bool
         params.push(options.categoryId);
     }
 
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+function buildProductPageWhere(options: ProductPageOptions): { whereSql: string; params: any[] } {
+    const base = buildProductFilterWhere(options);
+    const where: string[] = base.whereSql ? [base.whereSql.replace(/^WHERE\s+/i, '')] : [];
+    const params: any[] = [...base.params];
     const search = String(options.query || '').trim().toLowerCase();
     if (search) {
-        const fts = productSearchQuery(search);
-        if (useSearchIndex && fts) {
-            where.push(`p.id IN (
-                SELECT id FROM product_search_fts
-                WHERE product_search_fts MATCH ?
-            )`);
-            params.push(fts);
-        } else {
-            where.push(`(
-                p.name LIKE ? COLLATE NOCASE
-                OR p.sku LIKE ? COLLATE NOCASE
-                OR p.barcode LIKE ?
-                OR p.scalePlu LIKE ?
-            )`);
-            const prefix = `${search}%`;
-            params.push(prefix, prefix, prefix, prefix);
-        }
+        where.push(`(
+            p.name LIKE ? COLLATE NOCASE
+            OR p.sku LIKE ? COLLATE NOCASE
+            OR p.barcode LIKE ?
+            OR p.scalePlu LIKE ?
+        )`);
+        const prefix = `${search}%`;
+        params.push(prefix, prefix, prefix, prefix);
     }
 
     return {
@@ -1428,7 +1431,43 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     const offset = Math.max(0, Number(options.offset || 0));
     const hasSearch = Boolean(String(options.query || '').trim());
     const useSearchIndex = hasSearch ? await ensureProductSearchIndex() : false;
-    const { whereSql, params } = buildProductPageWhere(options, useSearchIndex);
+    const search = String(options.query || '').trim().toLowerCase();
+    const fts = search ? productSearchQuery(search) : '';
+
+    if (useSearchIndex && fts) {
+        const filters = buildProductFilterWhere(options);
+        const filterSql = filters.whereSql ? `AND ${filters.whereSql.replace(/^WHERE\s+/i, '')}` : '';
+        const searchParams = [fts, ...filters.params];
+        const rows: any[] = await d.select(
+            `SELECT p.*
+             FROM product_search_fts f
+             JOIN products p ON p.rowid = f.rowid
+             WHERE product_search_fts MATCH ?
+             ${filterSql}
+             LIMIT ? OFFSET ?`,
+            [...searchParams, limit, offset],
+        );
+        const countRows: any[] = await d.select(
+            `SELECT COUNT(*) AS count
+             FROM (
+                SELECT 1
+                FROM product_search_fts f
+                JOIN products p ON p.rowid = f.rowid
+                WHERE product_search_fts MATCH ?
+                ${filterSql}
+                LIMIT ?
+             )`,
+            [...searchParams, PRODUCT_SEARCH_COUNT_CAP + 1],
+        );
+        const limitedCount = Number(countRows[0]?.count || 0);
+        return {
+            rows,
+            total: Math.min(limitedCount, PRODUCT_SEARCH_COUNT_CAP),
+            totalIsCapped: limitedCount > PRODUCT_SEARCH_COUNT_CAP,
+        };
+    }
+
+    const { whereSql, params } = buildProductPageWhere(options);
 
     const rows: any[] = await d.select(
         `SELECT p.*
