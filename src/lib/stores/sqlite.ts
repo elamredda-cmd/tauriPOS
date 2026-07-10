@@ -79,7 +79,6 @@ export async function initDb() {
             color TEXT,
             sortOrder INTEGER DEFAULT 0,
             isActive INTEGER DEFAULT 1,
-            showOnPos INTEGER DEFAULT 1,
             createdAt TEXT
         )
     `);
@@ -712,6 +711,7 @@ async function runMigrations() {
     await addColumnIfMissing('products', 'allowPriceOverride', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('products', 'updatedAt', 'TEXT');
     await dropColumnIfExists('products', 'showInPos');
+    await dropColumnIfExists('categories', 'showOnPos');
     await addColumnIfMissing('employees', 'pinHash', 'TEXT');
 
     // Till cash-up and card reconciliation fields.
@@ -1122,7 +1122,16 @@ function parseScaleProductIds(settings: any[]): string[] {
     return [...ids];
 }
 
-export async function getProductsByIds(ids: string[]): Promise<any[]> {
+const PRODUCT_PICKER_COLUMNS = `
+    p.id, p.name, p.sku, p.barcode, p.scalePlu,
+    p.price, p.isActive
+`;
+
+export async function getProductsByIds(
+    ids: string[],
+    activeOnly = true,
+    compact = false,
+): Promise<any[]> {
     const uniqueIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
     if (uniqueIds.length === 0) return [];
     const d = await getDb();
@@ -1131,7 +1140,9 @@ export async function getProductsByIds(ids: string[]): Promise<any[]> {
         const chunk = uniqueIds.slice(i, i + 500);
         const placeholders = chunk.map(() => '?').join(', ');
         const chunkRows = await d.select(
-            `SELECT * FROM products WHERE id IN (${placeholders}) AND isActive = 1`,
+            `SELECT ${compact ? PRODUCT_PICKER_COLUMNS : 'p.*'}
+             FROM products p
+             WHERE p.id IN (${placeholders})${activeOnly ? ' AND p.isActive = 1' : ''}`,
             chunk,
         ) as any[];
         rows.push(...chunkRows);
@@ -1372,6 +1383,35 @@ export async function getAll(table: string): Promise<any[]> {
     return await d.select(`SELECT * FROM ${table}`);
 }
 
+export interface CategoryUsageSummary {
+    categoryId: string;
+    total: number;
+    active: number;
+    deactivated: number;
+}
+
+export async function getCategoryUsageSummary(): Promise<CategoryUsageSummary[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT categoryId,
+                COUNT(*) AS total,
+                SUM(CASE WHEN isActive = 1 THEN 1 ELSE 0 END) AS active
+         FROM products
+         WHERE categoryId IS NOT NULL AND categoryId <> ''
+         GROUP BY categoryId`,
+    );
+    return rows.map(row => {
+        const total = Number(row.total || 0);
+        const active = Number(row.active || 0);
+        return {
+            categoryId: String(row.categoryId || ''),
+            total,
+            active,
+            deactivated: Math.max(0, total - active),
+        };
+    });
+}
+
 export type ProductStatusFilter = 'active' | 'deactivated' | 'all';
 
 export interface ProductPageOptions {
@@ -1380,6 +1420,7 @@ export interface ProductPageOptions {
     status?: ProductStatusFilter;
     limit?: number;
     offset?: number;
+    compact?: boolean;
 }
 
 export interface ProductPageResult {
@@ -1451,7 +1492,7 @@ async function getProductsPageByContainsSearch(
     const d = await getDb();
     const { whereSql, params } = buildProductPageWhere(options);
     const rows: any[] = await d.select(
-        `SELECT p.*
+        `SELECT ${options.compact ? PRODUCT_PICKER_COLUMNS : 'p.*'}
          FROM products p
          ${whereSql}
          ORDER BY p.name COLLATE NOCASE ASC, p.id ASC
@@ -1491,7 +1532,7 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
         const filterSql = filters.whereSql ? `AND ${filters.whereSql.replace(/^WHERE\s+/i, '')}` : '';
         const searchParams = [fts, ...filters.params];
         const rows: any[] = await d.select(
-            `SELECT p.*
+            `SELECT ${options.compact ? PRODUCT_PICKER_COLUMNS : 'p.*'}
              FROM product_search_fts f
              JOIN products p ON p.id = f.id
              WHERE product_search_fts MATCH ?
@@ -1525,7 +1566,7 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     const { whereSql, params } = buildProductPageWhere(options);
 
     const rows: any[] = await d.select(
-        `SELECT p.*
+        `SELECT ${options.compact ? PRODUCT_PICKER_COLUMNS : 'p.*'}
          FROM products p
          ${whereSql}
          ORDER BY p.name COLLATE NOCASE ASC, p.id ASC

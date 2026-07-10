@@ -12,6 +12,7 @@
         getLightRouteHydrationTables,
         hasRestorePendingMariaDbReplace,
         hydrateSvelteStores,
+        isLightStorePath,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
         startBackgroundSync
     } from '$lib/stores/database';
@@ -39,7 +40,6 @@
     let queuedLightHydrationPath: string | null = null;
     let lastLightHydrationPath = '';
     const SYNC_STARTUP_RETRY_MS = 60 * 1000;
-    const LIGHT_STORE_ROUTES = ['/', '/admin', '/orders', '/items', '/customer-display'];
     let fullStoresHydrated = false;
 
     if (typeof window === 'undefined' || window.location.pathname !== '/customer-display') {
@@ -121,10 +121,6 @@
         dbReady = true;
     }
 
-    function isLightStoreRoute(pathname: string) {
-        return LIGHT_STORE_ROUTES.includes(pathname);
-    }
-
     async function hydrateLightStoresForTillRoute(pathname = window.location.pathname) {
         queuedLightHydrationPath = pathname;
         if (lightStoreHydrationRunning) return;
@@ -190,7 +186,7 @@
             // 3. Hydrate stores from the correct data source.
             // Always hydrate from local SQLite instantly first
             console.log("POS: Hydrating stores from SQLite…");
-            const lightStartup = isLightStoreRoute(startupPath);
+            const lightStartup = isLightStorePath(startupPath);
             if (lightStartup) {
                 lastLightHydrationPath = startupPath;
                 await hydrateLightStoresForTillRoute(startupPath);
@@ -293,7 +289,7 @@
         dbReady &&
         !fullStoresHydrated &&
         typeof window !== 'undefined' &&
-        !isLightStoreRoute($page.url.pathname)
+        !isLightStorePath($page.url.pathname)
     ) {
         fullStoresHydrated = true;
         lastLightHydrationPath = '';
@@ -306,7 +302,7 @@
     $: if (
         dbReady &&
         typeof window !== 'undefined' &&
-        isLightStoreRoute($page.url.pathname) &&
+        isLightStorePath($page.url.pathname) &&
         $page.url.pathname !== lastLightHydrationPath
     ) {
         void hydrateLightStoresForTillRoute($page.url.pathname);

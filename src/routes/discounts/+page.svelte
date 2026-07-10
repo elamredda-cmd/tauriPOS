@@ -7,10 +7,18 @@
         uuid, now, formatMoney
     } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, deletePromotionBundle, savePromotionBundle } from '$lib/stores/database';
+    import {
+        upsert,
+        deletePromotionBundle,
+        getProductsByIds,
+        getProductsPage,
+        savePromotionBundle,
+    } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import { isTauri } from '@tauri-apps/api/core';
+    import { get } from 'svelte/store';
 
     type Tab = 'bundle' | 'bogo' | 'temporary' | 'percent';
     let tab: Tab = 'bundle';
@@ -124,36 +132,175 @@
         if (!products.has(item.groupId)) products.set(item.groupId, item.productId);
         return products;
     }, new Map<string, string>());
-    $: productNameById = new Map($productsDB.map((product) => [product.id, product.name]));
 
-    function promotionNamesForProduct(
-        productId: string,
-        currentGroupId: string,
-        groupItems: PromoGroupItem[],
-        discounts: Discount[]
-    ): string[] {
-        const groupIds = new Set(
-            groupItems
-                .filter((item) => item.productId === productId && item.groupId !== currentGroupId)
-                .map((item) => item.groupId)
-        );
-        return uniqueById(discounts.filter((discount) =>
-            groupIds.has(discount.groupId) &&
-            ['bundle_fixed_price', 'bogo_fixed_price', 'temporary_item'].includes(discountKind(discount))
-        )).map((discount) => discount.name);
+    type ProductPicker = 'bundle' | 'bogo' | 'temporary';
+    type PromotionProductEntry = { groupId: string; name: string };
+    const PRODUCT_PICKER_LIMIT = 100;
+    let productCacheById = new Map<string, Product>();
+    let pickerRows: Record<ProductPicker, Product[]> = { bundle: [], bogo: [], temporary: [] };
+    let pickerLoading: Record<ProductPicker, boolean> = { bundle: false, bogo: false, temporary: false };
+    let pickerTotal: Record<ProductPicker, number> = { bundle: 0, bogo: 0, temporary: 0 };
+    let pickerError: Record<ProductPicker, string> = { bundle: '', bogo: '', temporary: '' };
+    const pickerTokens: Record<ProductPicker, number> = { bundle: 0, bogo: 0, temporary: 0 };
+    let referencedProductIds: string[] = [];
+    let referencedProductIdsKey = '';
+    let loadedReferencedProductIdsKey = '';
+    let referencedProductsLoadToken = 0;
+
+    function cacheProducts(products: Product[]) {
+        if (products.length === 0) return;
+        const next = new Map(productCacheById);
+        for (const product of products) next.set(product.id, product);
+        productCacheById = next;
     }
+
+    async function ensureProductsCached(productIds: string[]) {
+        const missing = Array.from(new Set(productIds)).filter(id => id && !productCacheById.has(id));
+        if (missing.length === 0) return;
+        if (!isTauri()) {
+            const missingIds = new Set(missing);
+            cacheProducts(get(productsDB).filter(product => missingIds.has(product.id)));
+            return;
+        }
+        await refreshProductsCached(missing);
+    }
+
+    async function refreshProductsCached(productIds: string[]) {
+        const uniqueIds = Array.from(new Set(productIds)).filter(Boolean);
+        if (uniqueIds.length === 0) return;
+        if (!isTauri()) {
+            const wantedIds = new Set(uniqueIds);
+            cacheProducts(get(productsDB).filter(product => wantedIds.has(product.id)));
+            return;
+        }
+        cacheProducts(await getProductsByIds(uniqueIds, false, true) as Product[]);
+    }
+
+    async function loadReferencedProducts(key: string, productIds: string[]) {
+        loadedReferencedProductIdsKey = key;
+        const token = ++referencedProductsLoadToken;
+        try {
+            await ensureProductsCached(productIds);
+        } catch (error) {
+            if (token !== referencedProductsLoadToken) return;
+            loadedReferencedProductIdsKey = '';
+            console.warn('Could not load promotion product names:', error);
+        }
+    }
+
+    async function loadProductPicker(kind: ProductPicker, query: string) {
+        const token = ++pickerTokens[kind];
+        pickerLoading = { ...pickerLoading, [kind]: true };
+        pickerError = { ...pickerError, [kind]: '' };
+        try {
+            if (!isTauri()) {
+                const normalizedQuery = query.trim().toLowerCase();
+                const matches = get(productsDB).filter(product =>
+                    product.isActive && (!normalizedQuery || [
+                        product.name,
+                        product.sku,
+                        product.barcode,
+                        product.scalePlu,
+                    ].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
+                );
+                if (token !== pickerTokens[kind]) return;
+                const rows = matches.slice(0, PRODUCT_PICKER_LIMIT);
+                cacheProducts(rows);
+                pickerRows = { ...pickerRows, [kind]: rows };
+                pickerTotal = { ...pickerTotal, [kind]: matches.length };
+                return;
+            }
+            const result = await getProductsPage({
+                query: query.trim(),
+                status: 'active',
+                limit: PRODUCT_PICKER_LIMIT,
+                offset: 0,
+                compact: true,
+            });
+            if (token !== pickerTokens[kind]) return;
+            const rows = result.rows as Product[];
+            cacheProducts(rows);
+            pickerRows = { ...pickerRows, [kind]: rows };
+            pickerTotal = { ...pickerTotal, [kind]: result.total };
+        } catch (error) {
+            if (token !== pickerTokens[kind]) return;
+            pickerRows = { ...pickerRows, [kind]: [] };
+            pickerTotal = { ...pickerTotal, [kind]: 0 };
+            pickerError = {
+                ...pickerError,
+                [kind]: String(error).replace(/^Error:\s*/, ''),
+            };
+        } finally {
+            if (token === pickerTokens[kind]) {
+                pickerLoading = { ...pickerLoading, [kind]: false };
+            }
+        }
+    }
+
+    function runPickerSearch(kind: ProductPicker) {
+        const query = kind === 'bundle'
+            ? productSearch
+            : kind === 'bogo'
+                ? bogoProductSearch
+                : temporaryProductSearch;
+        void loadProductPicker(kind, query);
+    }
+
+    function clearPickerSearch(kind: ProductPicker) {
+        if (kind === 'bundle') productSearch = '';
+        else if (kind === 'bogo') bogoProductSearch = '';
+        else temporaryProductSearch = '';
+        void loadProductPicker(kind, '');
+    }
+
+    function handlePickerSearchKeydown(event: KeyboardEvent, kind: ProductPicker) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runPickerSearch(kind);
+    }
+
+    $: referencedProductIds = Array.from(new Set(
+        $promoGroupItemsDB.map(item => item.productId).filter(Boolean)
+    ));
+    $: referencedProductIdsKey = [...referencedProductIds].sort().join('|');
+    $: if (referencedProductIdsKey !== loadedReferencedProductIdsKey) {
+        void loadReferencedProducts(referencedProductIdsKey, referencedProductIds);
+    }
+    $: productNameById = new Map(
+        Array.from(productCacheById, ([id, product]) => [id, product.name])
+    );
+    $: promotionEntriesByProductId = (() => {
+        const discountByGroup = new Map<string, string>();
+        for (const discount of uniqueById($discountsDB)) {
+            if (discount.groupId && ['bundle_fixed_price', 'bogo_fixed_price', 'temporary_item'].includes(discountKind(discount))) {
+                discountByGroup.set(discount.groupId, discount.name);
+            }
+        }
+        const entries = new Map<string, PromotionProductEntry[]>();
+        for (const item of $promoGroupItemsDB) {
+            const name = discountByGroup.get(item.groupId);
+            if (!name) continue;
+            const current = entries.get(item.productId) || [];
+            current.push({ groupId: item.groupId, name });
+            entries.set(item.productId, current);
+        }
+        return entries;
+    })();
 
     function promotionWarningsForProducts(
         productIds: string[],
         currentGroupId: string,
         productNames: Map<string, string>,
-        groupItems: PromoGroupItem[],
-        discounts: Discount[]
+        entriesByProductId: Map<string, PromotionProductEntry[]>
     ): string[] {
         const warnings = new Set<string>();
         for (const productId of productIds) {
             const productName = productNames.get(productId) || 'Selected item';
-            const promoNames = promotionNamesForProduct(productId, currentGroupId, groupItems, discounts);
+            const promoNames = Array.from(new Set(
+                (entriesByProductId.get(productId) || [])
+                    .filter(entry => entry.groupId !== currentGroupId)
+                    .map(entry => entry.name)
+            ));
             if (promoNames.length > 0) {
                 warnings.add(`${productName} is also in: ${promoNames.join(', ')}`);
             }
@@ -165,23 +312,20 @@
         Array.from(curProductIds),
         curGroupId,
         productNameById,
-        $promoGroupItemsDB,
-        $discountsDB
+        promotionEntriesByProductId
     );
     $: bogoOverlapWarnings = promotionWarningsForProducts(
         Array.from(bogoProductIds),
         bogoGroupId,
         productNameById,
-        $promoGroupItemsDB,
-        $discountsDB
+        promotionEntriesByProductId
     );
     $: temporaryOverlapWarnings = temporaryProductId
         ? promotionWarningsForProducts(
             [temporaryProductId],
             temporaryGroupId,
             productNameById,
-            $promoGroupItemsDB,
-            $discountsDB
+            promotionEntriesByProductId
         )
         : [];
 
@@ -228,6 +372,7 @@
         temporaryProductSearch = '';
         editingTemporary = false;
         showTemporary = true;
+        void loadProductPicker('temporary', '');
     }
 
     function editTemporary(d: Discount) {
@@ -244,6 +389,8 @@
         temporaryProductSearch = '';
         editingTemporary = true;
         showTemporary = true;
+        void refreshProductsCached([temporaryProductId]);
+        void loadProductPicker('temporary', '');
     }
 
     async function saveTemporary() {
@@ -262,7 +409,7 @@
             toast(`This item already has the temporary discount "${conflicting.name}"`, 'error');
             return;
         }
-        const product = $productsDB.find(p => p.id === temporaryProductId);
+        const product = productCacheById.get(temporaryProductId);
         const storedValue = temporaryType === 'fixed' ? Math.round(inputValue * 100) : inputValue;
         if (temporaryType === 'fixed' && product && storedValue >= product.price) {
             toast('Temporary sale price must be lower than the normal item price', 'error');
@@ -318,24 +465,10 @@
     }
 
     function isPromotionEligible(productId: string): boolean {
-        return $productsDB.some(p => p.id === productId && p.isActive);
+        return Boolean(productCacheById.get(productId)?.isActive);
     }
 
-    function productMatchesSearch(product: Product, rawQuery: string): boolean {
-        const q = rawQuery.trim().toLowerCase();
-        if (!q) return true;
-        return [product.name, product.sku, product.barcode, product.scalePlu]
-            .some(value => String(value || '').toLowerCase().includes(q));
-    }
-
-    $: filteredTemporaryProducts = (() => {
-        const q = temporaryProductSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive);
-        if (!q) return all.slice(0, 200);
-        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
-    })();
-
-    $: selectedTemporaryProduct = $productsDB.find(p => p.id === temporaryProductId);
+    $: selectedTemporaryProduct = productCacheById.get(temporaryProductId);
 
     function promotionStatus(d: Discount, group: PromoGroup | null | undefined): string {
         if (!d.isActive || group?.isActive === false) return 'Inactive';
@@ -383,6 +516,7 @@
         bogoProductSearch = '';
         editingBogo = false;
         showBogo = true;
+        void loadProductPicker('bogo', '');
     }
 
     function editBogo(d: Discount) {
@@ -400,6 +534,8 @@
         bogoProductSearch = '';
         editingBogo = true;
         showBogo = true;
+        void refreshProductsCached(Array.from(bogoProductIds));
+        void loadProductPicker('bogo', '');
     }
 
     async function saveBogo() {
@@ -539,6 +675,7 @@
         qtyString = '2';
         editingBundle = false;
         showBundle = true;
+        void loadProductPicker('bundle', '');
     }
 
     function editBundle(d: Discount) {
@@ -557,6 +694,8 @@
         qtyString = String(numeric(d.bundleQuantity, 2));
         editingBundle = true;
         showBundle = true;
+        void refreshProductsCached(Array.from(curProductIds));
+        void loadProductPicker('bundle', '');
     }
 
     async function saveBundle() {
@@ -662,13 +801,9 @@
         curProductIds = new Set(curProductIds);
     }
 
-    $: filteredProducts = (() => {
-        const q = productSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive);
-        if (!q) return all.slice(0, 200);
-        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
-    })();
-    $: selectedBundleProducts = $productsDB.filter(p => curProductIds.has(p.id));
+    $: selectedBundleProducts = Array.from(curProductIds)
+        .map(id => productCacheById.get(id))
+        .filter((product): product is Product => Boolean(product));
 
     function bundleWindow(d: Discount, group: PromoGroup | null | undefined): string {
         const s = group?.startAt || d.startAt;
@@ -683,13 +818,9 @@
         bogoProductIds = new Set(bogoProductIds);
     }
 
-    $: filteredBogoProducts = (() => {
-        const q = bogoProductSearch.trim().toLowerCase();
-        const all = $productsDB.filter(p => p.isActive);
-        if (!q) return all.slice(0, 200);
-        return all.filter(p => productMatchesSearch(p, q)).slice(0, 200);
-    })();
-    $: selectedBogoProducts = $productsDB.filter(p => bogoProductIds.has(p.id));
+    $: selectedBogoProducts = Array.from(bogoProductIds)
+        .map(id => productCacheById.get(id))
+        .filter((product): product is Product => Boolean(product));
 
     function handlePricePadKey(key: string) {
         if (key === 'C') {
@@ -878,15 +1009,20 @@
 
         <div class="field span-2 mt-2">
             <label>Find Products</label>
-            <div class="relative">
-                <input bind:value={productSearch} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-10" />
-                {#if productSearch}
-                    <button class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => productSearch=''}>✕</button>
-                {/if}
+            <div class="flex gap-2">
+                <div class="relative min-w-0 flex-1">
+                    <input bind:value={productSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bundle')} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-10" />
+                    {#if productSearch}
+                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bundle')}>✕</button>
+                    {/if}
+                </div>
+                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bundle} on:click={() => runPickerSearch('bundle')}>
+                    {pickerLoading.bundle ? 'Finding...' : 'Find'}
+                </button>
             </div>
         </div>
         <div class="span-2 max-h-[220px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each filteredProducts as p (p.id)}
+            {#each pickerRows.bundle as p (p.id)}
                 <label
                     class="grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-2.5 py-1.5 border-b border-border-flat last:border-b-0 cursor-pointer text-[0.85rem] hover:bg-bg-card {curProductIds.has(p.id) ? 'bg-accent-primary/10' : ''}"
                 >
@@ -901,8 +1037,16 @@
                     <span class="text-text-main font-semibold min-w-[60px] text-right">{formatMoney(p.price)}</span>
                 </label>
             {/each}
-            {#if filteredProducts.length === 0}<div class="p-4 text-center text-text-muted text-[0.9rem]">No matches.</div>{/if}
-            {#if filteredProducts.length === 200}<div class="p-4 text-center text-text-muted text-[0.9rem]">Showing first 200 — refine your search.</div>{/if}
+            {#if pickerError.bundle}
+                <div class="p-4 text-center text-danger text-[0.9rem]">{pickerError.bundle}</div>
+            {:else if pickerLoading.bundle && pickerRows.bundle.length === 0}
+                <div class="p-4 text-center text-text-muted text-[0.9rem]">Finding products...</div>
+            {:else if pickerRows.bundle.length === 0}
+                <div class="p-4 text-center text-text-muted text-[0.9rem]">No matches.</div>
+            {/if}
+            {#if pickerTotal.bundle > pickerRows.bundle.length}
+                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.bundle.length} of {pickerTotal.bundle}{pickerTotal.bundle >= 1000 ? '+' : ''} results.</div>
+            {/if}
         </div>
     </div>
     <svelte:fragment slot="footer">
@@ -951,10 +1095,20 @@
         </div>
         <div class="field span-2 mt-2">
             <label>Find Products</label>
-            <input class="search-input" bind:value={bogoProductSearch} placeholder="Search name, SKU, barcode, or PLU..." />
+            <div class="flex gap-2">
+                <div class="relative min-w-0 flex-1">
+                    <input class="search-input !pr-10" bind:value={bogoProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bogo')} placeholder="Search name, SKU, barcode, or PLU..." />
+                    {#if bogoProductSearch}
+                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bogo')}>✕</button>
+                    {/if}
+                </div>
+                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bogo} on:click={() => runPickerSearch('bogo')}>
+                    {pickerLoading.bogo ? 'Finding...' : 'Find'}
+                </button>
+            </div>
         </div>
         <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each filteredBogoProducts as p (p.id)}
+            {#each pickerRows.bogo as p (p.id)}
                 <label class="grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-2.5 py-1.5 border-b border-border-flat last:border-b-0 cursor-pointer text-[0.85rem] hover:bg-bg-card {bogoProductIds.has(p.id) ? 'bg-accent-primary/10' : ''}">
                     <div class="flex w-6 h-6 items-center justify-center rounded-md border-2 transition-colors shrink-0 {bogoProductIds.has(p.id) ? 'bg-accent-primary border-accent-primary text-white' : 'bg-bg-panel border-border-flat'}">
                         {#if bogoProductIds.has(p.id)}✓{/if}
@@ -965,7 +1119,16 @@
                     <span class="text-text-main font-semibold min-w-[60px] text-right">{formatMoney(p.price)}</span>
                 </label>
             {/each}
-            {#if filteredBogoProducts.length === 0}<div class="p-4 text-center text-text-muted">No matches.</div>{/if}
+            {#if pickerError.bogo}
+                <div class="p-4 text-center text-danger">{pickerError.bogo}</div>
+            {:else if pickerLoading.bogo && pickerRows.bogo.length === 0}
+                <div class="p-4 text-center text-text-muted">Finding products...</div>
+            {:else if pickerRows.bogo.length === 0}
+                <div class="p-4 text-center text-text-muted">No matches.</div>
+            {/if}
+            {#if pickerTotal.bogo > pickerRows.bogo.length}
+                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.bogo.length} of {pickerTotal.bogo}{pickerTotal.bogo >= 1000 ? '+' : ''} results.</div>
+            {/if}
         </div>
     </div>
     <svelte:fragment slot="footer">
@@ -1043,10 +1206,20 @@
         </div>
         <div class="field span-2">
             <label>Find Item *</label>
-            <input class="search-input" bind:value={temporaryProductSearch} placeholder="Search by item name, SKU, barcode or PLU..." />
+            <div class="flex gap-2">
+                <div class="relative min-w-0 flex-1">
+                    <input class="search-input !pr-10" bind:value={temporaryProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'temporary')} placeholder="Search by item name, SKU, barcode or PLU..." />
+                    {#if temporaryProductSearch}
+                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('temporary')}>✕</button>
+                    {/if}
+                </div>
+                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.temporary} on:click={() => runPickerSearch('temporary')}>
+                    {pickerLoading.temporary ? 'Finding...' : 'Find'}
+                </button>
+            </div>
         </div>
         <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each filteredTemporaryProducts as product (product.id)}
+            {#each pickerRows.temporary as product (product.id)}
                 <button
                     class="w-full grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-3 py-2 border-0 border-b border-border-flat last:border-b-0 text-left cursor-pointer hover:bg-bg-card {temporaryProductId === product.id ? 'bg-accent-primary/10' : 'bg-transparent'}"
                     on:click={() => selectTemporaryProduct(product.id)}
@@ -1059,8 +1232,16 @@
                     <span class="text-text-main font-semibold">{formatMoney(product.price)}</span>
                 </button>
             {/each}
-            {#if filteredTemporaryProducts.length === 0}<div class="p-4 text-center text-text-muted">No matches.</div>{/if}
-            {#if filteredTemporaryProducts.length === 200}<div class="p-3 text-center text-text-muted text-xs">Showing first 200 results. Refine your search to find more.</div>{/if}
+            {#if pickerError.temporary}
+                <div class="p-4 text-center text-danger">{pickerError.temporary}</div>
+            {:else if pickerLoading.temporary && pickerRows.temporary.length === 0}
+                <div class="p-4 text-center text-text-muted">Finding products...</div>
+            {:else if pickerRows.temporary.length === 0}
+                <div class="p-4 text-center text-text-muted">No matches.</div>
+            {/if}
+            {#if pickerTotal.temporary > pickerRows.temporary.length}
+                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.temporary.length} of {pickerTotal.temporary}{pickerTotal.temporary >= 1000 ? '+' : ''} results.</div>
+            {/if}
         </div>
         <div class="span-2 p-3 flat-card text-sm text-text-muted">
             The normal item price is kept unchanged. This discount applies automatically during the selected time window.

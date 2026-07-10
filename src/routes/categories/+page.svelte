@@ -4,9 +4,12 @@
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
-    import { categoriesDB, productsDB, type Category, uuid, now } from '$lib/stores/db';
+    import { categoriesDB, type Category, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/database';
+    import { getCategoryUsageSummary, upsert, remove as removeSql } from '$lib/stores/database';
+    import { onMount } from 'svelte';
+
+    type CategoryUsage = { total: number; active: number; deactivated: number };
 
     let show = false; 
     let editing = false;
@@ -14,6 +17,10 @@
     let idToDelete = "";
     let cur: Partial<Category> & { updatedAt?: string } = {};
     let searchQuery = "";
+    let categoryUsageById = new Map<string, CategoryUsage>();
+    let usageLoading = true;
+    let saving = false;
+    let deleting = false;
 
     $: filteredCategories = $categoriesDB.filter((category) => {
         const q = searchQuery.trim().toLowerCase();
@@ -22,7 +29,6 @@
         return [
             category.name,
             category.isActive ? 'active' : 'inactive',
-            category.showOnPos ? 'pos' : '',
             usage.total,
             usage.active,
             usage.deactivated,
@@ -30,7 +36,7 @@
     });
 
     function add() { 
-        cur = { id: uuid(), name:'', color:'#3b82f6', sortOrder: $categoriesDB.length + 1, isActive:true, showOnPos:true, createdAt: now() }; 
+        cur = { id: uuid(), name:'', color:'#3b82f6', sortOrder: $categoriesDB.length + 1, isActive:true, createdAt: now() };
         editing=false; 
         show=true; 
     }
@@ -40,17 +46,24 @@
         show=true; 
     }
 
-    function categoryUsage(categoryId: string) {
-        const assigned = $productsDB.filter(product => product.categoryId === categoryId);
-        const active = assigned.filter(product => product.isActive);
-        return {
-            total: assigned.length,
-            active: active.length,
-            deactivated: assigned.length - active.length,
-        };
+    function categoryUsage(categoryId: string): CategoryUsage {
+        return categoryUsageById.get(categoryId) || { total: 0, active: 0, deactivated: 0 };
+    }
+
+    async function loadCategoryUsage() {
+        usageLoading = true;
+        try {
+            const rows = await getCategoryUsageSummary();
+            categoryUsageById = new Map(rows.map(row => [row.categoryId, row]));
+        } catch (error) {
+            console.warn('Could not load category usage:', error);
+        } finally {
+            usageLoading = false;
+        }
     }
 
     async function save() {
+        if (saving) return;
         if (!cur.name?.trim()) { toast('Name is required', 'error'); return; }
         const sortOrder = Number(cur.sortOrder || 0);
         if (!Number.isInteger(sortOrder) || sortOrder < 0) {
@@ -63,13 +76,15 @@
             color: cur.color || '#3b82f6',
             sortOrder,
             isActive: cur.isActive !== false,
-            showOnPos: cur.showOnPos !== false,
             updatedAt: now(),
         } as Category & { updatedAt: string };
+        saving = true;
         try {
             await upsert('categories', record);
         } catch (e) {
             console.error(e); toast('Failed to save category', 'error'); return;
+        } finally {
+            saving = false;
         }
         categoriesDB.update(list => editing
             ? list.map(c => c.id === record.id ? record : c)
@@ -78,7 +93,8 @@
         toast(editing ? 'Category updated' : 'Category added');
     }
 
-    function confirmDel(id: string) {
+    async function confirmDel(id: string) {
+        await loadCategoryUsage();
         const usage = categoryUsage(id);
         if (usage.total > 0) {
             toast(`This category is used by ${usage.total} item${usage.total === 1 ? '' : 's'} (${usage.active} active, ${usage.deactivated} deactivated). Move those items first.`, 'error');
@@ -89,48 +105,41 @@
     }
 
     async function handleDel() {
+        if (deleting) return;
         const id = idToDelete;
+        deleting = true;
         try {
             await removeSql('categories', id);
         } catch (e) {
             console.error(e); toast('Failed to delete category', 'error'); return;
+        } finally {
+            deleting = false;
         }
         categoriesDB.update(l => l.filter(c => c.id !== id));
         toast('Category deleted', 'info');
         showDelConfirm = false;
     }
+
+    onMount(loadCategoryUsage);
 </script>
 
 <MgmtPage title="Categories">
     <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Category</button>
     <div class="p-4 border-b border-border-flat bg-bg-panel">
-        <div class="flat-card p-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div class="min-w-0">
-                <p class="text-xs uppercase tracking-[0.22em] text-accent-primary font-bold mb-1">Category lookup</p>
-                <h2 class="text-xl m-0">Find and manage groups</h2>
-                <p class="text-sm text-text-muted mt-1">Search by category name, active status, POS visibility, or item count.</p>
+        <div class="flex items-center gap-3">
+            <div class="relative min-w-0 flex-1">
+                <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input class="search-input !pl-12" bind:value={searchQuery} placeholder="Search categories..." />
             </div>
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-center lg:min-w-[520px]">
-                <div class="relative flex-1">
-                    <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
-                        <circle cx="11" cy="11" r="8"></circle>
-                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                    </svg>
-                    <input
-                        class="search-input !min-h-[56px] !pl-12 !pr-4"
-                        bind:value={searchQuery}
-                        placeholder="Search categories..."
-                    />
-                </div>
-                <div class="flex items-center gap-2">
-                    <span class="rounded-full border border-border-flat bg-bg-base px-4 py-3 text-sm font-bold text-text-muted whitespace-nowrap">
-                        {filteredCategories.length} / {$categoriesDB.length}
-                    </span>
-                    {#if searchQuery}
-                        <button class="btn btn-secondary !min-h-[56px]" on:click={() => searchQuery = ''}>Clear</button>
-                    {/if}
-                </div>
-            </div>
+            <span class="min-w-[92px] text-center text-sm font-bold text-text-muted">
+                {filteredCategories.length} / {$categoriesDB.length}
+            </span>
+            {#if searchQuery}
+                <button class="btn btn-secondary" on:click={() => searchQuery = ''}>Clear</button>
+            {/if}
         </div>
     </div>
     <table class="tbl">
@@ -143,16 +152,19 @@
                 <td class="font-semibold">{cat.name}</td>
                 <td>{cat.sortOrder}</td>
                 <td>
-                    <span class="font-semibold">{usage.total}</span>
-                    <span class="text-text-muted text-xs">({usage.active} active, {usage.deactivated} deactivated)</span>
+                    {#if usageLoading}
+                        <span class="text-text-muted">...</span>
+                    {:else}
+                        <span class="font-semibold">{usage.total}</span>
+                        <span class="text-text-muted text-xs">({usage.active} active, {usage.deactivated} deactivated)</span>
+                    {/if}
                 </td>
                 <td>
                     <span class="tag">{cat.isActive ? 'Active' : 'Inactive'}</span>
-                    {#if cat.showOnPos}<span class="tag !bg-accent-primary !text-white !border-0 ml-1">POS</span>{/if}
                 </td>
                 <td><div class="act-row">
-                    <button class="btn-icon act-btn" on:click={() => edit(cat)}>✎</button>
-                    <button class="btn-icon act-btn danger" on:click={() => confirmDel(cat.id)}>✕</button>
+                    <button class="btn-icon act-btn" title="Edit category" aria-label={`Edit ${cat.name}`} on:click={() => edit(cat)}>✎</button>
+                    <button class="btn-icon act-btn danger" title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}>✕</button>
                 </div></td>
             </tr>
             {/each}
@@ -164,17 +176,16 @@
 
 <Modal bind:show title={editing ? 'Edit Category' : 'Add Category'} width="420px">
     <div class="form-grid">
-        <div class="field span-2"><label>Name *</label><input bind:value={cur.name} placeholder="e.g. Drinks" /></div>
-        <div class="field span-2"><label>Sort Order</label><input type="number" bind:value={cur.sortOrder} /></div>
+        <div class="field span-2"><label for="category-name">Name *</label><input id="category-name" bind:value={cur.name} placeholder="e.g. Drinks" /></div>
+        <div class="field span-2"><label for="category-sort-order">Sort Order</label><input id="category-sort-order" type="number" bind:value={cur.sortOrder} /></div>
         
         <div class="span-2"><TouchColorPicker bind:value={cur.color} label="Category Color" /></div>
         
         <div class="span-2"><TouchToggle bind:checked={cur.isActive} label="Active Status" /></div>
-        <div class="span-2"><TouchToggle bind:checked={cur.showOnPos} label="Show on POS" /></div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => show=false}>Cancel</button>
-        <button class="btn btn-primary" on:click={save}>Save</button>
+        <button class="btn btn-danger" disabled={saving} on:click={() => show=false}>Cancel</button>
+        <button class="btn btn-primary" disabled={saving} on:click={save}>{saving ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
 

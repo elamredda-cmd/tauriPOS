@@ -88,7 +88,6 @@ export interface Category {
     color: string;
     sortOrder: number;
     isActive: boolean;
-    showOnPos: boolean;
     createdAt: string;
 }
 
@@ -413,10 +412,10 @@ const seedEmployees: Employee[] = [
 ];
 
 const seedCategories: Category[] = [
-    { id: 'cat-pool', name: 'Pool Sessions', color: '#3b82f6', sortOrder: 1, isActive: true, showOnPos: true, createdAt: now() },
-    { id: 'cat-drinks', name: 'Drinks', color: '#ef4444', sortOrder: 2, isActive: true, showOnPos: true, createdAt: now() },
-    { id: 'cat-snacks', name: 'Snacks', color: '#f59e0b', sortOrder: 3, isActive: true, showOnPos: true, createdAt: now() },
-    { id: 'cat-merch', name: 'Merchandise', color: '#10b981', sortOrder: 4, isActive: true, showOnPos: true, createdAt: now() },
+    { id: 'cat-pool', name: 'Pool Sessions', color: '#3b82f6', sortOrder: 1, isActive: true, createdAt: now() },
+    { id: 'cat-drinks', name: 'Drinks', color: '#ef4444', sortOrder: 2, isActive: true, createdAt: now() },
+    { id: 'cat-snacks', name: 'Snacks', color: '#f59e0b', sortOrder: 3, isActive: true, createdAt: now() },
+    { id: 'cat-merch', name: 'Merchandise', color: '#10b981', sortOrder: 4, isActive: true, createdAt: now() },
 ];
 
 const seedTaxRates: TaxRate[] = [

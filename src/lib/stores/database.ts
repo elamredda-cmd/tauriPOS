@@ -23,7 +23,9 @@ import { currentEmployee } from './session';
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
-const LIGHT_STORE_ROUTES = new Set(['/', '/admin', '/orders', '/items', '/customer-display']);
+const LIGHT_STORE_ROUTES = new Set([
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customer-display',
+]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
     'products',
@@ -55,7 +57,19 @@ const ORDERS_LIGHT_ROUTE_TABLES = [
     'settings',
     'registers',
 ] as const;
+const DISCOUNTS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'discounts',
+    'promo_groups',
+    'promo_group_items',
+] as const;
 const CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const CATEGORY_LIGHT_ROUTE_TABLES = [
+    'categories',
     'employees',
     'settings',
 ] as const;
@@ -68,14 +82,20 @@ const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
     'audit_logs',
 ]);
 
+export function isLightStorePath(pathname: string): boolean {
+    return LIGHT_STORE_ROUTES.has(pathname);
+}
+
 function isLightStoreRoute(): boolean {
-    return typeof window !== 'undefined' && LIGHT_STORE_ROUTES.has(window.location.pathname);
+    return typeof window !== 'undefined' && isLightStorePath(window.location.pathname);
 }
 
 export function getLightRouteHydrationTables(pathname = typeof window !== 'undefined' ? window.location.pathname : '/'): string[] {
     if (pathname === '/admin') return [...ADMIN_LIGHT_ROUTE_TABLES];
     if (pathname === '/items') return [...ITEM_LIGHT_ROUTE_TABLES];
     if (pathname === '/orders') return [...ORDERS_LIGHT_ROUTE_TABLES];
+    if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
+    if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
     if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
     return [...POS_LIGHT_ROUTE_TABLES];
 }
@@ -2274,6 +2294,12 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
     };
 }
 
+export async function getProductsByIds(ids: string[], activeOnly = true, compact = false): Promise<any[]> {
+    return hydrateProducts(await sqlite.getProductsByIds(ids, activeOnly, compact));
+}
+
+export const getCategoryUsageSummary = sqlite.getCategoryUsageSummary;
+
 export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Promise<sqlite.OrderPageResult> {
     const result = await sqlite.getOrdersPage(options);
     return {
@@ -3853,7 +3879,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             sqlite.getAll('cash_movements'),
         ]);
 
-        categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
+        categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive'])));
         posPagesDB.set(pages);
         tilesDB.set(tiles);
         productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
@@ -3890,7 +3916,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
 
     if (shouldHydrate('categories')) {
         const rows = await sqlite.getAll('categories');
-        categoriesDB.set(rows.map(c => sqlite.rehydrateBooleans(c, ['isActive', 'showOnPos'])));
+        categoriesDB.set(rows.map(c => sqlite.rehydrateBooleans(c, ['isActive'])));
     }
     if (shouldHydrate('pos_pages')) posPagesDB.set(await sqlite.getAll('pos_pages'));
     if (shouldHydrate('pos_tiles')) tilesDB.set(await sqlite.getAll('pos_tiles'));

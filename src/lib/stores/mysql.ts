@@ -168,7 +168,6 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             color TEXT,
             sortOrder INT DEFAULT 0,
             isActive INT DEFAULT 1,
-            showOnPos INT DEFAULT 1,
             createdAt TEXT
         )
     `);
@@ -635,6 +634,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products MODIFY COLUMN scalePlu VARCHAR(255) NULL`,
         `ALTER TABLE products MODIFY COLUMN sku VARCHAR(255) NULL`,
         `ALTER TABLE products DROP COLUMN IF EXISTS showInPos`,
+        `ALTER TABLE categories DROP COLUMN IF EXISTS showOnPos`,
 
         // Settings keys grew as more device/receipt/printer options were added.
         // 191 keeps the primary key safe on older utf8mb4 InnoDB limits.
