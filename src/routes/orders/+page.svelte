@@ -19,7 +19,6 @@
     };
 
     const PAGE_SIZE = 25;
-    const ORDER_SEARCH_DELAY_MS = 140;
     const statusFilterOptions = [
         { value: 'all', label: 'All receipts' },
         { value: 'completed', label: 'Completed sales' },
@@ -33,6 +32,7 @@
     let selectedOrderId = '';
     let showOrderDialog = false;
     let searchQuery = '';
+    let appliedSearchQuery = '';
     let statusFilter = 'all';
     let page = 0;
     let previousFilterKey = '';
@@ -52,7 +52,7 @@
     $: if (page >= pageCount) page = pageCount - 1;
     $: pagedOrders = sqlOrders;
     $: {
-        const filterKey = `${searchQuery}|${statusFilter}`;
+        const filterKey = `${appliedSearchQuery}|${statusFilter}`;
         if (filterKey !== previousFilterKey) {
             previousFilterKey = filterKey;
             page = 0;
@@ -70,12 +70,14 @@
 
     onMount(() => {
         ordersMounted = true;
-        previousFilterKey = `${searchQuery}|${statusFilter}`;
+        previousFilterKey = `${appliedSearchQuery}|${statusFilter}`;
         previousQueryKey = `${previousFilterKey}|${page}`;
         void loadOrdersPage();
     });
 
     onDestroy(() => {
+        ordersMounted = false;
+        queryRun += 1;
         if (ordersLoadTimer) clearTimeout(ordersLoadTimer);
     });
 
@@ -91,12 +93,46 @@
 
     $: selectedOrder = sqlOrders.find((order) => order.id === selectedOrderId) || null;
 
-    function scheduleOrdersLoad(delay = ORDER_SEARCH_DELAY_MS) {
+    function scheduleOrdersLoad(delay = 0) {
         if (ordersLoadTimer) clearTimeout(ordersLoadTimer);
         ordersLoadTimer = setTimeout(() => {
             ordersLoadTimer = null;
             void loadOrdersPage();
         }, delay);
+    }
+
+    function handleOrderSearchInput(event: Event) {
+        searchQuery = (event.currentTarget as HTMLInputElement).value;
+    }
+
+    function runOrderSearch() {
+        const nextQuery = searchQuery.trim();
+        if (nextQuery === appliedSearchQuery && page === 0) {
+            scheduleOrdersLoad();
+            return;
+        }
+        appliedSearchQuery = nextQuery;
+        page = 0;
+    }
+
+    function handleOrderSearchKeydown(event: KeyboardEvent) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runOrderSearch();
+    }
+
+    function clearOrderSearch() {
+        searchQuery = '';
+        if (!appliedSearchQuery && page === 0) return;
+        appliedSearchQuery = '';
+        page = 0;
+    }
+
+    function clearOrderFilters() {
+        searchQuery = '';
+        appliedSearchQuery = '';
+        statusFilter = 'all';
+        page = 0;
     }
 
     function openOrder(order: Order) {
@@ -168,7 +204,7 @@
         ordersLoadError = '';
         try {
             const result = await getOrdersPage({
-                query: searchQuery,
+                query: appliedSearchQuery,
                 status: statusFilter,
                 limit: PAGE_SIZE,
                 offset: page * PAGE_SIZE,
@@ -218,19 +254,22 @@
                 </div>
                 <input
                     class="search-input !h-11 !min-h-11 !rounded-md !bg-bg-card !pl-10 !pr-16 !text-sm"
-                    bind:value={searchQuery}
+                    value={searchQuery}
+                    on:input={handleOrderSearchInput}
+                    on:keydown={handleOrderSearchKeydown}
                     placeholder="Search receipt..."
                 />
-                {#if searchQuery}
+                {#if searchQuery || appliedSearchQuery}
                     <button
                         type="button"
                         class="absolute right-1.5 top-1/2 min-h-0 -translate-y-1/2 rounded-sm border border-border-flat bg-bg-base px-2 py-1 text-[0.7rem] font-bold text-text-muted transition hover:border-accent-primary hover:bg-bg-card-hover hover:text-text-main"
-                        on:click={() => searchQuery = ''}
+                        on:click={clearOrderSearch}
                     >
                         Clear
                     </button>
                 {/if}
             </div>
+            <button class="btn btn-secondary !h-11 !min-h-11 !rounded-md !px-4" on:click={runOrderSearch}>Find</button>
             <div class="min-w-[190px] max-w-[220px]">
                 <CustomSelect bind:value={statusFilter} options={statusFilterOptions} />
             </div>
@@ -239,8 +278,8 @@
             <span class="rounded-full border border-border-flat bg-bg-card px-3 py-2 text-xs font-bold text-text-muted">
                 {ordersLoading ? 'Searching...' : `${sqlTotal} / ${ordersTotal}`}
             </span>
-            {#if searchQuery || statusFilter !== 'all'}
-                <button class="btn btn-secondary !min-h-10 !px-3 !py-1.5 !text-xs" on:click={() => { searchQuery = ''; statusFilter = 'all'; }}>Clear</button>
+            {#if searchQuery || appliedSearchQuery || statusFilter !== 'all'}
+                <button class="btn btn-secondary !min-h-10 !px-3 !py-1.5 !text-xs" on:click={clearOrderFilters}>Clear</button>
             {/if}
         </div>
     </div>

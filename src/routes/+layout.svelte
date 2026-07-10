@@ -36,12 +36,15 @@
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let restorePendingMariaDbReplace = false;
     let lightStoreHydrationRunning = false;
+    let queuedLightHydrationPath: string | null = null;
     let lastLightHydrationPath = '';
-    const SYNC_STARTUP_RETRY_MS = 30 * 1000;
-    const LIGHT_STORE_ROUTES = ['/', '/orders', '/items', '/customer-display'];
+    const SYNC_STARTUP_RETRY_MS = 60 * 1000;
+    const LIGHT_STORE_ROUTES = ['/', '/admin', '/orders', '/items', '/customer-display'];
     let fullStoresHydrated = false;
 
-    primeSoundEngine();
+    if (typeof window === 'undefined' || window.location.pathname !== '/customer-display') {
+        primeSoundEngine();
+    }
 
     function clearSyncStartupRetry() {
         if (syncStartupRetry) {
@@ -123,15 +126,23 @@
     }
 
     async function hydrateLightStoresForTillRoute(pathname = window.location.pathname) {
+        queuedLightHydrationPath = pathname;
         if (lightStoreHydrationRunning) return;
         lightStoreHydrationRunning = true;
         try {
-            const tables = getLightRouteHydrationTables(pathname);
-            if (!tables.includes('products')) productsDB.set([]);
-            await hydrateSvelteStores(tables);
-            fullStoresHydrated = false;
-        } catch (error) {
-            console.warn('POS: light store hydration failed after navigation:', error);
+            while (queuedLightHydrationPath) {
+                const targetPath = queuedLightHydrationPath;
+                queuedLightHydrationPath = null;
+                try {
+                    await hydrateSvelteStores(getLightRouteHydrationTables(targetPath));
+                    fullStoresHydrated = false;
+                    if (window.location.pathname === targetPath) {
+                        lastLightHydrationPath = targetPath;
+                    }
+                } catch (error) {
+                    console.warn(`POS: light store hydration failed for ${targetPath}:`, error);
+                }
+            }
         } finally {
             lightStoreHydrationRunning = false;
         }
@@ -141,6 +152,16 @@
         try {
             if (!isTauri()) {
                 startBrowserPreviewMode();
+                return;
+            }
+
+            const startupPath = window.location.pathname;
+            if (startupPath === '/customer-display') {
+                // The customer display is a second WebView. It only needs enough
+                // local state for theme and access guards, never its own sync engine.
+                lastLightHydrationPath = startupPath;
+                await hydrateSvelteStores(getLightRouteHydrationTables(startupPath));
+                dbReady = true;
                 return;
             }
 
@@ -169,7 +190,6 @@
             // 3. Hydrate stores from the correct data source.
             // Always hydrate from local SQLite instantly first
             console.log("POS: Hydrating stores from SQLite…");
-            const startupPath = window.location.pathname;
             const lightStartup = isLightStoreRoute(startupPath);
             if (lightStartup) {
                 lastLightHydrationPath = startupPath;
@@ -289,7 +309,6 @@
         isLightStoreRoute($page.url.pathname) &&
         $page.url.pathname !== lastLightHydrationPath
     ) {
-        lastLightHydrationPath = $page.url.pathname;
         void hydrateLightStoresForTillRoute($page.url.pathname);
     }
 </script>

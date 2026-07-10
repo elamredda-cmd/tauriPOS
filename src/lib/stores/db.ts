@@ -544,10 +544,77 @@ export const posPagesDB = writable<PosPage[]>(seedPosPages);
 // DERIVED STORES (Convenience lookups)
 // ─────────────────────────────────────────────
 
-/** Active products only */
-export const activeProducts = derived(productsDB, ($p) =>
-    $p.filter(p => p.isActive)
-);
+function normalizeLookupCode(value: string | undefined) {
+    return String(value || '').trim();
+}
+
+/** Active products and lookup indexes cached for POS remounts. */
+export const activeProducts = writable<Product[]>(seedProducts.filter(p => p.isActive));
+export const goodsProducts = writable<Product[]>(seedProducts.filter(p => p.isActive && p.showInGoods));
+export const weighableProducts = writable<Product[]>(seedProducts.filter(p => p.isActive && p.isWeighable));
+export const productById = writable<Map<string, Product>>(new Map(seedProducts.map(product => [product.id, product])));
+export const activeProductById = writable<Map<string, Product>>(new Map(seedProducts.filter(p => p.isActive).map(product => [product.id, product])));
+export const productByBarcode = writable<Map<string, Product>>(new Map(
+    seedProducts
+        .filter(product => product.isActive && product.barcode?.trim())
+        .map(product => [normalizeLookupCode(product.barcode), product])
+));
+export const scaleProductByPlu = writable<Map<string, Product>>(new Map(
+    seedProducts
+        .filter(product => product.isActive && product.scalePlu?.trim())
+        .map(product => [normalizeLookupCode(product.scalePlu), product])
+));
+export const weighableProductById = writable<Map<string, Product>>(new Map(
+    seedProducts
+        .filter(product => product.isActive && product.isWeighable)
+        .map(product => [product.id, product])
+));
+export const activeProductIds = writable<Set<string>>(new Set(seedProducts.filter(p => p.isActive).map(product => product.id)));
+
+productsDB.subscribe((products) => {
+    const active: Product[] = [];
+    const goods: Product[] = [];
+    const weighable: Product[] = [];
+    const byId = new Map<string, Product>();
+    const activeById = new Map<string, Product>();
+    const byBarcode = new Map<string, Product>();
+    const byScalePlu = new Map<string, Product>();
+    const weighableById = new Map<string, Product>();
+    const activeIds = new Set<string>();
+
+    for (const product of products) {
+        byId.set(product.id, product);
+        if (!product.isActive) continue;
+
+        active.push(product);
+        activeById.set(product.id, product);
+        activeIds.add(product.id);
+
+        const barcode = normalizeLookupCode(product.barcode);
+        if (barcode) byBarcode.set(barcode, product);
+
+        const scalePlu = normalizeLookupCode(product.scalePlu);
+        if (scalePlu) byScalePlu.set(scalePlu, product);
+
+        if (product.showInGoods) goods.push(product);
+        if (product.isWeighable) {
+            weighable.push(product);
+            weighableById.set(product.id, product);
+        }
+    }
+
+    goods.sort((a, b) => (a.goodsSortOrder || 0) - (b.goodsSortOrder || 0));
+
+    activeProducts.set(active);
+    goodsProducts.set(goods);
+    weighableProducts.set(weighable);
+    productById.set(byId);
+    activeProductById.set(activeById);
+    productByBarcode.set(byBarcode);
+    scaleProductByPlu.set(byScalePlu);
+    weighableProductById.set(weighableById);
+    activeProductIds.set(activeIds);
+});
 
 /** Active categories sorted by sortOrder */
 export const activeCategories = derived(categoriesDB, ($c) =>

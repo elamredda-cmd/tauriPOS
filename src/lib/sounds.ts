@@ -5,11 +5,8 @@ import { settingsDB } from "$lib/stores/db";
 
 let audioContext: AudioContext | null = null;
 let enginePrimed = false;
-let keepAliveOscillator: OscillatorNode | null = null;
-let keepAliveGain: GainNode | null = null;
-let soundWatchdog: ReturnType<typeof setInterval> | null = null;
-let lastSoundAt = 0;
-const STALE_AFTER_MS = 2 * 60 * 1000;
+let audioSuspendTimer: ReturnType<typeof setTimeout> | null = null;
+const AUDIO_IDLE_SUSPEND_MS = 3_000;
 
 function settingEnabled(key: string, defaultValue = true): boolean {
     const value = get(settingsDB).find((setting) => setting.key === key)?.value;
@@ -26,8 +23,6 @@ function vibrate(pattern: number | number[]) {
 function createAudioContext(): AudioContext | null {
     if (typeof window === "undefined") return null;
     audioContext = new AudioContext({ latencyHint: "interactive" });
-    keepAliveOscillator = null;
-    keepAliveGain = null;
     return audioContext;
 }
 
@@ -40,34 +35,25 @@ function getAudioContext(): AudioContext | null {
     return audioContext;
 }
 
-function startSilentKeepAlive(context: AudioContext) {
-    if (keepAliveOscillator || context.state !== "running") return;
-    try {
-        keepAliveOscillator = context.createOscillator();
-        keepAliveGain = context.createGain();
-        keepAliveOscillator.frequency.value = 20;
-        keepAliveGain.gain.value = 0.000001;
-        keepAliveOscillator.connect(keepAliveGain).connect(context.destination);
-        keepAliveOscillator.start();
-    } catch {
-        keepAliveOscillator = null;
-        keepAliveGain = null;
-    }
-}
-
 function resetSoundEngine() {
     const oldContext = audioContext;
     audioContext = null;
-    keepAliveOscillator = null;
-    keepAliveGain = null;
-    lastSoundAt = 0;
+    if (audioSuspendTimer) clearTimeout(audioSuspendTimer);
+    audioSuspendTimer = null;
     if (oldContext && oldContext.state !== "closed") void oldContext.close().catch(() => {});
 }
 
+function scheduleAudioSuspend(context: AudioContext) {
+    if (audioSuspendTimer) clearTimeout(audioSuspendTimer);
+    audioSuspendTimer = setTimeout(() => {
+        audioSuspendTimer = null;
+        if (audioContext === context && context.state === "running") {
+            void context.suspend().catch(() => resetSoundEngine());
+        }
+    }, AUDIO_IDLE_SUSPEND_MS);
+}
+
 async function wakeSoundEngine(): Promise<AudioContext | null> {
-    if (audioContext && lastSoundAt > 0 && Date.now() - lastSoundAt > STALE_AFTER_MS) {
-        resetSoundEngine();
-    }
     let context = getAudioContext();
     if (!context) return null;
     if (context.state !== "running") {
@@ -89,7 +75,6 @@ async function wakeSoundEngine(): Promise<AudioContext | null> {
     }
     if (!context) return null;
     if ((context.state as string) !== "running") return null;
-    startSilentKeepAlive(context);
     return context;
 }
 
@@ -115,25 +100,19 @@ function tone(
         oscillator.connect(gain).connect(context.destination);
         oscillator.start(start);
         oscillator.stop(end + 0.005);
-        lastSoundAt = Date.now();
+        scheduleAudioSuspend(context);
     });
 }
 
-/** Keep audio ready after OS inactivity, sleep, focus changes, or WebView suspension. */
+/** Initialize lightweight lifecycle handling without keeping WebAudio running at idle. */
 export function primeSoundEngine() {
     if (typeof window === "undefined" || enginePrimed) return;
     enginePrimed = true;
-    const wake = () => { void wakeSoundEngine(); };
-    const wakeWhenVisible = () => { if (!document.hidden) wake(); };
-    window.addEventListener("pointerdown", wake, { capture: true });
-    window.addEventListener("keydown", wake, { capture: true });
-    window.addEventListener("focus", wake);
-    document.addEventListener("visibilitychange", wakeWhenVisible);
-    soundWatchdog ??= setInterval(() => {
-        if (!document.hidden && audioContext && (audioContext.state as string) !== "running") {
-            resetSoundEngine();
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden && audioContext?.state === "running") {
+            void audioContext.suspend().catch(() => resetSoundEngine());
         }
-    }, 15000);
+    });
 }
 
 /** Very short, tactile confirmation for every successful cart addition. */

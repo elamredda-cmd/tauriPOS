@@ -11,7 +11,12 @@
         taxRatesDB,
         activeCategories,
         activePosPages,
-        activeProducts,
+        activeProductById,
+        activeProductIds,
+        goodsProducts,
+        productByBarcode,
+        productById,
+        scaleProductByPlu,
         storeDB,
         tilesDB,
         ordersDB,
@@ -29,6 +34,8 @@
         now,
         uuid,
         settingsDB,
+        weighableProductById,
+        weighableProducts,
         type Customer,
         type Discount,
         type Employee,
@@ -256,9 +263,7 @@
     $: cashDrawerTarget = cashDrawerTargetLabel(cashDrawerConfig);
 
     let goodsSearchQuery = "";
-    $: filteredGoods = $activeProducts
-        .filter((p) => p.showInGoods)
-        .sort((a, b) => (a.goodsSortOrder || 0) - (b.goodsSortOrder || 0))
+    $: filteredGoods = $goodsProducts
         .filter((p) =>
             p.name.toLowerCase().includes(goodsSearchQuery.toLowerCase()),
         );
@@ -314,9 +319,9 @@
     })();
     $: if (!activeScaleTilePageId || !scaleTilePages.some((page) => page.id === activeScaleTilePageId)) activeScaleTilePageId = scaleTilePages[0]?.id || "";
     $: activeScaleTilePage = scaleTilePages.find((page) => page.id === activeScaleTilePageId);
-    $: allWeighableProducts = $activeProducts.filter((product) => product.isWeighable);
+    $: allWeighableProducts = $weighableProducts;
     $: configuredScaleProducts = activeScaleTilePage?.productIds.length
-        ? activeScaleTilePage.productIds.map((id) => allWeighableProducts.find((product) => product.id === id)).filter(Boolean)
+        ? activeScaleTilePage.productIds.map((id) => $weighableProductById.get(id)).filter(Boolean)
         : scaleTilePages.length === 1 && !$settingsDB.find(s => s.key === "scale_tile_pages")
             ? allWeighableProducts
             : [];
@@ -471,19 +476,6 @@
     $: activePageTiles = $tilesDB
         .filter((t) => t.pageId === activePageId)
         .sort((a, b) => a.position - b.position);
-    $: activeProductById = new Map($activeProducts.map((product) => [product.id, product]));
-    $: productById = new Map($productsDB.map((product) => [product.id, product]));
-    $: productByBarcode = new Map(
-        $activeProducts
-            .filter((product) => product.barcode?.trim())
-            .map((product) => [normalizeLookupCode(product.barcode), product]),
-    );
-    $: scaleProductByPlu = new Map(
-        $activeProducts
-            .filter((product) => product.scalePlu?.trim())
-            .map((product) => [normalizeLookupCode(product.scalePlu || ""), product]),
-    );
-    $: activeProductIds = new Set($activeProducts.map((product) => product.id));
     $: employeeById = new Map($employeesDB.map((employee) => [employee.id, employee]));
     $: registerById = new Map($registersDB.map((register) => [register.id, register]));
 
@@ -539,7 +531,7 @@
         if (!tile) return null;
         return {
             tile,
-            product: activeProductById.get(tile.productId),
+            product: $activeProductById.get(tile.productId),
         };
     });
 
@@ -552,7 +544,7 @@
         (d) => d.id === selectedManualDiscountId && d.kind === "manual_percent" && d.isActive,
     );
     $: eligiblePromoGroupItems = $promoGroupItemsDB.filter((membership) =>
-        activeProductIds.has(membership.productId),
+        $activeProductIds.has(membership.productId),
     );
     $: cartEval = applyManualPercentageDiscount(
         evaluateCart(
@@ -576,7 +568,7 @@
     let taxTotal = 0;
     let total = 0;
     $: calculatedTaxLines = cart.map((item, i) => {
-        const product = productById.get(item.id);
+        const product = $productById.get(item.id);
         const taxRate = $taxRatesDB.find((t) => t.id === product?.taxRateId)?.rate || 0;
         return calculateTaxLine({
             quantity: item.quantity,
@@ -1189,7 +1181,7 @@
         searchQuery = "";
 
         try {
-            const found = productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
+            const found = $productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
 
             if (found) {
                 const product = normalizeProductForCache(found);
@@ -1207,7 +1199,7 @@
             }
             const parsed = parseScaleBarcode(query, getBarcodeRules($settingsDB));
             if (parsed) {
-                const scaleProduct = scaleProductByPlu.get(normalizeLookupCode(parsed.scalePlu)) || await searchProductByScalePlu(parsed.scalePlu);
+                const scaleProduct = $scaleProductByPlu.get(normalizeLookupCode(parsed.scalePlu)) || await searchProductByScalePlu(parsed.scalePlu);
                 if (!scaleProduct) {
                     toast(`No active product has Scale PLU ${parsed.scalePlu}`, "error");
                     playErrorSound();
@@ -1501,7 +1493,7 @@
 
     function openChangePrice() {
         if (cart[selectedCartIndex]) {
-            const product = $productsDB.find((item) => item.id === cart[selectedCartIndex].id);
+            const product = $productById.get(cart[selectedCartIndex].id);
             if (!product?.allowPriceOverride && !hasPermission($currentEmployee, "price_override", $settingsDB)) {
                 void requirePermission(
                     "price_override",
@@ -1584,7 +1576,7 @@
         }
         if (cart[selectedCartIndex]) {
             const updatedItem = { ...cart[selectedCartIndex], price: newPence };
-            const product = $productsDB.find((item) => item.id === updatedItem.id);
+            const product = $productById.get(updatedItem.id);
             if (!product) {
                 toast("This item is no longer available", "error");
                 return;
@@ -1821,7 +1813,7 @@
                 order: selectedOrder,
                 lines: receiptLines.map((line) => ({
                     ...line,
-                    sku: productById.get(line.productId)?.sku || "",
+                    sku: $productById.get(line.productId)?.sku || "",
                 })),
                 cashierName: selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || "",
                 tillName: selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || tillName,
@@ -1872,7 +1864,7 @@
                 order: bundle.order,
                 lines: bundle.lines.map((line) => ({
                     ...line,
-                    sku: line.sku || productById.get(line.productId)?.sku || "",
+                    sku: line.sku || $productById.get(line.productId)?.sku || "",
                 })),
                 cashierName: employeeById.get(bundle.order.employeeId)?.name || $currentEmployee?.name || "",
                 tillName: registerById.get(bundle.order.tillNumber)?.name || tillName,
@@ -2464,7 +2456,7 @@
 
             const lines = cart.map((item, i) => {
                 const ev = cartEval.lines[i];
-                const product = productById.get(item.id);
+                const product = $productById.get(item.id);
                 const lineDiscount = ev?.savings || 0;
                 const lineDiscountId = ev?.applied?.[0]?.discountId || "";
                 const tax = calculatedTaxLines[i];
@@ -2503,7 +2495,7 @@
             updatedAt: timestamp,
             };
             const stockChanges = stockTrackingEnabled ? cart.flatMap((item) => {
-                const product = productById.get(item.id);
+                const product = $productById.get(item.id);
                 return product?.trackStock && !item.skipStockAdjustment ? [{
                     productId: item.id,
                     delta: -item.quantity,
@@ -3971,7 +3963,7 @@
                                         lines={getCachedReceiptLines(selectedRecentOrderId)
                                             .map((line) => ({
                                                 ...line,
-                                                sku: productById.get(line.productId)?.sku || '',
+                                                sku: $productById.get(line.productId)?.sku || '',
                                             }))}
                                         cashierName={selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || ''}
                                         tillName={selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || ''}

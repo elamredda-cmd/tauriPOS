@@ -5,7 +5,7 @@
     import { settingsDB } from '$lib/stores/db';
     import { currentEmployee, logout } from '$lib/stores/session';
     import { toast } from '$lib/stores/toast';
-    import { hasPermission, permissionLabels, type PermissionKey } from '$lib/permissions';
+    import { parseRolePermissions, permissionLabels, type PermissionKey } from '$lib/permissions';
     import PageBackButton from '$lib/components/PageBackButton.svelte';
 
     type AdminEntry = {
@@ -33,6 +33,11 @@
             | 'settings';
     };
 
+    type AdminViewEntry = AdminEntry & {
+        allowed: boolean;
+        lockedLabel: string;
+    };
+
     const adminEntries: AdminEntry[] = [
         { title: 'Design Studio', group: 'POS layout', description: 'Edit till pages and selling layout.', path: '/design', permission: 'open_design', accent: '#0ea5e9', icon: 'design' },
         { title: 'Items', group: 'Catalogue', description: 'Products, PLU, barcode, stock setup.', path: '/items', permission: 'open_items', accent: '#22c55e', icon: 'items' },
@@ -51,8 +56,6 @@
         { title: 'Settings', group: 'System', description: 'Printers, receipt, labels, and devices.', path: '/settings', permission: 'open_settings', accent: '#0f766e', icon: 'settings' },
     ];
 
-    const adminTilePlaceholders = Array.from({ length: Math.max(0, 20 - adminEntries.length) });
-
     let isFullscreen = false;
     let fullscreenBusy = false;
 
@@ -64,15 +67,20 @@
         .slice(0, 2)
         .map((part) => part[0]?.toUpperCase())
         .join('') || 'AD';
+    $: rolePermissions = parseRolePermissions($settingsDB);
+    $: adminViewEntries = adminEntries.map((entry): AdminViewEntry => {
+        const allowed = !entry.permission ||
+            Boolean($currentEmployee?.isActive && rolePermissions[$currentEmployee.role]?.includes(entry.permission));
+        return {
+            ...entry,
+            allowed,
+            lockedLabel: entry.permission ? permissionLabels[entry.permission] : entry.title,
+        };
+    });
 
-    function canOpen(entry: AdminEntry): boolean {
-        return !entry.permission || hasPermission($currentEmployee, entry.permission, $settingsDB);
-    }
-
-    function openEntry(entry: AdminEntry) {
-        if (!canOpen(entry)) {
-            const label = entry.permission ? permissionLabels[entry.permission] : entry.title;
-            toast(`You do not have permission: ${label}`, 'error');
+    function openEntry(entry: AdminViewEntry) {
+        if (!entry.allowed) {
+            toast(`You do not have permission: ${entry.lockedLabel}`, 'error');
             return;
         }
         goto(entry.path);
@@ -144,13 +152,13 @@
     </header>
 
     <main class="admin-grid" aria-label="Admin navigation">
-        {#each adminEntries as entry}
+        {#each adminViewEntries as entry}
             <button
                 type="button"
                 class="admin-tile"
-                class:locked={!canOpen(entry)}
+                class:locked={!entry.allowed}
                 style="--tile-accent: {entry.accent}"
-                disabled={!canOpen(entry)}
+                disabled={!entry.allowed}
                 title={entry.description}
                 aria-label={`${entry.title}. ${entry.description}`}
                 on:click={() => openEntry(entry)}
@@ -250,9 +258,6 @@
                 </span>
             </button>
         {/each}
-        {#each adminTilePlaceholders as _, slotIndex (`admin-empty-${slotIndex}`)}
-            <span class="admin-placeholder" aria-hidden="true"></span>
-        {/each}
     </main>
 </div>
 
@@ -290,14 +295,13 @@
         justify-content: center;
         gap: 0.5rem;
         padding: 0 0.9rem;
-        box-shadow: 0 8px 18px var(--shadow);
-        transition: background-color .15s ease, border-color .15s ease, color .15s ease, transform .15s ease;
+        transition: none;
     }
 
     .admin-header-btn:hover {
         background: var(--bg-card-hover);
         border-color: var(--accent-primary);
-        transform: translateY(-1px);
+        transform: none;
     }
 
     .admin-title {
@@ -362,7 +366,6 @@
         font-size: 0.82rem;
         font-weight: 950;
         letter-spacing: 0;
-        box-shadow: 0 8px 18px var(--shadow);
         flex: 0 0 auto;
     }
 
@@ -397,6 +400,7 @@
 
     .admin-tile {
         position: relative;
+        contain: layout paint;
         min-width: 0;
         min-height: 0;
         height: 100%;
@@ -412,20 +416,18 @@
         align-items: center;
         justify-content: center;
         gap: 0.28rem;
-        box-shadow: 0 8px 18px var(--shadow);
-        transition: background-color .15s ease, border-color .15s ease, transform .15s ease;
+        transition: none;
     }
 
     .admin-tile:hover:not(:disabled) {
         background: var(--bg-card-hover);
         border-color: var(--tile-accent);
-        transform: translateY(-1px);
+        transform: none;
     }
 
     .admin-tile:disabled {
         cursor: not-allowed;
         opacity: 0.48;
-        filter: grayscale(.2);
     }
 
     .admin-tile-mark {
@@ -439,8 +441,8 @@
         width: 44px;
         height: 44px;
         border-radius: 0.45rem;
-        background: color-mix(in srgb, var(--tile-accent) 18%, var(--bg-panel));
-        border: 1px solid color-mix(in srgb, var(--tile-accent) 45%, var(--border-flat));
+        background: var(--bg-panel);
+        border: 1px solid var(--border-flat);
         color: var(--tile-accent);
         display: flex;
         align-items: center;
@@ -479,15 +481,6 @@
     .admin-tile-group {
         font-size: 0.78rem;
         line-height: 1;
-    }
-
-    .admin-placeholder {
-        min-width: 0;
-        min-height: 0;
-        border: 1px dashed color-mix(in srgb, var(--border-flat) 70%, transparent);
-        border-radius: 0.45rem;
-        background: color-mix(in srgb, var(--bg-card) 45%, transparent);
-        opacity: 0.5;
     }
 
     @media (max-width: 1100px) {
@@ -618,8 +611,5 @@
             aspect-ratio: 1 / 1;
         }
 
-        .admin-placeholder {
-            display: none;
-        }
     }
 </style>

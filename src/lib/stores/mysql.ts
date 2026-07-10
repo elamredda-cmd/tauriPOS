@@ -124,6 +124,16 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
 
     console.log('Initializing MySQL/MariaDB Database…');
 
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS sync_change_log (
+            seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            table_name VARCHAR(64) NOT NULL,
+            changedAt VARCHAR(40) NOT NULL,
+            INDEX idx_sync_change_table_seq (table_name, seq),
+            INDEX idx_sync_change_time (changedAt)
+        )
+    `);
+
     // 1. Products
     await d.execute(`
         CREATE TABLE IF NOT EXISTS products (
@@ -412,9 +422,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             employeeId VARCHAR(36),
             action TEXT,
             entityType TEXT,
-            entityId VARCHAR(36),
-            oldData TEXT,
-            newData TEXT,
+            entityId VARCHAR(191),
+            oldData MEDIUMTEXT,
+            newData MEDIUMTEXT,
             createdAt TEXT
         )
     `);
@@ -688,6 +698,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE cash_movements MODIFY COLUMN amount BIGINT`,
         `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
+        `ALTER TABLE audit_logs MODIFY COLUMN entityId VARCHAR(191)`,
+        `ALTER TABLE audit_logs MODIFY COLUMN oldData MEDIUMTEXT`,
+        `ALTER TABLE audit_logs MODIFY COLUMN newData MEDIUMTEXT`,
         `ALTER TABLE manager_approvals ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE stock_receipts ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE stock_receipts MODIFY COLUMN totalCost BIGINT DEFAULT 0`,
@@ -717,6 +730,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     await cleanupDuplicatePromotionMemberships(d);
     await cleanupDuplicateOpenShifts(d);
     await ensureDeleteTombstoneTriggers(d);
+    await ensureSyncChangeTriggers(d);
     await cleanupDeletedOrOrphanedPromotionRows(d);
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
@@ -793,6 +807,29 @@ async function ensureSyncTimestampTriggers(d: Database): Promise<void> {
             `CREATE TRIGGER IF NOT EXISTS pos_stamp_${table}_update
              BEFORE UPDATE ON ${table} FOR EACH ROW SET NEW.updatedAt = ${stamp}`
         );
+    }
+}
+
+async function ensureSyncChangeTriggers(d: Database): Promise<void> {
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    const triggerRows: any[] = await d.select(
+        `SELECT TRIGGER_NAME
+         FROM INFORMATION_SCHEMA.TRIGGERS
+         WHERE TRIGGER_SCHEMA = DATABASE()
+           AND TRIGGER_NAME LIKE 'pos_change_%'`,
+    );
+    const existing = new Set(triggerRows.map(row => String(row.TRIGGER_NAME || row.trigger_name || '')));
+    for (const table of TIMESTAMP_SYNC_TABLES) {
+        for (const operation of ['insert', 'update', 'delete'] as const) {
+            const triggerName = `pos_change_${table}_${operation}`;
+            if (existing.has(triggerName)) continue;
+            await d.execute(
+                `CREATE TRIGGER IF NOT EXISTS ${triggerName}
+                 AFTER ${operation.toUpperCase()} ON ${table} FOR EACH ROW
+                 INSERT INTO sync_change_log (table_name, changedAt)
+                 VALUES ('${table}', ${stamp})`,
+            );
+        }
     }
 }
 
@@ -1207,6 +1244,114 @@ export async function mysqlGetUpdatedSince(table: string, sinceDate: string): Pr
     } else {
         return await d.select(`SELECT * FROM ${table}`);
     }
+}
+
+export interface MysqlSyncPageCursor {
+    updatedAt: string;
+    rowId: string;
+}
+
+export interface MysqlSyncPage {
+    rows: any[];
+    nextCursor: MysqlSyncPageCursor | null;
+}
+
+export interface MysqlSyncChange {
+    seq: number;
+    tableName: string;
+}
+
+export interface MysqlSyncChangeWindow {
+    minSeq: number;
+    maxSeq: number;
+    changes: MysqlSyncChange[];
+}
+
+export async function mysqlGetSyncChangeWindow(
+    afterSeq: number,
+    _limit = 1000,
+): Promise<MysqlSyncChangeWindow> {
+    const d = await getDb();
+    const bounds: any[] = await d.select(
+        `SELECT COALESCE(MIN(seq), 0) AS minSeq, COALESCE(MAX(seq), 0) AS maxSeq
+         FROM sync_change_log`,
+    );
+    const minSeq = Number(bounds[0]?.minSeq || 0);
+    const maxSeq = Number(bounds[0]?.maxSeq || 0);
+    if (maxSeq <= afterSeq) return { minSeq, maxSeq, changes: [] };
+
+    const rows: any[] = await d.select(
+        `SELECT MAX(seq) AS seq, table_name AS tableName
+         FROM sync_change_log
+         WHERE seq > ? AND seq <= ?
+         GROUP BY table_name
+         ORDER BY MAX(seq) ASC`,
+        [afterSeq, maxSeq],
+    );
+    return {
+        minSeq,
+        maxSeq,
+        changes: rows.map(row => ({
+            seq: Number(row.seq || 0),
+            tableName: String(row.tableName || ''),
+        })),
+    };
+}
+
+export async function mysqlPruneSyncChangeLog(retainRows = 200_000): Promise<void> {
+    const d = await getDb();
+    const keep = Math.max(10_000, Number(retainRows || 200_000));
+    await d.execute(
+        `DELETE FROM sync_change_log
+         WHERE seq < (SELECT cutoff FROM (
+            SELECT GREATEST(COALESCE(MAX(seq), 0) - ?, 0) AS cutoff
+            FROM sync_change_log
+         ) retained)`,
+        [keep],
+    );
+}
+
+/** Read a stable, bounded delta page without offset scans or large IPC payloads. */
+export async function mysqlGetSyncPage(
+    table: string,
+    sinceDate: string | null,
+    throughDate: string,
+    idKey = 'id',
+    cursor: MysqlSyncPageCursor | null = null,
+    limit = 500,
+): Promise<MysqlSyncPage> {
+    const d = await getDb();
+    const validCols = await getTableColumns(table);
+    if (!validCols.includes('updatedAt') || !validCols.includes(idKey)) {
+        throw new Error(`Sync paging requires ${table}.updatedAt and ${table}.${idKey}`);
+    }
+
+    const where: string[] = ['updatedAt <= ?'];
+    const params: any[] = [throughDate];
+    if (sinceDate) {
+        where.push('updatedAt > ?');
+        params.push(sinceDate);
+    }
+    if (cursor) {
+        where.push(`(updatedAt > ? OR (updatedAt = ? AND CAST(\`${idKey}\` AS CHAR) > ?))`);
+        params.push(cursor.updatedAt, cursor.updatedAt, cursor.rowId);
+    }
+
+    const safeLimit = Math.max(1, Math.min(1000, Number(limit || 500)));
+    const rows: any[] = await d.select(
+        `SELECT * FROM ${table}
+         WHERE ${where.join(' AND ')}
+         ORDER BY updatedAt ASC, CAST(\`${idKey}\` AS CHAR) ASC
+         LIMIT ?`,
+        [...params, safeLimit],
+    );
+    const last = rows[rows.length - 1];
+    return {
+        rows,
+        nextCursor: rows.length === safeLimit && last
+            ? { updatedAt: String(last.updatedAt || ''), rowId: String(last[idKey] || '') }
+            : null,
+    };
 }
 
 /**

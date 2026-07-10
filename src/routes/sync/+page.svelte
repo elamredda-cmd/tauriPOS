@@ -5,10 +5,10 @@
     import { toast } from '$lib/stores/toast';
     import {
         dismissSyncConflict,
-        flushOfflineQueue,
         forceFullSync,
         getOfflineQueueStats,
         getSyncConflicts,
+        retryOfflineQueueNow,
         retrySyncConflict,
         triggerSync,
         validateDatabaseSchemas,
@@ -17,7 +17,14 @@
         type SchemaValidationResult,
     } from '$lib/stores/database';
 
-    let stats: OfflineQueueStats = { pending: 0, conflicts: 0, oldestPendingAt: '' };
+    let stats: OfflineQueueStats = {
+        pending: 0,
+        retrying: 0,
+        conflicts: 0,
+        oldestPendingAt: '',
+        nextRetryAt: '',
+        lastError: '',
+    };
     let conflicts: SyncConflict[] = [];
     let schema: SchemaValidationResult = { ok: true, issues: [] };
     let loading = true;
@@ -68,7 +75,9 @@
             <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Pending</span>
                 <strong class="mt-2 block text-2xl {stats.pending ? 'text-warning' : 'text-success'}">{stats.pending}</strong>
-                <p class="m-0 mt-1 text-sm text-text-muted">Writes waiting to upload</p>
+                <p class="m-0 mt-1 text-sm text-text-muted">
+                    {stats.retrying ? `${stats.retrying} waiting to retry` : 'Writes waiting to upload'}
+                </p>
             </div>
             <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Conflicts</span>
@@ -88,10 +97,19 @@
             </div>
         {/if}
 
+        {#if stats.lastError}
+            <div class="mb-5 border border-warning/40 bg-warning/10 p-4 text-warning">
+                <strong>Last upload problem:</strong> {stats.lastError}
+                {#if stats.nextRetryAt}
+                    <span class="ml-2 text-sm">Next automatic retry: {new Date(stats.nextRetryAt).toLocaleString('en-GB')}</span>
+                {/if}
+            </div>
+        {/if}
+
         <section class="mb-5 rounded-2xl border border-border-flat bg-bg-card p-5">
             <h2 class="m-0 mb-3 text-xl">Actions</h2>
             <div class="flex flex-wrap gap-3">
-                <button class="btn btn-primary" disabled={!!busy} on:click={() => runAction('Flush queue', flushOfflineQueue)}>Flush Queue</button>
+                <button class="btn btn-primary" disabled={!!busy} on:click={() => runAction('Retry uploads', retryOfflineQueueNow)}>Retry Uploads</button>
                 <button class="btn btn-secondary" disabled={!!busy} on:click={() => runAction('Sync now', triggerSync)}>Sync Now</button>
                 <button class="btn btn-secondary" disabled={!!busy} on:click={() => runAction('Full repair sync', forceFullSync)}>Full Repair Sync</button>
             </div>

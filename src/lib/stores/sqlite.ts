@@ -102,7 +102,10 @@ export async function initDb() {
             operation TEXT,
             data TEXT,
             id_key TEXT,
-            created_at TEXT
+            created_at TEXT,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT DEFAULT '',
+            next_attempt_at TEXT DEFAULT ''
         )
     `);
     await d.execute(`
@@ -522,6 +525,16 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_promo_group_items_product ON promo_group_items(productId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_completed ON orders(completedAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(orderNumber)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_history_sort ON orders(
+        COALESCE(NULLIF(completedAt, ''), NULLIF(createdAt, ''), NULLIF(updatedAt, '')) DESC,
+        orderNumber DESC
+    )`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_status_history_sort ON orders(
+        status,
+        COALESCE(NULLIF(completedAt, ''), NULLIF(createdAt, ''), NULLIF(updatedAt, '')) DESC,
+        orderNumber DESC
+    )`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`);
@@ -537,6 +550,7 @@ export async function initDb() {
 
     // Indexes on migration-added columns must run AFTER runMigrations().
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_offline_queue_due ON _offline_queue(next_attempt_at, created_at)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu_active ON products(scalePlu, isActive)`);
@@ -629,6 +643,10 @@ async function dropColumnIfExists(table: string, column: string) {
  */
 async function runMigrations() {
     const d = await getDb();
+    await addColumnIfMissing('_offline_queue', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing('_offline_queue', 'last_error', "TEXT DEFAULT ''");
+    await addColumnIfMissing('_offline_queue', 'next_attempt_at', "TEXT DEFAULT ''");
+
     // Discounts gained promo-engine fields after the first release.
     await addColumnIfMissing('discounts', 'kind', "TEXT DEFAULT 'manual_percent'");
     await addColumnIfMissing('discounts', 'autoApply', 'INTEGER DEFAULT 0');
@@ -1651,48 +1669,55 @@ export async function getOrdersPage(options: OrderPageOptions = {}): Promise<Ord
         ${whereSql}
     `;
 
-    const rows: any[] = await d.select(
-        `SELECT o.*,
-                COALESCE(e.name, '') AS cashierName,
-                COALESCE(r.name, o.tillNumber, '') AS tillName,
-                COALESCE(c.name, '') AS customerName
-         ${fromSql}
-         ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
-                  o.orderNumber DESC
-         LIMIT ? OFFSET ?`,
-        [...params, limit, offset],
-    );
-    const countRows: any[] = await d.select(
-        `SELECT COUNT(*) AS count ${fromSql}`,
-        params,
-    );
-    const totalRows: any[] = await d.select(`SELECT COUNT(*) AS count FROM orders`);
+    const [rows, countRows, overallCountRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT o.*,
+                    COALESCE(e.name, '') AS cashierName,
+                    COALESCE(r.name, o.tillNumber, '') AS tillName,
+                    COALESCE(c.name, '') AS customerName
+             ${fromSql}
+             ORDER BY COALESCE(NULLIF(o.completedAt, ''), NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+                      o.orderNumber DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+        ),
+        d.select<any[]>(`SELECT COUNT(*) AS count ${fromSql}`, params),
+        whereSql
+            ? d.select<any[]>(`SELECT COUNT(*) AS count FROM orders`)
+            : Promise.resolve(null),
+    ]);
+    const filteredTotal = Number(countRows[0]?.count || 0);
+    const overallTotal = overallCountRows
+        ? Number(overallCountRows[0]?.count || 0)
+        : filteredTotal;
 
     const orderIds = rows.map((order) => order.id).filter(Boolean);
     if (orderIds.length === 0) {
         return {
             rows,
-            total: Number(countRows[0]?.count || 0),
-            overallTotal: Number(totalRows[0]?.count || 0),
+            total: filteredTotal,
+            overallTotal,
             lines: [],
             payments: [],
         };
     }
 
     const placeholders = orderIds.map(() => '?').join(',');
-    const lines: any[] = await d.select(
-        `SELECT * FROM order_lines WHERE orderId IN (${placeholders}) ORDER BY orderId, updatedAt, id`,
-        orderIds,
-    );
-    const payments: any[] = await d.select(
-        `SELECT * FROM payments WHERE orderId IN (${placeholders}) ORDER BY orderId, createdAt, id`,
-        orderIds,
-    );
+    const [lines, payments] = await Promise.all([
+        d.select<any[]>(
+            `SELECT * FROM order_lines WHERE orderId IN (${placeholders}) ORDER BY orderId, updatedAt, id`,
+            orderIds,
+        ),
+        d.select<any[]>(
+            `SELECT * FROM payments WHERE orderId IN (${placeholders}) ORDER BY orderId, createdAt, id`,
+            orderIds,
+        ),
+    ]);
 
     return {
         rows,
-        total: Number(countRows[0]?.count || 0),
-        overallTotal: Number(totalRows[0]?.count || 0),
+        total: filteredTotal,
+        overallTotal,
         lines,
         payments,
     };

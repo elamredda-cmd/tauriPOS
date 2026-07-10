@@ -40,6 +40,7 @@
     let goodsMenuAvailableTotal = 0;
     let goodsMenuLoading = false;
     let goodsMenuSearchTimer: ReturnType<typeof setTimeout> | null = null;
+    let goodsMenuLoadToken = 0;
     let previousGoodsMenuSearch = "";
     $: stockTrackingEnabled = ($settingsDB.find((setting) => setting.key === "stock_tracking_enabled")?.value ?? "true") !== "false";
 
@@ -109,6 +110,9 @@
     });
 
     onDestroy(() => {
+        itemsMounted = false;
+        itemsLoadToken += 1;
+        goodsMenuLoadToken += 1;
         if (itemsSearchTimer) clearTimeout(itemsSearchTimer);
         if (goodsMenuSearchTimer) clearTimeout(goodsMenuSearchTimer);
     });
@@ -479,9 +483,11 @@
     }
 
     async function loadGoodsMenuLists(preserveSelected = true, query = goodsMenuSearch) {
+        const token = ++goodsMenuLoadToken;
         goodsMenuLoading = true;
         try {
             const result = await getGoodsMenuEditorProducts(query, 100);
+            if (token !== goodsMenuLoadToken) return;
             if (!preserveSelected) {
                 goodsMenuSelected = result.selected.map((item) => ({ ...item, showInGoods: true }));
                 goodsMenuOriginal = new Map();
@@ -505,9 +511,10 @@
             goodsMenuAvailableTotal = result.totalAvailable;
             normalizeGoodsMenuOrder();
         } catch (error) {
+            if (token !== goodsMenuLoadToken) return;
             toast(`Could not load Goods Menu items: ${String(error).replace(/^Error:\s*/, "")}`, "error");
         } finally {
-            goodsMenuLoading = false;
+            if (token === goodsMenuLoadToken) goodsMenuLoading = false;
         }
     }
 
