@@ -393,44 +393,60 @@ fn number_candidates(text: &str) -> Vec<NumberCandidate> {
     let mut start: Option<usize> = None;
     let mut end = 0usize;
     let mut has_digit = false;
+    let mut has_decimal = false;
+
+    fn finish_candidate(
+        text: &str,
+        candidates: &mut Vec<NumberCandidate>,
+        start: Option<usize>,
+        end: usize,
+        has_digit: bool,
+    ) {
+        let Some(candidate_start) = start.filter(|_| has_digit) else {
+            return;
+        };
+        let token = text[candidate_start..end].replace(',', ".");
+        if let Ok(value) = token.parse::<f64>() {
+            candidates.push(NumberCandidate {
+                start: candidate_start,
+                end,
+                value,
+            });
+        }
+    }
 
     for (index, ch) in text.char_indices() {
-        let is_part = ch.is_ascii_digit() || ch == '.' || ch == ',' || ch == '-' || ch == '+';
-        if is_part {
+        if ch.is_ascii_digit() {
             if start.is_none() {
                 start = Some(index);
-                has_digit = false;
+                has_decimal = false;
             }
-            if ch.is_ascii_digit() {
-                has_digit = true;
-            }
+            has_digit = true;
             end = index + ch.len_utf8();
-        } else if let Some(candidate_start) = start.take() {
-            if has_digit {
-                let token = text[candidate_start..end].replace(',', ".");
-                if let Ok(value) = token.parse::<f64>() {
-                    candidates.push(NumberCandidate {
-                        start: candidate_start,
-                        end,
-                        value,
-                    });
-                }
-            }
+            continue;
         }
+
+        if (ch == '+' || ch == '-') && start.is_none() {
+            start = Some(index);
+            end = index + ch.len_utf8();
+            has_digit = false;
+            has_decimal = false;
+            continue;
+        }
+
+        if (ch == '.' || ch == ',') && start.is_some() && has_digit && !has_decimal {
+            has_decimal = true;
+            end = index + ch.len_utf8();
+            continue;
+        }
+
+        finish_candidate(text, &mut candidates, start, end, has_digit);
+        start = None;
+        has_digit = false;
+        has_decimal = false;
     }
 
-    if let Some(candidate_start) = start {
-        if has_digit {
-            let token = text[candidate_start..end].replace(',', ".");
-            if let Ok(value) = token.parse::<f64>() {
-                candidates.push(NumberCandidate {
-                    start: candidate_start,
-                    end,
-                    value,
-                });
-            }
-        }
-    }
+    finish_candidate(text, &mut candidates, start, end, has_digit);
 
     candidates
 }
@@ -509,13 +525,52 @@ fn parse_scale_weight(raw: &str) -> Option<ScaleWeightReading> {
     })
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScaleRequestMode {
+    Auto,
+    Listen,
+    AdamPrint,
+}
+
+fn scale_request_mode(value: Option<&str>) -> ScaleRequestMode {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "listen" => ScaleRequestMode::Listen,
+        "adam_print" => ScaleRequestMode::AdamPrint,
+        _ => ScaleRequestMode::Auto,
+    }
+}
+
 #[tauri::command]
 fn read_scale_weight(
     device_path: String,
     baud_rate: Option<u32>,
     timeout_ms: Option<u64>,
+    request_mode: Option<String>,
 ) -> Result<ScaleWeightReading, String> {
-    platform_read_scale_weight(device_path, baud_rate, timeout_ms)
+    platform_read_scale_weight(device_path, baud_rate, timeout_ms, request_mode)
+}
+
+#[cfg(target_os = "windows")]
+fn send_windows_scale_print_request(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+
+    let request = b"P\r\n";
+    let mut written = 0u32;
+    let ok = unsafe {
+        WriteFile(
+            handle,
+            request.as_ptr(),
+            request.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || written != request.len() as u32 {
+        return Err(last_windows_error("Could not send the Adam PRINT command"));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -523,6 +578,7 @@ fn platform_read_scale_weight(
     device_path: String,
     baud_rate: Option<u32>,
     timeout_ms: Option<u64>,
+    request_mode: Option<String>,
 ) -> Result<ScaleWeightReading, String> {
     use windows_sys::Win32::Devices::Communication::{
         GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT,
@@ -567,6 +623,7 @@ fn platform_read_scale_weight(
     let result = (|| {
         let baud = baud_rate.unwrap_or(9_600).clamp(1_200, 115_200);
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_200).clamp(200, 5_000));
+        let request_mode = scale_request_mode(request_mode.as_deref());
 
         let mut dcb: DCB = unsafe { std::mem::zeroed() };
         dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
@@ -583,8 +640,8 @@ fn platform_read_scale_weight(
 
         let timeouts = COMMTIMEOUTS {
             ReadIntervalTimeout: 50,
-            ReadTotalTimeoutMultiplier: 10,
-            ReadTotalTimeoutConstant: timeout.as_millis() as u32,
+            ReadTotalTimeoutMultiplier: 0,
+            ReadTotalTimeoutConstant: 75,
             WriteTotalTimeoutMultiplier: 0,
             WriteTotalTimeoutConstant: timeout.as_millis() as u32,
         };
@@ -594,6 +651,13 @@ fn platform_read_scale_weight(
 
         let started = Instant::now();
         let mut raw = Vec::new();
+        let mut last_data_at: Option<Instant> = None;
+        let mut request_sent = false;
+        let mut request_error = String::new();
+        if request_mode == ScaleRequestMode::AdamPrint {
+            send_windows_scale_print_request(handle)?;
+            request_sent = true;
+        }
         while started.elapsed() < timeout && raw.len() < 4_096 {
             let mut buffer = [0u8; 256];
             let mut read = 0u32;
@@ -610,16 +674,36 @@ fn platform_read_scale_weight(
                 return Err(last_windows_error("Could not read from scale port"));
             }
             if read == 0 {
-                break;
+                if request_mode == ScaleRequestMode::Auto
+                    && !request_sent
+                    && raw.is_empty()
+                    && started.elapsed() >= Duration::from_millis(200)
+                {
+                    request_sent = true;
+                    if let Err(error) = send_windows_scale_print_request(handle) {
+                        request_error = error;
+                    }
+                }
+                if last_data_at
+                    .is_some_and(|received| received.elapsed() >= Duration::from_millis(120))
+                {
+                    break;
+                }
+                continue;
             }
             raw.extend_from_slice(&buffer[..read as usize]);
-            if raw.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
-                break;
-            }
+            last_data_at = Some(Instant::now());
         }
 
         if raw.is_empty() {
-            return Err("No scale data received. Press PRINT on the scale, or enable continuous RS-232 output on the scale.".into());
+            let request_detail = if request_error.is_empty() {
+                String::new()
+            } else {
+                format!(" The automatic PRINT request also failed: {request_error}.")
+            };
+            return Err(format!(
+                "No scale data received.{request_detail} Close any other scale software, confirm the COM port, and check that the scale output is enabled."
+            ));
         }
 
         let text = String::from_utf8_lossy(&raw);
@@ -642,8 +726,9 @@ fn platform_read_scale_weight(
     device_path: String,
     baud_rate: Option<u32>,
     timeout_ms: Option<u64>,
+    request_mode: Option<String>,
 ) -> Result<ScaleWeightReading, String> {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::unix::fs::OpenOptionsExt;
     use std::process::Command;
     use std::thread;
@@ -660,6 +745,7 @@ fn platform_read_scale_weight(
 
     let baud = baud_rate.unwrap_or(9_600).clamp(1_200, 115_200);
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_200).clamp(200, 5_000));
+    let request_mode = scale_request_mode(request_mode.as_deref());
     let stty_device_flag = if cfg!(target_os = "macos") {
         "-f"
     } else {
@@ -672,23 +758,49 @@ fn platform_read_scale_weight(
         .args(["cs8", "-cstopb", "-parenb", "-ixon", "-ixoff", "raw"])
         .status();
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(NONBLOCK_FLAG)
+    let mut open_options = OpenOptions::new();
+    open_options.read(true).custom_flags(NONBLOCK_FLAG);
+    if request_mode != ScaleRequestMode::Listen {
+        open_options.write(true);
+    }
+    let mut file = open_options
         .open(device_path)
         .map_err(|error| format!("Could not open scale device {device_path}: {error}"))?;
 
     let started = Instant::now();
     let mut raw = Vec::new();
+    let mut last_data_at: Option<Instant> = None;
+    let mut request_sent = false;
+    let mut request_error = String::new();
+    if request_mode == ScaleRequestMode::AdamPrint {
+        file.write_all(b"P\r\n")
+            .map_err(|error| format!("Could not send the Adam PRINT command: {error}"))?;
+        request_sent = true;
+    }
     while started.elapsed() < timeout && raw.len() < 4_096 {
         let mut buffer = [0u8; 256];
         match file.read(&mut buffer) {
-            Ok(0) => thread::sleep(Duration::from_millis(40)),
-            Ok(read) => {
-                raw.extend_from_slice(&buffer[..read]);
-                if raw.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
+            Ok(0) => {
+                if request_mode == ScaleRequestMode::Auto
+                    && !request_sent
+                    && raw.is_empty()
+                    && started.elapsed() >= Duration::from_millis(200)
+                {
+                    request_sent = true;
+                    if let Err(error) = file.write_all(b"P\r\n") {
+                        request_error = format!("Could not send the Adam PRINT command: {error}");
+                    }
+                }
+                if last_data_at
+                    .is_some_and(|received| received.elapsed() >= Duration::from_millis(120))
+                {
                     break;
                 }
+                thread::sleep(Duration::from_millis(40));
+            }
+            Ok(read) => {
+                raw.extend_from_slice(&buffer[..read]);
+                last_data_at = Some(Instant::now());
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(40));
@@ -698,7 +810,14 @@ fn platform_read_scale_weight(
     }
 
     if raw.is_empty() {
-        return Err("No scale data received. Press PRINT on the scale, or enable continuous RS-232 output on the scale.".into());
+        let request_detail = if request_error.is_empty() {
+            String::new()
+        } else {
+            format!(" The automatic PRINT request also failed: {request_error}.")
+        };
+        return Err(format!(
+            "No scale data received.{request_detail} Close any other scale software, confirm the serial port, and check that the scale output is enabled."
+        ));
     }
 
     let text = String::from_utf8_lossy(&raw);
@@ -708,6 +827,38 @@ fn platform_read_scale_weight(
             clean_scale_raw(&text)
         )
     })
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::{parse_scale_weight, scale_request_mode, ScaleRequestMode};
+
+    #[test]
+    fn parses_weight_from_a_multiline_adam_packet() {
+        let reading = parse_scale_weight(
+            "Date: 11/07/2026\r\nTime: 02:15\r\nG/W:      1.250 kg\r\n",
+        )
+        .expect("weight should be parsed");
+
+        assert!((reading.weight - 1.25).abs() < f64::EPSILON);
+        assert_eq!(reading.unit, "kg");
+        assert!(reading.raw.contains("G/W: 1.250 kg"));
+    }
+
+    #[test]
+    fn parses_compact_gram_output() {
+        let reading = parse_scale_weight("ST,+000425g\r\n").expect("grams should be parsed");
+
+        assert!((reading.weight - 425.0).abs() < f64::EPSILON);
+        assert_eq!(reading.unit, "g");
+    }
+
+    #[test]
+    fn defaults_to_automatic_request_mode() {
+        assert!(scale_request_mode(None) == ScaleRequestMode::Auto);
+        assert!(scale_request_mode(Some("listen")) == ScaleRequestMode::Listen);
+        assert!(scale_request_mode(Some("adam_print")) == ScaleRequestMode::AdamPrint);
+    }
 }
 
 fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {

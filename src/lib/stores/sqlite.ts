@@ -549,6 +549,9 @@ export async function initDb() {
 
     // Indexes on migration-added columns must run AFTER runMigrations().
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_shift_status ON orders(shiftId, status)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_cash_movements_shift ON cash_movements(shiftId)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt DESC, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_offline_queue_due ON _offline_queue(next_attempt_at, created_at)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
@@ -1584,6 +1587,157 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
         rows,
         total: Number(countRows[0]?.count || 0),
     };
+}
+
+export type ShiftStatusFilter = 'all' | 'open' | 'closed' | string;
+
+export interface ShiftPageOptions {
+    query?: string;
+    status?: ShiftStatusFilter;
+    limit?: number;
+    offset?: number;
+}
+
+export interface ShiftPageResult {
+    rows: any[];
+    total: number;
+    overallTotal: number;
+}
+
+const SHIFT_BASE_SELECT = `
+    SELECT s.*,
+           COALESCE(e.name, '') AS cashierName,
+           COALESCE(closed_by.name, '') AS closedByName,
+           COALESCE(r.name, s.registerId, '') AS tillName
+    FROM shifts s
+    LEFT JOIN employees e ON e.id = s.employeeId
+    LEFT JOIN employees closed_by ON closed_by.id = s.closedByEmployeeId
+    LEFT JOIN registers r ON r.id = s.registerId
+`;
+
+function buildShiftPageWhere(options: ShiftPageOptions): { whereSql: string; params: any[] } {
+    const where: string[] = [];
+    const params: any[] = [];
+    const status = options.status || 'all';
+    if (status !== 'all') {
+        where.push('s.status = ?');
+        params.push(status);
+    }
+
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        const like = `%${search}%`;
+        where.push(`(
+            LOWER(COALESCE(r.name, s.registerId, '')) LIKE ?
+            OR LOWER(COALESCE(e.name, '')) LIKE ?
+            OR LOWER(COALESCE(closed_by.name, '')) LIKE ?
+            OR LOWER(COALESCE(s.notes, '')) LIKE ?
+            OR LOWER(COALESCE(s.openedAt, '')) LIKE ?
+            OR LOWER(COALESCE(s.closedAt, '')) LIKE ?
+        )`);
+        params.push(like, like, like, like, like, like);
+    }
+
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
+    const shiftIds = rows.map(row => String(row.id || '')).filter(Boolean);
+    if (shiftIds.length === 0) return rows;
+    const placeholders = shiftIds.map(() => '?').join(',');
+    const [orderRows, paymentRows, movementRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT shiftId,
+                    COUNT(*) AS orderCount,
+                    COALESCE(SUM(total), 0) AS salesTotal
+             FROM orders
+             WHERE shiftId IN (${placeholders})
+               AND status NOT IN ('hold', 'open')
+             GROUP BY shiftId`,
+            shiftIds,
+        ),
+        d.select<any[]>(
+            `SELECT o.shiftId,
+                    COALESCE(SUM(p.cashAmount), 0) AS cashPayments,
+                    COALESCE(SUM(p.cardAmount), 0) AS cardPayments
+             FROM payments p
+             JOIN orders o ON o.id = p.orderId
+             WHERE o.shiftId IN (${placeholders})
+               AND o.status NOT IN ('hold', 'open')
+             GROUP BY o.shiftId`,
+            shiftIds,
+        ),
+        d.select<any[]>(
+            `SELECT shiftId, COALESCE(SUM(amount), 0) AS cashMovements
+             FROM cash_movements
+             WHERE shiftId IN (${placeholders})
+             GROUP BY shiftId`,
+            shiftIds,
+        ),
+    ]);
+    const ordersByShift = new Map(orderRows.map(row => [String(row.shiftId), row]));
+    const paymentsByShift = new Map(paymentRows.map(row => [String(row.shiftId), row]));
+    const movementsByShift = new Map(movementRows.map(row => [String(row.shiftId), row]));
+    return rows.map(row => ({
+        ...row,
+        orderCount: Number(ordersByShift.get(String(row.id))?.orderCount || 0),
+        salesTotal: Number(ordersByShift.get(String(row.id))?.salesTotal || 0),
+        cashPayments: Number(paymentsByShift.get(String(row.id))?.cashPayments || 0),
+        cardPayments: Number(paymentsByShift.get(String(row.id))?.cardPayments || 0),
+        cashMovements: Number(movementsByShift.get(String(row.id))?.cashMovements || 0),
+    }));
+}
+
+/** Fetch one bounded management page with pre-aggregated cash-up totals. */
+export async function getShiftsPage(options: ShiftPageOptions = {}): Promise<ShiftPageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 20)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const { whereSql, params } = buildShiftPageWhere(options);
+    const countFromSql = `
+        FROM shifts s
+        LEFT JOIN employees e ON e.id = s.employeeId
+        LEFT JOIN employees closed_by ON closed_by.id = s.closedByEmployeeId
+        LEFT JOIN registers r ON r.id = s.registerId
+        ${whereSql}
+    `;
+
+    const [baseRows, countRows, overallCountRows] = await Promise.all([
+        d.select<any[]>(
+            `${SHIFT_BASE_SELECT}
+             ${whereSql}
+             ORDER BY s.openedAt DESC, s.id ASC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+        ),
+        d.select<any[]>(`SELECT COUNT(*) AS count ${countFromSql}`, params),
+        whereSql
+            ? d.select<any[]>(`SELECT COUNT(*) AS count FROM shifts`)
+            : Promise.resolve(null),
+    ]);
+    const rows = await addShiftPageTotals(d, baseRows);
+    const total = Number(countRows[0]?.count || 0);
+    return {
+        rows,
+        total,
+        overallTotal: overallCountRows ? Number(overallCountRows[0]?.count || 0) : total,
+    };
+}
+
+export async function getShiftSummary(id: string): Promise<any | null> {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) return null;
+    const d = await getDb();
+    const rows = await d.select<any[]>(
+        `${SHIFT_BASE_SELECT}
+         WHERE s.id = ?
+         LIMIT 1`,
+        [normalizedId],
+    );
+    return (await addShiftPageTotals(d, rows))[0] || null;
 }
 
 export type OrderStatusFilter =

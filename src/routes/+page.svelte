@@ -1587,9 +1587,6 @@
                     { price: product.price },
                 );
                 cart[selectedCartIndex] = updatedItem;
-                productsDB.update((items) => items.map((item) =>
-                    item.id === updatedItem.id ? { ...item, price: newPence, updatedAt: now() } : item,
-                ));
                 cart = [...cart];
                 toast("Price updated permanently");
             } catch (error) {
@@ -1610,6 +1607,8 @@
     function handleGoodsPadKey(key: string) {
         if (key === "C") {
             goodsPriceString = "0";
+        } else if (key === "DEL") {
+            goodsPriceString = goodsPriceString.length > 1 ? goodsPriceString.slice(0, -1) : "0";
         } else if (key === "00") {
             if (goodsPriceString !== "0" && goodsPriceString.length <= 7) goodsPriceString += "00";
         } else if (goodsPriceString.length < 9) {
@@ -3549,8 +3548,16 @@
                         on:click={() => (showGoodsModal = false)}>✕</button
                     >
                 </div>
-                <div class="np-display mb-4 mt-2">
-                    {formatMoney(parseInt(goodsPriceString || "0"))}
+                <div class="np-display !justify-between gap-3 mb-4 mt-2">
+                    <button
+                        type="button"
+                        class="h-10 min-w-[76px] rounded-md border border-border-flat bg-bg-card px-3 text-sm font-bold text-danger hover:border-danger hover:bg-danger hover:text-white"
+                        aria-label="Delete last price digit"
+                        on:click={() => handleGoodsPadKey("DEL")}
+                    >
+                        Delete
+                    </button>
+                    <span>{formatMoney(parseInt(goodsPriceString || "0"))}</span>
                 </div>
                 <div class="np-grid">
                     {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "C"] as key}

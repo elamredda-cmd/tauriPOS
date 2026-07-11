@@ -92,6 +92,7 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
         configuredConnection === 'system' && fallbackConnection !== 'system' ? fallbackConnection : configuredConnection,
         fallbackConnection
     );
+    const model = normalizeReceiptPrinterModel(setting(settings, 'receipt_printer_model', 'generic_escpos'));
     return {
         enabled: boolSetting(settings, 'receipt_printer_enabled', true),
         connection,
@@ -101,10 +102,13 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
         devicePath,
         baudRate: portSetting(settings, 'receipt_printer_baud_rate', 9600),
         paperWidth: setting(settings, 'receipt_printer_paper_width', '80mm') === '58mm' ? '58mm' : '80mm',
-        model: normalizeReceiptPrinterModel(setting(settings, 'receipt_printer_model', 'generic_escpos')),
+        model,
         autoPrintAfterPayment: boolSetting(settings, 'receipt_printer_auto_print_after_payment', false),
         cutPaper: boolSetting(settings, 'receipt_printer_cut_paper', true),
-        cutFeedLines: intSetting(settings, 'receipt_printer_cut_feed_lines', 8, 0, 20),
+        // Star's feed-and-cut command moves the paper to the cutter itself.
+        cutFeedLines: model === 'star_tsp100'
+            ? 0
+            : intSetting(settings, 'receipt_printer_cut_feed_lines', 8, 0, 20),
         openDrawerAfterPayment: boolSetting(
             settings,
             'receipt_printer_open_drawer_after_payment',
@@ -127,7 +131,7 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
             : labelDevicePath.trim()
                 ? 'serial'
                 : 'system';
-    const connection = normalizePrinterConnection(
+    const configuredOrFallbackConnection = normalizePrinterConnection(
         configuredConnection || fallbackConnection,
         fallbackConnection
     );
@@ -135,6 +139,10 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
     const directProtocol = protocolRaw === 'escpos' || protocolRaw === 'zpl' || protocolRaw === 'tspl'
         ? protocolRaw
         : 'escpos';
+    // System/driver mode must never be converted into a raw ESC/POS job. Raw
+    // bytes sent to a Star driver are printed as text and appear as gibberish.
+    const useSystemDriver = configuredOrFallbackConnection === 'system' || protocolRaw === 'system';
+    const connection: PrinterConnectionType = useSystemDriver ? 'system' : configuredOrFallbackConnection;
     return {
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
@@ -169,11 +177,62 @@ function feedLines(count: number): number[] {
 
 function receiptCut(config: ReceiptPrinterConfig): number[] {
     if (!config.cutPaper) return [];
-    const escposCutCommand = [0x1d, 0x56, 0x00];
-    const starCutFallback = config.model === 'star_tsp100'
-        ? [0x1b, 0x64, 0x02]
-        : [];
-    return [...feedLines(config.cutFeedLines), ...escposCutCommand, ...starCutFallback];
+    if (config.model === 'star_tsp100') {
+        // Star Line: feed to the cutter and perform a partial cut.
+        return [0x1b, 0x64, 0x03];
+    }
+    return [...feedLines(config.cutFeedLines), 0x1d, 0x56, 0x00];
+}
+
+type ReceiptCommands = {
+    init: number[];
+    font: number[];
+    center: number[];
+    left: number[];
+    boldOn: number[];
+    boldOff: number[];
+    normalSize: number[];
+    titleSize: number[];
+};
+
+function receiptCommands(config: ReceiptPrinterConfig, largeTitle = false): ReceiptCommands {
+    if (config.model === 'star_tsp100') {
+        return {
+            init: [0x1b, 0x40],
+            font: [0x1b, 0x4d],
+            center: [0x1b, 0x1d, 0x61, 0x01],
+            left: [0x1b, 0x1d, 0x61, 0x00],
+            boldOn: [0x1b, 0x45],
+            boldOff: [0x1b, 0x46],
+            normalSize: [0x1b, 0x14],
+            titleSize: largeTitle ? [0x1b, 0x0e] : [],
+        };
+    }
+    return {
+        init: [0x1b, 0x40],
+        font: [0x1b, 0x4d, 0x00],
+        center: [0x1b, 0x61, 0x01],
+        left: [0x1b, 0x61, 0x00],
+        boldOn: [0x1b, 0x45, 0x01],
+        boldOff: [0x1b, 0x45, 0x00],
+        normalSize: [0x1d, 0x21, 0x00],
+        titleSize: largeTitle ? [0x1d, 0x21, 0x11] : [0x1d, 0x21, 0x00],
+    };
+}
+
+function receiptTextWidth(config: ReceiptPrinterConfig): number {
+    if (config.paperWidth === '58mm') return 32;
+    return config.model === 'star_tsp100' ? 48 : 42;
+}
+
+function starCode39(value: string, encoding: 'latin1' | 'utf8'): number[] {
+    const barcode = String(value || '')
+        .toUpperCase()
+        .replace(/[^0-9A-Z. $/+%-]/g, '')
+        .slice(0, 16);
+    if (!barcode) return [];
+    // Star Line ESC b: Code 39, HRI text + line feed, narrow mode, 70-dot height.
+    return [0x1b, 0x62, 0x04, 0x02, 0x01, 0x46, ...encodeText(barcode, encoding), 0x1e];
 }
 
 function money(pence: number): string {
@@ -189,9 +248,10 @@ function cleanReceiptText(value: string, max = 42): string {
 }
 
 function textRow(left: string, right: string, width: number): string {
-    const cleanLeft = cleanReceiptText(left, width);
-    const cleanRight = cleanReceiptText(right, width);
-    const space = Math.max(1, width - cleanLeft.length - cleanRight.length);
+    let cleanRight = cleanReceiptText(right, width);
+    if (cleanRight.length >= width) return cleanRight.slice(0, width);
+    const cleanLeft = cleanReceiptText(left, Math.max(0, width - cleanRight.length - 1));
+    const space = width - cleanLeft.length - cleanRight.length;
     return `${cleanLeft}${' '.repeat(space)}${cleanRight}`;
 }
 
@@ -219,24 +279,32 @@ function thermalReportLines(text: string, width: number): string[] {
     return output;
 }
 
+function appendWrappedReceiptText(
+    bytes: number[],
+    text: string,
+    width: number,
+    encoding: 'latin1' | 'utf8',
+    maxLines = 4
+): void {
+    for (const wrappedLine of thermalReportLines(text, width).slice(0, maxLines)) {
+        bytes.push(...line(wrappedLine, encoding));
+    }
+}
+
 export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): number[] {
-    const width = config.paperWidth === '58mm' ? 32 : 42;
+    const width = receiptTextWidth(config);
     const divider = '-'.repeat(width);
-    const centerOn = [0x1b, 0x61, 0x01];
-    const leftOn = [0x1b, 0x61, 0x00];
-    const boldOn = [0x1b, 0x45, 0x01];
-    const boldOff = [0x1b, 0x45, 0x00];
-    const receiptFontSelect = [0x1b, 0x4d, 0x00];
+    const commands = receiptCommands(config);
     const bytes = [
-        0x1b, 0x40,
-        ...receiptFontSelect,
-        ...centerOn,
-        ...boldOn,
+        ...commands.init,
+        ...commands.font,
+        ...commands.center,
+        ...commands.boldOn,
         ...line('L&Bj POS', config.encoding),
-        ...boldOff,
+        ...commands.boldOff,
         ...line('Printer setup test', config.encoding),
         ...line(new Date().toLocaleString('en-GB'), config.encoding),
-        ...leftOn,
+        ...commands.left,
         ...line(divider, config.encoding),
         ...line(`Connection: ${config.connection}`, config.encoding),
         ...line(`Model: ${config.model === 'star_tsp100' ? 'Star TSP100' : 'Generic ESC/POS'}`, config.encoding),
@@ -246,22 +314,21 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
         ...line('Item              Qty     Total', config.encoding),
         ...line('Test Product       1       1.00', config.encoding),
         ...line(divider, config.encoding),
-        ...boldOn,
-        ...line('TOTAL                      1.00', config.encoding),
-        ...boldOff,
-        ...line('', config.encoding),
-        ...line('', config.encoding),
+        ...commands.boldOn,
+        ...line(textRow('TOTAL', '1.00', width), config.encoding),
+        ...commands.boldOff,
     ];
     bytes.push(...receiptCut(config));
     return bytes;
 }
 
 export function buildEscposTextReport(text: string, config = getReceiptPrinterConfig()): number[] {
-    const width = config.paperWidth === '58mm' ? 32 : 42;
+    const width = receiptTextWidth(config);
+    const commands = receiptCommands(config);
     const bytes = [
-        0x1b, 0x40,
-        0x1b, 0x4d, 0x00,
-        0x1b, 0x61, 0x00,
+        ...commands.init,
+        ...commands.font,
+        ...commands.left,
     ];
     for (const reportLine of thermalReportLines(text, width)) {
         bytes.push(...line(reportLine, config.encoding));
@@ -323,39 +390,42 @@ type ReceiptPayload = {
 };
 
 export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptPrinterConfig()): number[] {
-    const width = config.paperWidth === '58mm' ? 32 : 42;
+    const width = receiptTextWidth(config);
     const divider = '-'.repeat(width);
-    const centerOn = [0x1b, 0x61, 0x01];
-    const leftOn = [0x1b, 0x61, 0x00];
-    const boldOn = [0x1b, 0x45, 0x01];
-    const boldOff = [0x1b, 0x45, 0x00];
-    const normalSize = [0x1d, 0x21, 0x00];
-    const receiptFontSelect = [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
-    const titleSize = payload.design.titleTextSize === 'large' ? [0x1d, 0x21, 0x11] : normalSize;
-    const titleFontSelect = payload.design.titleTextSize === 'small' ? [0x1b, 0x4d, 0x01] : receiptFontSelect;
+    const commands = receiptCommands(config, payload.design.titleTextSize === 'large');
+    const receiptFontSelect = config.model === 'star_tsp100'
+        ? commands.font
+        : [0x1b, 0x4d, payload.design.fontFamily === 'condensed' ? 0x01 : 0x00];
+    const titleFontSelect = config.model !== 'star_tsp100' && payload.design.titleTextSize === 'small'
+        ? [0x1b, 0x4d, 0x01]
+        : receiptFontSelect;
     const receiptBarcode = String(payload.order.orderNumber || payload.order.receiptKey || payload.order.id || '')
         .toUpperCase()
         .replace(/[^0-9A-Z. $/+%-]/g, '')
         .slice(0, 32);
     const bytes = [
-        0x1b, 0x40,
+        ...commands.init,
         ...receiptFontSelect,
-        ...centerOn,
+        ...commands.center,
         ...titleFontSelect,
-        ...titleSize,
-        ...boldOn,
-        ...line(payload.design.headerText || payload.store.name || 'L&Bj POS', config.encoding),
-        ...boldOff,
-        ...normalSize,
-        ...receiptFontSelect,
+        ...commands.titleSize,
+        ...commands.boldOn,
     ];
+    appendWrappedReceiptText(
+        bytes,
+        payload.design.headerText || payload.store.name || 'L&Bj POS',
+        width,
+        config.encoding,
+        2
+    );
+    bytes.push(...commands.boldOff, ...commands.normalSize, ...receiptFontSelect);
 
-    if (payload.design.showAddress && payload.store.address) bytes.push(...line(payload.store.address, config.encoding));
-    if (payload.design.showPhone && payload.store.phone) bytes.push(...line(payload.store.phone, config.encoding));
-    if (payload.design.showEmail && payload.store.email) bytes.push(...line(payload.store.email, config.encoding));
-    if (payload.design.customMessage) bytes.push(...line(payload.design.customMessage, config.encoding));
+    if (payload.design.showAddress && payload.store.address) appendWrappedReceiptText(bytes, payload.store.address, width, config.encoding, 3);
+    if (payload.design.showPhone && payload.store.phone) appendWrappedReceiptText(bytes, payload.store.phone, width, config.encoding, 2);
+    if (payload.design.showEmail && payload.store.email) appendWrappedReceiptText(bytes, payload.store.email, width, config.encoding, 2);
+    if (payload.design.customMessage) appendWrappedReceiptText(bytes, payload.design.customMessage, width, config.encoding, 3);
 
-    bytes.push(...leftOn, ...line(divider, config.encoding));
+    bytes.push(...commands.left, ...line(divider, config.encoding));
     if (payload.design.showReceiptNumber) bytes.push(...line(textRow('Receipt', `#${payload.order.orderNumber || '-'}`, width), config.encoding));
     if (payload.design.showDateTime) bytes.push(...line(textRow('Date', new Date(payload.order.completedAt || Date.now()).toLocaleString('en-GB'), width), config.encoding));
     if (payload.design.showCashier) bytes.push(...line(textRow('Cashier', payload.cashierName || payload.order.employeeId || '-', width), config.encoding));
@@ -375,7 +445,7 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
         bytes.push(...line(textRow('Subtotal', money(payload.order.subtotal), width), config.encoding));
         bytes.push(...line(textRow('Discount', `-${money(payload.order.discountAmount)}`, width), config.encoding));
     }
-    bytes.push(...boldOn, ...line(textRow('TOTAL', money(payload.order.total), width), config.encoding), ...boldOff);
+    bytes.push(...commands.boldOn, ...line(textRow('TOTAL', money(payload.order.total), width), config.encoding), ...commands.boldOff);
     if (payload.design.showPayment) {
         bytes.push(...line(textRow((payload.order.paymentMethod || 'cash').toUpperCase(), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
         if ((payload.order.amountTendered || 0) > payload.order.total) {
@@ -383,10 +453,17 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
         }
     }
 
-    bytes.push(...line(divider, config.encoding), ...centerOn);
-    bytes.push(...line(payload.design.footerText || payload.store.receiptFooter || 'Thank you', config.encoding));
+    bytes.push(...line(divider, config.encoding), ...commands.center);
+    appendWrappedReceiptText(
+        bytes,
+        payload.design.footerText || payload.store.receiptFooter || 'Thank you',
+        width,
+        config.encoding,
+        3
+    );
     if (payload.design.showBarcode && receiptBarcode) {
-        bytes.push(...escposCode39(receiptBarcode), ...line('', config.encoding));
+        if (config.model === 'star_tsp100') bytes.push(...starCode39(receiptBarcode, config.encoding));
+        else bytes.push(...escposCode39(receiptBarcode), ...line('', config.encoding));
     }
     bytes.push(...receiptCut(config));
     return bytes;

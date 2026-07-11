@@ -24,7 +24,7 @@ const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items']
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
-    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customer-display',
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/shifts', '/customer-display',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -73,6 +73,10 @@ const CATEGORY_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
 ] as const;
+const SHIFTS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
 const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
     'orders',
     'order_lines',
@@ -96,6 +100,7 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/orders') return [...ORDERS_LIGHT_ROUTE_TABLES];
     if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
+    if (pathname === '/shifts') return [...SHIFTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
     return [...POS_LIGHT_ROUTE_TABLES];
 }
@@ -539,6 +544,12 @@ async function recordQueueFailure(d: any, row: any, error: unknown): Promise<num
 }
 
 async function executeQueuedOperation(row: any, data: any, mysqlDb: any, d: any): Promise<void> {
+    // Settings can become device-local in newer releases while an older build
+    // has already queued them. Treat those stale outbox rows as completed so
+    // they are removed without ever reaching MariaDB.
+    if (row.table_name === 'settings' && !isSyncableSetting(String(data?.key || ''))) {
+        return;
+    }
     if (row.operation === 'upsert') {
         if (PROMOTION_SYNC_TABLE_SET.has(row.table_name)) {
             await flushQueuedPromotionUpsert(row, data, mysqlDb, d);
@@ -1032,7 +1043,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
     'receipt_printer_enabled', 'receipt_printer_connection', 'receipt_printer_host',
     'receipt_printer_port', 'receipt_printer_name', 'receipt_printer_device_path',
-    'receipt_printer_baud_rate', 'receipt_printer_paper_width',
+    'receipt_printer_baud_rate', 'receipt_printer_paper_width', 'receipt_printer_model',
     'receipt_printer_auto_print_after_payment', 'receipt_printer_cut_paper',
     'receipt_printer_cut_feed_lines',
     'receipt_printer_open_drawer_after_cash', 'receipt_printer_open_drawer_after_payment',
@@ -1042,7 +1053,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
     'label_printer_gap_lines', 'label_printer_dpi',
     'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
-    'scale_hardware_poll_ms',
+    'scale_hardware_poll_ms', 'scale_hardware_request_mode',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done', SERVER_DATA_EPOCH_SEEN_KEY,
 ]);
@@ -2308,6 +2319,9 @@ export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Prom
     };
 }
 
+export const getShiftsPage = sqlite.getShiftsPage;
+export const getShiftSummary = sqlite.getShiftSummary;
+
 function hydrateOrderLines(rows: any[]): any[] {
     return rows.map((line) => sqlite.rehydrateBooleans(line, ['isPriceOverride']));
 }
@@ -2407,6 +2421,7 @@ export async function updateProductFields(
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
         await sqlite.updateProductFields(stamped);
+        patchProductInStore(stamped);
         if (isMultiMode()) {
             await queueLocalProductSnapshot(stamped.id, stamped);
             void flushOfflineQueue().catch((e) => console.warn('database: product field outbox flush failed:', e));
@@ -3811,7 +3826,7 @@ export async function getLiveTillPeriodReport(
 // ─── Svelte Store Hydration ─────────────────────────────────────────────────
 
 import {
-    productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
+    productsDB, patchProductInStore, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
     settingsDB, customersDB, storeDB, registersDB, discountsDB,
     ordersDB, orderLinesDB, paymentsDB, suppliersDB, productSuppliersDB,
     inventoryLogDB, loyaltyLogDB, auditLogDB, shiftsDB, cashMovementsDB,
@@ -3982,16 +3997,59 @@ let syncInterval: any = null;
 let fastSyncInterval: any = null;
 let heartbeatInterval: any = null;
 let changePollInterval: any = null;
+let presenceInterval: any = null;
+let presenceStartTimeout: any = null;
 
 let isSyncRunning = false;
 let isFastSyncRunning = false;
 let isHeartbeatRunning = false;
 let isChangeSyncRunning = false;
+let isPresenceRunning = false;
 const OFFLINE_RECONNECT_CHECK_MS = 60 * 1000;
 const CHANGE_POLL_INTERVAL_MS = 5 * 1000;
 const FAST_SYNC_INTERVAL_MS = 60 * 1000;
 const FULL_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const TILL_PRESENCE_INTERVAL_MS = 15 * 1000;
+const TILL_ONLINE_WINDOW_SECONDS = 45;
 const SYNC_CHANGE_CURSOR_KEY = 'sync_change_cursor';
+
+export interface ConnectedTill {
+    tillId: string;
+    tillName: string;
+    lastSeenAt: string;
+    secondsAgo: number;
+    isCurrent: boolean;
+}
+
+async function publishTillPresence(force = false): Promise<void> {
+    if (!isMultiMode() || isPresenceRunning) return;
+    if (!force && !get(connectionState).mysqlOnline) return;
+    isPresenceRunning = true;
+    try {
+        const tillId = await sqlite.getOrCreateTillId();
+        const tillName = await sqlite.getTillName();
+        await mysql.mysqlTouchTillPresence(tillId, tillName);
+    } finally {
+        isPresenceRunning = false;
+    }
+}
+
+export async function getConnectedTills(): Promise<ConnectedTill[]> {
+    const tillId = await sqlite.getOrCreateTillId();
+    const tillName = await sqlite.getTillName();
+    if (!isMultiMode()) {
+        return [{
+            tillId,
+            tillName,
+            lastSeenAt: new Date().toISOString(),
+            secondsAgo: 0,
+            isCurrent: true,
+        }];
+    }
+    await publishTillPresence(true);
+    const tills = await mysql.mysqlGetConnectedTills(TILL_ONLINE_WINDOW_SECONDS);
+    return tills.map((till) => ({ ...till, isCurrent: till.tillId === tillId }));
+}
 
 /**
  * Heartbeat: actively ping MariaDB to keep the online/offline indicator
@@ -4494,10 +4552,14 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
     if (fastSyncInterval) clearInterval(fastSyncInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (changePollInterval) clearInterval(changePollInterval);
+    if (presenceInterval) clearInterval(presenceInterval);
+    if (presenceStartTimeout) clearTimeout(presenceStartTimeout);
     syncInterval = null;
     fastSyncInterval = null;
     heartbeatInterval = null;
     changePollInterval = null;
+    presenceInterval = null;
+    presenceStartTimeout = null;
 
     if (await pauseSyncIfRestorePending()) return;
 
@@ -4519,6 +4581,17 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
 
     // Offline reconnect check: slow and short so the till never freezes.
     heartbeatInterval = setInterval(() => runHeartbeat(), OFFLINE_RECONNECT_CHECK_MS);
+
+    // Yield once so layout startup can mark MariaDB online before the first
+    // lightweight presence write.
+    presenceStartTimeout = setTimeout(() => {
+        presenceStartTimeout = null;
+        publishTillPresence().catch(console.error);
+    }, 0);
+    presenceInterval = setInterval(
+        () => publishTillPresence().catch(console.error),
+        TILL_PRESENCE_INTERVAL_MS,
+    );
 }
 
 /** Stop background sync. */
@@ -4538,6 +4611,14 @@ export function stopBackgroundSync(): void {
     if (changePollInterval) {
         clearInterval(changePollInterval);
         changePollInterval = null;
+    }
+    if (presenceInterval) {
+        clearInterval(presenceInterval);
+        presenceInterval = null;
+    }
+    if (presenceStartTimeout) {
+        clearTimeout(presenceStartTimeout);
+        presenceStartTimeout = null;
     }
 }
 

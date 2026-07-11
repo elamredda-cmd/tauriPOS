@@ -12,6 +12,8 @@
     let title = "Enter text";
     let maxLength = 120;
     let maxValue: number | null = null;
+    let selectionStart = 0;
+    let selectionEnd = 0;
     let lastAppliedValue = "";
     let lastPointerTarget: Element | null = null;
     let focusTimer: number | undefined;
@@ -21,9 +23,9 @@
     const activeInputClasses = [
         "!border-accent-primary",
         "!bg-bg-card",
-        "!outline-4",
+        "!outline-2",
         "!outline-accent-primary",
-        "!outline-offset-2",
+        "!outline-offset-1",
     ];
 
     const ignoredTypes = new Set([
@@ -54,6 +56,8 @@
         target.classList.add(...activeInputClasses);
         value = element.value || "";
         lastAppliedValue = value;
+        selectionStart = element.selectionStart ?? value.length;
+        selectionEnd = element.selectionEnd ?? selectionStart;
         numeric = element instanceof HTMLInputElement &&
             (element.type === "number" || element.type === "tel" || element.inputMode === "numeric" || element.inputMode === "decimal");
         decimal = element instanceof HTMLInputElement &&
@@ -78,6 +82,7 @@
         target.value = value;
         lastAppliedValue = value;
         target.dispatchEvent(new Event("input", { bubbles: true }));
+        applySelection();
         updateTargetRect();
         refocusTarget();
     }
@@ -110,13 +115,32 @@
             if (!element.isConnected || target !== element) return;
             updateTargetRect();
             element.focus({ preventScroll: true });
-            try {
-                const end = element.value.length;
-                element.setSelectionRange(end, end);
-            } catch {
-                // Some input types do not support text selection.
-            }
+            applySelection();
         }, 0);
+    }
+
+    function applySelection() {
+        if (!target?.isConnected) return;
+        selectionStart = Math.max(0, Math.min(selectionStart, target.value.length));
+        selectionEnd = Math.max(0, Math.min(selectionEnd, target.value.length));
+        try {
+            target.setSelectionRange(selectionStart, selectionEnd);
+        } catch {
+            // Some input types do not support text selection.
+        }
+    }
+
+    function syncSelectionFromTarget() {
+        if (!target?.isConnected) return;
+        selectionStart = target.selectionStart ?? target.value.length;
+        selectionEnd = target.selectionEnd ?? selectionStart;
+    }
+
+    function handleKeyboardSelectionChange(start: number, end: number) {
+        selectionStart = start;
+        selectionEnd = end;
+        applySelection();
+        refocusTarget();
     }
 
     function updateTargetRect() {
@@ -149,6 +173,16 @@
     onMount(() => {
         const handlePointer = (event: PointerEvent) => { lastPointerTarget = event.target as Element | null; };
         const handleClose = () => done();
+        const handleInput = (event: Event) => {
+            const activeTarget = target;
+            if (!activeTarget || event.target !== activeTarget) return;
+            value = activeTarget.value;
+            lastAppliedValue = value;
+            syncSelectionFromTarget();
+        };
+        const handleSelectionChange = () => {
+            if (document.activeElement === target) syncSelectionFromTarget();
+        };
         const handleKeydown = (event: KeyboardEvent) => {
             if (event.key === "Escape" && visible) {
                 event.preventDefault();
@@ -158,6 +192,8 @@
         document.addEventListener("pointerdown", handlePointer, true);
         document.addEventListener("focusin", handleFocus, true);
         document.addEventListener("close-touch-keyboard", handleClose);
+        document.addEventListener("input", handleInput, true);
+        document.addEventListener("selectionchange", handleSelectionChange);
         document.addEventListener("keydown", handleKeydown, true);
         window.addEventListener("resize", updateTargetRect);
         window.addEventListener("scroll", updateTargetRect, true);
@@ -165,6 +201,8 @@
             document.removeEventListener("pointerdown", handlePointer, true);
             document.removeEventListener("focusin", handleFocus, true);
             document.removeEventListener("close-touch-keyboard", handleClose);
+            document.removeEventListener("input", handleInput, true);
+            document.removeEventListener("selectionchange", handleSelectionChange);
             document.removeEventListener("keydown", handleKeydown, true);
             window.removeEventListener("resize", updateTargetRect);
             window.removeEventListener("scroll", updateTargetRect, true);
@@ -231,8 +269,11 @@
                 {masked}
                 {title}
                 {maxLength}
+                bind:selectionStart
+                bind:selectionEnd
                 placeholder={target?.placeholder || "Touch the keys to enter text"}
                 onDone={done}
+                onSelectionChange={handleKeyboardSelectionChange}
             />
         {/if}
     </div>

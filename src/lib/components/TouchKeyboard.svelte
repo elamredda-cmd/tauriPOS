@@ -5,7 +5,10 @@
     export let placeholder = "";
     export let masked = false;
     export let maxLength = 120;
+    export let selectionStart = 0;
+    export let selectionEnd = 0;
     export let onDone: () => void = () => {};
+    export let onSelectionChange: (start: number, end: number) => void = () => {};
 
     let shift = true;
     let symbols = false;
@@ -22,25 +25,74 @@
     ];
     $: rows = symbols ? symbolRows : letterRows;
     $: effectiveMaxLength = maxLength && maxLength > 0 ? maxLength : 120;
+    $: selectionStart = clampPosition(selectionStart);
+    $: selectionEnd = clampPosition(selectionEnd);
+    $: selectionFrom = Math.min(selectionStart, selectionEnd);
+    $: selectionTo = Math.max(selectionStart, selectionEnd);
+    $: beforeSelection = display(value.slice(0, selectionFrom));
+    $: selectedText = display(value.slice(selectionFrom, selectionTo));
+    $: afterSelection = display(value.slice(selectionTo));
+
+    function clampPosition(position: number): number {
+        return Math.max(0, Math.min(Number.isFinite(position) ? position : value.length, value.length));
+    }
+
+    function display(text: string): string {
+        return masked ? "●".repeat(text.length) : text;
+    }
+
+    function setSelection(start: number, end = start) {
+        selectionStart = clampPosition(start);
+        selectionEnd = clampPosition(end);
+        onSelectionChange(selectionStart, selectionEnd);
+    }
 
     function press(key: string) {
         if (key === "shift") {
             shift = !shift;
         } else if (key === "backspace") {
-            value = value.slice(0, -1);
+            backspace();
         } else if (key === "clear") {
             value = "";
+            setSelection(0);
         } else if (key === "space") {
-            append(" ");
+            insert(" ");
         } else {
-            append(!symbols && shift ? key.toUpperCase() : key);
+            insert(!symbols && shift ? key.toUpperCase() : key);
             if (!symbols && shift) shift = false;
         }
     }
 
-    function append(text: string) {
-        if (value.length >= effectiveMaxLength) return;
-        value = `${value}${text}`.slice(0, effectiveMaxLength);
+    function insert(text: string) {
+        const from = Math.min(selectionStart, selectionEnd);
+        const to = Math.max(selectionStart, selectionEnd);
+        const available = effectiveMaxLength - (value.length - (to - from));
+        const inserted = text.slice(0, Math.max(0, available));
+        if (!inserted) return;
+        value = `${value.slice(0, from)}${inserted}${value.slice(to)}`;
+        setSelection(from + inserted.length);
+    }
+
+    function backspace() {
+        const from = Math.min(selectionStart, selectionEnd);
+        const to = Math.max(selectionStart, selectionEnd);
+        if (from !== to) {
+            value = `${value.slice(0, from)}${value.slice(to)}`;
+            setSelection(from);
+        } else if (from > 0) {
+            value = `${value.slice(0, from - 1)}${value.slice(from)}`;
+            setSelection(from - 1);
+        }
+    }
+
+    function moveCursor(direction: -1 | 1) {
+        if (selectionStart !== selectionEnd) {
+            setSelection(direction < 0
+                ? Math.min(selectionStart, selectionEnd)
+                : Math.max(selectionStart, selectionEnd));
+            return;
+        }
+        setSelection(selectionStart + direction);
     }
 
     function finish() {
@@ -51,10 +103,35 @@
 
 {#if visible}
     <section class="touch-keyboard shrink-0 border-t border-border-flat bg-bg-panel p-[.65rem]" aria-label={title}>
-        <div class="mb-2 flex items-center justify-between gap-[.7rem] [@media(max-height:720px)]:mb-[.3rem]">
-            <div class="flex min-w-0 flex-col gap-[.1rem]">
+        <div class="mb-2 flex items-end gap-[.55rem] [@media(max-height:720px)]:mb-[.3rem]">
+            <div class="flex min-w-0 flex-1 flex-col gap-[.2rem]">
                 <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">{title}</span>
-                <strong class="min-h-[1.3rem] overflow-hidden text-ellipsis whitespace-nowrap text-text-main">{value ? (masked ? "●".repeat(value.length) : value) : placeholder}</strong>
+                <div
+                    class="flex h-[43px] min-w-0 items-center overflow-x-auto rounded-[.45rem] border-2 border-accent-primary bg-bg-base px-3 text-base font-bold text-text-main shadow-inner"
+                    role="textbox"
+                    aria-label={`${title} text editor`}
+                    aria-readonly="true"
+                >
+                    {#if value}
+                        <span class="whitespace-pre">{beforeSelection}</span>
+                        {#if selectionFrom === selectionTo}
+                            <span class="h-[1.35em] w-0 shrink-0 border-l-2 border-accent-primary" aria-hidden="true"></span>
+                        {:else}
+                            <span class="whitespace-pre bg-accent-primary px-[1px] text-white">{selectedText}</span>
+                        {/if}
+                        <span class="whitespace-pre">{afterSelection}</span>
+                    {:else}
+                        <span class="h-[1.35em] w-0 shrink-0 border-l-2 border-accent-primary" aria-hidden="true"></span>
+                        <span class="truncate pl-1 text-sm text-text-muted">{placeholder}</span>
+                    {/if}
+                </div>
+            </div>
+            <div class="grid shrink-0 grid-cols-5 gap-[.3rem]" aria-label="Cursor controls">
+                <button type="button" class="grid h-[43px] w-[48px] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-lg font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none" title="Move to start" aria-label="Move cursor to start" on:click={() => setSelection(0)}>↤</button>
+                <button type="button" class="grid h-[43px] w-[48px] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-xl font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none" title="Move left" aria-label="Move cursor left" disabled={selectionStart === 0 && selectionEnd === 0} on:click={() => moveCursor(-1)}>←</button>
+                <button type="button" class="grid h-[43px] min-w-[64px] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card px-2 text-[.68rem] font-black uppercase text-accent-primary shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none" title="Select all text" on:click={() => setSelection(0, value.length)}>Select</button>
+                <button type="button" class="grid h-[43px] w-[48px] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-xl font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none" title="Move right" aria-label="Move cursor right" disabled={selectionStart === value.length && selectionEnd === value.length} on:click={() => moveCursor(1)}>→</button>
+                <button type="button" class="grid h-[43px] w-[48px] place-items-center rounded-[.45rem] border border-border-flat bg-bg-card text-lg font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none" title="Move to end" aria-label="Move cursor to end" on:click={() => setSelection(value.length)}>↦</button>
             </div>
             <button
                 type="button"

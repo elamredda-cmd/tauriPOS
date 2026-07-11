@@ -3,12 +3,14 @@ import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
 
 export type ScaleWeightUnit = 'kg' | 'g';
+export type ScaleRequestMode = 'auto' | 'listen' | 'adam_print';
 
 export interface ScaleHardwareConfig {
     enabled: boolean;
     devicePath: string;
     baudRate: number;
     pollMs: number;
+    requestMode: ScaleRequestMode;
 }
 
 export interface ScaleWeightReading {
@@ -43,6 +45,11 @@ export function getScaleHardwareConfig(settings: Setting[] = get(settingsDB)): S
         devicePath: setting(settings, 'scale_hardware_device_path'),
         baudRate: intSetting(settings, 'scale_hardware_baud_rate', 9600, 1200, 115200),
         pollMs: intSetting(settings, 'scale_hardware_poll_ms', 1200, 500, 5000),
+        requestMode: setting(settings, 'scale_hardware_request_mode', 'auto') === 'listen'
+            ? 'listen'
+            : setting(settings, 'scale_hardware_request_mode', 'auto') === 'adam_print'
+                ? 'adam_print'
+                : 'auto',
     };
 }
 
@@ -60,6 +67,7 @@ export async function readScaleWeight(config = getScaleHardwareConfig()): Promis
         devicePath,
         baudRate: config.baudRate,
         timeoutMs: config.pollMs,
+        requestMode: config.requestMode,
     });
     const unit: ScaleWeightUnit = reading.unit === 'g' ? 'g' : 'kg';
     return {

@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { isTauri } from '@tauri-apps/api/core';
     import { onDestroy, onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
@@ -216,9 +217,11 @@
             pageLinesByOrder = groupByOrderId<OrderLine>(result.lines as OrderLine[]);
             pagePaymentsByOrder = groupByOrderId<Payment>(result.payments as Payment[]);
         } catch (error) {
-            console.warn('orders: page lookup failed:', error);
             if (run !== queryRun) return;
-            ordersLoadError = String(error).replace(/^Error:\s*/, '');
+            if (isTauri()) {
+                console.warn('orders: page lookup failed:', error);
+                ordersLoadError = 'Order history is temporarily unavailable.';
+            }
             sqlTotal = 0;
             ordersTotal = 0;
             sqlOrders = [];
@@ -243,9 +246,8 @@
 </script>
 
 <MgmtPage title="Order History">
-    <div slot="actions" class="flex min-w-0 flex-1 items-center justify-end gap-3">
-        <div class="flex min-w-0 flex-1 max-w-[760px] items-center gap-3">
-            <div class="relative min-w-[230px] flex-1">
+    <div class="orders-toolbar">
+            <div class="order-search-control">
                 <div class="pointer-events-none absolute inset-y-0 left-0 flex w-10 items-center justify-center">
                     <svg class="text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18">
                         <circle cx="11" cy="11" r="8"></circle>
@@ -253,69 +255,72 @@
                     </svg>
                 </div>
                 <input
-                    class="search-input !h-11 !min-h-11 !rounded-md !bg-bg-card !pl-10 !pr-16 !text-sm"
+                    class="search-input !h-11 !min-h-11 !rounded-md !bg-bg-card !pl-10 !pr-10 !text-sm"
                     value={searchQuery}
                     on:input={handleOrderSearchInput}
                     on:keydown={handleOrderSearchKeydown}
-                    placeholder="Search receipt..."
+                    placeholder="Receipt, item, cashier, customer..."
                 />
                 {#if searchQuery || appliedSearchQuery}
                     <button
                         type="button"
-                        class="absolute right-1.5 top-1/2 min-h-0 -translate-y-1/2 rounded-sm border border-border-flat bg-bg-base px-2 py-1 text-[0.7rem] font-bold text-text-muted transition hover:border-accent-primary hover:bg-bg-card-hover hover:text-text-main"
+                        class="order-search-clear"
+                        aria-label="Clear receipt search"
+                        title="Clear search"
                         on:click={clearOrderSearch}
                     >
-                        Clear
+                        ×
                     </button>
                 {/if}
             </div>
-            <button class="btn btn-secondary !h-11 !min-h-11 !rounded-md !px-4" on:click={runOrderSearch}>Find</button>
-            <div class="min-w-[190px] max-w-[220px]">
+            <button class="btn btn-secondary order-find" on:click={runOrderSearch}>Find</button>
+            <div class="order-filter">
                 <CustomSelect bind:value={statusFilter} options={statusFilterOptions} />
             </div>
-        </div>
-        <div class="flex shrink-0 items-center gap-2">
-            <span class="rounded-full border border-border-flat bg-bg-card px-3 py-2 text-xs font-bold text-text-muted">
+            <span class="order-count">
                 {ordersLoading ? 'Searching...' : `${sqlTotal} / ${ordersTotal}`}
             </span>
-            {#if searchQuery || appliedSearchQuery || statusFilter !== 'all'}
-                <button class="btn btn-secondary !min-h-10 !px-3 !py-1.5 !text-xs" on:click={clearOrderFilters}>Clear</button>
+            {#if statusFilter !== 'all'}
+                <button class="btn btn-secondary order-reset" on:click={clearOrderFilters}>Reset</button>
             {/if}
-        </div>
     </div>
 
-    <table class="tbl">
+    <div class="orders-table-wrap">
+    <table class="tbl orders-table">
         <thead>
             <tr>
                 <th>#</th>
                 <th>Date</th>
                 <th>Status</th>
-                <th>Cashier</th>
-                <th>Till</th>
-                <th>Lines</th>
+                <th>Staff / Till</th>
                 <th>Items</th>
                 <th>Total</th>
             </tr>
         </thead>
         <tbody>
             {#each pagedOrders as o}
-                <tr on:click={() => openOrder(o)} class="cursor-pointer">
-                    <td class="mono">{o.orderNumber || '-'}</td>
+                <tr>
+                    <td>
+                        <button class="receipt-button mono" aria-label={`Open receipt ${o.orderNumber || '-'}`} on:click={() => openOrder(o)}>
+                            #{o.orderNumber || '-'}
+                        </button>
+                    </td>
                     <td>{formatDate(o.completedAt || o.createdAt)}</td>
                     <td><span class={`tag capitalize ${statusClass(o)}`}>{statusLabel(o)}</span></td>
-                    <td>{cashierName(o)}</td>
-                    <td>{tillName(o)}</td>
-                    <td>{lineCount(o.id)}</td>
-                    <td>{itemQuantity(o.id).toLocaleString('en-GB', { maximumFractionDigits: 3 })}</td>
+                    <td class="staff-cell"><strong>{cashierName(o)}</strong><small>{tillName(o)}</small></td>
+                    <td class="items-cell"><strong>{itemQuantity(o.id).toLocaleString('en-GB', { maximumFractionDigits: 3 })}</strong><small>{lineCount(o.id)} {lineCount(o.id) === 1 ? 'line' : 'lines'}</small></td>
                     <td class="money {o.total < 0 ? '!text-danger' : ''}">{formatMoney(o.total)}</td>
                 </tr>
             {/each}
-            {#if ordersLoading && pagedOrders.length === 0}<tr class="empty-row"><td colspan="8">Loading orders...</td></tr>{/if}
-            {#if !ordersLoading && !ordersLoadError && ordersTotal === 0}<tr class="empty-row"><td colspan="8">No orders yet.</td></tr>{/if}
-            {#if !ordersLoading && !ordersLoadError && ordersTotal > 0 && sqlTotal === 0}<tr class="empty-row"><td colspan="8">No orders match your filters.</td></tr>{/if}
-            {#if !ordersLoading && ordersLoadError && pagedOrders.length === 0}<tr class="empty-row"><td colspan="8">Could not load orders: {ordersLoadError}</td></tr>{/if}
+            {#if ordersLoading && pagedOrders.length === 0}<tr class="empty-row"><td colspan="6">Loading orders...</td></tr>{/if}
+            {#if !ordersLoading && !ordersLoadError && ordersTotal === 0}<tr class="empty-row"><td colspan="6">No orders yet.</td></tr>{/if}
+            {#if !ordersLoading && !ordersLoadError && ordersTotal > 0 && sqlTotal === 0}<tr class="empty-row"><td colspan="6">No orders match your filters.</td></tr>{/if}
+            {#if !ordersLoading && ordersLoadError && pagedOrders.length === 0}
+                <tr class="empty-row"><td colspan="6"><span>Could not load orders: {ordersLoadError}</span><button class="btn btn-secondary ml-3" on:click={loadOrdersPage}>Retry</button></td></tr>
+            {/if}
         </tbody>
     </table>
+    </div>
 
     {#if sqlTotal > PAGE_SIZE}
         <div class="flex items-center justify-between gap-3 p-4 border-t border-border-flat bg-bg-panel">
@@ -438,3 +443,29 @@
         <button class="btn btn-secondary" on:click={() => showOrderDialog = false}>Close</button>
     </svelte:fragment>
 </Modal>
+
+<style>
+    .orders-toolbar { min-width: 0; padding: .75rem 1rem; display: flex; align-items: center; gap: .6rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
+    .order-search-control { position: relative; min-width: 220px; max-width: 520px; flex: 1; }
+    .order-search-clear { position: absolute; right: .4rem; top: 50%; width: 1.9rem; height: 1.9rem; display: grid; place-items: center; transform: translateY(-50%); color: var(--text-muted); font-size: 1.2rem; border: 1px solid var(--border-flat); border-radius: .35rem; background: var(--bg-base); }
+    .order-search-clear:hover { color: var(--text-main); border-color: var(--accent-primary); }
+    .order-find { height: 44px; min-height: 44px; padding-inline: 1rem; }
+    .order-filter { width: 190px; flex: 0 0 190px; }
+    .order-count { min-width: 76px; padding: .55rem .65rem; color: var(--text-muted); font-size: .72rem; font-weight: 800; text-align: center; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
+    .order-reset { min-height: 40px; padding: .45rem .7rem; font-size: .75rem; }
+    .orders-table-wrap { overflow: auto; }
+    .orders-table { min-width: 760px; }
+    .receipt-button { min-width: 4.25rem; min-height: 2.1rem; padding: .35rem .55rem; color: var(--accent-primary); font-weight: 900; text-align: left; border: 1px solid var(--border-flat); border-radius: .35rem; background: var(--bg-card); }
+    .receipt-button:hover { color: white; border-color: var(--accent-primary); background: var(--accent-primary); }
+    .staff-cell strong, .staff-cell small, .items-cell strong, .items-cell small { display: block; }
+    .staff-cell small, .items-cell small { margin-top: .15rem; color: var(--text-muted); font-size: .7rem; }
+    @media (max-width: 900px) {
+        .orders-toolbar { flex-wrap: wrap; }
+        .order-search-control { max-width: none; }
+        .order-filter { width: 160px; flex-basis: 160px; }
+    }
+    @media (max-width: 680px) {
+        .order-search-control { min-width: 100%; flex-basis: 100%; }
+        .order-filter { flex: 1; }
+    }
+</style>

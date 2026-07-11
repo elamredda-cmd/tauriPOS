@@ -30,6 +30,12 @@
         { label: '38400', value: '38400' },
     ];
 
+    const requestModeOptions = [
+        { label: 'Automatic (recommended)', value: 'auto' },
+        { label: 'Continuous output / listen only', value: 'listen' },
+        { label: 'Adam on-demand / send PRINT command', value: 'adam_print' },
+    ];
+
     onMount(() => {
         void findScalePorts(true);
     });
@@ -191,6 +197,12 @@
                                 value={String(scale.baudRate)}
                                 options={baudOptions}
                                 on:change={(event) => updateSetting('scale_hardware_baud_rate', String(event.detail))}
+                            />
+                            <CustomSelect
+                                label="Scale Output Mode"
+                                value={scale.requestMode}
+                                options={requestModeOptions}
+                                on:change={(event) => updateSetting('scale_hardware_request_mode', String(event.detail))}
                             />
                             <div class="field">
                                 <label>Read Interval</label>

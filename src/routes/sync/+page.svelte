@@ -6,6 +6,7 @@
     import {
         dismissSyncConflict,
         forceFullSync,
+        getConnectedTills,
         getOfflineQueueStats,
         getSyncConflicts,
         retryOfflineQueueNow,
@@ -13,6 +14,7 @@
         triggerSync,
         validateDatabaseSchemas,
         type OfflineQueueStats,
+        type ConnectedTill,
         type SyncConflict,
         type SchemaValidationResult,
     } from '$lib/stores/database';
@@ -29,6 +31,28 @@
     let schema: SchemaValidationResult = { ok: true, issues: [] };
     let loading = true;
     let busy = '';
+    let connectedTills: ConnectedTill[] = [];
+    let presenceLoading = true;
+    let presenceError = '';
+    let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+    function lastSeenLabel(secondsAgo: number): string {
+        if (secondsAgo < 5) return 'Online now';
+        return `Seen ${secondsAgo}s ago`;
+    }
+
+    async function loadConnectedTills() {
+        presenceLoading = connectedTills.length === 0;
+        try {
+            connectedTills = await getConnectedTills();
+            presenceError = '';
+        } catch (error) {
+            connectedTills = [];
+            presenceError = String(error).replace(/^Error:\s*/, '');
+        } finally {
+            presenceLoading = false;
+        }
+    }
 
     async function load() {
         loading = true;
@@ -38,6 +62,7 @@
                 getSyncConflicts(),
                 validateDatabaseSchemas(),
             ]);
+            await loadConnectedTills();
         } catch (error) {
             toast(`Could not load sync dashboard: ${error}`, 'error');
         } finally {
@@ -59,7 +84,13 @@
         }
     }
 
-    onMount(load);
+    onMount(() => {
+        void load();
+        presenceRefreshTimer = setInterval(() => void loadConnectedTills(), 15_000);
+        return () => {
+            if (presenceRefreshTimer) clearInterval(presenceRefreshTimer);
+        };
+    });
 </script>
 
 <MgmtPage title="Sync Dashboard">
@@ -105,6 +136,47 @@
                 {/if}
             </div>
         {/if}
+
+        <section class="mb-5 rounded-lg border border-border-flat bg-bg-card p-5">
+            <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <p class="m-0 text-xs font-black uppercase tracking-[0.16em] text-text-muted">
+                        {$connectionState.mode === 'multi' ? 'Live MariaDB presence' : 'Local device'}
+                    </p>
+                    <h2 class="m-0 mt-1 text-xl">Connected tills</h2>
+                </div>
+                <div class="flex h-12 min-w-16 items-center justify-center rounded-md border border-success/35 bg-success/10 px-4 text-2xl font-black text-success">
+                    {connectedTills.length}
+                </div>
+            </div>
+
+            {#if presenceError}
+                <div class="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
+                    Could not read connected tills: {presenceError}
+                </div>
+            {:else if presenceLoading}
+                <p class="m-0 text-sm text-text-muted">Checking connected tills...</p>
+            {:else if connectedTills.length === 0}
+                <p class="m-0 text-sm text-text-muted">No tills are currently connected to MariaDB.</p>
+            {:else}
+                <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                    {#each connectedTills as till (till.tillId)}
+                        <article class="flex min-h-[76px] items-center gap-3 rounded-md border border-border-flat bg-bg-panel p-3">
+                            <span class="h-3 w-3 shrink-0 rounded-full bg-success ring-4 ring-success/15"></span>
+                            <div class="min-w-0 flex-1">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <strong class="truncate text-base text-text-main">{till.tillName}</strong>
+                                    {#if till.isCurrent}
+                                        <span class="rounded-sm bg-accent-primary/15 px-2 py-0.5 text-[0.68rem] font-black uppercase text-accent-primary">This till</span>
+                                    {/if}
+                                </div>
+                                <p class="m-0 mt-1 text-xs text-success">{lastSeenLabel(till.secondsAgo)}</p>
+                            </div>
+                        </article>
+                    {/each}
+                </div>
+            {/if}
+        </section>
 
         <section class="mb-5 rounded-2xl border border-border-flat bg-bg-card p-5">
             <h2 class="m-0 mb-3 text-xl">Actions</h2>

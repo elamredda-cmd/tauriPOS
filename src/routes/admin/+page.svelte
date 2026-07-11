@@ -48,7 +48,7 @@
         { title: 'Discounts', group: 'Promotions', description: 'Offers, bundles, and manual discounts.', path: '/discounts', permission: 'open_discounts', accent: '#ec4899', icon: 'discounts' },
         { title: 'Tax Rates', group: 'Catalogue', description: 'VAT and tax configuration.', path: '/tax-rates', permission: 'open_items', accent: '#64748b', icon: 'tax' },
         { title: 'Orders', group: 'Sales', description: 'Receipts, returns, and past orders.', path: '/orders', permission: 'open_reports', accent: '#3b82f6', icon: 'orders' },
-        { title: 'Shifts', group: 'Till', description: 'Open shifts and cash-up history.', path: '/shifts', permission: 'open_reports', accent: '#10b981', icon: 'shifts' },
+        { title: 'Till Sessions', group: 'Till', description: 'Open sessions and cash-up history.', path: '/shifts', permission: 'open_reports', accent: '#10b981', icon: 'shifts' },
         { title: 'Stock Receiving', group: 'Stock', description: 'Receive stock and update quantities.', path: '/stock-receiving', permission: 'open_stock_receiving', accent: '#f97316', icon: 'stock' },
         { title: 'Reports', group: 'Sales', description: 'Sales, close reports, and totals.', path: '/reports', permission: 'open_reports', accent: '#06b6d4', icon: 'reports' },
         { title: 'Sync Dashboard', group: 'System', description: 'Database sync and connection status.', path: '/sync', permission: 'open_sync', accent: '#8b5cf6', icon: 'sync' },

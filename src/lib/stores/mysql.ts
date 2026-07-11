@@ -571,6 +571,17 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
+    // Live device presence is intentionally not part of normal table sync.
+    // Rows expire by lastSeenAt and only describe tills currently using MariaDB.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS till_presence (
+            tillId VARCHAR(64) PRIMARY KEY,
+            tillName VARCHAR(255) NOT NULL,
+            lastSeenAt DATETIME(3) NOT NULL,
+            INDEX idx_till_presence_last_seen (lastSeenAt)
+        )
+    `);
+
     // ─── Migrations for existing databases ─────────────────────────────────
     const migrations = [
         // Orders
@@ -763,6 +774,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_stock_receipts_created ON stock_receipts(createdAt(255))`,
         `CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_orders_shift_status ON orders(shiftId, status(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_cash_movements_shift ON cash_movements(shiftId)`,
+        `CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt(255), id)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(openRegisterId)`,
         ...TIMESTAMP_SYNC_TABLES.map((table) =>
@@ -1215,6 +1229,46 @@ export async function mysqlGetServerTime(): Promise<string> {
     const d = await getDb();
     const res: any[] = await d.select(`SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ') as t`);
     return res[0].t;
+}
+
+export interface MysqlConnectedTill {
+    tillId: string;
+    tillName: string;
+    lastSeenAt: string;
+    secondsAgo: number;
+}
+
+export async function mysqlTouchTillPresence(tillId: string, tillName: string): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+        `INSERT INTO till_presence (tillId, tillName, lastSeenAt)
+         VALUES (?, ?, UTC_TIMESTAMP(3))
+         ON DUPLICATE KEY UPDATE
+            tillName = VALUES(tillName),
+            lastSeenAt = UTC_TIMESTAMP(3)`,
+        [tillId, tillName],
+    );
+}
+
+export async function mysqlGetConnectedTills(onlineWithinSeconds = 45): Promise<MysqlConnectedTill[]> {
+    const d = await getDb();
+    const windowSeconds = Math.min(300, Math.max(15, Math.trunc(onlineWithinSeconds || 45)));
+    const rows: any[] = await d.select(
+        `SELECT
+            tillId,
+            CAST(tillName AS CHAR) AS tillName,
+            DATE_FORMAT(lastSeenAt, '%Y-%m-%dT%H:%i:%s.%fZ') AS lastSeenAt,
+            CAST(GREATEST(0, TIMESTAMPDIFF(SECOND, lastSeenAt, UTC_TIMESTAMP(3))) AS SIGNED) AS secondsAgo
+         FROM till_presence
+         WHERE lastSeenAt >= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ${windowSeconds} SECOND)
+         ORDER BY tillName ASC, tillId ASC`,
+    );
+    return rows.map((row) => ({
+        tillId: String(row.tillId || ''),
+        tillName: String(row.tillName || 'Till'),
+        lastSeenAt: String(row.lastSeenAt || ''),
+        secondsAgo: Math.max(0, Number(row.secondsAgo || 0)),
+    }));
 }
 
 /**

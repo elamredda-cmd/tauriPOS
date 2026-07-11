@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { tick } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
@@ -65,7 +66,14 @@
         if (!selectedProduct) { toast('Select an item to print', 'error'); return; }
         if (printingLabels) return;
         if (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system') {
-            toast('Set Label Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
+            printingLabels = true;
+            try {
+                await tick();
+                window.print();
+                toast('Print dialog opened for labels', 'success');
+            } finally {
+                printingLabels = false;
+            }
             return;
         }
         printingLabels = true;

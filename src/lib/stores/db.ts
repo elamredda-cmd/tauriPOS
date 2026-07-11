@@ -485,6 +485,23 @@ export const customersDB = writable<Customer[]>([]);
 export const categoriesDB = writable<Category[]>(seedCategories);
 export const taxRatesDB = writable<TaxRate[]>(seedTaxRates);
 export const productsDB = writable<Product[]>(seedProducts);
+
+/** Update one cached product without reloading the product table. */
+export function patchProductInStore(
+    patch: Partial<Product> & Pick<Product, 'id'>,
+    addIfMissing = false,
+): void {
+    productsDB.update((products) => {
+        const index = products.findIndex((product) => product.id === patch.id);
+        if (index === -1) {
+            return addIfMissing ? [...products, patch as Product] : products;
+        }
+
+        const next = products.slice();
+        next[index] = { ...products[index], ...patch };
+        return next;
+    });
+}
 export const suppliersDB = writable<Supplier[]>([]);
 export const productSuppliersDB = writable<ProductSupplier[]>([]);
 export const inventoryLogDB = writable<InventoryLog[]>([]);

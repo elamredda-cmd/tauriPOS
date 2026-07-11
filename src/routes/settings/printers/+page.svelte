@@ -11,6 +11,7 @@
         getReceiptPrinterConfig,
         sendLabelPrinterTest,
         sendReceiptPrinterTest,
+        type LabelPrinterProtocol,
         type PrinterConnectionType,
         type ReceiptPrinterModel,
     } from '$lib/printers';
@@ -83,7 +84,7 @@
         await updateSetting('receipt_printer_paper_width', '80mm');
         await updateSetting('receipt_printer_encoding', 'latin1');
         await updateSetting('receipt_printer_cut_paper', 'true');
-        await updateSetting('receipt_printer_cut_feed_lines', '8');
+        await updateSetting('receipt_printer_cut_feed_lines', '0');
         await updateSetting('receipt_printer_open_drawer_after_payment', 'false');
         void findSystemPrinters({ quiet: true });
         receiptTestStatus = 'Star TSP100 preset applied.';
@@ -97,7 +98,22 @@
 
     async function selectLabelConnection(connection: PrinterConnectionType) {
         await updateSetting('label_printer_connection', connection);
+        if (connection === 'system') {
+            await updateSetting('label_printer_protocol', 'system');
+        } else if (label.protocol === 'system') {
+            await updateSetting('label_printer_protocol', 'escpos');
+        }
         if (connection === 'usb_raw') void findSystemPrinters({ quiet: true });
+    }
+
+    async function selectLabelProtocol(protocol: LabelPrinterProtocol) {
+        await updateSetting('label_printer_protocol', protocol);
+        if (protocol === 'system') {
+            await updateSetting('label_printer_connection', 'system');
+        } else if (label.connection === 'system') {
+            await updateSetting('label_printer_connection', 'usb_raw');
+            void findSystemPrinters({ quiet: true });
+        }
     }
 
     async function handleDrawerPrinterSelect(value: string) {
@@ -271,7 +287,7 @@
 
     const receiptModelOptions: Array<{ label: string; value: ReceiptPrinterModel }> = [
         { label: 'Generic ESC/POS thermal printer', value: 'generic_escpos' },
-        { label: 'Star TSP100 / TSP143', value: 'star_tsp100' },
+        { label: 'Star TSP100 / TSP143 (Star Line)', value: 'star_tsp100' },
     ];
 
     const drawerPinOptions = [
@@ -642,7 +658,7 @@
                                 label="Direct Label Protocol"
                                 value={label.protocol}
                                 options={labelProtocolOptions}
-                                on:change={(event) => updateSetting('label_printer_protocol', String(event.detail))}
+                                on:change={(event) => selectLabelProtocol(String(event.detail) as LabelPrinterProtocol)}
                             />
                             {#if label.connection !== 'system'}
                                 <CustomSelect
