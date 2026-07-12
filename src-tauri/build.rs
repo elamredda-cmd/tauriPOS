@@ -16,6 +16,9 @@ fn main() {
         "allocate_mysql_till_sequence",
         "create_local_backup",
         "latest_local_backup",
+        "create_automatic_setup_backup",
+        "latest_automatic_setup_backup",
+        "validate_local_database_backup",
         "restore_latest_local_backup",
         "restore_local_database_from_path",
     ]);

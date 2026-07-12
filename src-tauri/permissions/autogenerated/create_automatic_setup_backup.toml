@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-automatic-setup-backup"
+description = "Enables the create_automatic_setup_backup command without any pre-configured scope."
+commands.allow = ["create_automatic_setup_backup"]
+
+[[permission]]
+identifier = "deny-create-automatic-setup-backup"
+description = "Denies the create_automatic_setup_backup command without any pre-configured scope."
+commands.deny = ["create_automatic_setup_backup"]

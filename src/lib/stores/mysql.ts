@@ -767,6 +767,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_promo_group_product ON promo_group_items(groupId, productId)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_completed ON orders(completedAt(255))`,
         `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_loyalty_logs_customer ON loyalty_logs(customerId(255), createdAt(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_customers_loyalty_code ON customers(loyaltyCode)`,
         `CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method(255))`,
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
         `CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`,
@@ -2043,12 +2046,23 @@ export async function mysqlGetAllTillNumbers(): Promise<string[]> {
 
 export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
     const d = await getDb();
-    const rows: any[] = await d.select(
+    const [orderRows, registerRows] = await Promise.all([
+        d.select<any[]>(
         `SELECT CAST(o.tillNumber AS CHAR) as id, CAST(MAX(r.name) AS CHAR) as name, MIN(o.orderNumber) as minOrderNumber
          FROM orders o LEFT JOIN registers r ON r.id = o.tillNumber
          WHERE o.tillNumber IS NOT NULL AND o.tillNumber != ''
-         GROUP BY o.tillNumber ORDER BY MIN(o.orderNumber), o.tillNumber`
-    );
+         GROUP BY o.tillNumber ORDER BY MIN(o.orderNumber), o.tillNumber`,
+        ),
+        d.select<any[]>(`SELECT CAST(id AS CHAR) as id, CAST(name AS CHAR) as name FROM registers WHERE isActive = 1 ORDER BY name, id`),
+    ]);
+    const byId = new Map<string, any>();
+    for (const row of registerRows) {
+        byId.set(String(row.id || ''), { ...row, minOrderNumber: 0 });
+    }
+    for (const row of orderRows) {
+        byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row });
+    }
+    const rows = [...byId.values()];
     const usedNames = new Map<string, number>();
     return rows.map((row, index) => {
         const sequence = Math.floor((row.minOrderNumber || 0) / 1_000_000);
@@ -2087,14 +2101,24 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
          GROUP BY o.tillNumber ORDER BY netSales DESC`,
         bounds
     );
-    return rows.map((row, index) => ({
-        id: row.id || '',
-        name: options.find(option => option.id === row.id)?.name || `Till ${index + 1}`,
-        netSales: row.netSales || 0, grossSales: row.grossSales || 0, refunds: row.refunds || 0,
-        taxTotal: row.taxTotal || 0, transactions: row.transactions || 0,
-        refundTransactions: row.refundTransactions || 0, itemsSold: row.itemsSold || 0,
-        cashTotal: row.cashTotal || 0, cardTotal: row.cardTotal || 0, loyaltyTotal: row.loyaltyTotal || 0,
-    }));
+    const byId = new Map(rows.map((row) => [String(row.id || ''), row]));
+    return options.map((option) => {
+        const row = byId.get(option.id) || {};
+        return {
+            id: option.id,
+            name: option.name,
+            netSales: row.netSales || 0,
+            grossSales: row.grossSales || 0,
+            refunds: row.refunds || 0,
+            taxTotal: row.taxTotal || 0,
+            transactions: row.transactions || 0,
+            refundTransactions: row.refundTransactions || 0,
+            itemsSold: row.itemsSold || 0,
+            cashTotal: row.cashTotal || 0,
+            cardTotal: row.cardTotal || 0,
+            loyaltyTotal: row.loyaltyTotal || 0,
+        };
+    });
 }
 
 export async function mysqlGetDailySalesTrend(startDate: string, endDate: string, tillNumber?: string): Promise<DailySalesPoint[]> {

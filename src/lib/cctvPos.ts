@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { get } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
 
 export interface CctvPosConfig {
@@ -10,8 +10,15 @@ export interface CctvPosConfig {
     posName: string;
     sourceIp: string;
     encoding: 'latin1' | 'utf8';
+    lineWidth: number;
     sendItems: boolean;
     sendReceipts: boolean;
+}
+
+export interface CctvConnectionState {
+    status: 'idle' | 'sending' | 'online' | 'offline';
+    message: string;
+    retryAt: number;
 }
 
 export interface CctvReceiptLine {
@@ -33,6 +40,35 @@ export interface CctvReceiptPayload {
     lines: CctvReceiptLine[];
 }
 
+export interface CctvItemPayload {
+    name: string;
+    price: number;
+    quantity?: number;
+    tillName: string;
+    cashierName: string;
+}
+
+export const cctvConnectionState = writable<CctvConnectionState>({
+    status: 'idle',
+    message: 'No connection test has been run yet.',
+    retryAt: 0,
+});
+
+const MAX_AUTOMATIC_QUEUE = 5;
+const OFFLINE_COOLDOWN_MS = 15_000;
+
+type CctvMessageKind = 'item' | 'receipt';
+
+interface QueuedCctvMessage {
+    text: string;
+    config: CctvPosConfig;
+    kind: CctvMessageKind;
+}
+
+let automaticQueue: QueuedCctvMessage[] = [];
+let automaticWorkerRunning = false;
+let unavailableUntil = 0;
+
 function setting(settings: Setting[], key: string, fallback = ''): string {
     return settings.find((item) => item.key === key)?.value || fallback;
 }
@@ -53,6 +89,7 @@ export function getCctvPosConfig(settings: Setting[] = get(settingsDB)): CctvPos
         posName: setting(settings, 'cctv_pos_name', 'POS 1'),
         sourceIp: setting(settings, 'cctv_pos_source_ip'),
         encoding: setting(settings, 'cctv_pos_encoding', 'latin1') === 'utf8' ? 'utf8' : 'latin1',
+        lineWidth: normaliseLineWidth(Number(setting(settings, 'cctv_pos_line_width', '40'))),
         sendItems: boolSetting(settings, 'cctv_pos_send_items', true),
         sendReceipts: boolSetting(settings, 'cctv_pos_send_receipts', true),
     };
@@ -69,10 +106,26 @@ function cleanText(value: string): string {
         .trim();
 }
 
-function receiptLine(quantity: number, name: string, amount: number): string {
-    const qty = Number.isFinite(quantity) ? quantity : 1;
-    const cleanName = cleanText(name).slice(0, 24);
-    return `${qty} ${cleanName} ${money(amount)}`;
+function normaliseLineWidth(value: number): number {
+    if (!Number.isFinite(value)) return 40;
+    return Math.max(24, Math.min(64, Math.round(value)));
+}
+
+function formatQuantity(value: number | undefined): string {
+    const quantity = Number.isFinite(value) && Number(value) > 0 ? Number(value) : 1;
+    return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(3).replace(/\.?0+$/, '');
+}
+
+function alignedLine(label: string, value: string, width: number): string {
+    const safeWidth = normaliseLineWidth(width);
+    const cleanValue = cleanText(value).slice(0, safeWidth - 2);
+    const labelWidth = Math.max(1, safeWidth - cleanValue.length - 1);
+    const cleanLabel = cleanText(label).slice(0, labelWidth);
+    return `${cleanLabel.padEnd(labelWidth, ' ')} ${cleanValue}`;
+}
+
+function divider(width: number): string {
+    return '-'.repeat(normaliseLineWidth(width));
 }
 
 function withEnding(text: string): string {
@@ -80,42 +133,127 @@ function withEnding(text: string): string {
     return normalised.endsWith('\r\n\r\n') ? normalised : `${normalised}\r\n\r\n`;
 }
 
-export async function sendCctvPosText(text: string, config = getCctvPosConfig()): Promise<void> {
+async function transmitCctvPosText(text: string, config: CctvPosConfig): Promise<void> {
     if (!config.enabled || !config.host.trim()) return;
     await invoke('send_cctv_pos_text', {
         host: config.host.trim(),
         port: config.port,
         text: withEnding(text),
-        timeoutMs: 800,
+        timeoutMs: 500,
         encoding: config.encoding,
     });
 }
 
-export function sendCctvItemAdded(payload: {
-    name: string;
-    price: number;
-    quantity?: number;
-    tillName: string;
-    cashierName: string;
-}): void {
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function markOnline(): void {
+    unavailableUntil = 0;
+    cctvConnectionState.set({
+        status: 'online',
+        message: 'Recorder accepted the latest POS text.',
+        retryAt: 0,
+    });
+}
+
+function markOffline(error: unknown): void {
+    unavailableUntil = Date.now() + OFFLINE_COOLDOWN_MS;
+    cctvConnectionState.set({
+        status: 'offline',
+        message: `Recorder unavailable: ${errorMessage(error)}`,
+        retryAt: unavailableUntil,
+    });
+}
+
+export async function sendCctvPosText(text: string, config = getCctvPosConfig()): Promise<void> {
+    if (!config.enabled || !config.host.trim()) return;
+    cctvConnectionState.set({ status: 'sending', message: 'Contacting the recorder...', retryAt: 0 });
+    try {
+        await transmitCctvPosText(text, config);
+        markOnline();
+    } catch (error) {
+        markOffline(error);
+        throw error;
+    }
+}
+
+async function drainAutomaticQueue(): Promise<void> {
+    if (automaticWorkerRunning) return;
+    automaticWorkerRunning = true;
+    try {
+        while (automaticQueue.length > 0) {
+            if (Date.now() < unavailableUntil || !getCctvPosConfig().enabled) {
+                automaticQueue = [];
+                break;
+            }
+
+            const message = automaticQueue.shift();
+            if (!message) break;
+            cctvConnectionState.set({ status: 'sending', message: 'Sending POS text...', retryAt: 0 });
+            try {
+                await transmitCctvPosText(message.text, message.config);
+                markOnline();
+            } catch (error) {
+                automaticQueue = [];
+                markOffline(error);
+                console.warn(`CCTV POS ${message.kind} send paused for 15 seconds:`, error);
+                break;
+            }
+        }
+    } finally {
+        automaticWorkerRunning = false;
+    }
+}
+
+function queueAutomaticText(text: string, config: CctvPosConfig, kind: CctvMessageKind): void {
+    if (!config.enabled || !config.host.trim() || Date.now() < unavailableUntil) return;
+
+    if (automaticQueue.length >= MAX_AUTOMATIC_QUEUE) {
+        const oldestItemIndex = automaticQueue.findIndex((message) => message.kind === 'item');
+        if (oldestItemIndex >= 0) automaticQueue.splice(oldestItemIndex, 1);
+        else automaticQueue.shift();
+    }
+    automaticQueue.push({ text, config, kind });
+    void drainAutomaticQueue();
+}
+
+export function formatCctvItemText(payload: CctvItemPayload, config = getCctvPosConfig()): string {
+    const quantity = Number.isFinite(payload.quantity) && Number(payload.quantity) > 0
+        ? Number(payload.quantity)
+        : 1;
+    const label = quantity === 1
+        ? cleanText(payload.name)
+        : `${formatQuantity(quantity)}x ${cleanText(payload.name)}`;
+    return alignedLine(label, `GBP ${money(payload.price * quantity)}`, config.lineWidth);
+}
+
+export function formatCctvReceiptText(payload: CctvReceiptPayload, config = getCctvPosConfig()): string {
+    const width = config.lineWidth;
+    const till = cleanText(payload.tillName || config.posName || `POS ${config.posNumber}`);
+    const cashier = cleanText(payload.cashierName);
+    const rows = [cleanText(`SALE COMPLETE - ${till}`).slice(0, width), divider(width)];
+
+    rows.push(...payload.lines.slice(0, 30).map((item) => {
+        const label = `${formatQuantity(item.quantity)}x ${cleanText(item.name)}`;
+        return alignedLine(label, `GBP ${money(item.lineTotal)}`, width);
+    }));
+    rows.push(divider(width));
+    if (payload.discount > 0) rows.push(alignedLine('DISCOUNT', `-GBP ${money(payload.discount)}`, width));
+    rows.push(alignedLine('TOTAL', `GBP ${money(payload.total)}`, width));
+    rows.push(cleanText(`${payload.paymentMethod.toUpperCase()}${cashier ? ` - ${cashier}` : ''}`).slice(0, width));
+    return rows.join('\r\n');
+}
+
+export function sendCctvItemAdded(payload: CctvItemPayload): void {
     const config = getCctvPosConfig();
     if (!config.enabled || !config.sendItems) return;
-    const text = cleanText(payload.name);
-    sendCctvPosText(text, config).catch((error) => {
-        console.warn('CCTV POS item send failed:', error);
-    });
+    queueAutomaticText(formatCctvItemText(payload, config), config, 'item');
 }
 
 export function sendCctvReceipt(payload: CctvReceiptPayload): void {
     const config = getCctvPosConfig();
     if (!config.enabled || !config.sendReceipts) return;
 
-    const rows = payload.lines.slice(0, 40).map((item) =>
-        receiptLine(item.quantity, item.name, item.lineTotal)
-    );
-    rows.push(`TOTAL ${money(payload.total)}`);
-
-    sendCctvPosText(rows.join('\r\n'), config).catch((error) => {
-        console.warn('CCTV POS receipt send failed:', error);
-    });
+    queueAutomaticText(formatCctvReceiptText(payload, config), config, 'receipt');
 }

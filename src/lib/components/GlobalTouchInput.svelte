@@ -73,7 +73,13 @@
 
     function handleFocus(event: FocusEvent) {
         const element = event.target as Element | null;
+        if (element instanceof HTMLElement && element.dataset.touchKeyboard === "button") return;
         if (element instanceof HTMLElement && element.dataset.touchKeyboard === "manual" && element !== lastPointerTarget) return;
+        if (canUseTouchInput(element)) openFor(element);
+    }
+
+    function handleOpenRequest(event: Event) {
+        const element = (event as CustomEvent<{ target?: Element }>).detail?.target ?? null;
         if (canUseTouchInput(element)) openFor(element);
     }
 
@@ -81,8 +87,8 @@
         if (!visible || !target || value === lastAppliedValue) return;
         target.value = value;
         lastAppliedValue = value;
-        target.dispatchEvent(new Event("input", { bubbles: true }));
         applySelection();
+        target.dispatchEvent(new Event("input", { bubbles: true }));
         updateTargetRect();
         refocusTarget();
     }
@@ -139,7 +145,6 @@
     function handleKeyboardSelectionChange(start: number, end: number) {
         selectionStart = start;
         selectionEnd = end;
-        applySelection();
         refocusTarget();
     }
 
@@ -192,6 +197,7 @@
         document.addEventListener("pointerdown", handlePointer, true);
         document.addEventListener("focusin", handleFocus, true);
         document.addEventListener("close-touch-keyboard", handleClose);
+        document.addEventListener("open-touch-keyboard", handleOpenRequest);
         document.addEventListener("input", handleInput, true);
         document.addEventListener("selectionchange", handleSelectionChange);
         document.addEventListener("keydown", handleKeydown, true);
@@ -201,6 +207,7 @@
             document.removeEventListener("pointerdown", handlePointer, true);
             document.removeEventListener("focusin", handleFocus, true);
             document.removeEventListener("close-touch-keyboard", handleClose);
+            document.removeEventListener("open-touch-keyboard", handleOpenRequest);
             document.removeEventListener("input", handleInput, true);
             document.removeEventListener("selectionchange", handleSelectionChange);
             document.removeEventListener("keydown", handleKeydown, true);

@@ -525,6 +525,9 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_completed ON orders(completedAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(orderNumber)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_loyalty_logs_customer ON loyalty_logs(customerId, createdAt DESC)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_customers_loyalty_code ON customers(loyaltyCode COLLATE NOCASE)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_history_sort ON orders(
         COALESCE(NULLIF(completedAt, ''), NULLIF(createdAt, ''), NULLIF(updatedAt, '')) DESC,
         orderNumber DESC
@@ -2576,14 +2579,25 @@ function friendlyTillName(id: string, name: string | null, minOrderNumber: numbe
 /** Return every till used by sales with a human-friendly display name. */
 export async function getTillReportOptions(): Promise<TillReportOption[]> {
     const d = await getDb();
-    const rows: any[] = await d.select(
+    const [orderRows, registerRows] = await Promise.all([
+        d.select<any[]>(
         `SELECT o.tillNumber as id, MAX(r.name) as name, MIN(o.orderNumber) as minOrderNumber
          FROM orders o
          LEFT JOIN registers r ON r.id = o.tillNumber
          WHERE o.tillNumber IS NOT NULL AND o.tillNumber != ''
          GROUP BY o.tillNumber
-         ORDER BY MIN(o.orderNumber), o.tillNumber`
-    );
+         ORDER BY MIN(o.orderNumber), o.tillNumber`,
+        ),
+        d.select<any[]>(`SELECT id, name FROM registers WHERE isActive = 1 ORDER BY name, id`),
+    ]);
+    const byId = new Map<string, any>();
+    for (const row of registerRows) {
+        byId.set(String(row.id || ''), { ...row, minOrderNumber: 0 });
+    }
+    for (const row of orderRows) {
+        byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row });
+    }
+    const rows = [...byId.values()];
     const usedNames = new Map<string, number>();
     return rows.map((row, index) => {
         const baseName = friendlyTillName(row.id, row.name, row.minOrderNumber || 0, index);
@@ -2627,20 +2641,24 @@ export async function getTillSalesSummaries(startDate: string, endDate: string):
          ORDER BY netSales DESC`,
         bounds
     );
-    return rows.map((row, index) => ({
-        id: row.id || '',
-        name: options.find((option) => option.id === row.id)?.name || `Till ${index + 1}`,
-        netSales: row.netSales || 0,
-        grossSales: row.grossSales || 0,
-        refunds: row.refunds || 0,
-        taxTotal: row.taxTotal || 0,
-        transactions: row.transactions || 0,
-        refundTransactions: row.refundTransactions || 0,
-        itemsSold: row.itemsSold || 0,
-        cashTotal: row.cashTotal || 0,
-        cardTotal: row.cardTotal || 0,
-        loyaltyTotal: row.loyaltyTotal || 0,
-    }));
+    const byId = new Map(rows.map((row) => [String(row.id || ''), row]));
+    return options.map((option) => {
+        const row = byId.get(option.id) || {};
+        return {
+            id: option.id,
+            name: option.name,
+            netSales: row.netSales || 0,
+            grossSales: row.grossSales || 0,
+            refunds: row.refunds || 0,
+            taxTotal: row.taxTotal || 0,
+            transactions: row.transactions || 0,
+            refundTransactions: row.refundTransactions || 0,
+            itemsSold: row.itemsSold || 0,
+            cashTotal: row.cashTotal || 0,
+            cardTotal: row.cardTotal || 0,
+            loyaltyTotal: row.loyaltyTotal || 0,
+        };
+    });
 }
 
 /** Daily net-sales trend for the selected period and optional till. */

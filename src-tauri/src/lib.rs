@@ -835,10 +835,9 @@ mod scale_tests {
 
     #[test]
     fn parses_weight_from_a_multiline_adam_packet() {
-        let reading = parse_scale_weight(
-            "Date: 11/07/2026\r\nTime: 02:15\r\nG/W:      1.250 kg\r\n",
-        )
-        .expect("weight should be parsed");
+        let reading =
+            parse_scale_weight("Date: 11/07/2026\r\nTime: 02:15\r\nG/W:      1.250 kg\r\n")
+                .expect("weight should be parsed");
 
         assert!((reading.weight - 1.25).abs() < f64::EPSILON);
         assert_eq!(reading.unit, "kg");
@@ -878,8 +877,7 @@ fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {
     }
 }
 
-#[tauri::command]
-fn send_cctv_pos_text(
+fn send_cctv_pos_text_blocking(
     host: String,
     port: u16,
     text: String,
@@ -918,6 +916,63 @@ fn send_cctv_pos_text(
         .flush()
         .map_err(|error| format!("Could not flush CCTV POS text: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod cctv_tests {
+    use super::{encode_pos_text, send_cctv_pos_text_blocking};
+    use std::{io::Read, net::TcpListener, thread};
+
+    #[test]
+    fn latin1_keeps_pound_sign_and_replaces_unsupported_characters() {
+        assert_eq!(encode_pos_text("GBP £1 😀", "latin1"), b"GBP \xa31 ?");
+    }
+
+    #[test]
+    fn sends_overlay_text_to_the_configured_tcp_port() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("listener should have an address")
+            .port();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("sender should connect");
+            let mut bytes = Vec::new();
+            stream
+                .read_to_end(&mut bytes)
+                .expect("overlay bytes should be readable");
+            bytes
+        });
+
+        send_cctv_pos_text_blocking(
+            "127.0.0.1".into(),
+            port,
+            "TEST GBP 1.23\r\n\r\n".into(),
+            Some(500),
+            Some("latin1".into()),
+        )
+        .expect("overlay should send");
+
+        assert_eq!(
+            receiver.join().expect("receiver thread should finish"),
+            b"TEST GBP 1.23\r\n\r\n"
+        );
+    }
+}
+
+#[tauri::command]
+async fn send_cctv_pos_text(
+    host: String,
+    port: u16,
+    text: String,
+    timeout_ms: Option<u64>,
+    encoding: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        send_cctv_pos_text_blocking(host, port, text, timeout_ms, encoding)
+    })
+    .await
+    .map_err(|error| format!("CCTV network task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1158,6 +1213,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Err(error) = commerce::apply_pending_restore_on_startup(app.handle()) {
                 eprintln!("Could not apply pending database restore: {error}");
@@ -1201,6 +1257,9 @@ pub fn run() {
             commerce::allocate_mysql_till_sequence,
             commerce::create_local_backup,
             commerce::latest_local_backup,
+            commerce::create_automatic_setup_backup,
+            commerce::latest_automatic_setup_backup,
+            commerce::validate_local_database_backup,
             commerce::restore_latest_local_backup,
             commerce::restore_local_database_from_path,
         ])

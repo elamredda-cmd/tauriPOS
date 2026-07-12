@@ -26,6 +26,7 @@
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import TouchToggle from "$lib/components/TouchToggle.svelte";
+    import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
     import PageBackButton from "$lib/components/PageBackButton.svelte";
     import { getBarcodeRules } from "$lib/barcodeRules";
 
@@ -604,13 +605,16 @@
                     <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
                         ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     <input
-                        class="search-input !pl-10 !pr-3"
+                        id="items-search"
+                        class="search-input !pl-10 !pr-12"
                         type="text"
+                        data-touch-keyboard="button"
                         value={searchQuery}
                         on:input={handleItemsSearchInput}
                         on:keydown={handleItemsSearchKeydown}
                         placeholder="Search name, SKU, barcode, PLU..."
                     />
+                    <TouchKeyboardButton targetId="items-search" label="Open item search keyboard" embedded />
                 </div>
                 <button class="btn btn-secondary items-command-btn" on:click={runItemsSearch}>Find</button>
                 <button class="btn btn-secondary items-command-btn" disabled={!searchQuery && !appliedSearchQuery} on:click={clearItemsSearch}>Clear</button>
@@ -761,12 +765,17 @@
             <div class="item-form-grid form-grid overflow-y-auto p-4">
                 <div class="field span-2">
                     <label for="name">Item Name *</label>
-                    <input
-                        type="text"
-                        id="name"
-                        bind:value={currentItem.name}
-                        placeholder="e.g. Coca Cola"
-                    />
+                    <div class="relative">
+                        <input
+                            class="min-w-0 !pr-12"
+                            type="text"
+                            id="name"
+                            data-touch-keyboard="button"
+                            bind:value={currentItem.name}
+                            placeholder="e.g. Coca Cola"
+                        />
+                        <TouchKeyboardButton targetId="name" label="Open item name keyboard" embedded />
+                    </div>
                 </div>
 
                 <div class="field span-2">
@@ -823,24 +832,33 @@
 
                 <div class="field">
                     <label for="sku">SKU</label>
-                    <input type="text" id="sku" bind:value={currentItem.sku} placeholder="Stock Keeping Unit" />
+                    <div class="relative">
+                        <input class="min-w-0 !pr-12" type="text" id="sku" data-touch-keyboard="button" bind:value={currentItem.sku} placeholder="Stock Keeping Unit" />
+                        <TouchKeyboardButton targetId="sku" label="Open SKU keyboard" embedded />
+                    </div>
                 </div>
 
                 <div class="field">
                     <label for="barcode">Barcode</label>
-                    <input type="text" id="barcode" bind:value={currentItem.barcode} placeholder="Scan or type barcode" />
+                    <div class="relative">
+                        <input class="min-w-0 !pr-12" type="text" id="barcode" data-touch-keyboard="button" bind:value={currentItem.barcode} placeholder="Scan or type barcode" />
+                        <TouchKeyboardButton targetId="barcode" label="Open barcode keyboard" embedded />
+                    </div>
                 </div>
 
-                <div class="field">
+                <div class="field span-2">
                     <label for="scalePlu">PLU / Scale Product Code</label>
                     <div class="plu-entry-row flex gap-2">
-                        <input class="flex-1 min-w-0" type="text" id="scalePlu" bind:value={currentItem.scalePlu} inputmode="numeric" placeholder="Enter manually or generate" />
+                        <div class="relative min-w-0 flex-1">
+                            <input class="min-w-0 !pr-12" type="text" id="scalePlu" data-touch-keyboard="button" bind:value={currentItem.scalePlu} inputmode="numeric" placeholder="Enter manually or generate" />
+                            <TouchKeyboardButton targetId="scalePlu" label="Open PLU keyboard" embedded />
+                        </div>
                         <button type="button" class="btn btn-secondary shrink-0" on:click={generateScalePlu}>Generate</button>
                     </div>
                     <small class="text-text-muted">You can keep the generated PLU or type your own unique number.</small>
                 </div>
                 {#if configuredPluLengths.length > 1}
-                    <div class="field">
+                    <div class="field span-2">
                         <CustomSelect
                             label="Generated PLU Digits"
                             bind:value={selectedPluLength}
@@ -862,22 +880,6 @@
                 </div>
 
                 <div class="field">
-                    <CustomSelect
-                        label="Category *"
-                        bind:value={currentItem.categoryId}
-                        options={itemCategoryOptions}
-                    />
-                </div>
-
-                <div class="field">
-                    <CustomSelect
-                        label="Tax Rate"
-                        bind:value={currentItem.taxRateId}
-                        options={$taxRatesDB.map(t => ({label: t.name, value: t.id}))}
-                    />
-                </div>
-
-                <div class="field">
                     <label for="cost">Cost Price (£)</label>
                     <input
                         type="number"
@@ -893,20 +895,43 @@
                     />
                 </div>
 
+                <div class="field">
+                    <CustomSelect
+                        label="Category *"
+                        bind:value={currentItem.categoryId}
+                        options={itemCategoryOptions}
+                    />
+                </div>
+
+                <div class="field">
+                    <CustomSelect
+                        label="Tax Rate"
+                        bind:value={currentItem.taxRateId}
+                        options={$taxRatesDB.map(t => ({label: t.name, value: t.id}))}
+                    />
+                </div>
+
                 {#if stockTrackingEnabled}
-                    <div class="field">
-                        <label for="stock" class="{currentItem.trackStock ? '' : 'opacity-40'}">Stock Level</label>
-                        <input type="number" id="stock" bind:value={currentItem.stockLevel} placeholder="0" disabled={!currentItem.trackStock} class={!currentItem.trackStock ? 'opacity-40 cursor-not-allowed' : ''} />
-                    </div>
-                    <div class="field"><TouchToggle bind:checked={currentItem.trackStock} label="Track This Item" /></div>
+                    <section class="item-inventory-section span-2">
+                        <div class="field">
+                            <label for="stock" class="{currentItem.trackStock ? '' : 'opacity-40'}">Stock Level</label>
+                            <input type="number" id="stock" bind:value={currentItem.stockLevel} placeholder="0" disabled={!currentItem.trackStock} class={!currentItem.trackStock ? 'opacity-40 cursor-not-allowed' : ''} />
+                        </div>
+                        <div class="field item-toggle-field"><TouchToggle bind:checked={currentItem.trackStock} label="Track This Item" /></div>
+                    </section>
                 {:else}
                     <div class="field span-2 p-3 rounded-sm border border-border-flat bg-bg-panel text-text-muted text-sm">
                         Shop-wide stock tracking is disabled. It can be enabled from Settings.
                     </div>
                 {/if}
-                <div class="field"><TouchToggle bind:checked={currentItem.showInGoods} label="Show in Goods Menu" /></div>
-                <div class="field"><TouchToggle bind:checked={currentItem.allowPriceOverride} label="Allow Cashier Price Override" /></div>
-                <div class="field"><TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" /></div>
+                <section class="item-options-section span-2">
+                    <h3>Item Options</h3>
+                    <div class="item-options-grid">
+                        <TouchToggle bind:checked={currentItem.showInGoods} label="Show in Goods Menu" />
+                        <TouchToggle bind:checked={currentItem.allowPriceOverride} label="Allow Cashier Price Override" />
+                        <TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" />
+                    </div>
+                </section>
             </div>
 
             <div class="item-modal-actions flex justify-end gap-3 p-4 border-t border-border-flat shrink-0 bg-bg-card">
@@ -961,12 +986,17 @@
             <div class="goods-menu-columns grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-hidden">
                 <div class="flex flex-col gap-2 h-full">
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Available Items</h3>
-                    <input
-                        type="text"
-                        class="search-input !min-h-10 shrink-0"
-                        placeholder="Search name, SKU, barcode, PLU..."
-                        bind:value={goodsMenuSearch}
-                    />
+                    <div class="relative shrink-0">
+                        <input
+                            id="goods-menu-search"
+                            type="text"
+                            data-touch-keyboard="button"
+                            class="search-input !min-h-10 min-w-0 !pr-12"
+                            placeholder="Search name, SKU, barcode, PLU..."
+                            bind:value={goodsMenuSearch}
+                        />
+                        <TouchKeyboardButton targetId="goods-menu-search" label="Open Goods Menu search keyboard" embedded />
+                    </div>
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
                         {#if goodsMenuLoading && availableGoodsDraft.length === 0}
                             <p class="text-center text-text-muted p-4 text-sm shrink-0">Loading items...</p>
@@ -1250,6 +1280,45 @@
 
     .goods-menu-panel {
         max-width: min(800px, calc(100vw - 1.5rem));
+    }
+
+    .item-inventory-section {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: end;
+        gap: 0.75rem;
+        padding-top: 0.25rem;
+    }
+
+    .item-toggle-field {
+        justify-content: end;
+    }
+
+    .item-options-section {
+        border-top: 1px solid var(--border-flat);
+        padding-top: 0.85rem;
+    }
+
+    .item-options-section h3 {
+        margin: 0 0 0.55rem;
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0;
+    }
+
+    .item-options-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+    }
+
+    @media (max-width: 760px) {
+        .item-inventory-section,
+        .item-options-grid {
+            grid-template-columns: minmax(0, 1fr);
+        }
     }
 
     @media (min-width: 900px) and (max-width: 1180px) and (min-height: 680px) and (max-height: 900px) {

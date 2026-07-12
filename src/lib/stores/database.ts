@@ -24,7 +24,7 @@ const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items']
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
-    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/shifts', '/customer-display',
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/reports', '/shifts', '/customer-display',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -73,6 +73,15 @@ const CATEGORY_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
 ] as const;
+const CUSTOMER_LIGHT_ROUTE_TABLES = [
+    'customers',
+    'employees',
+    'settings',
+] as const;
+const REPORTS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
 const SHIFTS_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
@@ -100,6 +109,8 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/orders') return [...ORDERS_LIGHT_ROUTE_TABLES];
     if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
+    if (pathname === '/customers') return [...CUSTOMER_LIGHT_ROUTE_TABLES];
+    if (pathname === '/reports') return [...REPORTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/shifts') return [...SHIFTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
     return [...POS_LIGHT_ROUTE_TABLES];
@@ -1032,12 +1043,14 @@ async function tryMysql(): Promise<boolean> {
 // every till the same till_id, leak DB credentials, and clobber sync state.
 const LOCAL_ONLY_SETTING_KEYS = new Set([
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_seq',
+    'automatic_setup_backup_enabled', 'automatic_setup_backup_time',
+    'automatic_setup_backup_directory', 'backup_directory',
     'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
     'transaction_purge_applied_at', 'sync_change_cursor',
     'training_mode_enabled',
     'cctv_pos_enabled', 'cctv_pos_host', 'cctv_pos_port', 'cctv_pos_number',
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
-    'cctv_pos_send_items', 'cctv_pos_send_receipts',
+    'cctv_pos_line_width', 'cctv_pos_send_items', 'cctv_pos_send_receipts',
     'cash_drawer_enabled', 'cash_drawer_printer_host', 'cash_drawer_printer_port',
     'cash_drawer_printer_name', 'cash_drawer_printer_device_path',
     'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
@@ -2185,6 +2198,78 @@ export async function getAll(table: string): Promise<any[]> {
     return sqlite.getAll(table);
 }
 
+export interface CustomerUsage {
+    orders: number;
+    loyaltyEntries: number;
+}
+
+export interface CustomerLoyaltyHistoryRow {
+    id: string;
+    orderId: string;
+    orderNumber: number | null;
+    pointsChange: number;
+    reason: string;
+    createdAt: string;
+}
+
+export async function isCustomerLoyaltyCodeInUse(
+    loyaltyCode: string,
+    excludeCustomerId = '',
+): Promise<boolean> {
+    const normalized = loyaltyCode.trim().toUpperCase();
+    if (!normalized) return false;
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT 1
+         FROM customers
+         WHERE loyaltyCode = ? COLLATE NOCASE
+           AND id <> ?
+         LIMIT 1`,
+        [normalized, excludeCustomerId],
+    );
+    return rows.length > 0;
+}
+
+export async function getCustomerUsage(customerId: string): Promise<CustomerUsage> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT
+            (SELECT COUNT(*) FROM orders WHERE customerId = ?) AS orders,
+            (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries`,
+        [customerId, customerId],
+    );
+    return {
+        orders: Number(rows[0]?.orders || 0),
+        loyaltyEntries: Number(rows[0]?.loyaltyEntries || 0),
+    };
+}
+
+export async function getCustomerLoyaltyHistory(
+    customerId: string,
+    limit = 50,
+): Promise<CustomerLoyaltyHistoryRow[]> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT l.id, l.orderId, o.orderNumber, l.pointsChange, l.reason, l.createdAt
+         FROM loyalty_logs l
+         LEFT JOIN orders o ON o.id = l.orderId
+         WHERE l.customerId = ?
+         ORDER BY COALESCE(l.createdAt, '') DESC, l.id DESC
+         LIMIT ?`,
+        [customerId, Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)))],
+    );
+    return rows.map((row) => ({
+        id: String(row.id || ''),
+        orderId: String(row.orderId || ''),
+        orderNumber: row.orderNumber === null || row.orderNumber === undefined
+            ? null
+            : Number(row.orderNumber),
+        pointsChange: Number(row.pointsChange || 0),
+        reason: String(row.reason || ''),
+        createdAt: String(row.createdAt || ''),
+    }));
+}
+
 export interface AuditLogPage {
     rows: any[];
     total: number;
@@ -2784,23 +2869,25 @@ async function getMysqlReportSnapshot(
     // landed mid-read, so the sections do not silently describe different
     // moments.
     for (let attempt = 0; attempt < 2; attempt++) {
-        const allTillsOverviewBefore = tillNumber
-            ? await mysql.mysqlGetSalesOverview(startDate, endDate)
-            : null;
-        const overviewBefore = await mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber);
-        const breakdownBefore = await mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber);
-        const businessBefore = await mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber);
-        const topProducts = await mysql.mysqlGetTopProducts(startDate, endDate, sortBy, limit, tillNumber);
-        const tillOptions = await mysql.mysqlGetTillReportOptions();
-        const tillSummaries = await mysql.mysqlGetTillSalesSummaries(startDate, endDate);
-        const dailyTrend = await mysql.mysqlGetDailySalesTrend(startDate, endDate, tillNumber);
-        const employeeSales = await mysql.mysqlGetEmployeeSalesSummaries(startDate, endDate, tillNumber);
-        const overviewAfter = await mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber);
-        const breakdownAfter = await mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber);
-        const businessAfter = await mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber);
-        const allTillsOverviewAfter = tillNumber
-            ? await mysql.mysqlGetSalesOverview(startDate, endDate)
-            : null;
+        const [allTillsOverviewBefore, overviewBefore, breakdownBefore, businessBefore] = await Promise.all([
+            tillNumber ? mysql.mysqlGetSalesOverview(startDate, endDate) : Promise.resolve(null),
+            mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber),
+            mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber),
+            mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber),
+        ]);
+        const [topProducts, tillOptions, tillSummaries, dailyTrend, employeeSales] = await Promise.all([
+            mysql.mysqlGetTopProducts(startDate, endDate, sortBy, limit, tillNumber),
+            mysql.mysqlGetTillReportOptions(),
+            mysql.mysqlGetTillSalesSummaries(startDate, endDate),
+            mysql.mysqlGetDailySalesTrend(startDate, endDate, tillNumber),
+            mysql.mysqlGetEmployeeSalesSummaries(startDate, endDate, tillNumber),
+        ]);
+        const [overviewAfter, breakdownAfter, businessAfter, allTillsOverviewAfter] = await Promise.all([
+            mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber),
+            mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber),
+            mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber),
+            tillNumber ? mysql.mysqlGetSalesOverview(startDate, endDate) : Promise.resolve(null),
+        ]);
         if (
             JSON.stringify([allTillsOverviewBefore, overviewBefore, breakdownBefore, businessBefore]) ===
             JSON.stringify([allTillsOverviewAfter, overviewAfter, breakdownAfter, businessAfter])
@@ -2871,7 +2958,13 @@ export async function getReportSnapshot(
     if (isMultiMode()) {
         try {
             const pendingBeforeFlush = await pendingReportWriteCount();
-            if (pendingBeforeFlush > 0) await flushOfflineQueue();
+            if (pendingBeforeFlush > 0) {
+                await withTimeout(
+                    flushOfflineQueue(),
+                    2_500,
+                    'Pending transaction sync did not finish in time',
+                );
+            }
             const pendingWrites = await pendingReportWriteCount();
             if (pendingWrites > 0) {
                 const local = await getSqliteReportSnapshot(startDate, endDate, sortBy, limit, tillNumber);
@@ -2880,10 +2973,22 @@ export async function getReportSnapshot(
                     warning: `${pendingWrites} local transaction update${pendingWrites === 1 ? ' is' : 's are'} waiting to sync, so this report is showing the local SQLite cache.`,
                 };
             }
-            const mysqlDb = await getMysqlDb();
+            const mysqlDb = await withTimeout(
+                getMysqlDb(),
+                2_500,
+                'MariaDB report connection timed out',
+            );
             if (mysqlDb) {
-                const remote = await getMysqlReportSnapshot(startDate, endDate, sortBy, limit, tillNumber);
-                const missingOrders = await missingRemoteReportOrderCount(startDate, endDate, tillNumber);
+                const remote = await withTimeout(
+                    getMysqlReportSnapshot(startDate, endDate, sortBy, limit, tillNumber),
+                    10_000,
+                    'MariaDB report queries timed out',
+                );
+                const missingOrders = await withTimeout(
+                    missingRemoteReportOrderCount(startDate, endDate, tillNumber),
+                    3_000,
+                    'MariaDB report consistency check timed out',
+                );
                 if (missingOrders === 0) {
                     return remote;
                 }
@@ -3433,12 +3538,112 @@ export async function ensureTillReceiptSequence(): Promise<number> {
     return getTillSequence();
 }
 
-export async function createLocalBackup(): Promise<string> {
-    return invoke<string>('create_local_backup');
+export async function createLocalBackup(backupDirectory?: string): Promise<string> {
+    const directory = backupDirectory === undefined
+        ? (await getAutomaticSetupBackupConfig()).directory
+        : backupDirectory.trim();
+    return invoke<string>('create_local_backup', { backupDirectory: directory || null });
 }
 
-export async function getLatestLocalBackup(): Promise<string | null> {
-    return invoke<string | null>('latest_local_backup');
+export async function getLatestLocalBackup(backupDirectory?: string): Promise<string | null> {
+    const directory = backupDirectory === undefined
+        ? (await getAutomaticSetupBackupConfig()).directory
+        : backupDirectory.trim();
+    return invoke<string | null>('latest_local_backup', { backupDirectory: directory || null });
+}
+
+export interface AutomaticSetupBackupResult {
+    path: string;
+    created: boolean;
+}
+
+export interface AutomaticSetupBackupConfig {
+    enabled: boolean;
+    time: string;
+    directory: string;
+}
+
+const DEFAULT_AUTOMATIC_SETUP_BACKUP_TIME = '03:00';
+
+function normalizeAutomaticBackupTime(value: string | null): string {
+    const match = String(value || '').match(/^(\d{2}):(\d{2})$/);
+    if (!match) return DEFAULT_AUTOMATIC_SETUP_BACKUP_TIME;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    return hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60
+        ? `${match[1]}:${match[2]}`
+        : DEFAULT_AUTOMATIC_SETUP_BACKUP_TIME;
+}
+
+export async function getAutomaticSetupBackupEnabled(): Promise<boolean> {
+    const value = await getSettingValue('automatic_setup_backup_enabled');
+    return value === null ? true : value === 'true';
+}
+
+export async function setAutomaticSetupBackupEnabled(enabled: boolean): Promise<void> {
+    await sqlite.upsert('settings', {
+        key: 'automatic_setup_backup_enabled',
+        value: enabled ? 'true' : 'false',
+        updatedAt: new Date().toISOString(),
+    }, 'key');
+}
+
+export async function getAutomaticSetupBackupConfig(): Promise<AutomaticSetupBackupConfig> {
+    const [enabled, time, directory, legacyDirectory] = await Promise.all([
+        getAutomaticSetupBackupEnabled(),
+        getSettingValue('automatic_setup_backup_time'),
+        getSettingValue('backup_directory'),
+        getSettingValue('automatic_setup_backup_directory'),
+    ]);
+    return {
+        enabled,
+        time: normalizeAutomaticBackupTime(time),
+        directory: String(directory || legacyDirectory || '').trim(),
+    };
+}
+
+export async function setAutomaticSetupBackupSchedule(time: string, directory: string): Promise<void> {
+    const normalizedTime = normalizeAutomaticBackupTime(time);
+    const stamp = new Date().toISOString();
+    await sqlite.upsert('settings', {
+        key: 'automatic_setup_backup_time',
+        value: normalizedTime,
+        updatedAt: stamp,
+    }, 'key');
+    await sqlite.upsert('settings', {
+        key: 'backup_directory',
+        value: directory.trim(),
+        updatedAt: stamp,
+    }, 'key');
+}
+
+export async function createAutomaticSetupBackup(
+    backupDirectory?: string,
+): Promise<AutomaticSetupBackupResult> {
+    const directory = backupDirectory === undefined
+        ? (await getAutomaticSetupBackupConfig()).directory
+        : backupDirectory.trim();
+    return invoke<AutomaticSetupBackupResult>('create_automatic_setup_backup', {
+        backupDirectory: directory || null,
+    });
+}
+
+export async function runAutomaticSetupBackupIfEnabled(): Promise<AutomaticSetupBackupResult | null> {
+    const config = await getAutomaticSetupBackupConfig();
+    if (!config.enabled) return null;
+    const [hours, minutes] = config.time.split(':').map(Number);
+    const current = new Date();
+    if (current.getHours() * 60 + current.getMinutes() < hours * 60 + minutes) return null;
+    return createAutomaticSetupBackup(config.directory);
+}
+
+export async function getLatestAutomaticSetupBackup(backupDirectory?: string): Promise<string | null> {
+    const directory = backupDirectory === undefined
+        ? (await getAutomaticSetupBackupConfig()).directory
+        : backupDirectory.trim();
+    return invoke<string | null>('latest_automatic_setup_backup', {
+        backupDirectory: directory || null,
+    });
 }
 
 export interface DatabaseRestoreResult {
@@ -3454,13 +3659,27 @@ async function closeLocalDatabaseForRestore(): Promise<void> {
 }
 
 export async function restoreLatestLocalBackup(): Promise<DatabaseRestoreResult> {
-    await closeLocalDatabaseForRestore();
-    return invoke<DatabaseRestoreResult>('restore_latest_local_backup');
+    const sourcePath = await getLatestLocalBackup();
+    if (!sourcePath) throw new Error('No user-created local backup is available.');
+    return restoreLocalDatabaseFromPath(sourcePath);
 }
 
 export async function restoreLocalDatabaseFromPath(sourcePath: string): Promise<DatabaseRestoreResult> {
+    await invoke<void>('validate_local_database_backup', { sourcePath });
     await closeLocalDatabaseForRestore();
-    return invoke<DatabaseRestoreResult>('restore_local_database_from_path', { sourcePath });
+    try {
+        return await invoke<DatabaseRestoreResult>('restore_local_database_from_path', { sourcePath });
+    } catch (error) {
+        // Validation happens before closing SQLite, but native replacement can
+        // still fail. Reopen the original database so the app remains usable.
+        try {
+            await sqlite.getDb();
+            if (isMultiMode()) void startBackgroundSync();
+        } catch (reopenError) {
+            console.error('database: could not reopen SQLite after restore failure:', reopenError);
+        }
+        throw error;
+    }
 }
 
 export interface SchemaValidationResult {

@@ -14,6 +14,7 @@
         hydrateSvelteStores,
         isLightStorePath,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+        runAutomaticSetupBackupIfEnabled,
         startBackgroundSync
     } from '$lib/stores/database';
     import {
@@ -39,7 +40,12 @@
     let lightStoreHydrationRunning = false;
     let queuedLightHydrationPath: string | null = null;
     let lastLightHydrationPath = '';
+    let automaticBackupStartTimeout: ReturnType<typeof setTimeout> | null = null;
+    let automaticBackupInterval: ReturnType<typeof setInterval> | null = null;
+    let automaticBackupRunning = false;
     const SYNC_STARTUP_RETRY_MS = 60 * 1000;
+    const AUTOMATIC_BACKUP_START_DELAY_MS = 2 * 60 * 1000;
+    const AUTOMATIC_BACKUP_CHECK_MS = 5 * 60 * 1000;
     let fullStoresHydrated = false;
 
     if (typeof window === 'undefined' || window.location.pathname !== '/customer-display') {
@@ -51,6 +57,43 @@
             clearInterval(syncStartupRetry);
             syncStartupRetry = null;
         }
+    }
+
+    function clearAutomaticBackupSchedule() {
+        if (automaticBackupStartTimeout) {
+            clearTimeout(automaticBackupStartTimeout);
+            automaticBackupStartTimeout = null;
+        }
+        if (automaticBackupInterval) {
+            clearInterval(automaticBackupInterval);
+            automaticBackupInterval = null;
+        }
+    }
+
+    async function checkAutomaticSetupBackup() {
+        if (automaticBackupRunning) return;
+        automaticBackupRunning = true;
+        try {
+            const result = await runAutomaticSetupBackupIfEnabled();
+            if (result?.created) {
+                console.log(`POS: daily shop setup backup created at ${result.path}`);
+            }
+        } catch (error) {
+            console.warn('POS: automatic shop setup backup failed:', error);
+        } finally {
+            automaticBackupRunning = false;
+        }
+    }
+
+    function startAutomaticBackupSchedule() {
+        clearAutomaticBackupSchedule();
+        automaticBackupStartTimeout = setTimeout(() => {
+            automaticBackupStartTimeout = null;
+            void checkAutomaticSetupBackup();
+            automaticBackupInterval = setInterval(() => {
+                void checkAutomaticSetupBackup();
+            }, AUTOMATIC_BACKUP_CHECK_MS);
+        }, AUTOMATIC_BACKUP_START_DELAY_MS);
     }
 
     function isDatabaseIdentityMismatch(error: unknown): boolean {
@@ -235,6 +278,7 @@
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {
                 stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
+                startAutomaticBackupSchedule();
             }
 
             // A shop without an active administrator cannot be managed yet. Always send it
@@ -254,6 +298,7 @@
     onDestroy(() => {
         stopCustomerDisplayAutoOpen?.();
         clearSyncStartupRetry();
+        clearAutomaticBackupSchedule();
     });
 
     // Reactive theme application via store subscription.
@@ -287,6 +332,7 @@
 
     $: if (
         dbReady &&
+        isTauri() &&
         !fullStoresHydrated &&
         typeof window !== 'undefined' &&
         !isLightStorePath($page.url.pathname)

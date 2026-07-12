@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { formatMoney, settingsDB } from '$lib/stores/db';
@@ -38,6 +39,7 @@
     let startDate = localDateValue(firstOfMonth);
     let endDate = localDateValue(today);
 
+    type DatePreset = 'today' | 'week' | 'month' | 'year';
     let sortBy: 'quantity' | 'revenue' = 'quantity';
     let selectedTill = ''; // empty = all tills
     $: tillOptions = [
@@ -64,6 +66,12 @@
     let loadSequence = 0;
     let reportSource = 'Local SQLite';
     let loadedReportKey = '';
+    let previewMode = false;
+    let appliedStartDate = startDate;
+    let appliedEndDate = endDate;
+    let appliedTill = '';
+    let appliedSortBy: 'quantity' | 'revenue' = 'quantity';
+    const REPORT_LOAD_TIMEOUT_MS = 16_000;
 
     function clearReportResults() {
         overview = { totalRevenue: 0, totalTransactions: 0, refundTransactions: 0, avgTransactionValue: 0, totalItemsSold: 0 };
@@ -91,6 +99,22 @@
     let closeReportSaving = false;
     let reportPrintBusy = false;
     let closeReportPrintBusy = false;
+    let periodReportBusy = false;
+
+    async function withReportTimeout<T>(operation: Promise<T>): Promise<T> {
+        let timeoutId: ReturnType<typeof setTimeout>;
+        const timeout = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+                () => reject(new Error('Report loading timed out. Check the database connection and try again.')),
+                REPORT_LOAD_TIMEOUT_MS,
+            );
+        });
+        try {
+            return await Promise.race([operation, timeout]);
+        } finally {
+            clearTimeout(timeoutId!);
+        }
+    }
 
     async function loadData() {
         const sequence = ++loadSequence;
@@ -104,8 +128,22 @@
         loading = true;
         reportError = '';
         const till = selectedTill || undefined;
+        if (previewMode) {
+            clearReportResults();
+            appliedStartDate = startDate;
+            appliedEndDate = endDate;
+            appliedTill = selectedTill;
+            appliedSortBy = sortBy;
+            reportSource = 'Browser Preview';
+            loadedReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
+            lastRefreshed = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            loading = false;
+            return;
+        }
         try {
-            const snapshot = await getReportSnapshot(startDate, endDate, sortBy, 10, till);
+            const snapshot = await withReportTimeout(
+                getReportSnapshot(startDate, endDate, sortBy, 10, till),
+            );
             if (sequence !== loadSequence) return;
             overview = snapshot.overview;
             breakdown = snapshot.breakdown;
@@ -117,6 +155,10 @@
             employeeSales = snapshot.employeeSales;
             reportSource = snapshot.source === 'mariadb' ? 'Live MariaDB' : 'Local SQLite';
             reportError = snapshot.warning || '';
+            appliedStartDate = startDate;
+            appliedEndDate = endDate;
+            appliedTill = selectedTill;
+            appliedSortBy = sortBy;
             loadedReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
         } catch (error) {
             if (sequence !== loadSequence) return;
@@ -129,7 +171,7 @@
         loading = false;
     }
 
-    function setDatePreset(preset: 'today' | 'week' | 'month' | 'year') {
+    function datePresetRange(preset: DatePreset): [string, string] {
         const end = new Date();
         const start = new Date(end);
         if (preset === 'week') start.setDate(end.getDate() - 6);
@@ -138,8 +180,20 @@
             start.setMonth(0);
             start.setDate(1);
         }
-        startDate = localDateValue(start);
-        endDate = localDateValue(end);
+        return [localDateValue(start), localDateValue(end)];
+    }
+
+    function setDatePreset(preset: DatePreset) {
+        [startDate, endDate] = datePresetRange(preset);
+        if (mounted) void loadData();
+    }
+
+    function selectedDatePreset(currentStart: string, currentEnd: string): DatePreset | '' {
+        for (const preset of ['today', 'week', 'month', 'year'] as DatePreset[]) {
+            const [presetStart, presetEnd] = datePresetRange(preset);
+            if (currentStart === presetStart && currentEnd === presetEnd) return preset;
+        }
+        return '';
     }
 
     function csvCell(value: string | number) {
@@ -316,6 +370,8 @@
     }
 
     async function previewPeriodReport(scope: 'till' | 'system', closePeriod: boolean) {
+        if (periodReportBusy) return;
+        periodReportBusy = true;
         try {
             const markerTill = scope === 'system' ? '' : tillId;
             const title = scope === 'system' ? 'Whole System Period Close Report' : `${tillName} Period Close Report`;
@@ -345,6 +401,8 @@
         } catch (e) {
             console.error(e);
             toast(`Failed to generate report: ${e}`, 'error');
+        } finally {
+            periodReportBusy = false;
         }
     }
 
@@ -394,19 +452,20 @@
     }
 
     onMount(async () => {
-        tillName = await getTillName();
-        tillId = await getOrCreateTillId();
-        mounted = true;
-    });
-
-    // Reactive reload when any filter changes
-    $: {
-        selectedTill;
-        sortBy;
-        if (mounted && startDate && endDate) {
-            loadData();
+        previewMode = !isTauri();
+        if (previewMode) {
+            tillName = 'Browser Preview';
+            tillId = 'browser-preview-till';
+        } else {
+            try {
+                [tillName, tillId] = await Promise.all([getTillName(), getOrCreateTillId()]);
+            } catch (error) {
+                reportError = `Could not identify this till: ${error}`;
+            }
         }
-    }
+        mounted = true;
+        await loadData();
+    });
 
     $: paymentMagnitude = Math.abs(breakdown.totalCash)
         + Math.abs(breakdown.totalCard)
@@ -416,10 +475,10 @@
     $: cardPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalCard) / paymentMagnitude) * 100) : 0;
     $: loyaltyPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalLoyalty) / paymentMagnitude) * 100) : 0;
     $: unrecordedPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.unrecordedAmount) / paymentMagnitude) * 100) : 0;
-    $: visibleTillSummaries = selectedTill ? tillSummaries.filter((till) => till.id === selectedTill) : tillSummaries;
+    $: visibleTillSummaries = appliedTill ? tillSummaries.filter((till) => till.id === appliedTill) : tillSummaries;
     $: tillTotals = [...visibleTillSummaries].sort((a, b) => Math.abs(b.netSales) - Math.abs(a.netSales));
-    $: selectedTillLabel = allTills.find((till) => till.id === selectedTill)?.name || 'All Tills';
-    $: reportPeriodLabel = startDate === endDate ? formatDateShort(startDate) : `${formatDateShort(startDate)} to ${formatDateShort(endDate)}`;
+    $: selectedTillLabel = allTills.find((till) => till.id === appliedTill)?.name || 'All Tills';
+    $: reportPeriodLabel = appliedStartDate === appliedEndDate ? formatDateShort(appliedStartDate) : `${formatDateShort(appliedStartDate)} to ${formatDateShort(appliedEndDate)}`;
     $: tillNetTotal = tillTotals.reduce((sum, till) => sum + till.netSales, 0);
     $: tillGrossTotal = tillTotals.reduce((sum, till) => sum + till.grossSales, 0);
     $: tillRefundTotal = tillTotals.reduce((sum, till) => sum + till.refunds, 0);
@@ -441,10 +500,12 @@
         { label: 'Cost of Goods', value: formatMoney(business.costTotal), detail: 'Product cost total', tone: 'text-text-main' },
         { label: 'Gross Profit', value: formatMoney(business.grossProfit), detail: 'After cost of goods', tone: business.grossProfit >= 0 ? 'text-success' : 'text-danger' },
     ];
-    $: displayDailyTrend = filledDailyTrend(startDate, endDate, dailyTrend);
+    $: displayDailyTrend = filledDailyTrend(appliedStartDate, appliedEndDate, dailyTrend);
     $: maxDailySales = Math.max(1, ...displayDailyTrend.map((day) => Math.abs(day.netSales)));
     $: currentReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
     $: reportReady = !loading && loadedReportKey === currentReportKey;
+    $: filtersDirty = Boolean(loadedReportKey && loadedReportKey !== currentReportKey);
+    $: activeDatePreset = selectedDatePreset(startDate, endDate);
     $: reconciliationDifference = business.grossSales - business.discountTotal - business.refunds - business.netSales;
     $: closeReportStartDay = closeReportStart ? localDateValue(new Date(closeReportStart)) : '';
     $: closeReportIncludesPreviousDays = Boolean(closeReportStartDay && closeReportStartDay < localDateValue(new Date()));
@@ -467,41 +528,55 @@
                         </div>
                     </div>
                     <div class="grid grid-cols-2 sm:flex gap-2">
-                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('today')}>Today</button>
-                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('week')}>7 Days</button>
-                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('month')}>This Month</button>
-                        <button class="btn btn-secondary !px-4 !py-2 !text-sm" on:click={() => setDatePreset('year')}>This Year</button>
+                        <button class="btn {activeDatePreset === 'today' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('today')}>Today</button>
+                        <button class="btn {activeDatePreset === 'week' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('week')}>7 Days</button>
+                        <button class="btn {activeDatePreset === 'month' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('month')}>This Month</button>
+                        <button class="btn {activeDatePreset === 'year' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('year')}>This Year</button>
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[repeat(4,minmax(0,1fr))_auto_auto_auto] gap-3 items-end">
-                    <div class="field">
-                        <label for="report-start-date">Start Date</label>
-                        <input id="report-start-date" type="date" bind:value={startDate} />
+                <div class="report-filter-bar">
+                    <div class="report-filter-grid">
+                        <div class="field">
+                            <label for="report-start-date">Start Date</label>
+                            <input id="report-start-date" type="date" bind:value={startDate} />
+                        </div>
+                        <div class="field">
+                            <label for="report-end-date">End Date</label>
+                            <input id="report-end-date" type="date" bind:value={endDate} />
+                        </div>
+                        <div class="min-w-0">
+                            <CustomSelect label="Till" bind:value={selectedTill} options={tillOptions} />
+                        </div>
+                        <div class="min-w-0">
+                            <CustomSelect label="Top Products" bind:value={sortBy} options={sortOptions} />
+                        </div>
                     </div>
-                    <div class="field">
-                        <label for="report-end-date">End Date</label>
-                        <input id="report-end-date" type="date" bind:value={endDate} />
+                    <div class="report-filter-actions">
+                        <button class="btn btn-primary" disabled={loading} on:click={loadData}>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8"></path><path d="M20 3v5h-5"></path></svg>
+                            {loading ? 'Loading...' : 'Apply Filters'}
+                        </button>
+                        <button class="btn btn-secondary" disabled={!reportReady} on:click={exportCsv}>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"></path></svg>
+                            Export CSV
+                        </button>
+                        <button class="btn btn-secondary" disabled={!reportReady || reportPrintBusy} on:click={printReport}>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"></path></svg>
+                            {reportPrintBusy ? 'Printing...' : 'Print'}
+                        </button>
                     </div>
-                    <div class="min-w-0">
-                        <CustomSelect label="Till" bind:value={selectedTill} options={tillOptions} />
-                    </div>
-                    <div class="min-w-0">
-                        <CustomSelect label="Top Products" bind:value={sortBy} options={sortOptions} />
-                    </div>
-                    <button class="btn btn-primary" disabled={loading} on:click={loadData}>
-                        {loading ? 'Loading...' : 'Refresh'}
-                    </button>
-                    <button class="btn btn-secondary" disabled={!reportReady} on:click={exportCsv}>Export CSV</button>
-                    <button class="btn btn-secondary" disabled={!reportReady || reportPrintBusy} on:click={printReport}>
-                        {reportPrintBusy ? 'Printing...' : 'Print'}
-                    </button>
                 </div>
+                {#if loading}
+                    <div class="report-load-state">Updating report totals...</div>
+                {:else if filtersDirty}
+                    <div class="report-filter-pending">Filters changed. Press Apply Filters to update the report.</div>
+                {/if}
             </div>
         </section>
 
         {#if reportError}
-            <div class="bg-danger/10 border border-danger/40 text-danger rounded-lg p-4">
+            <div class="bg-warning/10 border border-warning/40 text-warning rounded-lg p-4">
                 <strong>Report warning:</strong> {reportError}
             </div>
         {/if}
@@ -689,14 +764,14 @@
                     <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                         <span class="text-sm font-bold text-text-muted">Cash</span>
                         <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-success" style="width: {cashPercent}%"></div>
+                                <div class="h-full rounded-md min-w-[2px] bg-success" style="width: {cashPercent}%"></div>
                         </div>
                         <span class="text-right text-sm font-bold">{cashPercent}%</span>
                     </div>
                     <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                         <span class="text-sm font-bold text-text-muted">Card</span>
                         <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                            <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-accent-primary" style="width: {cardPercent}%"></div>
+                                <div class="h-full rounded-md min-w-[2px] bg-accent-primary" style="width: {cardPercent}%"></div>
                         </div>
                         <span class="text-right text-sm font-bold">{cardPercent}%</span>
                     </div>
@@ -704,7 +779,7 @@
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Loyalty</span>
                             <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-warning" style="width: {Math.max(0, loyaltyPercent)}%"></div>
+                                <div class="h-full rounded-md min-w-[2px] bg-warning" style="width: {Math.max(0, loyaltyPercent)}%"></div>
                             </div>
                             <span class="text-right text-sm font-bold">{loyaltyPercent}%</span>
                         </div>
@@ -713,7 +788,7 @@
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Missing</span>
                             <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
-                                <div class="h-full rounded-md transition-[width] duration-500 min-w-[2px] bg-border-flat" style="width: {unrecordedPercent}%"></div>
+                                <div class="h-full rounded-md min-w-[2px] bg-border-flat" style="width: {unrecordedPercent}%"></div>
                             </div>
                             <span class="text-right text-sm font-bold">{unrecordedPercent}%</span>
                         </div>
@@ -759,7 +834,7 @@
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
             <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
                 <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Products</div>
-                <h3 class="m-0 mt-1 text-xl">Top products by {sortBy === 'revenue' ? 'revenue' : 'quantity'}</h3>
+                <h3 class="m-0 mt-1 text-xl">Top products by {appliedSortBy === 'revenue' ? 'revenue' : 'quantity'}</h3>
                 {#if topProducts.length === 0}
                     <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No sales data for the selected period.</div>
                 {:else}
@@ -838,14 +913,14 @@
                     <p class="m-0 mt-1 text-sm text-text-muted">Close uses the time from the last close to now, not automatically today's calendar sales.</p>
                 </div>
                 <div class="flex flex-wrap gap-3">
-                    <button class="btn btn-primary" disabled={!tillId} on:click={runTillDayReport}>
-                        Close This Till
+                    <button class="btn btn-primary" disabled={!tillId || periodReportBusy} on:click={runTillDayReport}>
+                        {periodReportBusy ? 'Generating...' : 'Close This Till'}
                     </button>
-                    <button class="btn btn-primary" on:click={runSystemDayReport}>
-                        Close Whole System
+                    <button class="btn btn-primary" disabled={periodReportBusy} on:click={runSystemDayReport}>
+                        {periodReportBusy ? 'Generating...' : 'Close Whole System'}
                     </button>
-                    <button class="btn btn-secondary" disabled={!tillId} on:click={runTillFullReport}>
-                        Preview This Till
+                    <button class="btn btn-secondary" disabled={!tillId || periodReportBusy} on:click={runTillFullReport}>
+                        {periodReportBusy ? 'Generating...' : 'Preview This Till'}
                     </button>
                 </div>
             </div>
@@ -863,7 +938,9 @@
                     <h3 class="m-0 truncate text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
                     <div class="mt-1 text-xs text-text-muted">{tillReportPeriod}</div>
                 </div>
-                <button class="shrink-0 bg-transparent text-text-muted text-[1.2rem]" on:click={() => showTillReport = false}>✕</button>
+                <button class="btn-icon shrink-0" aria-label="Close report preview" title="Close report preview" on:click={() => showTillReport = false}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+                </button>
             </div>
             <div class="flex flex-col gap-3 p-3 md:p-4">
             {#if closeReportIncludesPreviousDays}
@@ -971,6 +1048,26 @@
 {/if}
 
 <style>
+    .report-filter-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem; }
+    .report-filter-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); align-items: end; gap: .75rem; }
+    .report-filter-grid .field { min-width: 0; }
+    .report-filter-grid input { width: 100%; }
+    .report-filter-actions { display: grid; grid-template-columns: repeat(3, max-content); align-items: stretch; gap: .65rem; }
+    .report-filter-actions .btn { min-height: 48px; padding-inline: 1rem; }
+    .report-filter-actions svg { width: 18px; height: 18px; flex: 0 0 auto; }
+    .report-load-state,
+    .report-filter-pending { padding: .65rem .8rem; border-left: 3px solid var(--accent-primary); background: var(--bg-panel); color: var(--text-muted); font-size: .82rem; font-weight: 750; }
+    .report-filter-pending { border-left-color: var(--warning); color: var(--warning); }
+    @media (max-width: 1100px) {
+        .report-filter-bar { grid-template-columns: minmax(0, 1fr); }
+        .report-filter-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 850px) {
+        .report-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+        .report-filter-actions { grid-template-columns: 1fr; }
+    }
     @media print {
         :global(.management-header),
         :global(.fullscreen-toggle),
@@ -1003,9 +1100,3 @@
         }
     }
 </style>
-
-{#if loading}
-    <div class="fixed inset-0 bg-black/30 flex items-center justify-center z-50 pointer-events-none">
-        <div class="bg-bg-card p-4 rounded-md text-text-main font-semibold shadow-lg">Loading reports…</div>
-    </div>
-{/if}

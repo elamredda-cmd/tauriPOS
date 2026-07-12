@@ -25,6 +25,9 @@
     "allow-list-system-printers",
     "allow-list-serial-ports",
     "allow-select-restore-database-file",
+    "dialog:allow-open",
+    "opener:allow-open-path",
+    "opener:allow-reveal-item-in-dir",
     "allow-read-scale-weight",
     "allow-open-cash-drawer",
     "allow-commit-local-sale",
@@ -33,6 +36,9 @@
     "allow-allocate-mysql-till-sequence",
     "allow-create-local-backup",
     "allow-latest-local-backup",
+    "allow-create-automatic-setup-backup",
+    "allow-latest-automatic-setup-backup",
+    "allow-validate-local-database-backup",
     "allow-restore-latest-local-backup",
     "allow-restore-local-database-from-path"
   ]

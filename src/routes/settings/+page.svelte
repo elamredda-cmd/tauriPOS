@@ -3,7 +3,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { currentEmployee } from '$lib/stores/session';
-    import { storeDB, settingsDB, type Store, now } from '$lib/stores/db';
+    import { storeDB, settingsDB, type Store, now, formatMoney } from '$lib/stores/db';
     import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { appFontOptions, appFontSizeOptions, normalizeAppFontChoice } from '$lib/typography';
@@ -22,6 +22,9 @@
     $: selectedPosFontSize = $settingsDB.find(s => s.key === 'ui_font_size_pos')?.value || 'normal';
     $: selectedSettingsFontSize = $settingsDB.find(s => s.key === 'ui_font_size_settings')?.value || 'normal';
     $: selectedFontOption = appFontOptions.find((option) => option.value === selectedAppFont) || appFontOptions[0];
+    $: loyaltyPointsPerPound = loyaltyNumber('loyalty_points_per_pound', 0, 1);
+    $: loyaltyPointsRequired = loyaltyNumber('loyalty_points_to_redeem', 1, 100);
+    $: loyaltyCreditValue = loyaltyNumber('loyalty_redemption_value', 1, 100);
 
     onMount(async () => {
         editTillName = await getTillName();
@@ -50,6 +53,20 @@
 
     function getSettingValue(key: string): string {
         return $settingsDB.find(s => s.key === key)?.value || '';
+    }
+
+    function loyaltyNumber(key: string, minimum: number, fallback: number): number {
+        const parsed = Math.floor(Number(getSettingValue(key)));
+        return Number.isFinite(parsed) ? Math.max(minimum, parsed) : fallback;
+    }
+
+    async function updateLoyaltyNumber(key: string, rawValue: string, minimum: number, fallback: number) {
+        const parsed = Math.floor(Number(rawValue));
+        const value = Number.isFinite(parsed) ? Math.max(minimum, parsed) : fallback;
+        await updateSetting(key, String(value));
+        if (rawValue.trim() !== String(value)) {
+            toast(`Loyalty value adjusted to ${value}`, 'info');
+        }
     }
 
     function saveStore() {
@@ -217,18 +234,18 @@
                 </button>
             </div>
             <div class="form-grid">
-                <div class="field"><label>Points per £1 spent</label>
-                    <input type="number" min="0" step="1" value={getSettingValue('loyalty_points_per_pound') || '1'} on:change={(e) => updateSetting('loyalty_points_per_pound', e.currentTarget.value)} />
+                <div class="field"><label for="loyalty-points-per-pound">Points per £1 spent</label>
+                    <input id="loyalty-points-per-pound" type="number" inputmode="numeric" min="0" step="1" value={loyaltyPointsPerPound} on:change={(e) => updateLoyaltyNumber('loyalty_points_per_pound', e.currentTarget.value, 0, 1)} />
                 </div>
-                <div class="field"><label>Points required for credit</label>
-                    <input type="number" min="1" step="1" value={getSettingValue('loyalty_points_to_redeem') || '100'} on:change={(e) => updateSetting('loyalty_points_to_redeem', e.currentTarget.value)} />
+                <div class="field"><label for="loyalty-points-required">Points required for credit</label>
+                    <input id="loyalty-points-required" type="number" inputmode="numeric" min="1" step="1" value={loyaltyPointsRequired} on:change={(e) => updateLoyaltyNumber('loyalty_points_to_redeem', e.currentTarget.value, 1, 100)} />
                 </div>
-                <div class="field"><label>Credit value (pence)</label>
-                    <input type="number" min="1" step="1" value={getSettingValue('loyalty_redemption_value') || '100'} on:change={(e) => updateSetting('loyalty_redemption_value', e.currentTarget.value)} />
+                <div class="field"><label for="loyalty-credit-value">Credit value (pence)</label>
+                    <input id="loyalty-credit-value" type="number" inputmode="numeric" min="1" step="1" value={loyaltyCreditValue} on:change={(e) => updateLoyaltyNumber('loyalty_redemption_value', e.currentTarget.value, 1, 100)} />
                 </div>
                 <div class="field justify-end">
                     <div class="rounded-xl border border-border-flat bg-bg-panel p-3 text-sm text-text-muted">
-                        Example: {getSettingValue('loyalty_points_to_redeem') || '100'} points = {Number(getSettingValue('loyalty_redemption_value') || '100') / 100} GBP credit
+                        Example: {loyaltyPointsRequired.toLocaleString()} points = {formatMoney(loyaltyCreditValue)} credit
                     </div>
                 </div>
             </div>

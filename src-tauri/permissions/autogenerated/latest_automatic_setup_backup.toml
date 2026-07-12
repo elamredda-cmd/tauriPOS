@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-latest-automatic-setup-backup"
+description = "Enables the latest_automatic_setup_backup command without any pre-configured scope."
+commands.allow = ["latest_automatic_setup_backup"]
+
+[[permission]]
+identifier = "deny-latest-automatic-setup-backup"
+description = "Denies the latest_automatic_setup_backup command without any pre-configured scope."
+commands.deny = ["latest_automatic_setup_backup"]

@@ -15,6 +15,7 @@
         savePromotionBundle,
     } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
+    import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { isTauri } from '@tauri-apps/api/core';
@@ -961,7 +962,13 @@
 
 <Modal bind:show={showBundle} title={editingBundle ? 'Edit Bundle' : 'Add Bundle'} width="760px" height="min(86vh, 780px)">
     <div class="form-grid">
-        <div class="field span-2"><label>Bundle Name *</label><input bind:value={curName} placeholder="e.g. Any 3 Croissants for £4" /></div>
+        <div class="field span-2">
+            <label for="bundle-name">Bundle Name *</label>
+            <div class="relative">
+                <input class="min-w-0 !pr-12" id="bundle-name" data-touch-keyboard="button" bind:value={curName} placeholder="e.g. Any 3 Croissants for £4" />
+                <TouchKeyboardButton targetId="bundle-name" label="Open bundle name keyboard" embedded />
+            </div>
+        </div>
         <div class="field">
             <label>Quantity *</label>
             <div class="flex justify-between items-center px-3 py-2.5 bg-bg-panel border border-border-flat rounded-sm cursor-pointer transition-colors hover:border-accent-primary" on:click={() => showQtyPad = true}>
@@ -1011,10 +1018,11 @@
             <label>Find Products</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
-                    <input bind:value={productSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bundle')} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-10" />
+                    <input id="bundle-product-search" data-touch-keyboard="button" bind:value={productSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bundle')} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-20" />
                     {#if productSearch}
-                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bundle')}>✕</button>
+                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bundle')}>✕</button>
                     {/if}
+                    <TouchKeyboardButton targetId="bundle-product-search" label="Open bundle product search keyboard" embedded />
                 </div>
                 <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bundle} on:click={() => runPickerSearch('bundle')}>
                     {pickerLoading.bundle ? 'Finding...' : 'Find'}
@@ -1057,7 +1065,13 @@
 
 <Modal bind:show={showBogo} title={editingBogo ? 'Edit BOGO Promotion' : 'Add BOGO Promotion'} width="760px" height="min(86vh, 780px)">
     <div class="form-grid">
-        <div class="field span-2"><label>Promotion Name *</label><input bind:value={bogoName} placeholder="e.g. Buy 1, get the next for £1" /></div>
+        <div class="field span-2">
+            <label for="bogo-name">Promotion Name *</label>
+            <div class="relative">
+                <input class="min-w-0 !pr-12" id="bogo-name" data-touch-keyboard="button" bind:value={bogoName} placeholder="e.g. Buy 1, get the next for £1" />
+                <TouchKeyboardButton targetId="bogo-name" label="Open promotion name keyboard" embedded />
+            </div>
+        </div>
         <div class="field"><label>Full-price items to buy *</label><input type="number" min="1" step="1" bind:value={bogoBuyQty} /></div>
         <div class="field"><label>Price of the next item (£) *</label><input type="number" min="0" step="0.01" bind:value={bogoSecondPricePounds} /></div>
         <div class="field">
@@ -1097,10 +1111,11 @@
             <label>Find Products</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
-                    <input class="search-input !pr-10" bind:value={bogoProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bogo')} placeholder="Search name, SKU, barcode, or PLU..." />
+                    <input id="bogo-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={bogoProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bogo')} placeholder="Search name, SKU, barcode, or PLU..." />
                     {#if bogoProductSearch}
-                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bogo')}>✕</button>
+                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bogo')}>✕</button>
                     {/if}
+                    <TouchKeyboardButton targetId="bogo-product-search" label="Open promotion product search keyboard" embedded />
                 </div>
                 <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bogo} on:click={() => runPickerSearch('bogo')}>
                     {pickerLoading.bogo ? 'Finding...' : 'Find'}
@@ -1139,7 +1154,13 @@
 
 <Modal bind:show={showPercent} title={editingPercent ? 'Edit Percentage Discount' : 'Add Percentage Discount'} width="520px">
     <div class="form-grid">
-        <div class="field span-2"><label>Discount Name *</label><input bind:value={percentName} placeholder="e.g. Staff Discount" /></div>
+        <div class="field span-2">
+            <label for="percent-name">Discount Name *</label>
+            <div class="relative">
+                <input class="min-w-0 !pr-12" id="percent-name" data-touch-keyboard="button" bind:value={percentName} placeholder="e.g. Staff Discount" />
+                <TouchKeyboardButton targetId="percent-name" label="Open discount name keyboard" embedded />
+            </div>
+        </div>
         <div class="field"><label>Percentage Off *</label><input type="number" min="1" max="100" step="1" bind:value={percentValue} /></div>
         <div class="field flex items-end"><TouchToggle bind:checked={percentActive} label="Active Status" /></div>
         <div class="span-2 p-3 flat-card text-sm text-text-muted">This discount is selected manually by the cashier from the POS discount button.</div>
@@ -1153,8 +1174,11 @@
 <Modal bind:show={showTemporary} title={editingTemporary ? 'Edit Temporary Item Discount' : 'Add Temporary Item Discount'} width="760px" height="min(86vh, 780px)">
     <div class="form-grid">
         <div class="field span-2">
-            <label>Discount Name *</label>
-            <input bind:value={temporaryName} placeholder="e.g. Tomatoes weekend offer" />
+            <label for="temporary-name">Discount Name *</label>
+            <div class="relative">
+                <input class="min-w-0 !pr-12" id="temporary-name" data-touch-keyboard="button" bind:value={temporaryName} placeholder="e.g. Tomatoes weekend offer" />
+                <TouchKeyboardButton targetId="temporary-name" label="Open discount name keyboard" embedded />
+            </div>
         </div>
         <div class="field">
             <label>Discount Type *</label>
@@ -1208,10 +1232,11 @@
             <label>Find Item *</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
-                    <input class="search-input !pr-10" bind:value={temporaryProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'temporary')} placeholder="Search by item name, SKU, barcode or PLU..." />
+                    <input id="temporary-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={temporaryProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'temporary')} placeholder="Search by item name, SKU, barcode or PLU..." />
                     {#if temporaryProductSearch}
-                        <button aria-label="Clear product search" class="absolute right-2 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('temporary')}>✕</button>
+                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('temporary')}>✕</button>
                     {/if}
+                    <TouchKeyboardButton targetId="temporary-product-search" label="Open item search keyboard" embedded />
                 </div>
                 <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.temporary} on:click={() => runPickerSearch('temporary')}>
                     {pickerLoading.temporary ? 'Finding...' : 'Find'}

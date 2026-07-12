@@ -9,8 +9,11 @@
         appFontSizeOptions,
         normalizeAppFontChoice,
         normalizeAppFontSizeChoice,
+        normalizeTileFontWeight,
+        tileFontWeightOptions,
         type AppFontChoice,
         type AppFontSizeChoice,
+        type TileFontWeightChoice,
     } from '$lib/typography';
 
     type SizeSection = {
@@ -33,7 +36,7 @@
             label: 'POS selling screen',
             key: 'ui_font_size_pos',
             value: normalizeAppFontSizeChoice(settingValue($settingsDB, pendingSettings, 'ui_font_size_pos', 'normal')),
-            note: 'Product tiles, cart, checkout controls.',
+            note: 'Cart, checkout controls, and the POS toolbar.',
         },
         {
             label: 'Management pages',
@@ -54,6 +57,21 @@
             note: 'Numpads, payment dialogs, edit popups.',
         },
     ] satisfies SizeSection[];
+    $: tileTextSections = [
+        {
+            label: 'Product name',
+            key: 'ui_font_size_tile_name',
+            value: normalizeAppFontSizeChoice(settingValue($settingsDB, pendingSettings, 'ui_font_size_tile_name', 'normal')),
+            note: 'The item name shown over every selling tile.',
+        },
+        {
+            label: 'Tile price',
+            key: 'ui_font_size_tile_price',
+            value: normalizeAppFontSizeChoice(settingValue($settingsDB, pendingSettings, 'ui_font_size_tile_price', 'normal')),
+            note: 'The normal and promotional price shown on tiles.',
+        },
+    ] satisfies SizeSection[];
+    $: selectedTileWeight = normalizeTileFontWeight(settingValue($settingsDB, pendingSettings, 'ui_font_weight_tiles', 'strong'));
 
     function selectedSizeLabel(value: AppFontSizeChoice): string {
         return appFontSizeOptions.find((option) => option.value === value)?.label || 'Normal';
@@ -77,6 +95,15 @@
     }
 
     function sizeButtonClass(current: AppFontSizeChoice, option: AppFontSizeChoice): string {
+        return [
+            'min-h-12 rounded-lg border px-3 py-2 text-sm font-black transition-all',
+            current === option
+                ? 'border-accent-primary bg-accent-primary text-white shadow-[0_10px_24px_var(--shadow)]'
+                : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
+        ].join(' ');
+    }
+
+    function weightButtonClass(current: TileFontWeightChoice, option: TileFontWeightChoice): string {
         return [
             'min-h-12 rounded-lg border px-3 py-2 text-sm font-black transition-all',
             current === option
@@ -157,7 +184,7 @@
                 </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
                 {#each appFontOptions as option}
                     {@const active = selectedAppFont === option.value}
                     <button
@@ -181,6 +208,65 @@
                         {/if}
                     </button>
                 {/each}
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <div class="mb-4">
+                <h3 class="settings-section-title !mb-1">POS Product Tiles</h3>
+                <p class="m-0 text-sm text-text-muted">Set tile text separately so item names and prices remain clear on compact tills.</p>
+            </div>
+
+            <div class="grid gap-5 lg:grid-cols-[minmax(240px,.75fr)_minmax(0,1.5fr)] lg:items-stretch">
+                <div class="relative min-h-[220px] overflow-hidden rounded-lg border border-border-flat bg-[#2563eb]">
+                    <div class="absolute inset-x-0 bottom-0 bg-black/70 p-4">
+                        <div class="flex items-end justify-between gap-3">
+                            <strong class="pos-tile-name line-clamp-2 text-white">Coca Cola 330ml</strong>
+                            <span class="pos-tile-price shrink-0 rounded-sm bg-black/75 px-2 py-1 text-white">£2.50</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex min-w-0 flex-col justify-between gap-4">
+                    {#each tileTextSections as section}
+                        <div class="border-b border-border-flat pb-4 last:border-b-0 last:pb-0">
+                            <div class="mb-3 flex items-start justify-between gap-3">
+                                <div>
+                                    <strong class="block text-base text-text-main">{section.label}</strong>
+                                    <small class="text-text-muted">{section.note}</small>
+                                </div>
+                                <span class="shrink-0 text-xs font-bold text-accent-primary">{selectedSizeLabel(section.value)}</span>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                {#each appFontSizeOptions as option}
+                                    <button
+                                        type="button"
+                                        class={sizeButtonClass(section.value, option.value)}
+                                        aria-pressed={section.value === option.value}
+                                        on:click={() => updateSetting(section.key, option.value)}
+                                    >{option.label}</button>
+                                {/each}
+                            </div>
+                        </div>
+                    {/each}
+
+                    <div>
+                        <div class="mb-3">
+                            <strong class="block text-base text-text-main">Product name weight</strong>
+                            <small class="text-text-muted">Use Strong or Heavy when a low-resolution display makes thin text unclear.</small>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2">
+                            {#each tileFontWeightOptions as option}
+                                <button
+                                    type="button"
+                                    class={weightButtonClass(selectedTileWeight, option.value)}
+                                    aria-pressed={selectedTileWeight === option.value}
+                                    on:click={() => updateSetting('ui_font_weight_tiles', option.value)}
+                                >{option.label}</button>
+                            {/each}
+                        </div>
+                    </div>
+                </div>
             </div>
         </section>
 

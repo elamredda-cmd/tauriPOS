@@ -2,6 +2,8 @@
     import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
     import { invoke } from '@tauri-apps/api/core';
+    import { open } from '@tauri-apps/plugin-dialog';
+    import { revealItemInDir } from '@tauri-apps/plugin-opener';
     import { get } from 'svelte/store';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { connectionState } from '$lib/stores/connection';
@@ -11,16 +13,20 @@
     import {
         forceFullSync,
         forcePushToServer,
+        getAutomaticSetupBackupConfig,
         dismissSyncConflict,
         getSyncConflicts,
+        getLatestAutomaticSetupBackup,
         getLatestLocalBackup,
+        createAutomaticSetupBackup,
         createLocalBackup,
         migrateLocalDataToServer,
         purgeAllTransactions,
-        replaceMariaDbDataFromThisTill,
         restoreLatestLocalBackup,
         restoreLocalDatabaseFromPath,
         retrySyncConflict,
+        setAutomaticSetupBackupEnabled,
+        setAutomaticSetupBackupSchedule,
         upsert,
         validateDatabaseSchemas,
         wipeAndPullFromServer,
@@ -33,7 +39,6 @@
     let syncStatus = '';
     let wipeStatus = '';
     let pushStatus = '';
-    let replaceServerStatus = '';
     let backupStatus = '';
     let restoreStatus = '';
     type RestoreProgressState = 'idle' | 'confirm' | 'running' | 'success' | 'stopped';
@@ -47,7 +52,6 @@
     let migrationConfirmed = false;
     let wipeConfirmed = false;
     let pushConfirmed = false;
-    let replaceServerConfirmed = false;
     let restoreConfirmed = false;
     let restoreFilePath = '';
     let restoreFileConfirmed = false;
@@ -55,10 +59,48 @@
     let taxIncludedInPrice = $storeDB.taxIncludedInPrice;
     let syncConflicts: SyncConflict[] = [];
     let conflictStatus = '';
+    let latestBackupPath: string | null = null;
+    let latestBackupChecked = false;
+    let automaticSetupBackupEnabled = true;
+    let automaticSetupBackupTime = '03:00';
+    let automaticSetupBackupDirectory = '';
+    let latestAutomaticBackupPath: string | null = null;
+    let automaticBackupStatus = '';
     const RESTORE_NOTICE_KEY = 'pos_restore_notice';
 
     function cleanError(error: unknown): string {
         return String(error).replace(/^Error:\s*/, '').trim();
+    }
+
+    function backupFileName(path: string | null): string {
+        if (!path) return '';
+        return path.split(/[\\/]/).pop() || path;
+    }
+
+    function fullBackupDateTime(path: string | null): string {
+        const match = backupFileName(path).match(
+            /^pos-backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(?:-(\d{3}))?\.db$/,
+        );
+        if (!match) return 'Unknown backup time';
+        const [, year, month, day, hour, minute, second, milliseconds = '0'] = match;
+        const createdAt = new Date(Date.UTC(
+            Number(year),
+            Number(month) - 1,
+            Number(day),
+            Number(hour),
+            Number(minute),
+            Number(second),
+            Number(milliseconds),
+        ));
+        if (Number.isNaN(createdAt.getTime())) return 'Unknown backup time';
+        return createdAt.toLocaleString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+        });
     }
 
     function setRestoreProgress(
@@ -149,8 +191,127 @@
             }
             return;
         }
-        await refreshConflicts();
+        await Promise.all([
+            refreshConflicts(),
+            refreshLatestBackup(),
+            refreshAutomaticBackup(),
+        ]);
     });
+
+    async function refreshAutomaticBackup() {
+        try {
+            const config = await getAutomaticSetupBackupConfig();
+            automaticSetupBackupEnabled = config.enabled;
+            automaticSetupBackupTime = config.time;
+            automaticSetupBackupDirectory = config.directory;
+            latestAutomaticBackupPath = await getLatestAutomaticSetupBackup(config.directory);
+        } catch (error) {
+            automaticBackupStatus = `Could not check automatic setup backups: ${cleanError(error)}`;
+        }
+    }
+
+    async function toggleAutomaticSetupBackup() {
+        const enabled = !automaticSetupBackupEnabled;
+        automaticSetupBackupEnabled = enabled;
+        try {
+            await setAutomaticSetupBackupEnabled(enabled);
+            automaticBackupStatus = enabled
+                ? 'Daily shop setup backup enabled.'
+                : 'Daily shop setup backup disabled.';
+        } catch (error) {
+            automaticSetupBackupEnabled = !enabled;
+            automaticBackupStatus = `Could not save automatic backup setting: ${cleanError(error)}`;
+        }
+    }
+
+    async function createSetupBackupNow() {
+        busy = true;
+        automaticBackupStatus = 'Creating shop setup backup...';
+        try {
+            await setAutomaticSetupBackupSchedule(
+                automaticSetupBackupTime,
+                automaticSetupBackupDirectory,
+            );
+            const result = await createAutomaticSetupBackup(automaticSetupBackupDirectory);
+            latestAutomaticBackupPath = result.path;
+            automaticBackupStatus = result.created
+                ? `Shop setup backup created and verified: ${backupFileName(result.path)}`
+                : `Today's shop setup backup is already ready: ${backupFileName(result.path)}`;
+        } catch (error) {
+            automaticBackupStatus = `Shop setup backup failed: ${cleanError(error)}`;
+        } finally {
+            busy = false;
+        }
+    }
+
+    async function saveAutomaticBackupConfiguration() {
+        busy = true;
+        automaticBackupStatus = 'Saving automatic backup schedule...';
+        try {
+            await setAutomaticSetupBackupSchedule(
+                automaticSetupBackupTime,
+                automaticSetupBackupDirectory,
+            );
+            latestAutomaticBackupPath = await getLatestAutomaticSetupBackup(
+                automaticSetupBackupDirectory,
+            );
+            latestBackupPath = await getLatestLocalBackup(automaticSetupBackupDirectory);
+            automaticBackupStatus = `Automatic setup backup scheduled daily at ${automaticSetupBackupTime}.`;
+        } catch (error) {
+            automaticBackupStatus = `Could not save automatic backup schedule: ${cleanError(error)}`;
+        } finally {
+            busy = false;
+        }
+    }
+
+    async function chooseAutomaticBackupDirectory() {
+        automaticBackupStatus = 'Opening folder picker...';
+        try {
+            const selected = await open({
+                directory: true,
+                multiple: false,
+                title: 'Choose backup destination',
+            });
+            const directory = Array.isArray(selected) ? selected[0] : selected;
+            if (!directory) {
+                automaticBackupStatus = 'Backup folder was not changed.';
+                return;
+            }
+            automaticSetupBackupDirectory = directory;
+            await saveAutomaticBackupConfiguration();
+        } catch (error) {
+            automaticBackupStatus = `Could not choose backup folder: ${cleanError(error)}`;
+        }
+    }
+
+    async function useDefaultAutomaticBackupDirectory() {
+        automaticSetupBackupDirectory = '';
+        await saveAutomaticBackupConfiguration();
+    }
+
+    async function openBackupFolder() {
+        const path = latestBackupPath || latestAutomaticBackupPath;
+        if (!path) {
+            automaticBackupStatus = 'Create a backup first, then its exact folder can be opened.';
+            return;
+        }
+        try {
+            await revealItemInDir(path);
+            automaticBackupStatus = `Opened backup location: ${path}`;
+        } catch (error) {
+            automaticBackupStatus = `Could not open backup folder: ${cleanError(error)}`;
+        }
+    }
+
+    async function refreshLatestBackup() {
+        try {
+            latestBackupPath = await getLatestLocalBackup();
+        } catch (error) {
+            backupStatus = `Could not check local backups: ${cleanError(error)}`;
+        } finally {
+            latestBackupChecked = true;
+        }
+    }
 
     async function refreshConflicts() {
         syncConflicts = await getSyncConflicts();
@@ -259,27 +420,9 @@
         }
     }
 
-    async function replaceMariaDbFromThisTill() {
-        if (!replaceServerConfirmed) {
-            replaceServerConfirmed = true;
-            replaceServerStatus = 'Click again to delete MariaDB business data and upload this restored till. Employees and settings are kept.';
-            return;
-        }
-        busy = true;
-        try {
-            replaceServerStatus = 'Replacing MariaDB business data from this restored till...';
-            await replaceMariaDbDataFromThisTill();
-            replaceServerStatus = 'MariaDB was replaced from this till. Employees and settings were kept.';
-        } catch (error) {
-            replaceServerStatus = `MariaDB replace failed: ${cleanError(error)}`;
-        } finally {
-            busy = false;
-            replaceServerConfirmed = false;
-        }
-    }
-
     async function restoreBackup() {
         const latest = await getLatestLocalBackup();
+        latestBackupPath = latest;
         if (!latest) {
             stopRestoreWithError('No local backup is available.');
             return;
@@ -291,9 +434,9 @@
                 'confirm',
                 0,
                 'Ready to restore latest backup',
-                `Click Restore Latest Backup again to replace this till's local data with ${latest}`
+                `Click restore again to use the full backup from ${fullBackupDateTime(latest)}. File: ${latest}`
             );
-            restoreStatus = `Click again to replace this till’s local data with ${latest}`;
+            restoreStatus = `Click again to restore the backup from ${fullBackupDateTime(latest)}.`;
             return;
         }
         busy = true;
@@ -359,11 +502,17 @@
 
     async function createBackup() {
         busy = true;
-        backupStatus = 'Creating local backup...';
+        backupStatus = 'Creating full backup...';
         try {
-            backupStatus = `Backup saved: ${await createLocalBackup()}`;
+            await setAutomaticSetupBackupSchedule(
+                automaticSetupBackupTime,
+                automaticSetupBackupDirectory,
+            );
+            latestBackupPath = await createLocalBackup(automaticSetupBackupDirectory);
+            latestBackupChecked = true;
+            backupStatus = `Full backup created and verified: ${latestBackupPath}`;
         } catch (error) {
-            backupStatus = `Backup failed: ${error}`;
+            backupStatus = `Backup failed: ${cleanError(error)}`;
         } finally {
             busy = false;
         }
@@ -371,16 +520,16 @@
 
     async function purgeTransactions() {
         if (!purgeResponsibilityAccepted) {
-            purgeStatus = 'Confirm that you understand this action permanently deletes database history.';
+            purgeStatus = 'Confirm that you understand this action permanently deletes sales and transaction history.';
             return;
         }
         if (!purgeFinalConfirmation) {
             purgeFinalConfirmation = true;
-            purgeStatus = 'Final warning: click Delete Database Permanently again to continue.';
+            purgeStatus = 'Final warning: click Delete History Permanently again to continue.';
             return;
         }
         busy = true;
-        purgeStatus = 'Deleting database history from every till...';
+        purgeStatus = 'Deleting history from every till...';
         try {
             await purgeAllTransactions();
             purgeStatus = 'Database history was deleted. Reloading...';
@@ -432,6 +581,161 @@
             {#if migrationStatus}<p class="status-text">{migrationStatus}</p>{/if}
         </section>
 
+        <section class="settings-section">
+            <div class="backup-heading">
+                <div>
+                    <h3 class="settings-section-title">Backup and Restore</h3>
+                    <p class="text-text-muted">
+                        Manual full backups include the complete local database, including sales and orders.
+                    </p>
+                </div>
+                <div class="backup-state" class:has-backup={Boolean(latestBackupPath)}>
+                    <strong>
+                        {latestBackupPath
+                            ? `Latest full backup: ${fullBackupDateTime(latestBackupPath)}`
+                            : latestBackupChecked ? 'No full backup' : 'Checking backups'}
+                    </strong>
+                    <span>{latestBackupPath || 'Create a backup before using repair tools.'}</span>
+                </div>
+            </div>
+            {#if $connectionState.mode === 'multi'}
+                <p class="backup-mode-note">
+                    Creating a backup only writes a file to the destination below. It does not change this till's live database or MariaDB.
+                </p>
+            {/if}
+            <div class="button-row mt-4">
+                <button class="btn btn-primary" disabled={busy} on:click={createBackup}>
+                    {busy && backupStatus === 'Creating full backup...' ? 'Creating Full Backup...' : 'Create Full Backup'}
+                </button>
+                <button class="btn btn-danger" disabled={busy || !latestBackupPath} on:click={restoreBackup}>
+                    {restoreConfirmed
+                        ? `Confirm Restore - ${fullBackupDateTime(latestBackupPath)}`
+                        : latestBackupPath
+                            ? `Restore Backup - ${fullBackupDateTime(latestBackupPath)}`
+                            : 'Restore Backup'}
+                </button>
+            </div>
+            <div class="automatic-backup-row">
+                <div class="automatic-backup-copy">
+                    <strong>Daily Shop Setup Backup</strong>
+                    <span>Includes shop setup, products, current stock, customers, staff, settings and layouts. Sales and orders are excluded. Only the newest two daily files are kept.</span>
+                    <small>
+                        {latestAutomaticBackupPath
+                            ? `Latest: ${backupFileName(latestAutomaticBackupPath)}`
+                            : 'No automatic setup backup created yet.'}
+                    </small>
+                </div>
+                <div class="automatic-backup-actions">
+                    <button
+                        type="button"
+                        class="backup-toggle"
+                        class:enabled={automaticSetupBackupEnabled}
+                        role="switch"
+                        aria-checked={automaticSetupBackupEnabled}
+                        disabled={busy}
+                        on:click={toggleAutomaticSetupBackup}
+                    >
+                        <i></i>
+                        {automaticSetupBackupEnabled ? 'Automatic On' : 'Automatic Off'}
+                    </button>
+                    <button class="btn btn-secondary" disabled={busy} on:click={createSetupBackupNow}>
+                        Create Setup Backup Now
+                    </button>
+                </div>
+                <div class="automatic-backup-config">
+                    <label for="automatic-backup-time">
+                        <span>Daily time</span>
+                        <input
+                            id="automatic-backup-time"
+                            class="flat-input"
+                            type="time"
+                            bind:value={automaticSetupBackupTime}
+                            disabled={busy}
+                        />
+                    </label>
+                    <label class="backup-directory-field" for="automatic-backup-directory">
+                        <span>Backup destination (Full + Setup)</span>
+                        <input
+                            id="automatic-backup-directory"
+                            class="flat-input"
+                            value={automaticSetupBackupDirectory}
+                            placeholder="Protected app backup folder (default)"
+                            readonly
+                            title={automaticSetupBackupDirectory || 'Protected app backup folder'}
+                        />
+                    </label>
+                    <button class="btn btn-secondary" disabled={busy} on:click={chooseAutomaticBackupDirectory}>
+                        Choose Folder
+                    </button>
+                    <div class="backup-folder-actions">
+                        <button class="btn btn-secondary" disabled={busy || !automaticSetupBackupDirectory} on:click={useDefaultAutomaticBackupDirectory}>
+                            Use Default
+                        </button>
+                        <button class="btn btn-secondary" disabled={busy || (!latestBackupPath && !latestAutomaticBackupPath)} on:click={openBackupFolder}>
+                            Open Folder
+                        </button>
+                        <button class="btn btn-primary" disabled={busy} on:click={saveAutomaticBackupConfiguration}>
+                            Save Schedule
+                        </button>
+                    </div>
+                </div>
+                <small class="cloud-folder-note">A OneDrive, Google Drive, Dropbox or iCloud Drive folder will be uploaded by its desktop sync application.</small>
+            </div>
+            {#if automaticBackupStatus}<p class="status-text break-all">{automaticBackupStatus}</p>{/if}
+            <details class="restore-file-panel">
+                <summary>Restore from another till database</summary>
+                <label for="restore-file-path">Database file</label>
+                <div class="restore-file-row">
+                    <input
+                        id="restore-file-path"
+                        class="flat-input"
+                        bind:value={restoreFilePath}
+                        placeholder="Choose a .db file or paste its full path"
+                        on:input={() => restoreFileConfirmed = false}
+                    />
+                    <button class="btn btn-secondary" disabled={busy} on:click={chooseRestoreDatabaseFile}>
+                        Choose File
+                    </button>
+                    <button class="btn btn-danger" disabled={busy || !restoreFilePath.trim()} on:click={restoreDatabaseFile}>
+                        {restoreFileConfirmed ? 'Confirm Restore From File' : 'Restore From File'}
+                    </button>
+                </div>
+                <small>The selected database is checked before the current till database is closed or replaced.</small>
+            </details>
+            {#if restoreProgressState !== 'idle'}
+                <div
+                    class="restore-progress-panel"
+                    class:restore-stopped={restoreProgressState === 'stopped'}
+                    class:restore-success={restoreProgressState === 'success'}
+                >
+                    <div class="restore-progress-head">
+                        <div>
+                            <strong>{restoreProgressTitle}</strong>
+                            {#if restoreProgressDetail}
+                                <p>{restoreProgressDetail}</p>
+                            {/if}
+                        </div>
+                        <b>{restoreProgress}%</b>
+                    </div>
+                    <div class="restore-progress-track" aria-label="Restore progress">
+                        <span style={`width: ${restoreProgress}%`}></span>
+                    </div>
+                    {#if restoreProgressState === 'stopped'}
+                        <div class="button-row">
+                            <button class="btn btn-secondary" type="button" on:click={resetRestoreProgress}>
+                                Dismiss
+                            </button>
+                            <button class="btn btn-primary" type="button" disabled={busy} on:click={chooseRestoreDatabaseFile}>
+                                Choose Another File
+                            </button>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+            {#if backupStatus}<p class="status-text break-all">{backupStatus}</p>{/if}
+            {#if restoreStatus && restoreProgressState === 'idle'}<p class="status-text break-all">{restoreStatus}</p>{/if}
+        </section>
+
         {#if $connectionState.mode === 'multi'}
             <section class="settings-section">
                 <h3 class="settings-section-title">Database Repair</h3>
@@ -454,14 +758,6 @@
                         <p>Upload this till’s complete local shop data to MariaDB.</p>
                         <button class="btn btn-danger" disabled={busy} on:click={forcePush}>Push Local Data to Server</button>
                         {#if pushStatus}<small>{pushStatus}</small>{/if}
-                    </article>
-                    <article class="danger-card">
-                        <strong>Replace MariaDB From Restore</strong>
-                        <p>Delete MariaDB products, customers, orders, stock, discounts, and reports, then upload this restored till. Employees and settings stay.</p>
-                        <button class="btn btn-danger" disabled={busy} on:click={replaceMariaDbFromThisTill}>
-                            {replaceServerConfirmed ? 'Confirm Replace MariaDB' : 'Replace MariaDB From This Till'}
-                        </button>
-                        {#if replaceServerStatus}<small>{replaceServerStatus}</small>{/if}
                     </article>
                 </div>
             </section>
@@ -498,10 +794,9 @@
         </section>
 
         <section class="settings-section danger-card">
-            <h3 class="settings-section-title !text-danger">Delete Database</h3>
+            <h3 class="settings-section-title !text-danger">Delete History</h3>
             <p class="text-text-muted mb-3">
-                Permanently deletes orders, payments, till shifts, cash movements, sales reports, sales audit logs, and refund approvals.
-                Products, current stock levels, customers, loyalty balances and loyalty history, employees, settings, and tills are kept.
+                This permanently removes sales and transaction history from this database and every connected till. Are you sure you want to continue?
             </p>
             {#if $connectionState.mode === 'multi' && !$connectionState.mysqlOnline}
                 <p class="purge-warning">MariaDB must be online so every till receives the deletion instruction.</p>
@@ -523,7 +818,7 @@
                     purgeFinalConfirmation = false;
                 }}
             >
-                <span class="font-bold">I understand this permanently deletes database history from all tills, and I choose to continue.</span>
+                <span class="font-bold">I understand this permanently deletes database history from all tills. Are you sure you want to continue?</span>
                 <b class="shrink-0 text-xs uppercase tracking-[0.12em]">{purgeResponsibilityAccepted ? 'Accepted' : 'Required'}</b>
             </button>
             <button
@@ -531,71 +826,9 @@
                 disabled={busy || !purgeResponsibilityAccepted}
                 on:click={purgeTransactions}
             >
-                {busy ? 'Deleting Database…' : purgeFinalConfirmation ? 'Delete Database Permanently' : 'Continue to Final Confirmation'}
+                {busy ? 'Deleting History…' : purgeFinalConfirmation ? 'Delete History Permanently' : 'Continue to Final Confirmation'}
             </button>
             {#if purgeStatus}<p class="status-text">{purgeStatus}</p>{/if}
-        </section>
-
-        <section class="settings-section danger-card">
-            <h3 class="settings-section-title !text-danger">Local Backups</h3>
-            <p class="text-text-muted mb-4">
-                Create a safe local database backup before upgrades or risky repair tools. Restore replaces this till’s local database with its latest backup and reloads the app.
-            </p>
-            <div class="button-row">
-                <button class="btn btn-primary" disabled={busy} on:click={createBackup}>Create Local Backup</button>
-                <button class="btn btn-danger" disabled={busy} on:click={restoreBackup}>Restore Latest Backup</button>
-            </div>
-            <div class="restore-file-panel">
-                <label for="restore-file-path">Old till database file path</label>
-                <div class="restore-file-row">
-                    <input
-                        id="restore-file-path"
-                        class="flat-input"
-                        bind:value={restoreFilePath}
-                        placeholder="For example: D:\old-till\pos.db"
-                        on:input={() => restoreFileConfirmed = false}
-                    />
-                    <button class="btn btn-secondary" disabled={busy} on:click={chooseRestoreDatabaseFile}>
-                        Choose File
-                    </button>
-                    <button class="btn btn-danger" disabled={busy || !restoreFilePath.trim()} on:click={restoreDatabaseFile}>
-                        {restoreFileConfirmed ? 'Confirm Restore From File' : 'Restore From File'}
-                    </button>
-                </div>
-                <small>Use this when moving the database from an old till. Choose the copied .db file, or paste the full path.</small>
-            </div>
-            {#if restoreProgressState !== 'idle'}
-                <div
-                    class="restore-progress-panel"
-                    class:restore-stopped={restoreProgressState === 'stopped'}
-                    class:restore-success={restoreProgressState === 'success'}
-                >
-                    <div class="restore-progress-head">
-                        <div>
-                            <strong>{restoreProgressTitle}</strong>
-                            {#if restoreProgressDetail}
-                                <p>{restoreProgressDetail}</p>
-                            {/if}
-                        </div>
-                        <b>{restoreProgress}%</b>
-                    </div>
-                    <div class="restore-progress-track" aria-label="Restore progress">
-                        <span style={`width: ${restoreProgress}%`}></span>
-                    </div>
-                    {#if restoreProgressState === 'stopped'}
-                        <div class="button-row">
-                            <button class="btn btn-secondary" type="button" on:click={resetRestoreProgress}>
-                                Stop Restore
-                            </button>
-                            <button class="btn btn-primary" type="button" disabled={busy} on:click={chooseRestoreDatabaseFile}>
-                                Choose Another File
-                            </button>
-                        </div>
-                    {/if}
-                </div>
-            {/if}
-            {#if backupStatus}<p class="status-text break-all">{backupStatus}</p>{/if}
-            {#if restoreStatus}<p class="status-text break-all">{restoreStatus}</p>{/if}
         </section>
     </div>
 </MgmtPage>
@@ -612,7 +845,34 @@
     .status-card div { display: flex; flex-direction: column; }
     .status-card span, article p, article small { color: var(--text-muted); }
     .button-row { display: flex; flex-wrap: wrap; gap: .65rem; }
-    .restore-file-panel { margin-top: 1rem; display: grid; gap: .45rem; }
+    .backup-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+    .backup-heading .settings-section-title { margin-bottom: .35rem; }
+    .backup-state { min-width: 220px; padding: .8rem 1rem; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-panel); }
+    .backup-state.has-backup { border-color: var(--success); background: rgba(34, 197, 94, .08); }
+    .backup-state strong { color: var(--text-main); }
+    .backup-state span { margin-top: .15rem; color: var(--text-muted); font-size: .78rem; overflow-wrap: anywhere; }
+    .backup-mode-note { margin-top: .8rem; padding: .65rem .8rem; border-left: 3px solid var(--accent-primary); background: var(--bg-panel); }
+    .automatic-backup-row { margin-top: 1rem; padding-top: 1rem; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem; border-top: 1px solid var(--border-flat); }
+    .automatic-backup-copy { min-width: 0; display: flex; flex-direction: column; gap: .25rem; }
+    .automatic-backup-row strong { color: var(--text-main); }
+    .automatic-backup-row span, .automatic-backup-row small { color: var(--text-muted); }
+    .automatic-backup-row small { overflow-wrap: anywhere; }
+    .automatic-backup-actions { display: flex; flex: 0 0 auto; align-items: center; gap: .65rem; }
+    .automatic-backup-config { grid-column: 1 / -1; display: grid; grid-template-columns: 145px minmax(230px, 1fr) auto; align-items: end; gap: .65rem; }
+    .automatic-backup-config label { min-width: 0; display: flex; flex-direction: column; gap: .35rem; color: var(--text-main); font-weight: 800; }
+    .automatic-backup-config label > span { color: var(--text-muted); font-size: .76rem; }
+    .automatic-backup-config input { min-height: 46px; width: 100%; }
+    .backup-directory-field { min-width: 0; }
+    .backup-directory-field input { overflow: hidden; text-overflow: ellipsis; }
+    .backup-folder-actions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .65rem; }
+    .cloud-folder-note { grid-column: 1 / -1; }
+    .backup-toggle { min-height: 46px; padding: .6rem .8rem; display: inline-flex; align-items: center; gap: .5rem; color: var(--text-muted); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); font-weight: 850; }
+    .backup-toggle i { width: 1rem; height: 1rem; border: 2px solid currentColor; border-radius: .2rem; background: transparent; }
+    .backup-toggle.enabled { color: var(--success); border-color: var(--success); background: rgba(34, 197, 94, .08); }
+    .backup-toggle.enabled i { background: currentColor; box-shadow: inset 0 0 0 3px var(--bg-card); }
+    .restore-file-panel { margin-top: 1rem; padding: .8rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-panel); }
+    .restore-file-panel[open] { display: grid; gap: .55rem; }
+    .restore-file-panel summary { cursor: pointer; color: var(--text-main); font-weight: 850; }
     .restore-file-panel label { font-weight: 800; color: var(--text-main); }
     .restore-file-panel small { color: var(--text-muted); }
     .restore-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .65rem; align-items: stretch; }
@@ -625,7 +885,7 @@
     .restore-progress-head p { margin: .25rem 0 0; color: var(--text-muted); overflow-wrap: anywhere; }
     .restore-progress-head b { color: var(--text-main); }
     .restore-progress-track { height: .65rem; overflow: hidden; border-radius: 999px; background: var(--border-flat); }
-    .restore-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent-primary); transition: width .25s ease; }
+    .restore-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent-primary); }
     .restore-stopped .restore-progress-track span { background: var(--danger); }
     .restore-success .restore-progress-track span { background: var(--success); }
     .repair-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .8rem; }
@@ -644,6 +904,13 @@
     .purge-warning { color: var(--danger); }
     .purge-warning { margin: 0 0 .8rem; font-weight: 800; }
     @media (max-width: 900px) {
+        .backup-heading { flex-direction: column; }
+        .backup-state { width: 100%; min-width: 0; }
+        .automatic-backup-row { grid-template-columns: 1fr; align-items: stretch; }
+        .automatic-backup-actions { flex-wrap: wrap; }
+        .automatic-backup-config { grid-template-columns: 1fr 1fr; }
+        .backup-directory-field { grid-column: 1 / -1; }
+        .backup-folder-actions { grid-column: 1 / -1; justify-content: flex-start; }
         .restore-file-row { grid-template-columns: 1fr; }
         .repair-grid { grid-template-columns: 1fr; }
         .conflict-list article { align-items: stretch; flex-direction: column; }

@@ -932,12 +932,12 @@
     $: selectedCartItem = cart[selectedCartIndex];
     $: hasSelectedCartItem = Boolean(selectedCartItem);
 
-    function sendCctvCartProductName(item: { name: string; price: number } | undefined) {
+    function sendCctvCartProductName(item: { name: string; price: number; quantity?: number } | undefined) {
         if (!item) return;
         sendCctvItemAdded({
             name: item.name,
             price: item.price,
-            quantity: 1,
+            quantity: item.quantity || 1,
             tillName,
             cashierName: $currentEmployee?.name || "",
         });
@@ -1045,7 +1045,7 @@
         }
         cart = [...cart];
         playItemAddedSound();
-        sendCctvCartProductName({ name: product.name, price: product.price });
+        sendCctvCartProductName(cart[selectedCartIndex]);
     }
 
     function scaleInputFromReading(reading: ScaleWeightReading): string {
@@ -2724,6 +2724,7 @@
                 <button
                     class="flex items-center gap-3 bg-transparent hover:bg-bg-card rounded-md p-1.5 transition-colors"
                     title="Change user"
+                    aria-label={`Change user: ${$currentEmployee?.name || 'Signed out'}`}
                     on:click={logoutEmployee}
                 >
                     <div
@@ -2745,12 +2746,18 @@
                 </button>
             </div>
 
-            <h1
-                class="min-w-0 max-w-[34vw] truncate text-center text-xl md:text-2xl lg:text-3xl font-black text-text-main tracking-tight"
-                title={$storeDB.name}
-            >
-                {$storeDB.name}
-            </h1>
+            <div class="pos-shop-identity">
+                <h1
+                    class="min-w-0 truncate text-center text-xl md:text-2xl lg:text-3xl font-black text-text-main tracking-tight"
+                    title={$storeDB.name}
+                >
+                    {$storeDB.name}
+                </h1>
+                <span class="pos-till-chip" title={tillName || tillId}>
+                    <small>Till</small>
+                    <b>{tillName || tillId}</b>
+                </span>
+            </div>
             <div
                 class="sync-pill justify-self-end {syncStyle}"
                 title={$connectionState.syncError || syncLabel}
@@ -2784,7 +2791,7 @@
             {/each}
         </div>
 
-        <!-- Product Grid (Fixed 4x3) -->
+        <!-- Product Grid (Fixed 4x4) -->
         <div class="pos-product-workspace flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
             <div class="pos-product-grid grid grid-cols-4 grid-rows-4 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
@@ -2809,14 +2816,14 @@
                                 <div
                                     class="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 via-black/40 to-transparent"
                                 >
-                                    <div class="flex items-end justify-between gap-2">
+                                    <div class="pos-tile-caption flex items-end justify-between gap-2">
                                         <h3
-                                            class="m-0 text-[11px] md:text-sm lg:text-base font-semibold text-white line-clamp-2 leading-tight"
+                                            class="pos-tile-name m-0 text-white line-clamp-3"
                                         >
                                             {slot.product.name}
                                         </h3>
                                         <span
-                                            class="bg-[var(--price-bg)] px-2 py-1 rounded-sm text-[var(--price-text)] font-bold text-[10px] md:text-xs lg:text-sm shrink-0"
+                                            class="pos-tile-price bg-[var(--price-bg)] px-2 py-1 rounded-sm text-[var(--price-text)] shrink-0"
                                         >
                                             {#if temporaryOffer}
                                                 <small class="block line-through opacity-70">{formatMoney(slot.product.price)}</small>
@@ -2910,30 +2917,34 @@
     <aside
         class="pos-cart flex flex-col w-[34vw] min-w-[330px] max-w-[480px] bg-bg-panel border-l border-border-flat shrink-0 overflow-hidden"
     >
-        <!-- Compact Trolly Header (Order info + Search + Clear) -->
+        <!-- Compact trolley header (retrieve + search + clear) -->
         <div
             class="pos-cart-header flex items-center gap-2 md:gap-3 p-3 md:p-4 border-b border-border-flat bg-bg-panel shrink-0"
         >
-            <div class="flex flex-col gap-0.5 min-w-[80px]">
-                <span
-                    class="text-[10px] md:text-xs font-bold text-text-muted uppercase tracking-wider leading-none"
-                    >Till</span
+            <button
+                class="pos-retrieve-button"
+                class:has-orders={heldOrdersForTill.length > 0}
+                disabled={heldOrdersLoading}
+                title={`Retrieve held orders (${heldOrdersForTill.length})`}
+                aria-label={`Retrieve held orders (${heldOrdersForTill.length})`}
+                on:click|stopPropagation={() => (showHeldOrders = true)}
+            >
+                <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    width="17"
+                    aria-hidden="true"
                 >
-                <div class="flex items-center gap-2">
-                    <span
-                        class="text-sm md:text-base lg:text-lg font-bold text-accent-primary leading-none"
-                        >{tillName || tillId}</span
-                    >
-                    {#if heldOrdersForTill.length > 0}
-                        <button
-                            class="bg-warning/20 text-warning text-[10px] font-bold px-1.5 py-0.5 rounded-full border border-warning/30 animate-pulse"
-                            on:click|stopPropagation={() =>
-                                (showHeldOrders = true)}
-                            >{heldOrdersForTill.length} held</button
-                        >
-                    {/if}
-                </div>
-            </div>
+                    <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+                    <path d="M3 4v6h6"></path>
+                </svg>
+                <span>Retrieve</span>
+                <b>{heldOrdersLoading ? '...' : heldOrdersForTill.length}</b>
+            </button>
 
             <div
                 class="flex-1 flex items-center gap-2 bg-bg-card border border-border-flat rounded-md px-3 h-10 focus-within:border-accent-primary transition-colors {showNotFoundModal ? 'opacity-40 pointer-events-none' : ''}"
@@ -3586,17 +3597,20 @@
             >
                 <h2 class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
                 <button
-                    class="modal-close"
+                    class="modal-close payment-close"
+                    aria-label="Close payment"
+                    title="Close payment"
                     disabled={isCompletingSale}
                     on:click={closePayment}>✕</button
                 >
             </div>
 
             {#if loyaltyConfig.enabled}
-                <section class="payment-loyalty grid grid-cols-1 md:grid-cols-[1fr_1.1fr] gap-2 p-2.5 rounded-md border border-border-flat bg-bg-panel">
+                <section class="payment-loyalty p-2.5 rounded-md border border-border-flat bg-bg-panel">
                     <div class="relative">
-                        <label class="block text-xs font-bold text-text-muted mb-1">Scan loyalty barcode or search customer</label>
+                        <label for="payment-customer-search" class="block text-xs font-bold text-text-muted mb-1">Scan loyalty barcode or search customer</label>
                         <input
+                            id="payment-customer-search"
                             bind:this={customerSearchInput}
                             class="flat-input payment-customer-input w-full"
                             bind:value={customerSearch}
@@ -3616,22 +3630,31 @@
                         {/if}
                     </div>
                     {#if selectedCustomer}
-                        <div class="flex items-center justify-between gap-3 p-2 rounded-md bg-bg-card border border-accent-primary/40">
-                            <div>
-                                <strong class="block">{selectedCustomer.name}</strong>
-                                <span class="text-xs text-text-muted">{selectedCustomer.loyaltyCode}</span>
-                                <div class="mt-1 text-sm"><b>{selectedCustomer.loyaltyPoints} points</b> · {formatMoney(availableLoyaltyCredit)} available</div>
-                                <small class="text-success">This sale earns {loyaltyPointsEarned} points</small>
+                        <div class="payment-customer-card">
+                            <div class="payment-customer-details">
+                                <div class="payment-customer-identity">
+                                    <strong>{selectedCustomer.name}</strong>
+                                    <span>{selectedCustomer.loyaltyCode}</span>
+                                </div>
+                                <div class="payment-customer-balance">
+                                    <b>{Number(selectedCustomer.loyaltyPoints || 0).toLocaleString()} points</b>
+                                    <span>{formatMoney(availableLoyaltyCredit)} credit</span>
+                                    <small>+{loyaltyPointsEarned} this sale</small>
+                                </div>
                             </div>
-                            <div class="flex flex-col gap-2">
-                                <button class="btn btn-secondary {useLoyaltyCredit ? '!bg-success !text-white' : ''}" disabled={availableLoyaltyCredit <= 0 || !loyaltyRedemptionAvailable} on:click={toggleLoyaltyCredit}>
+                            <div class="payment-customer-actions">
+                                <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={availableLoyaltyCredit <= 0 || !loyaltyRedemptionAvailable} on:click={toggleLoyaltyCredit}>
                                     {useLoyaltyCredit ? `Using ${formatMoney(loyaltyCreditUsed)}` : loyaltyRedemptionAvailable ? 'Use Credit' : 'Credit Offline'}
                                 </button>
-                                <button class="btn btn-secondary" on:click={removePaymentCustomer}>Remove</button>
+                                <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" on:click={removePaymentCustomer}>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                        <path d="M18 6 6 18M6 6l12 12"></path>
+                                    </svg>
+                                </button>
                             </div>
                         </div>
                     {:else}
-                        <div class="flex items-center justify-center text-sm text-text-muted border border-dashed border-border-flat rounded-md">No customer selected</div>
+                        <div class="payment-customer-empty">No customer selected</div>
                     {/if}
                 </section>
             {/if}
@@ -3818,7 +3841,7 @@
             on:click|stopPropagation
         >
             <div class="modal-header">
-                <h3>Held Orders ({heldOrdersForTill.length})</h3>
+                <h3>Retrieve Held Orders ({heldOrdersForTill.length})</h3>
                 <button
                     class="modal-close"
                     on:click={() => (showHeldOrders = false)}>✕</button

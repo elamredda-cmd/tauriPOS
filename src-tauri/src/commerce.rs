@@ -162,6 +162,13 @@ pub struct RestoreDatabaseResult {
     pub restart_required: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomaticSetupBackupResult {
+    pub path: String,
+    pub created: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct PendingRestoreMarker {
     source: String,
@@ -182,6 +189,141 @@ fn local_backup_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .join("backups");
     fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
     Ok(backup_dir)
+}
+
+fn safe_backup_folder_component(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(40)
+        .collect();
+    cleaned.trim_matches([' ', '-', '_']).to_string()
+}
+
+async fn selected_till_backup_dir(
+    app: &AppHandle,
+    source: &PathBuf,
+    backup_directory: Option<&str>,
+) -> Result<PathBuf, String> {
+    let custom = backup_directory.unwrap_or_default().trim();
+    if custom.is_empty() {
+        return local_backup_dir(app);
+    }
+    let base_directory = restore_source_path(custom)?;
+    fs::create_dir_all(&base_directory).map_err(|e| {
+        format!(
+            "Could not open the selected backup folder {}: {e}",
+            base_directory.display()
+        )
+    })?;
+    if !base_directory.is_dir() {
+        return Err("The selected backup destination is not a folder".into());
+    }
+
+    let uri = format!("sqlite://{}?mode=ro", source.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not read this till's backup identity: {e}"))?;
+    let identity_rows =
+        sqlx::query("SELECT key, value FROM settings WHERE key IN ('till_id', 'till_name')")
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| format!("Could not read this till's backup identity: {e}"))?;
+    pool.close().await;
+    let mut till_id = String::new();
+    let mut till_name = String::new();
+    for row in identity_rows {
+        let key = row.try_get::<String, _>("key").unwrap_or_default();
+        let value = row.try_get::<String, _>("value").unwrap_or_default();
+        if key == "till_id" {
+            till_id = value;
+        } else if key == "till_name" {
+            till_name = value;
+        }
+    }
+    let name = safe_backup_folder_component(&till_name);
+    let id = safe_backup_folder_component(&till_id.chars().take(8).collect::<String>());
+    let scope = match (name.is_empty(), id.is_empty()) {
+        (false, false) => format!("{name}-{id}"),
+        (false, true) => name,
+        (true, false) => format!("Till-{id}"),
+        (true, true) => "This-Till".into(),
+    };
+    let directory = base_directory.join("LBj POS Backups").join(scope);
+    fs::create_dir_all(&directory).map_err(|e| {
+        format!(
+            "Could not open the selected backup folder {}: {e}",
+            directory.display()
+        )
+    })?;
+    if !directory.is_dir() {
+        return Err("The selected backup destination is not a folder".into());
+    }
+    Ok(directory)
+}
+
+fn is_user_backup(path: &PathBuf) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    name.starts_with("pos-backup-") && name.ends_with(".db")
+}
+
+fn is_automatic_setup_backup(path: &PathBuf) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    name.starts_with("shop-setup-backup-") && name.ends_with(".db")
+}
+
+fn latest_user_backup_in_dir(backup_dir: &PathBuf) -> Result<Option<PathBuf>, String> {
+    if !backup_dir.exists() {
+        return Ok(None);
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(backup_dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(is_user_backup)
+        .collect();
+    files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    Ok(files.pop())
+}
+
+fn automatic_setup_backups_in_dir(backup_dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
+    if !backup_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(backup_dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(is_automatic_setup_backup)
+        .collect();
+    files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    Ok(files)
+}
+
+fn prune_automatic_setup_backups(backup_dir: &PathBuf) -> Result<(), String> {
+    let files = automatic_setup_backups_in_dir(backup_dir)?;
+    let remove_count = files.len().saturating_sub(2);
+    for path in files.into_iter().take(remove_count) {
+        fs::remove_file(&path).map_err(|e| {
+            format!(
+                "Could not remove old automatic setup backup {}: {e}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn pending_restore_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -772,43 +914,356 @@ pub async fn allocate_mysql_till_sequence(mysql_uri: String) -> Result<i64, Stri
 }
 
 #[tauri::command]
-pub async fn create_local_backup(app: AppHandle) -> Result<String, String> {
+pub async fn create_local_backup(
+    app: AppHandle,
+    backup_directory: Option<String>,
+) -> Result<String, String> {
     let source = local_db_path(&app)?;
     if !source.exists() {
         return Err("Local database does not exist yet".into());
     }
-    let backup_dir = local_backup_dir(&app)?;
+    let backup_dir = selected_till_backup_dir(&app, &source, backup_directory.as_deref()).await?;
+    create_local_backup_in_dir(&source, &backup_dir)
+        .await
+        .map(|path| path.display().to_string())
+}
+
+async fn validate_backup_snapshot(source: &PathBuf) -> Result<(), String> {
+    if !source.is_file() {
+        return Err("The backup file was not created".into());
+    }
+    let uri = format!("sqlite://{}?mode=ro", source.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not open the new backup: {e}"))?;
+    let result = async {
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| format!("Could not verify the new backup: {e}"))?;
+        if !integrity.eq_ignore_ascii_case("ok") {
+            return Err(format!(
+                "The new backup failed its integrity check: {integrity}"
+            ));
+        }
+        for table in ["settings", "products"] {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| format!("Could not inspect the new backup: {e}"))?;
+            if count == 0 {
+                return Err(format!("The new backup is missing required table {table}"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn create_local_backup_in_dir(
+    source: &PathBuf,
+    backup_dir: &PathBuf,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(backup_dir).map_err(|e| e.to_string())?;
     let name = format!(
         "pos-backup-{}.db",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
     );
     let target = backup_dir.join(name);
-    let uri = format!("sqlite://{}?mode=rwc", source.display());
-    let pool = SqlitePool::connect(&uri).await.map_err(|e| e.to_string())?;
+    if target.exists() {
+        return Err("A backup with the same timestamp already exists; try again".into());
+    }
+    create_sqlite_snapshot(source, &target).await?;
+    if let Err(error) = validate_backup_snapshot(&target).await {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    Ok(target)
+}
+
+async fn create_sqlite_snapshot(source: &PathBuf, target: &PathBuf) -> Result<(), String> {
+    let uri = format!("sqlite://{}?mode=rw", source.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not open the local database for backup: {e}"))?;
+    let _ = sqlx::query("PRAGMA busy_timeout = 10000")
+        .execute(&pool)
+        .await;
     let escaped = target.display().to_string().replace('\'', "''");
-    sqlx::query(&format!("VACUUM INTO '{escaped}'"))
+    let backup_result = sqlx::query(&format!("VACUUM INTO '{escaped}'"))
         .execute(&pool)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok(target.display().to_string())
+        .map_err(|e| format!("Could not create the local backup: {e}"));
+    pool.close().await;
+    if let Err(error) = backup_result {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String> {
+    let uri = format!("sqlite://{}?mode=rw", target.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not open the automatic setup backup: {e}"))?;
+    let table_rows = sqlx::query("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| format!("Could not inspect automatic setup backup tables: {e}"))?;
+    let tables: std::collections::HashSet<String> = table_rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String, _>("name").ok())
+        .collect();
+    sqlx::query("PRAGMA secure_delete = ON")
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Could not enable secure cleanup for setup backup: {e}"))?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Could not prepare the automatic setup backup: {e}"))?;
+    let result = async {
+        if tables.contains("orders") && tables.contains("inventory_logs") {
+            sqlx::query(
+                "DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders)",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove sales stock history: {e}"))?;
+        }
+        if tables.contains("audit_logs") {
+            let mut predicates = vec![
+                "entityType IN ('order','shift','cash_movement','report')".to_string(),
+                "action IN ('sale_completed','order_refunded','order_partially_refunded','order_voided','refund_completed','report_period_closed')".to_string(),
+            ];
+            if tables.contains("orders") {
+                predicates.push("entityId IN (SELECT id FROM orders)".to_string());
+            }
+            if tables.contains("shifts") {
+                predicates.push("entityId IN (SELECT id FROM shifts)".to_string());
+            }
+            sqlx::query(&format!(
+                "DELETE FROM audit_logs WHERE {}",
+                predicates.join(" OR ")
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove sales audit history: {e}"))?;
+        }
+        if tables.contains("manager_approvals") {
+            let mut predicates = vec![
+                "entityType = 'order'".to_string(),
+                "action = 'refund_void'".to_string(),
+            ];
+            if tables.contains("orders") {
+                predicates.push("entityId IN (SELECT id FROM orders)".to_string());
+            }
+            sqlx::query(&format!(
+                "DELETE FROM manager_approvals WHERE {}",
+                predicates.join(" OR ")
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove sales approvals: {e}"))?;
+        }
+        if tables.contains("loyalty_logs") {
+            sqlx::query(
+                "DELETE FROM loyalty_logs WHERE orderId IS NOT NULL AND TRIM(orderId) <> ''",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove order-linked loyalty history: {e}"))?;
+        }
+        for table in [
+            "payments",
+            "order_lines",
+            "cash_movements",
+            "orders",
+            "shifts",
+            "daily_sales_summary",
+            "till_report_markers",
+        ] {
+            if tables.contains(table) {
+                sqlx::query(&format!("DELETE FROM {table}"))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| format!("Could not clear {table} from setup backup: {e}"))?;
+            }
+        }
+        if tables.contains("_offline_queue") {
+            sqlx::query(
+                "DELETE FROM _offline_queue
+                 WHERE operation = 'saleBundle'
+                    OR table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove queued sales from setup backup: {e}"))?;
+        }
+        if tables.contains("tombstones") {
+            sqlx::query(
+                "DELETE FROM tombstones
+                 WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Could not remove sales deletion markers: {e}"))?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let _ = tx.rollback().await;
+        pool.close().await;
+        return Err(error);
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Could not finish automatic setup backup cleanup: {e}"))?;
+    pool.close().await;
+    Ok(())
+}
+
+async fn validate_automatic_setup_backup(target: &PathBuf) -> Result<(), String> {
+    validate_backup_snapshot(target).await?;
+    let uri = format!("sqlite://{}?mode=ro", target.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not verify the automatic setup backup: {e}"))?;
+    let result = async {
+        for table in [
+            "orders",
+            "order_lines",
+            "payments",
+            "shifts",
+            "cash_movements",
+        ] {
+            if table_exists(&pool, "main", table).await? {
+                let count = count_rows(&pool, &format!("SELECT COUNT(*) FROM {table}")).await?;
+                if count != 0 {
+                    return Err(format!(
+                        "Automatic setup backup still contains {count} row(s) in {table}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    pool.close().await;
+    result
+}
+
+async fn create_automatic_setup_backup_in_dir(
+    source: &PathBuf,
+    backup_dir: &PathBuf,
+    date: &str,
+) -> Result<(PathBuf, bool), String> {
+    fs::create_dir_all(backup_dir).map_err(|e| e.to_string())?;
+    let target = backup_dir.join(format!("shop-setup-backup-{date}.db"));
+    if target.exists() {
+        if target
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            prune_automatic_setup_backups(backup_dir)?;
+            return Ok((target, false));
+        }
+        fs::remove_file(&target)
+            .map_err(|e| format!("Could not replace an invalid automatic setup backup: {e}"))?;
+    }
+
+    if let Err(error) = create_sqlite_snapshot(source, &target).await {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    if let Err(error) = sanitize_automatic_setup_backup(&target).await {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    if let Err(error) = validate_automatic_setup_backup(&target).await {
+        let _ = fs::remove_file(&target);
+        return Err(error);
+    }
+    prune_automatic_setup_backups(backup_dir)?;
+    Ok((target, true))
 }
 
 #[tauri::command]
-pub async fn latest_local_backup(app: AppHandle) -> Result<Option<String>, String> {
-    let backup_dir = local_backup_dir(&app)?;
-    if !backup_dir.exists() {
-        return Ok(None);
+pub async fn create_automatic_setup_backup(
+    app: AppHandle,
+    backup_directory: Option<String>,
+) -> Result<AutomaticSetupBackupResult, String> {
+    let source = local_db_path(&app)?;
+    if !source.exists() {
+        return Err("Local database does not exist yet".into());
     }
-    let mut files: Vec<_> = fs::read_dir(backup_dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .filter(|e| e.path().extension().is_some_and(|x| x == "db"))
-        .collect();
-    files.sort_by_key(|e| e.file_name());
-    Ok(files.last().map(|e| e.path().display().to_string()))
+    let backup_dir = selected_till_backup_dir(&app, &source, backup_directory.as_deref()).await?;
+    let date = chrono::Local::now().format("%Y%m%d").to_string();
+    let (path, created) = create_automatic_setup_backup_in_dir(&source, &backup_dir, &date).await?;
+    Ok(AutomaticSetupBackupResult {
+        path: path.display().to_string(),
+        created,
+    })
+}
+
+#[tauri::command]
+pub async fn latest_automatic_setup_backup(
+    app: AppHandle,
+    backup_directory: Option<String>,
+) -> Result<Option<String>, String> {
+    let source = local_db_path(&app)?;
+    let backup_dir = selected_till_backup_dir(&app, &source, backup_directory.as_deref()).await?;
+    let mut files = automatic_setup_backups_in_dir(&backup_dir)?;
+    Ok(files.pop().map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn latest_local_backup(
+    app: AppHandle,
+    backup_directory: Option<String>,
+) -> Result<Option<String>, String> {
+    let source = local_db_path(&app)?;
+    let backup_dir = selected_till_backup_dir(&app, &source, backup_directory.as_deref()).await?;
+    latest_user_backup_in_dir(&backup_dir)
+        .map(|backup| backup.map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+pub async fn validate_local_database_backup(source_path: String) -> Result<(), String> {
+    let source = restore_source_path(&source_path)?;
+    validate_restore_source(&source).await
 }
 
 async fn validate_restore_database(source: &PathBuf) -> Result<(), String> {
+    validate_restore_database_with_options(source, false).await
+}
+
+async fn validate_restore_source(source: &PathBuf) -> Result<(), String> {
+    validate_restore_database_with_options(source, true).await
+}
+
+async fn validate_restore_database_with_options(
+    source: &PathBuf,
+    allow_repairable_transaction_orphans: bool,
+) -> Result<(), String> {
     if !source.exists() {
         return Err("The selected database file does not exist".into());
     }
@@ -847,7 +1302,7 @@ async fn validate_restore_database(source: &PathBuf) -> Result<(), String> {
     }
 
     validate_restore_schema(&pool).await?;
-    validate_restore_data(&pool).await?;
+    validate_restore_data(&pool, allow_repairable_transaction_orphans).await?;
 
     pool.close().await;
     Ok(())
@@ -860,7 +1315,10 @@ async fn validate_restore_schema(pool: &SqlitePool) -> Result<(), String> {
         ("categories", vec!["id", "name"]),
         ("customers", vec!["id", "name"]),
         ("orders", vec!["id", "receiptKey", "total"]),
-        ("order_lines", vec!["id", "orderId", "productId", "lineTotal"]),
+        (
+            "order_lines",
+            vec!["id", "orderId", "productId", "lineTotal"],
+        ),
         ("payments", vec!["id", "orderId", "amount"]),
     ];
 
@@ -870,8 +1328,10 @@ async fn validate_restore_schema(pool: &SqlitePool) -> Result<(), String> {
             // tables above must have the columns they advertise when present.
             continue;
         }
-        let actual: std::collections::HashSet<_> =
-            table_columns(pool, "main", table).await?.into_iter().collect();
+        let actual: std::collections::HashSet<_> = table_columns(pool, "main", table)
+            .await?
+            .into_iter()
+            .collect();
         for column in columns {
             if !actual.contains(column) {
                 return Err(format!(
@@ -929,7 +1389,10 @@ async fn add_issue_for_count(
     Ok(())
 }
 
-async fn validate_restore_data(pool: &SqlitePool) -> Result<(), String> {
+async fn validate_restore_data(
+    pool: &SqlitePool,
+    allow_repairable_transaction_orphans: bool,
+) -> Result<(), String> {
     let mut issues = Vec::new();
 
     add_issue_for_count(
@@ -979,34 +1442,43 @@ async fn validate_restore_data(pool: &SqlitePool) -> Result<(), String> {
             "POS tiles pointing to missing products",
             vec!["pos_tiles", "products"],
             "SELECT COUNT(*) FROM pos_tiles t LEFT JOIN products p ON p.id = t.productId WHERE p.id IS NULL",
+            false,
         ),
         (
             "POS tiles pointing to missing pages",
             vec!["pos_tiles", "pos_pages"],
             "SELECT COUNT(*) FROM pos_tiles t LEFT JOIN pos_pages p ON p.id = t.pageId WHERE p.id IS NULL",
+            false,
         ),
         (
             "Promotion items pointing to missing products",
             vec!["promo_group_items", "products"],
             "SELECT COUNT(*) FROM promo_group_items i LEFT JOIN products p ON p.id = i.productId WHERE p.id IS NULL",
+            false,
         ),
         (
             "Promotion items pointing to missing groups",
             vec!["promo_group_items", "promo_groups"],
             "SELECT COUNT(*) FROM promo_group_items i LEFT JOIN promo_groups g ON g.id = i.groupId WHERE g.id IS NULL",
+            false,
         ),
         (
             "Order lines pointing to missing orders",
             vec!["order_lines", "orders"],
             "SELECT COUNT(*) FROM order_lines l LEFT JOIN orders o ON o.id = l.orderId WHERE o.id IS NULL",
+            true,
         ),
         (
             "Payments pointing to missing orders",
             vec!["payments", "orders"],
             "SELECT COUNT(*) FROM payments p LEFT JOIN orders o ON o.id = p.orderId WHERE o.id IS NULL",
+            true,
         ),
     ];
-    for (label, tables, sql) in orphan_checks {
+    for (label, tables, sql, repairable) in orphan_checks {
+        if repairable && allow_repairable_transaction_orphans {
+            continue;
+        }
         let mut has_all_tables = true;
         for table in tables {
             if !table_exists(pool, "main", table).await? {
@@ -1026,6 +1498,44 @@ async fn validate_restore_data(pool: &SqlitePool) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+async fn repair_restore_pool(pool: &SqlitePool) -> Result<(), String> {
+    for (child_table, parent_table, foreign_key) in [
+        ("order_lines", "orders", "orderId"),
+        ("payments", "orders", "orderId"),
+    ] {
+        if !table_exists(pool, "main", child_table).await?
+            || !table_exists(pool, "main", parent_table).await?
+        {
+            continue;
+        }
+        let query = format!(
+            "DELETE FROM {child_table}
+             WHERE {foreign_key} IS NULL
+                OR TRIM({foreign_key}) = ''
+                OR NOT EXISTS (
+                    SELECT 1 FROM {parent_table}
+                    WHERE {parent_table}.id = {child_table}.{foreign_key}
+                )"
+        );
+        sqlx::query(&query).execute(pool).await.map_err(|e| {
+            format!("Could not remove repairable orphan rows from {child_table}: {e}")
+        })?;
+    }
+    Ok(())
+}
+
+async fn repair_restore_database(source: &PathBuf) -> Result<(), String> {
+    let uri = format!("sqlite://{}?mode=rw", source.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Could not open the prepared restore database: {e}"))?;
+    let result = repair_restore_pool(&pool).await;
+    pool.close().await;
+    result
 }
 
 fn retry_file_operation<T, F>(mut operation: F) -> Result<T, std::io::Error>
@@ -1050,9 +1560,8 @@ fn quote_sqlite_text(value: &str) -> String {
 }
 
 async fn table_exists(pool: &SqlitePool, schema: &str, table: &str) -> Result<bool, String> {
-    let query = format!(
-        "SELECT COUNT(*) FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?"
-    );
+    let query =
+        format!("SELECT COUNT(*) FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?");
     let count: i64 = sqlx::query_scalar(&query)
         .bind(table)
         .fetch_one(pool)
@@ -1061,7 +1570,11 @@ async fn table_exists(pool: &SqlitePool, schema: &str, table: &str) -> Result<bo
     Ok(count > 0)
 }
 
-async fn table_columns(pool: &SqlitePool, schema: &str, table: &str) -> Result<Vec<String>, String> {
+async fn table_columns(
+    pool: &SqlitePool,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<String>, String> {
     let query = format!("PRAGMA {schema}.table_info({table})");
     let rows = sqlx::query(&query)
         .fetch_all(pool)
@@ -1118,7 +1631,10 @@ async fn copy_preserved_table(
     Ok(())
 }
 
-async fn restore_preserved_local_setup(target: &PathBuf, preserve_from: Option<&str>) -> Result<(), String> {
+async fn restore_preserved_local_setup(
+    target: &PathBuf,
+    preserve_from: Option<&str>,
+) -> Result<(), String> {
     let Some(preserve_from) = preserve_from else {
         return Ok(());
     };
@@ -1154,12 +1670,11 @@ async fn restore_preserved_local_setup(target: &PathBuf, preserve_from: Option<&
     .await
     .map_err(|e| format!("Could not clear old sync markers after restore: {e}"))?;
 
-    let restored_mode: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM settings WHERE key = 'pos_mode' LIMIT 1",
-    )
-    .fetch_optional(&pool)
-    .await
-    .map_err(|e| format!("Could not read restored POS mode: {e}"))?;
+    let restored_mode: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'pos_mode' LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| format!("Could not read restored POS mode: {e}"))?;
 
     if restored_mode.as_deref() == Some("multi") {
         sqlx::query(
@@ -1178,7 +1693,9 @@ async fn restore_preserved_local_setup(target: &PathBuf, preserve_from: Option<&
             .map_err(|e| format!("Could not clear MariaDB restore marker: {e}"))?;
     }
 
-    let _ = sqlx::query("DETACH DATABASE preserved").execute(&pool).await;
+    let _ = sqlx::query("DETACH DATABASE preserved")
+        .execute(&pool)
+        .await;
     pool.close().await;
     Ok(())
 }
@@ -1195,8 +1712,7 @@ fn schedule_pending_restore(
     };
     let text = serde_json::to_string(&payload)
         .map_err(|e| format!("Could not prepare pending restore marker: {e}"))?;
-    fs::write(&marker, text)
-        .map_err(|e| format!("Could not schedule restore for restart: {e}"))?;
+    fs::write(&marker, text).map_err(|e| format!("Could not schedule restore for restart: {e}"))?;
     Ok(())
 }
 
@@ -1208,17 +1724,19 @@ pub fn apply_pending_restore_on_startup(app: &AppHandle) -> Result<(), String> {
 
     let source_text = fs::read_to_string(&marker)
         .map_err(|e| format!("Could not read pending restore marker: {e}"))?;
-    let pending = serde_json::from_str::<PendingRestoreMarker>(&source_text)
-        .unwrap_or(PendingRestoreMarker {
+    let pending = serde_json::from_str::<PendingRestoreMarker>(&source_text).unwrap_or(
+        PendingRestoreMarker {
             source: source_text.trim().to_string(),
             preserve_from: None,
-        });
+        },
+    );
     let source = PathBuf::from(pending.source.trim());
     if !source.exists() {
         let _ = fs::remove_file(&marker);
         return Err("Pending restore file is missing. Restore was cancelled.".into());
     }
 
+    tauri::async_runtime::block_on(repair_restore_database(&source))?;
     tauri::async_runtime::block_on(validate_restore_database(&source))?;
     let target = local_db_path(app)?;
     let backup_dir = local_backup_dir(app)?;
@@ -1250,7 +1768,7 @@ async fn restore_local_database_from_path_impl(
     app: AppHandle,
     source: PathBuf,
 ) -> Result<RestoreDatabaseResult, String> {
-    validate_restore_database(&source).await?;
+    validate_restore_source(&source).await?;
 
     let target = local_db_path(&app)?;
     if source.canonicalize().ok() == target.canonicalize().ok() {
@@ -1260,8 +1778,17 @@ async fn restore_local_database_from_path_impl(
     let backup_dir = local_backup_dir(&app)?;
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let staging_path = backup_dir.join(format!("restore-staging-{stamp}.db"));
-    fs::copy(&source, &staging_path)
-        .map_err(|e| format!("Restore stopped before changing data: could not prepare the selected database: {e}"))?;
+    fs::copy(&source, &staging_path).map_err(|e| {
+        format!(
+            "Restore stopped before changing data: could not prepare the selected database: {e}"
+        )
+    })?;
+    if let Err(error) = repair_restore_database(&staging_path).await {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!(
+            "Restore stopped before changing data: could not repair the prepared database: {error}"
+        ));
+    }
     if let Err(error) = validate_restore_database(&staging_path).await {
         let _ = fs::remove_file(&staging_path);
         return Err(format!(
@@ -1314,8 +1841,11 @@ async fn restore_local_database_from_path_impl(
 }
 
 #[tauri::command]
-pub async fn restore_latest_local_backup(app: AppHandle) -> Result<RestoreDatabaseResult, String> {
-    let backup = latest_local_backup(app.clone())
+pub async fn restore_latest_local_backup(
+    app: AppHandle,
+    backup_directory: Option<String>,
+) -> Result<RestoreDatabaseResult, String> {
+    let backup = latest_local_backup(app.clone(), backup_directory)
         .await?
         .ok_or_else(|| "No local backup is available".to_string())?;
     restore_local_database_from_path_impl(app, PathBuf::from(backup)).await
@@ -1334,6 +1864,204 @@ pub async fn restore_local_database_from_path(
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    fn temporary_backup_test_dir(label: &str) -> PathBuf {
+        let stamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let path =
+            std::env::temp_dir().join(format!("lbj-pos-{label}-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn latest_backup_ignores_internal_restore_files() {
+        let dir = temporary_backup_test_dir("backup-selection");
+        for name in [
+            "pos-backup-20260701-100000-000.db",
+            "pos-backup-20260702-100000-000.db",
+            "pre-restore-pos-backup-20260712-120000.db",
+            "restore-staging-20260712-120001.db",
+        ] {
+            fs::write(dir.join(name), b"test").unwrap();
+        }
+
+        let latest = latest_user_backup_in_dir(&dir).unwrap().unwrap();
+        assert_eq!(
+            latest.file_name().and_then(|name| name.to_str()),
+            Some("pos-backup-20260702-100000-000.db")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn creates_and_verifies_a_consistent_sqlite_backup() {
+        tauri::async_runtime::block_on(async {
+            let dir = temporary_backup_test_dir("backup-create");
+            let source = dir.join("pos.db");
+            let backup_dir = dir.join("backups");
+            let uri = format!("sqlite://{}?mode=rwc", source.display());
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&uri)
+                .await
+                .unwrap();
+            sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("CREATE TABLE products (id TEXT PRIMARY KEY, name TEXT, price INTEGER, costPrice INTEGER)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO products (id, name, price, costPrice) VALUES ('p1', 'Test', 125, 50)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+
+            let backup = create_local_backup_in_dir(&source, &backup_dir)
+                .await
+                .unwrap();
+            assert!(is_user_backup(&backup));
+            validate_backup_snapshot(&backup).await.unwrap();
+
+            let backup_uri = format!("sqlite://{}?mode=ro", backup.display());
+            let backup_pool = SqlitePool::connect(&backup_uri).await.unwrap();
+            let product_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products")
+                .fetch_one(&backup_pool)
+                .await
+                .unwrap();
+            backup_pool.close().await;
+            assert_eq!(product_count, 1);
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
+    #[test]
+    fn automatic_setup_backup_strips_sales_and_keeps_only_two_daily_files() {
+        tauri::async_runtime::block_on(async {
+            let dir = temporary_backup_test_dir("automatic-setup-backup");
+            let source = dir.join("pos.db");
+            let backup_dir = dir.join("backups");
+            let uri = format!("sqlite://{}?mode=rwc", source.display());
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&uri)
+                .await
+                .unwrap();
+            for sql in [
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
+                "CREATE TABLE products (id TEXT PRIMARY KEY, name TEXT, price INTEGER, costPrice INTEGER)",
+                "CREATE TABLE orders (id TEXT PRIMARY KEY)",
+                "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT)",
+                "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT)",
+                "CREATE TABLE shifts (id TEXT PRIMARY KEY)",
+                "CREATE TABLE cash_movements (id TEXT PRIMARY KEY, shiftId TEXT)",
+                "CREATE TABLE inventory_logs (id TEXT PRIMARY KEY, referenceId TEXT)",
+                "CREATE TABLE audit_logs (id TEXT PRIMARY KEY, entityId TEXT, entityType TEXT, action TEXT)",
+                "CREATE TABLE manager_approvals (id TEXT PRIMARY KEY, entityId TEXT, entityType TEXT, action TEXT)",
+                "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, orderId TEXT)",
+                "CREATE TABLE daily_sales_summary (id TEXT PRIMARY KEY)",
+                "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY)",
+                "CREATE TABLE _offline_queue (id TEXT PRIMARY KEY, operation TEXT, table_name TEXT)",
+                "CREATE TABLE tombstones (id TEXT PRIMARY KEY, table_name TEXT)",
+                "INSERT INTO settings VALUES ('store_info', '{}', '')",
+                "INSERT INTO products VALUES ('product-1', 'Product', 100, 50)",
+                "INSERT INTO orders VALUES ('order-1')",
+                "INSERT INTO order_lines VALUES ('line-1', 'order-1')",
+                "INSERT INTO payments VALUES ('payment-1', 'order-1')",
+                "INSERT INTO shifts VALUES ('shift-1')",
+                "INSERT INTO cash_movements VALUES ('cash-1', 'shift-1')",
+                "INSERT INTO inventory_logs VALUES ('stock-sale', 'order-1')",
+                "INSERT INTO inventory_logs VALUES ('stock-manual', 'manual-adjustment')",
+                "INSERT INTO audit_logs VALUES ('audit-sale', 'order-1', 'order', 'sale_completed')",
+                "INSERT INTO audit_logs VALUES ('audit-product', 'product-1', 'product', 'updated')",
+                "INSERT INTO manager_approvals VALUES ('approval-1', 'order-1', 'order', 'refund_void')",
+                "INSERT INTO loyalty_logs VALUES ('loyalty-sale', 'order-1')",
+                "INSERT INTO loyalty_logs VALUES ('loyalty-manual', '')",
+                "INSERT INTO daily_sales_summary VALUES ('summary-1')",
+                "INSERT INTO till_report_markers VALUES ('marker-1')",
+                "INSERT INTO _offline_queue VALUES ('queue-sale', 'saleBundle', 'orders')",
+                "INSERT INTO tombstones VALUES ('tomb-sale', 'orders')",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+            pool.close().await;
+
+            let (first, created) =
+                create_automatic_setup_backup_in_dir(&source, &backup_dir, "20260710")
+                    .await
+                    .unwrap();
+            assert!(created);
+            assert!(first.exists());
+            let (_, duplicate_created) =
+                create_automatic_setup_backup_in_dir(&source, &backup_dir, "20260710")
+                    .await
+                    .unwrap();
+            assert!(!duplicate_created);
+
+            let manual_backup = create_local_backup_in_dir(&source, &backup_dir)
+                .await
+                .unwrap();
+            create_automatic_setup_backup_in_dir(&source, &backup_dir, "20260711")
+                .await
+                .unwrap();
+            let (latest, _) =
+                create_automatic_setup_backup_in_dir(&source, &backup_dir, "20260712")
+                    .await
+                    .unwrap();
+
+            let automatic_files = automatic_setup_backups_in_dir(&backup_dir).unwrap();
+            assert_eq!(automatic_files.len(), 2);
+            assert!(!first.exists());
+            assert!(manual_backup.exists());
+
+            let backup_uri = format!("sqlite://{}?mode=ro", latest.display());
+            let backup_pool = SqlitePool::connect(&backup_uri).await.unwrap();
+            for table in [
+                "orders",
+                "order_lines",
+                "payments",
+                "shifts",
+                "cash_movements",
+                "daily_sales_summary",
+                "till_report_markers",
+            ] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(&backup_pool)
+                    .await
+                    .unwrap();
+                assert_eq!(count, 0, "{table} should be empty in setup backup");
+            }
+            for (table, expected) in [
+                ("products", 1_i64),
+                ("inventory_logs", 1),
+                ("audit_logs", 1),
+                ("loyalty_logs", 1),
+            ] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                    .fetch_one(&backup_pool)
+                    .await
+                    .unwrap();
+                assert_eq!(count, expected, "{table} shop data should be preserved");
+            }
+            backup_pool.close().await;
+
+            let source_pool =
+                SqlitePool::connect(&format!("sqlite://{}?mode=ro", source.display()))
+                    .await
+                    .unwrap();
+            let source_orders: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders")
+                .fetch_one(&source_pool)
+                .await
+                .unwrap();
+            source_pool.close().await;
+            assert_eq!(source_orders, 1, "the live source must not be modified");
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
 
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
@@ -1363,6 +2091,41 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    #[test]
+    fn restore_repair_removes_only_orphan_transaction_children() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            sqlx::query("INSERT INTO orders (id) VALUES ('order-1')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            for sql in [
+                "INSERT INTO order_lines (id, orderId) VALUES ('line-valid', 'order-1')",
+                "INSERT INTO order_lines (id, orderId) VALUES ('line-orphan', 'missing-order')",
+                "INSERT INTO payments (id, orderId) VALUES ('payment-valid', 'order-1')",
+                "INSERT INTO payments (id, orderId) VALUES ('payment-orphan', 'missing-order')",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+
+            repair_restore_pool(&pool).await.unwrap();
+
+            let line_ids: Vec<String> =
+                sqlx::query_scalar("SELECT id FROM order_lines ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let payment_ids: Vec<String> =
+                sqlx::query_scalar("SELECT id FROM payments ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(line_ids, vec!["line-valid"]);
+            assert_eq!(payment_ids, vec!["payment-valid"]);
+            pool.close().await;
+        });
     }
 
     fn bundle(id: &str, receipt: &str, payment: &str) -> SaleBundle {
