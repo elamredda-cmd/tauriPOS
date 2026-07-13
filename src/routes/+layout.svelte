@@ -26,7 +26,8 @@
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
     import { applyTypography } from '$lib/typography';
     import { page } from '$app/stores';
-    import { canManage, currentEmployee, currentShiftId, REMEMBERED_EMPLOYEE_SESSION_KEY } from '$lib/stores/session';
+    import { currentEmployee, currentShiftId, REMEMBERED_EMPLOYEE_SESSION_KEY } from '$lib/stores/session';
+    import { canAccessPath } from '$lib/permissions';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
@@ -316,16 +317,16 @@
     $: applyTypography($settingsDB);
 
     $: if (dbReady && typeof window !== 'undefined') {
-        const allowedForCashier = ['/', '/orders', '/shifts', '/customer-display', '/label-print'];
+        const pathname = $page.url.pathname;
         const hasActiveAdmin = get(employeesDB).some((employee) =>
             employee.isActive && employee.role === 'admin'
         );
-        const setupAllowed = $page.url.pathname === '/setup' && (!hasActiveAdmin || restorePendingMariaDbReplace);
-        if (restorePendingMariaDbReplace && $page.url.pathname !== '/setup') {
+        const setupAllowed = pathname === '/setup' && (!hasActiveAdmin || restorePendingMariaDbReplace);
+        if (restorePendingMariaDbReplace && pathname !== '/setup') {
             goto('/setup');
-        } else if (!hasActiveAdmin && $page.url.pathname !== '/setup') {
+        } else if (!hasActiveAdmin && pathname !== '/setup') {
             goto('/setup');
-        } else if (!allowedForCashier.includes($page.url.pathname) && !setupAllowed && !canManage($currentEmployee)) {
+        } else if (!setupAllowed && !canAccessPath($currentEmployee, pathname, $settingsDB)) {
             goto('/');
         }
     }

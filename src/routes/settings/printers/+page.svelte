@@ -298,6 +298,7 @@
     const labelProtocolOptions = [
         { label: 'System printer / driver', value: 'system' },
         { label: 'ESC/POS / Xprinter USB', value: 'escpos' },
+        { label: 'Star TSP100 / Star Graphic', value: 'star' },
         { label: 'ZPL / Zebra style', value: 'zpl' },
         { label: 'TSPL / TSC style', value: 'tspl' },
     ];
@@ -652,6 +653,9 @@
                     <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel p-4">
                         <div class="mb-4">
                             <h4 class="m-0 text-base font-black">Label connection details</h4>
+                            {#if label.protocol === 'star'}
+                                <p class="m-0 mt-2 text-sm font-semibold text-success">Star Graphic mode is active. Label bitmap data is safely framed for the Star TSP100.</p>
+                            {/if}
                         </div>
                         <div class="form-grid">
                             <CustomSelect

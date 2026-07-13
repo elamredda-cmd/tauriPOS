@@ -87,7 +87,7 @@
     import { getLabelPrinterConfig, getReceiptPrinterConfig, printEscposReceipt, printProductLabels, sendEscposReceipt } from "$lib/printers";
     import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
-    import { hasPermission, permissionLabels, type PermissionKey } from "$lib/permissions";
+    import { canAccessPath, hasPermission, permissionForPath, permissionLabels, type PermissionKey } from "$lib/permissions";
 
     type PosOrderSummary = Order & {
         cashierName?: string;
@@ -178,8 +178,6 @@
     let activeScaleTilePageId = "";
     let scaleReadBusy = false;
     let scaleReadStatus = "";
-    let scalePollTimer: ReturnType<typeof setInterval> | undefined;
-    let scalePollingSignature = "";
     const SCALE_PRODUCTS_PER_PAGE = 9;
     const POS_TILES_PER_PAGE = 16;
     const MAX_SCALE_WEIGHT_DIGITS = 6;
@@ -340,16 +338,6 @@
         : parseFloat(scaleWeightInput) || 0;
     $: scaleLinePrice = Math.round(scaleWeightKg * (selectedScaleProduct?.price || 0));
     $: scaleHardwareReady = scaleHardwareConfig.enabled && Boolean(scaleHardwareConfig.devicePath.trim());
-    $: {
-        const nextSignature = showScaleModal && scaleHardwareReady
-            ? `${scaleHardwareConfig.devicePath.trim()}|${scaleHardwareConfig.baudRate}|${scaleHardwareConfig.pollMs}`
-            : "";
-        if (nextSignature !== scalePollingSignature) {
-            stopScalePolling();
-            scalePollingSignature = nextSignature;
-            if (nextSignature) startScalePolling();
-        }
-    }
 
     function showTrolleyFeedback(
         msg: string,
@@ -722,7 +710,7 @@
 
     async function approveManagerAction() {
         if (!managerApprovalEmployeeId) {
-            managerApprovalError = "Choose a manager or admin";
+            managerApprovalError = "Choose an authorized approver";
             return;
         }
         const approver = await verifyEmployeePin(managerApprovalEmployeeId, managerApprovalPin);
@@ -779,6 +767,11 @@
     }
 
     let promoClock = new Date().toISOString();
+    $: headerTime = new Date(promoClock).toLocaleTimeString('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+    }).toUpperCase();
 
     onMount(() => {
         const timer = setInterval(() => {
@@ -811,7 +804,6 @@
     });
 
     onDestroy(() => {
-        stopScalePolling();
         if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
     });
 
@@ -1059,7 +1051,7 @@
         if (!Number.isFinite(reading.weight)) return;
         scaleWeightUnit = reading.unit;
         scaleWeightInput = scaleInputFromReading(reading);
-        scaleReadStatus = `Live scale: ${formatScaleReading(reading)}`;
+        scaleReadStatus = `Scale reading: ${formatScaleReading(reading)}`;
     }
 
     async function readScaleNow(showErrors = true) {
@@ -1083,23 +1075,8 @@
         }
     }
 
-    function startScalePolling() {
-        if (scalePollTimer) return;
-        void readScaleNow(false);
-        scalePollTimer = setInterval(() => void readScaleNow(false), scaleHardwareConfig.pollMs);
-    }
-
-    function stopScalePolling() {
-        if (scalePollTimer) {
-            clearInterval(scalePollTimer);
-            scalePollTimer = undefined;
-        }
-    }
-
     function closeScaleModal() {
         showScaleModal = false;
-        stopScalePolling();
-        scalePollingSignature = "";
     }
 
     function productMatchesScaleSearch(product: Product, rawQuery: string): boolean {
@@ -1703,25 +1680,9 @@
             goto("/setup");
             return;
         }
-        const permissionByPath: Record<string, PermissionKey> = {
-            "/design": "open_design",
-            "/tiles": "open_design",
-            "/items": "open_items",
-            "/categories": "open_items",
-            "/customers": "open_items",
-            "/suppliers": "open_items",
-            "/tax-rates": "open_items",
-            "/discounts": "open_discounts",
-            "/employees": "open_employees",
-            "/reports": "open_reports",
-            "/settings": "open_settings",
-            "/sync": "open_sync",
-            "/audit": "open_audit",
-            "/stock-receiving": "open_stock_receiving",
-        };
-        const permission = permissionByPath[path];
-        if (permission && !hasPermission($currentEmployee, permission, $settingsDB)) {
-            void requirePermission(permission, `Open ${permissionLabels[permission]}`, () => goto(path), "page", path);
+        if (!canAccessPath($currentEmployee, path, $settingsDB)) {
+            const permission = permissionForPath(path);
+            toast(permission ? `Your role cannot ${permissionLabels[permission].toLowerCase()}` : 'Your role cannot open the admin dashboard', 'error');
             return;
         }
         goto(path);
@@ -2695,28 +2656,7 @@
                         title="Open Admin"
                         on:click|stopPropagation={() => handleMenuClick("/admin")}
                     >
-                        <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            stroke-width="2"
-                            width="20"
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            ><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect
-                                x="14"
-                                y="3"
-                                width="7"
-                                height="7"
-                                rx="1"
-                            ></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect
-                                x="14"
-                                y="14"
-                                width="7"
-                                height="7"
-                                rx="1"
-                            ></rect></svg
-                        >
+                        <img class="h-7 w-7 shrink-0 rounded object-contain" src="/lbj-pos-logo.png" alt="" />
                         <span>Admin</span>
                     </button>
                 </div>
@@ -2758,12 +2698,21 @@
                     <b>{tillName || tillId}</b>
                 </span>
             </div>
-            <div
-                class="sync-pill justify-self-end {syncStyle}"
-                title={$connectionState.syncError || syncLabel}
-            >
-                <span></span>
-                {syncLabel}
+            <div class="pos-header-status justify-self-end">
+                <time class="pos-clock" datetime={promoClock} title={new Date(promoClock).toLocaleString('en-GB')}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9"></circle>
+                        <path d="M12 7v5l3 2"></path>
+                    </svg>
+                    {headerTime}
+                </time>
+                <div
+                    class="sync-pill {syncStyle}"
+                    title={$connectionState.syncError || syncLabel}
+                >
+                    <span></span>
+                    {syncLabel}
+                </div>
             </div>
         </header>
 
@@ -2797,8 +2746,10 @@
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
                     {#if slot && slot.product}
                         {@const temporaryOffer = activeTemporaryOffer(slot.product.id, slot.product.price, promoClock)}
-                        <div
-                            class="relative h-full min-h-0 overflow-hidden cursor-pointer bg-[var(--tile-bg)] border border-border-flat rounded-md transition-colors hover:brightness-110 flex flex-col"
+                        <button
+                            type="button"
+                            class="pos-product-tile relative h-full min-h-0 overflow-hidden cursor-pointer bg-[var(--tile-bg)] border border-border-flat rounded-md transition-colors hover:brightness-110 flex flex-col"
+                            aria-label={`Add ${slot.product.name}, ${formatMoney(temporaryOffer?.price ?? slot.product.price)}`}
                             on:click={() => slot.product!.isWeighable ? openScaleForProduct(slot.product!.id) : addToCart(slot.product!)}
                         >
                             <div
@@ -2810,7 +2761,7 @@
                                     <img
                                         src={slot.product.image}
                                         alt={slot.product.name}
-                                        class="absolute inset-0 h-full w-full object-cover"
+                                        class="absolute inset-0 h-full w-full bg-white object-contain"
                                     />
                                 {/if}
                                 <div
@@ -2835,7 +2786,7 @@
                                     </div>
                                 </div>
                             </div>
-                        </div>
+                        </button>
                     {:else}
                         <div
                             class="bg-bg-card/30 border border-border-flat/30 border-dashed rounded-md"
@@ -2884,23 +2835,27 @@
                         disabled={currentPageIndex >= totalPages - 1}
                         on:click={() => currentPageIndex++}>&rarr;</button
                     >
-                {:else}
-                    <div class="w-11 h-full md:w-14"></div>
-                    <div class="w-11 h-full md:w-14"></div>
-                    <div class="w-11 h-full md:w-14"></div>
                 {/if}
                 <div class="pos-toolbar-actions" style="--pos-toolbar-count: {toolbarLayout.length}">
                     {#each toolbarLayout as btn}
                         {#if btn === 'scale'}
                             <button class="pos-toolbar-action" on:click={openScale}>SCALE</button>
                         {:else if btn === 'label_print'}
-                            <button class="pos-toolbar-action" on:click={() => goto('/label-print')}>LABEL PRINT</button>
+                            <button
+                                class="pos-toolbar-action"
+                                disabled={cart.length > 0}
+                                title={cart.length > 0 ? 'Complete, hold, or clear the trolley before printing labels' : 'Print product labels'}
+                                on:click={() => goto('/label-print')}>LABEL PRINT</button>
                         {:else if btn === 'discount'}
                             <button class="pos-toolbar-action" on:click={openDiscounts}>DISCOUNT</button>
                         {:else if btn === 'goods'}
                             <button class="pos-toolbar-action" on:click={openGoodsModal}>GOODS</button>
                         {:else if btn === 'recent_trans'}
-                            <button class="pos-toolbar-action" on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
+                            <button
+                                class="pos-toolbar-action"
+                                disabled={cart.length > 0}
+                                title={cart.length > 0 ? 'Complete, hold, or clear the trolley before opening recent transactions' : 'Open recent transactions'}
+                                on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
                         {:else if btn === 'change_price'}
                             <button
                                 class="pos-toolbar-action disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
@@ -2968,7 +2923,8 @@
                 <input
                     bind:this={scanInput}
                     type="text"
-                    placeholder="Search/Scan..."
+                    placeholder="Scan barcode..."
+                    aria-label="Scan product barcode"
                     class="bg-transparent border-none outline-none text-sm text-text-main w-full disabled:opacity-40"
                     bind:value={searchQuery}
                     on:keydown={handleSearchKeydown}
@@ -2978,8 +2934,9 @@
             </div>
 
             <button
-                class="w-10 h-10 flex items-center justify-center bg-bg-card border border-border-flat text-danger rounded-md hover:bg-danger hover:text-white transition-colors shrink-0"
+                class="w-10 h-10 flex items-center justify-center bg-bg-card border border-border-flat text-danger rounded-md hover:bg-danger hover:text-white transition-colors shrink-0 disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-bg-card disabled:hover:text-danger"
                 title="Clear Order"
+                disabled={cart.length === 0}
                 on:click={() => (showClearConfirm = true)}
             >
                 <svg
@@ -3019,55 +2976,65 @@
                 {@const lineNet = Math.max(0, lineGross - lineSavings)}
                 <div
                     bind:this={cartItemEls[i]}
-                    class="cart-line flex items-center gap-1.5 p-1 md:p-1.5 rounded-md border transition-all cursor-pointer group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'} {promoNotice?.kind === 'applied' ? 'cart-line-promo-applied' : promoNotice?.kind === 'eligible' ? 'cart-line-promo-eligible' : ''}"
-                    on:click={() => (selectedCartIndex = i)}
+                    class="cart-line flex items-center gap-1.5 p-1 md:p-1.5 rounded-md border transition-all group {selectedCartIndex === i ? 'cart-line-selected' : 'cart-line-normal'} {promoNotice?.kind === 'applied' ? 'cart-line-promo-applied' : promoNotice?.kind === 'eligible' ? 'cart-line-promo-eligible' : ''}"
+                    class:cart-line-scale={scaleDisplay.kind !== 'each'}
                 >
-                    <div
-                        class="text-[11px] md:text-xs font-bold text-accent-primary min-w-[18px] md:min-w-[22px] pt-0.5"
+                    <button
+                        type="button"
+                        class="cart-line-select flex flex-1 min-w-0 items-center gap-1.5"
+                        aria-label={`Select ${item.name}`}
+                        aria-pressed={selectedCartIndex === i}
+                        on:click={() => (selectedCartIndex = i)}
                     >
-                        {scaleDisplay.label}
-                    </div>
-                    <div class="flex-1 min-w-0">
-                        <div class="cart-line-title">
-                            <h4
-                                class="m-0 text-[12px] md:text-[13px] font-black text-text-main truncate leading-tight"
-                                title={item.name}
-                            >
-                                {item.name}
-                            </h4>
-                            {#if promoNotice}
-                                <span class="cart-promo-chip cart-promo-chip-{promoNotice.kind}" title={promoNotice.title}>{promoNotice.label}</span>
+                        <div
+                            class="cart-line-quantity text-[11px] md:text-xs font-bold text-accent-primary min-w-[18px] md:min-w-[22px] pt-0.5"
+                        >
+                            {scaleDisplay.label}
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="cart-line-title">
+                                <h4
+                                    class="m-0 text-[12px] md:text-[13px] font-black text-text-main truncate leading-tight"
+                                    title={item.name}
+                                >
+                                    {item.name}
+                                </h4>
+                                {#if promoNotice}
+                                    <span class="cart-promo-chip cart-promo-chip-{promoNotice.kind}" title={promoNotice.title}>{promoNotice.label}</span>
+                                {/if}
+                            </div>
+                            {#if item.quantityLocked && scaleDisplay.kind === 'each'}
+                                <span class="text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-warning">Scale label · fixed quantity</span>
+                            {/if}
+                            {#if item.note && scaleDisplay.kind === 'each'}
+                                <span
+                                    class="text-[9px] text-text-muted italic block truncate mt-0.5 leading-tight"
+                                    >{item.note}</span
+                                >
                             {/if}
                         </div>
-                        {#if item.quantityLocked}
-                            <span class="text-[9px] md:text-[10px] font-bold uppercase tracking-wide text-warning">Scale label · fixed quantity</span>
-                        {/if}
-                        {#if item.note}
-                            <span
-                                class="text-[9px] text-text-muted italic block truncate mt-0.5 leading-tight"
-                                >{item.note}</span
-                            >
-                        {/if}
-                    </div>
-                    <div class="cart-line-price w-[62px] md:w-[74px] text-right shrink-0">
-                        {#if lineSavings > 0}
-                            <div class="cart-price-original">
-                                {formatMoney(lineGross)}
-                            </div>
-                            <div class="cart-price-discounted">
-                                {formatMoney(lineNet)}
-                            </div>
-                        {:else}
-                            <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
-                                {formatMoney(item.price)}
-                            </div>
-                            <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
-                                {formatMoney(lineGross)}
-                            </div>
-                        {/if}
-                    </div>
+                        <div class="cart-line-price w-[62px] md:w-[74px] text-right shrink-0">
+                            {#if lineSavings > 0}
+                                <div class="cart-price-original">
+                                    {formatMoney(lineGross)}
+                                </div>
+                                <div class="cart-price-discounted">
+                                    {formatMoney(lineNet)}
+                                </div>
+                            {:else}
+                                <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
+                                    {formatMoney(item.price)}
+                                </div>
+                                <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
+                                    {formatMoney(lineGross)}
+                                </div>
+                            {/if}
+                        </div>
+                    </button>
                     <button
                         class="w-6 h-6 flex items-center justify-center text-text-muted hover:text-danger opacity-60 group-hover:opacity-100 transition-all shrink-0"
+                        aria-label={`Remove ${item.name} from trolley`}
+                        title={`Remove ${item.name}`}
                         on:click|stopPropagation={() => deleteItem(i)}
                     >
                         <svg
@@ -3335,6 +3302,7 @@
                                     <button
                                         class="scale-product {product.image ? 'with-image' : ''} {selectedScaleProductId === product.id ? 'selected' : ''}"
                                         style="--scale-color: {product.color || '#3b82f6'}"
+                                        aria-pressed={selectedScaleProductId === product.id}
                                         on:click={() => (selectedScaleProductId = product.id)}
                                     >
                                         <i></i>
@@ -3347,6 +3315,13 @@
                                             <span>{formatMoney(product.price)} / kg</span>
                                             {#if product.scalePlu}<small>PLU {product.scalePlu}</small>{/if}
                                         </div>
+                                        {#if selectedScaleProductId === product.id}
+                                            <span class="scale-product-check" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                                                    <path d="m5 12 4 4L19 6"></path>
+                                                </svg>
+                                            </span>
+                                        {/if}
                                     </button>
                                 {/if}
                             {/each}
@@ -3367,10 +3342,19 @@
                 </section>
 
                 <aside class="scale-entry">
-                    <div class="scale-selected">
-                        <span>Selected product</span>
-                        <strong>{selectedScaleProduct?.name || "Choose a tile"}</strong>
-                        <small>{selectedScaleProduct ? `${formatMoney(selectedScaleProduct.price)} per kilogram` : "The price stored on a weighable item is its price per kg."}</small>
+                    <div class="scale-selected {selectedScaleProduct ? 'has-product' : ''}">
+                        <div class="scale-selected-copy">
+                            <span>Selected product</span>
+                            <strong>{selectedScaleProduct?.name || "Choose a product"}</strong>
+                            <small>{selectedScaleProduct ? `${formatMoney(selectedScaleProduct.price)} per kilogram` : "Select one of the product tiles to continue."}</small>
+                        </div>
+                        {#if selectedScaleProduct}
+                            <span class="scale-selected-ready" aria-label="Product selected">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="m5 12 4 4L19 6"></path>
+                                </svg>
+                            </span>
+                        {/if}
                     </div>
                     <div class="scale-units">
                         <button class={scaleWeightUnit === "kg" ? '!border-success !bg-success !text-white' : ''} on:click={() => (scaleWeightUnit = "kg")}>Kilograms</button>
@@ -3383,7 +3367,7 @@
                     <div class="scale-live">
                         <div>
                             <span>{scaleHardwareReady ? `Scale port ${scaleHardwareConfig.devicePath}` : "Scale not connected"}</span>
-                            <small>{scaleReadStatus || (scaleHardwareReady ? "Waiting for live weight..." : "Use Printer Setup to choose the scale port.")}</small>
+                            <small>{scaleReadStatus || (scaleHardwareReady ? "Press Read Scale when the weight is stable." : "Use Printer Setup to choose the scale port.")}</small>
                         </div>
                         <button class="btn btn-secondary" disabled={!scaleHardwareReady || scaleReadBusy} on:click={() => readScaleNow(true)}>
                             {scaleReadBusy ? "Reading..." : "Read Scale"}
@@ -4209,18 +4193,18 @@
             on:click|stopPropagation
         >
             <div>
-                <h2 class="m-0 text-xl">Manager Approval</h2>
+                <h2 class="m-0 text-xl">Approval Required</h2>
                 <p class="mt-1 text-sm text-text-muted">
                     {managerApprovalTitle || permissionLabels[managerApprovalPermission]} needs approval before continuing.
                 </p>
             </div>
             {#if managerApprovers.length === 0}
                 <div class="rounded-xl border border-danger/40 bg-danger/10 p-4 text-danger">
-                    No active manager or admin has this permission. Update Role Permissions in Settings.
+                    No active manager, supervisor, or administrator has this permission. Update Role Permissions in Settings.
                 </div>
             {:else}
                 <CustomSelect
-                    label="Approving manager"
+                    label="Approving staff member"
                     bind:value={managerApprovalEmployeeId}
                     options={managerApprovers.map((employee) => ({ label: `${employee.name} (${employee.role})`, value: employee.id }))}
                 />
@@ -4338,13 +4322,15 @@
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
     .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
-    .scale-product-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .scale-product-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #fff; }
     .scale-product-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgba(15, 23, 42, .82), rgba(15, 23, 42, .25), rgba(15, 23, 42, .05)); }
     .scale-product-content { position: relative; z-index: 1; display: flex; min-width: 0; flex-direction: column; gap: .12rem; }
     .scale-product strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
     .scale-product span, .scale-product small { color: var(--text-muted); font-size: .75rem; }
     .scale-product.with-image strong, .scale-product.with-image span, .scale-product.with-image small { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, .45); }
-    .scale-product.selected { border-color: var(--success); background: rgba(16, 185, 129, .10); }
+    .scale-product.selected { border-color: var(--success); box-shadow: inset 0 0 0 1px var(--success), 0 0 0 2px color-mix(in srgb, var(--success) 22%, transparent); }
+    .scale-product-check { position: absolute; z-index: 3; top: .5rem; right: .5rem; width: 1.65rem; height: 1.65rem; display: grid; place-items: center; color: white !important; border: 2px solid white; border-radius: 50%; background: var(--success); box-shadow: 0 2px 8px rgba(0, 0, 0, .28); }
+    .scale-product-check svg { width: 1rem; height: 1rem; }
     .scale-pagination { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-muted); font-size: .72rem; }
     .scale-pagination div { display: flex; align-items: center; gap: .4rem; }
     .scale-pagination button { min-height: 34px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }
@@ -4352,10 +4338,14 @@
     .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 72px 42px 64px 66px minmax(190px, 1fr) 52px 48px; gap: .38rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
     .scale-selected, .scale-display, .scale-live, .scale-total { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .1rem; border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-card); }
     .scale-selected span, .scale-display span, .scale-live span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
-    .scale-selected { min-width: 0; min-height: 0; overflow: hidden; }
+    .scale-selected { min-width: 0; min-height: 0; overflow: hidden; flex-direction: row; align-items: center; justify-content: space-between; gap: .65rem; }
+    .scale-selected.has-product { border-color: color-mix(in srgb, var(--success) 55%, var(--border-flat)); }
+    .scale-selected-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: .1rem; }
     .scale-selected strong, .scale-selected small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .scale-selected strong { line-height: 1.15; }
     .scale-selected small { color: var(--text-muted); line-height: 1.2; }
+    .scale-selected-ready { width: 2rem; height: 2rem; flex: 0 0 2rem; display: grid; place-items: center; color: white !important; border-radius: 50%; background: var(--success); }
+    .scale-selected-ready svg { width: 1.1rem; height: 1.1rem; }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
     .scale-units button { min-height: 42px; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }

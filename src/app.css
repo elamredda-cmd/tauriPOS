@@ -350,6 +350,19 @@
   font-size: .78em;
 }
 
+.pos-product-tile {
+    appearance: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+
+.pos-product-tile:focus-visible {
+    outline: 3px solid var(--accent-primary);
+    outline-offset: -3px;
+}
+
 .management-page,
 .items-management-page {
   padding: var(--app-page-gutter) !important;
@@ -695,6 +708,13 @@
     border-color: var(--accent-primary);
 }
 
+.pos-toolbar-action:disabled {
+    cursor: not-allowed;
+    opacity: .38;
+    background: var(--bg-card) !important;
+    border-color: var(--border-flat) !important;
+}
+
 .sync-pill {
     display: inline-flex;
     align-items: center;
@@ -735,6 +755,38 @@
     border-color: var(--border-flat) !important;
 }
 
+.pos-header-status {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: .45rem;
+}
+
+.pos-clock {
+    min-height: 32px;
+    padding: .35rem .6rem;
+    display: inline-flex;
+    align-items: center;
+    gap: .38rem;
+    color: var(--text-main);
+    border: 1px solid var(--border-flat);
+    border-radius: .45rem;
+    background: var(--bg-card);
+    font-size: .78rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 900;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.pos-clock svg {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+    color: var(--accent-primary);
+}
+
 .pos-shop-identity {
     min-width: 0;
     max-width: 36vw;
@@ -750,7 +802,7 @@
 
 .pos-till-chip {
     min-width: 0;
-    max-width: 150px;
+    max-width: 176px;
     min-height: 34px;
     padding: .3rem .55rem;
     display: flex;
@@ -844,6 +896,22 @@
     min-height: 38px !important;
     padding: .28rem .38rem !important;
     gap: .35rem !important;
+}
+
+.cart-line-select {
+    appearance: none;
+    padding: 0;
+    color: inherit;
+    border: 0;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+}
+
+.cart-line-select:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+    border-radius: .25rem;
 }
 
 .cart-line-title {
@@ -1452,9 +1520,22 @@
         }
 
         .pos-till-chip {
-            max-width: 112px;
+            max-width: 168px;
             min-height: 32px;
             padding-inline: .45rem;
+        }
+
+        .pos-header-status {
+            gap: .3rem;
+        }
+
+        .pos-clock {
+            min-height: 30px;
+            padding-inline: .45rem;
+        }
+
+        .pos-clock svg {
+            display: none;
         }
 
         .pos-main-header button[title="Change user"] {
@@ -1608,9 +1689,23 @@
     min-height: 2.45em !important;
 }
 
-.pos-cart-items .cart-line > div:first-child {
+.pos-cart-items .cart-line-quantity {
     min-width: 2em !important;
     font-size: .72em !important;
+}
+
+.pos-cart-items .cart-line-scale {
+    min-height: 2.15em !important;
+}
+
+.pos-cart-items .cart-line-scale .cart-line-quantity {
+    width: 3.8em;
+    min-width: 3.8em !important;
+    max-width: 3.8em;
+    overflow: hidden;
+    font-size: .66em !important;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .pos-cart-items h4,

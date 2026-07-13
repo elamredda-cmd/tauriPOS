@@ -30,7 +30,8 @@
             | 'reports'
             | 'sync'
             | 'audit'
-            | 'settings';
+            | 'settings'
+            | 'about';
     };
 
     type AdminViewEntry = AdminEntry & {
@@ -54,6 +55,7 @@
         { title: 'Sync Dashboard', group: 'System', description: 'Database sync and connection status.', path: '/sync', permission: 'open_sync', accent: '#8b5cf6', icon: 'sync' },
         { title: 'Audit Log', group: 'System', description: 'Review key changes and staff actions.', path: '/audit', permission: 'open_audit', accent: '#ef4444', icon: 'audit' },
         { title: 'Settings', group: 'System', description: 'Printers, receipt, labels, and devices.', path: '/settings', permission: 'open_settings', accent: '#0f766e', icon: 'settings' },
+        { title: 'About', group: 'L&Bj POS', description: 'Application details and contact information.', path: '/about', accent: '#2563eb', icon: 'about' },
     ];
 
     let isFullscreen = false;
@@ -132,8 +134,11 @@
     <header class="admin-header">
         <PageBackButton fallback="/" ariaLabel="Back to POS" title="Back to POS" />
         <div class="admin-title">
-            <span>Management</span>
-            <h1>Admin</h1>
+            <img class="admin-brand-logo" src="/lbj-pos-logo.png" alt="" />
+            <div>
+                <span>L&amp;Bj POS</span>
+                <h1>Admin</h1>
+            </div>
         </div>
         <div class="admin-user" aria-label="Signed in staff">
             <span class="admin-user-avatar" aria-hidden="true">{employeeInitials}</span>
@@ -249,6 +254,10 @@
                             <circle cx="9" cy="6" r="2"></circle>
                             <circle cx="15" cy="12" r="2"></circle>
                             <circle cx="11" cy="18" r="2"></circle>
+                        {:else if entry.icon === 'about'}
+                            <circle cx="12" cy="12" r="9"></circle>
+                            <path d="M12 11v6"></path>
+                            <path d="M12 7h.01"></path>
                         {/if}
                     </svg>
                 </span>
@@ -306,6 +315,17 @@
 
     .admin-title {
         min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+    }
+
+    .admin-brand-logo {
+        width: 46px;
+        height: 46px;
+        flex: 0 0 auto;
+        border-radius: 0.42rem;
+        object-fit: contain;
     }
 
     .admin-title span,
@@ -536,6 +556,11 @@
 
         .admin-title h1 {
             font-size: 1.55rem;
+        }
+
+        .admin-brand-logo {
+            width: 40px;
+            height: 40px;
         }
 
         .admin-header-actions {

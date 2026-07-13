@@ -541,13 +541,17 @@ fn scale_request_mode(value: Option<&str>) -> ScaleRequestMode {
 }
 
 #[tauri::command]
-fn read_scale_weight(
+async fn read_scale_weight(
     device_path: String,
     baud_rate: Option<u32>,
     timeout_ms: Option<u64>,
     request_mode: Option<String>,
 ) -> Result<ScaleWeightReading, String> {
-    platform_read_scale_weight(device_path, baud_rate, timeout_ms, request_mode)
+    tauri::async_runtime::spawn_blocking(move || {
+        platform_read_scale_weight(device_path, baud_rate, timeout_ms, request_mode)
+    })
+    .await
+    .map_err(|error| format!("Scale read worker failed: {error}"))?
 }
 
 #[cfg(target_os = "windows")]

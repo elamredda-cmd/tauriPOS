@@ -135,5 +135,5 @@ export function logout(): void {
 }
 
 export function canManage(employee: Employee | null): boolean {
-    return employee?.role === 'admin' || employee?.role === 'manager';
+    return employee?.role === 'admin' || employee?.role === 'manager' || employee?.role === 'supervisor';
 }

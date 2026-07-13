@@ -61,10 +61,11 @@ export interface Employee {
     name: string;
     pin: string;
     pinHash?: string;
-    role: 'admin' | 'manager' | 'cashier';
+    role: 'admin' | 'manager' | 'supervisor' | 'cashier';
     email: string;
     isActive: boolean;
     createdAt: string;
+    updatedAt?: string;
 }
 
 // 4. Customer

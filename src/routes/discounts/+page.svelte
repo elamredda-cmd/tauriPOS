@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { onDestroy, onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import {
@@ -23,6 +24,18 @@
 
     type Tab = 'bundle' | 'bogo' | 'temporary' | 'percent';
     let tab: Tab = 'bundle';
+    let promotionClock = Date.now();
+    let promotionClockTimer: ReturnType<typeof setInterval> | null = null;
+
+    onMount(() => {
+        promotionClockTimer = setInterval(() => {
+            promotionClock = Date.now();
+        }, 30_000);
+    });
+
+    onDestroy(() => {
+        if (promotionClockTimer) clearInterval(promotionClockTimer);
+    });
 
     // ───── Bundle (group + discount as one entity in the UI) ─────
     let showBundle = false;
@@ -136,7 +149,7 @@
 
     type ProductPicker = 'bundle' | 'bogo' | 'temporary';
     type PromotionProductEntry = { groupId: string; name: string };
-    const PRODUCT_PICKER_LIMIT = 100;
+    const PRODUCT_PICKER_LIMIT = 60;
     let productCacheById = new Map<string, Product>();
     let pickerRows: Record<ProductPicker, Product[]> = { bundle: [], bogo: [], temporary: [] };
     let pickerLoading: Record<ProductPicker, boolean> = { bundle: false, bogo: false, temporary: false };
@@ -471,18 +484,17 @@
 
     $: selectedTemporaryProduct = productCacheById.get(temporaryProductId);
 
-    function promotionStatus(d: Discount, group: PromoGroup | null | undefined): string {
+    function promotionStatus(d: Discount, group: PromoGroup | null | undefined, current: number): string {
         if (!d.isActive || group?.isActive === false) return 'Inactive';
         const startAt = group?.startAt || d.startAt;
         const endAt = group?.endAt || d.endAt;
-        const current = Date.now();
         if (startAt && current < new Date(startAt).getTime()) return 'Scheduled';
         if (endAt && current > new Date(endAt).getTime()) return 'Expired';
         return 'Active';
     }
 
-    function promotionStatusClass(d: Discount, group: PromoGroup | null | undefined): string {
-        const status = promotionStatus(d, group);
+    function promotionStatusClass(d: Discount, group: PromoGroup | null | undefined, current: number): string {
+        const status = promotionStatus(d, group, current);
         if (status === 'Active') return 'text-success';
         if (status === 'Scheduled') return 'text-warning';
         return 'text-danger';
@@ -553,6 +565,16 @@
             toast('Remove deactivated or hidden items before saving this promotion', 'error');
             return;
         }
+        const secondPrice = Math.round(secondPricePounds * 100);
+        const invalidPriceProducts = Array.from(bogoProductIds)
+            .map(id => productCacheById.get(id))
+            .filter((product): product is Product => Boolean(product?.price && secondPrice >= product.price));
+        if (invalidPriceProducts.length > 0) {
+            const firstName = invalidPriceProducts[0].name;
+            const remaining = invalidPriceProducts.length - 1;
+            toast(`Next-item price must be below the normal price for ${firstName}${remaining ? ` and ${remaining} more` : ''}`, 'error');
+            return;
+        }
 
         const timestamp = now();
         const existingGroup = $promoGroupsDB.find(g => g.id === bogoGroupId);
@@ -566,7 +588,7 @@
             isActive: bogoActive, createdAt: existingDiscount?.createdAt || timestamp,
             updatedAt: timestamp, kind: 'bogo_fixed_price',
             autoApply: true, groupId: bogoGroupId, minQuantity: buyQty,
-            secondPrice: Math.round(secondPricePounds * 100), bundleQuantity: 0, bundlePrice: 0,
+            secondPrice, bundleQuantity: 0, bundlePrice: 0,
             maxApplications,
             startAt: bogoStartAt, endAt: bogoEndAt, priority: 0
         };
@@ -691,7 +713,7 @@
         curActive = d.isActive && (g?.isActive ?? true);
         curProductIds = new Set($promoGroupItemsDB.filter(i => i.groupId === d.groupId).map(i => i.productId));
         productSearch = '';
-        priceString = String(numeric(d.bundlePrice));
+        priceString = (numeric(d.bundlePrice) / 100).toFixed(2).replace(/\.00$/, '');
         qtyString = String(numeric(d.bundleQuantity, 2));
         editingBundle = true;
         showBundle = true;
@@ -806,11 +828,26 @@
         .map(id => productCacheById.get(id))
         .filter((product): product is Product => Boolean(product));
 
+    function formatPromotionDate(value: string): string {
+        const date = new Date(value);
+        if (!Number.isFinite(date.getTime())) return value;
+        return date.toLocaleString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: '2-digit',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+        });
+    }
+
     function bundleWindow(d: Discount, group: PromoGroup | null | undefined): string {
         const s = group?.startAt || d.startAt;
         const e = group?.endAt || d.endAt;
         if (!s && !e) return 'Always';
-        return `${s || '—'} → ${e || '—'}`;
+        if (s && e) return `${formatPromotionDate(s)} to ${formatPromotionDate(e)}`;
+        if (s) return `From ${formatPromotionDate(s)}`;
+        return `Until ${formatPromotionDate(e)}`;
     }
 
     function toggleBogoProduct(pid: string) {
@@ -830,13 +867,17 @@
             priceString = priceString.length > 1 ? priceString.slice(0, -1) : '0';
         } else if (key === 'ENTER') {
             showPricePad = false;
-        } else if (key === '00') {
-            if (priceString !== '0') priceString += '00';
+        } else if (key === '.') {
+            if (!priceString.includes('.')) priceString += '.';
         } else {
-            if (priceString === '0') priceString = key;
-            else priceString += key;
+            const decimalPlaces = priceString.includes('.') ? priceString.split('.')[1].length : 0;
+            if (decimalPlaces < 2) {
+                if (priceString === '0') priceString = key;
+                else priceString += key;
+            }
         }
-        curPrice = parseInt(priceString) || 0;
+        const pounds = Number(priceString);
+        curPrice = Number.isFinite(pounds) ? Math.round(pounds * 100) : 0;
     }
 
     function handleQtyPadKey(key: string) {
@@ -855,109 +896,114 @@
 </script>
 
 <MgmtPage title="Discounts & Promotions">
-    <div slot="actions" class="hdr-actions">
-        <div class="tabs">
-            <button class="tab-btn {tab==='bundle'?'active':''}" on:click={() => tab='bundle'}>Bundle Deals</button>
-            <button class="tab-btn {tab==='bogo'?'active':''}" on:click={() => tab='bogo'}>BOGO</button>
-            <button class="tab-btn {tab==='temporary'?'active':''}" on:click={() => tab='temporary'}>Temporary Item</button>
-            <button class="tab-btn {tab==='percent'?'active':''}" on:click={() => tab='percent'}>Percentage</button>
-        </div>
+    <div slot="actions">
         {#if tab==='bundle'}
-            <button class="btn btn-primary" on:click={addBundle}>+ Add Bundle</button>
+            <button class="btn btn-primary add-promotion-button" on:click={addBundle}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Bundle</button>
         {:else if tab==='bogo'}
-            <button class="btn btn-primary" on:click={addBogo}>+ Add BOGO</button>
+            <button class="btn btn-primary add-promotion-button" on:click={addBogo}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add BOGO</button>
         {:else if tab==='temporary'}
-            <button class="btn btn-primary" on:click={addTemporary}>+ Add Temporary</button>
+            <button class="btn btn-primary add-promotion-button" on:click={addTemporary}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Temporary</button>
         {:else}
-            <button class="btn btn-primary" on:click={addPercent}>+ Add Percentage</button>
+            <button class="btn btn-primary add-promotion-button" on:click={addPercent}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Percentage</button>
         {/if}
     </div>
 
-    {#if tab==='bundle'}
-        <table class="tbl">
-            <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>
-                {#each bundles as d (d.id)}
-                    {@const group = promoGroupById.get(d.groupId)}
-                    <tr>
-                        <td class="font-semibold">{d.name}</td>
-                        <td>Any {numeric(d.bundleQuantity)} for {formatMoney(numeric(d.bundlePrice))}</td>
-                        <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
-                        <td>{bundleWindow(d, group)}</td>
-                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
-                        <td><div class="act-row">
-                            <button class="btn-icon act-btn" on:click={() => editBundle(d)}>✎</button>
-                            <button class="btn-icon act-btn danger" on:click={() => delBundle(d)}>✕</button>
-                        </div></td>
-                    </tr>
-                {/each}
-                {#if bundles.length===0}<tr class="empty-row"><td colspan="6">No bundle deals yet.</td></tr>{/if}
-            </tbody>
-        </table>
-    {:else if tab==='bogo'}
-        <table class="tbl">
-            <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Limit</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>
-                {#each bogos as d (d.id)}
-                    {@const group = promoGroupById.get(d.groupId)}
-                    <tr>
-                        <td class="font-semibold">{d.name}</td>
-                        <td>Buy {numeric(d.minQuantity, 1)}, next for {formatMoney(numeric(d.secondPrice))}</td>
-                        <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
-                        <td>{bundleWindow(d, group)}</td>
-                        <td>{d.maxApplications == null ? 'Unlimited' : `${numeric(d.maxApplications)} per sale`}</td>
-                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
-                        <td><div class="act-row">
-                            <button class="btn-icon act-btn" on:click={() => editBogo(d)}>✎</button>
-                            <button class="btn-icon act-btn danger" on:click={() => delBogo(d)}>✕</button>
-                        </div></td>
-                    </tr>
-                {/each}
-                {#if bogos.length===0}<tr class="empty-row"><td colspan="7">No BOGO promotions yet.</td></tr>{/if}
-            </tbody>
-        </table>
-    {:else if tab==='temporary'}
-        <table class="tbl">
-            <thead><tr><th>Name</th><th>Item</th><th>Temporary Deal</th><th>Window</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>
-                {#each temporaryItems as d (d.id)}
-                    {@const group = promoGroupById.get(d.groupId)}
-                    {@const productId = firstPromoProductIdByGroup.get(d.groupId) || ''}
-                    <tr>
-                        <td class="font-semibold">{d.name}</td>
-                        <td>{productNameById.get(productId) || 'Unknown item'}</td>
-                        <td>{temporaryDeal(d)}</td>
-                        <td>{bundleWindow(d, group)}</td>
-                        <td><span class="tag {promotionStatusClass(d, group)}">{promotionStatus(d, group)}</span></td>
-                        <td><div class="act-row">
-                            <button class="btn-icon act-btn" on:click={() => editTemporary(d)}>✎</button>
-                            <button class="btn-icon act-btn danger" on:click={() => delTemporary(d)}>✕</button>
-                        </div></td>
-                    </tr>
-                {/each}
-                {#if temporaryItems.length===0}<tr class="empty-row"><td colspan="6">No temporary item discounts yet.</td></tr>{/if}
-            </tbody>
-        </table>
-    {:else}
-        <table class="tbl">
-            <thead><tr><th>Name</th><th>Discount</th><th>Applied By</th><th>Status</th><th>Actions</th></tr></thead>
-            <tbody>
-                {#each percentages as d (d.id)}
-                    <tr>
-                        <td class="font-semibold">{d.name}</td>
-                        <td>{numeric(d.value)}% off</td>
-                        <td>Cashier</td>
-                        <td><span class="tag {d.isActive ? 'text-success' : 'text-danger'}">{d.isActive?'Active':'Inactive'}</span></td>
-                        <td><div class="act-row">
-                            <button class="btn-icon act-btn" on:click={() => editPercent(d)}>✎</button>
-                            <button class="btn-icon act-btn danger" on:click={() => delPercent(d)}>✕</button>
-                        </div></td>
-                    </tr>
-                {/each}
-                {#if percentages.length===0}<tr class="empty-row"><td colspan="5">No percentage discounts yet.</td></tr>{/if}
-            </tbody>
-        </table>
-    {/if}
+    <div class="discount-page">
+        <nav class="promotion-tabs" aria-label="Promotion types">
+            <button class:active={tab === 'bundle'} aria-pressed={tab === 'bundle'} on:click={() => tab='bundle'}><span>Bundle Deals</span><small>{bundles.length}</small></button>
+            <button class:active={tab === 'bogo'} aria-pressed={tab === 'bogo'} on:click={() => tab='bogo'}><span>BOGO</span><small>{bogos.length}</small></button>
+            <button class:active={tab === 'temporary'} aria-pressed={tab === 'temporary'} on:click={() => tab='temporary'}><span>Temporary Item</span><small>{temporaryItems.length}</small></button>
+            <button class:active={tab === 'percent'} aria-pressed={tab === 'percent'} on:click={() => tab='percent'}><span>Percentage</span><small>{percentages.length}</small></button>
+        </nav>
+
+        <div class="promotion-table-wrap">
+            {#if tab==='bundle'}
+                <table class="tbl promotion-table">
+                    <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Status</th><th class="actions-heading">Actions</th></tr></thead>
+                    <tbody>
+                        {#each bundles as d (d.id)}
+                            {@const group = promoGroupById.get(d.groupId)}
+                            <tr>
+                                <td class="font-semibold">{d.name}</td>
+                                <td>Any {numeric(d.bundleQuantity)} for {formatMoney(numeric(d.bundlePrice))}</td>
+                                <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
+                                <td class="window-cell">{bundleWindow(d, group)}</td>
+                                <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
+                                <td class="action-cell"><div class="act-row">
+                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                </div></td>
+                            </tr>
+                        {/each}
+                        {#if bundles.length===0}<tr class="empty-row"><td colspan="6">No bundle deals yet.</td></tr>{/if}
+                    </tbody>
+                </table>
+            {:else if tab==='bogo'}
+                <table class="tbl promotion-table promotion-table-wide">
+                    <thead><tr><th>Name</th><th>Deal</th><th>Items</th><th>Window</th><th>Limit</th><th>Status</th><th class="actions-heading">Actions</th></tr></thead>
+                    <tbody>
+                        {#each bogos as d (d.id)}
+                            {@const group = promoGroupById.get(d.groupId)}
+                            <tr>
+                                <td class="font-semibold">{d.name}</td>
+                                <td>Buy {numeric(d.minQuantity, 1)}, next for {formatMoney(numeric(d.secondPrice))}</td>
+                                <td>{promoItemCountsByGroup.get(d.groupId) || 0}</td>
+                                <td class="window-cell">{bundleWindow(d, group)}</td>
+                                <td>{d.maxApplications == null ? 'Unlimited' : `${numeric(d.maxApplications)} per sale`}</td>
+                                <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
+                                <td class="action-cell"><div class="act-row">
+                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                </div></td>
+                            </tr>
+                        {/each}
+                        {#if bogos.length===0}<tr class="empty-row"><td colspan="7">No BOGO promotions yet.</td></tr>{/if}
+                    </tbody>
+                </table>
+            {:else if tab==='temporary'}
+                <table class="tbl promotion-table">
+                    <thead><tr><th>Name</th><th>Item</th><th>Temporary Deal</th><th>Window</th><th>Status</th><th class="actions-heading">Actions</th></tr></thead>
+                    <tbody>
+                        {#each temporaryItems as d (d.id)}
+                            {@const group = promoGroupById.get(d.groupId)}
+                            {@const productId = firstPromoProductIdByGroup.get(d.groupId) || ''}
+                            <tr>
+                                <td class="font-semibold">{d.name}</td>
+                                <td>{productNameById.get(productId) || 'Unknown item'}</td>
+                                <td>{temporaryDeal(d)}</td>
+                                <td class="window-cell">{bundleWindow(d, group)}</td>
+                                <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
+                                <td class="action-cell"><div class="act-row">
+                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                </div></td>
+                            </tr>
+                        {/each}
+                        {#if temporaryItems.length===0}<tr class="empty-row"><td colspan="6">No temporary item discounts yet.</td></tr>{/if}
+                    </tbody>
+                </table>
+            {:else}
+                <table class="tbl promotion-table">
+                    <thead><tr><th>Name</th><th>Discount</th><th>Applied By</th><th>Status</th><th class="actions-heading">Actions</th></tr></thead>
+                    <tbody>
+                        {#each percentages as d (d.id)}
+                            <tr>
+                                <td class="font-semibold">{d.name}</td>
+                                <td>{numeric(d.value)}% off</td>
+                                <td>Manual at checkout</td>
+                                <td><span class="tag {d.isActive ? 'text-success' : 'text-danger'}">{d.isActive?'Active':'Inactive'}</span></td>
+                                <td class="action-cell"><div class="act-row">
+                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                </div></td>
+                            </tr>
+                        {/each}
+                        {#if percentages.length===0}<tr class="empty-row"><td colspan="5">No percentage discounts yet.</td></tr>{/if}
+                    </tbody>
+                </table>
+            {/if}
+        </div>
+    </div>
 </MgmtPage>
 
 <Modal bind:show={showBundle} title={editingBundle ? 'Edit Bundle' : 'Add Bundle'} width="760px" height="min(86vh, 780px)">
@@ -970,18 +1016,18 @@
             </div>
         </div>
         <div class="field">
-            <label>Quantity *</label>
-            <div class="flex justify-between items-center px-3 py-2.5 bg-bg-panel border border-border-flat rounded-sm cursor-pointer transition-colors hover:border-accent-primary" on:click={() => showQtyPad = true}>
+            <label for="bundle-quantity-button">Quantity *</label>
+            <button id="bundle-quantity-button" type="button" class="number-trigger" on:click={() => showQtyPad = true}>
                 <span class="text-text-main font-semibold">{curQty} items</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
-            </div>
+            </button>
         </div>
         <div class="field">
-            <label>Bundle Price (£) *</label>
-            <div class="flex justify-between items-center px-3 py-2.5 bg-bg-panel border border-border-flat rounded-sm cursor-pointer transition-colors hover:border-accent-primary" on:click={() => showPricePad = true}>
+            <label for="bundle-price-button">Bundle Price (£) *</label>
+            <button id="bundle-price-button" type="button" class="number-trigger" on:click={() => showPricePad = true}>
                 <span class="font-semibold text-success">{formatMoney(curPrice)}</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-            </div>
+            </button>
         </div>
         <div class="field"><TouchDateTimePicker label="Start Time (optional)" bind:value={curStartAt} /></div>
         <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={curEndAt} /></div>
@@ -1058,7 +1104,7 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showBundle=false}>Cancel</button>
+        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showBundle=false}>Cancel</button>
         <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBundle}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
@@ -1147,7 +1193,7 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showBogo=false}>Cancel</button>
+        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showBogo=false}>Cancel</button>
         <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBogo}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
@@ -1166,7 +1212,7 @@
         <div class="span-2 p-3 flat-card text-sm text-text-muted">This discount is selected manually by the cashier from the POS discount button.</div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showPercent=false}>Cancel</button>
+        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showPercent=false}>Cancel</button>
         <button class="btn btn-primary" disabled={savingPromotion} on:click={savePercent}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
@@ -1273,7 +1319,7 @@
         </div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={savingPromotion} on:click={() => showTemporary=false}>Cancel</button>
+        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showTemporary=false}>Cancel</button>
         <button class="btn btn-primary" disabled={savingPromotion} on:click={saveTemporary}>{savingPromotion ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
@@ -1283,8 +1329,8 @@
         Delete <strong>“{bundleToDelete?.name}”</strong>? This removes the promotion and its product list.
     </p>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={deletingPromotion} on:click={() => { showDeleteConfirm = false; bundleToDelete = null; }}>Cancel</button>
-        <button class="btn btn-primary" disabled={deletingPromotion} on:click={confirmDelete}>{deletingPromotion ? 'Deleting...' : 'Delete'}</button>
+        <button class="btn btn-secondary" disabled={deletingPromotion} on:click={() => { showDeleteConfirm = false; bundleToDelete = null; }}>Cancel</button>
+        <button class="btn btn-danger" disabled={deletingPromotion} on:click={confirmDelete}>{deletingPromotion ? 'Deleting...' : 'Delete'}</button>
     </svelte:fragment>
 </Modal>
 
@@ -1294,13 +1340,13 @@
         <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" on:click|stopPropagation>
             <div class="flex justify-between items-center mb-4">
                 <h3 class="m-0 text-base text-text-muted">Enter Bundle Price</h3>
-                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" on:click={() => showPricePad = false}>✕</button>
+                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close price keypad" aria-label="Close price keypad" on:click={() => showPricePad = false}>✕</button>
             </div>
             <div class="p-5 text-3xl font-bold text-center text-success mb-4 flat-card">
-                {formatMoney(parseInt(priceString || '0'))}
+                {formatMoney(curPrice)}
             </div>
             <div class="grid grid-cols-3 gap-2.5">
-                {#each ['1', '2', '3', '4', '5', '6', '7', '8', '9', '00', '0', 'DEL', 'C', 'ENTER'] as key}
+                {#each ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'DEL', 'C', 'ENTER'] as key}
                     <button
                         class="flat-card p-5 text-lg font-semibold text-center cursor-pointer transition-colors hover:!bg-bg-card-hover hover:border-accent-primary
                             {key === 'ENTER' ? '!bg-accent-primary !text-white !border-0 col-span-2 hover:!bg-accent-primary-hover' : ''}
@@ -1321,7 +1367,7 @@
         <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" on:click|stopPropagation>
             <div class="flex justify-between items-center mb-4">
                 <h3 class="m-0 text-base text-text-muted">Enter Quantity</h3>
-                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" on:click={() => showQtyPad = false}>✕</button>
+                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close quantity keypad" aria-label="Close quantity keypad" on:click={() => showQtyPad = false}>✕</button>
             </div>
             <div class="p-5 text-3xl font-bold text-center text-text-main mb-4 flat-card">
                 {qtyString}
@@ -1342,3 +1388,34 @@
         </div>
     </div>
 {/if}
+
+<style>
+    .add-promotion-button { min-width: 168px; display: inline-flex; align-items: center; justify-content: center; gap: .5rem; }
+    .add-promotion-button svg { width: 19px; height: 19px; flex: 0 0 19px; }
+    .discount-page { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .promotion-tabs { padding: .7rem 1rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
+    .promotion-tabs button { min-width: 0; min-height: 50px; padding: .55rem .75rem; display: flex; align-items: center; justify-content: space-between; gap: .55rem; color: var(--text-muted); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); cursor: pointer; }
+    .promotion-tabs button:hover { color: var(--text-main); border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .promotion-tabs button.active { color: white; border-color: var(--accent-primary); background: var(--accent-primary); }
+    .promotion-tabs span { min-width: 0; overflow: hidden; font-size: .82rem; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
+    .promotion-tabs small { min-width: 25px; height: 25px; padding: 0 .35rem; display: grid; place-items: center; flex: 0 0 auto; font-size: .68rem; font-weight: 900; border-radius: 50%; background: var(--bg-panel); }
+    .promotion-tabs button.active small { color: var(--accent-primary); background: white; }
+    .promotion-table-wrap { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }
+    .promotion-table { width: 100%; min-width: 760px; }
+    .promotion-table-wide { min-width: 890px; }
+    .promotion-table th { position: sticky; top: 0; z-index: 2; }
+    .promotion-table td { vertical-align: middle; }
+    .promotion-table .empty-row td { height: 96px; }
+    .window-cell { min-width: 180px; max-width: 260px; color: var(--text-muted); font-size: .78rem; line-height: 1.4; }
+    .actions-heading { width: 118px; text-align: right; }
+    .action-cell { width: 118px; }
+    .act-row { display: grid; grid-template-columns: repeat(2, 42px); justify-content: end; gap: .45rem; }
+    .act-row .act-btn { width: 42px !important; height: 42px !important; min-width: 42px !important; min-height: 42px !important; border-radius: .4rem; }
+    .act-row svg { width: 18px; height: 18px; }
+    .number-trigger { width: 100%; min-height: 46px; padding: .65rem .75rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--text-main); text-align: left; border: 1px solid var(--border-flat); border-radius: .25rem; background: var(--bg-panel); cursor: pointer; }
+    .number-trigger:hover { border-color: var(--accent-primary); }
+    @media (max-width: 700px) {
+        .add-promotion-button { min-width: 142px; }
+        .promotion-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+</style>

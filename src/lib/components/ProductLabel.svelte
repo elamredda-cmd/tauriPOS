@@ -15,8 +15,8 @@
     $: labelPadding = labelWidth >= 70 ? 1.5 : labelWidth <= 32 ? 0.8 : 1;
     $: labelTopPadding = labelWidth >= 70 ? 0.25 : labelWidth <= 32 ? 0 : 0.05;
     $: nameLines = isWideLabel && isTallLabel ? 2 : 1;
-    $: barcodeValue = product.barcode || product.sku || product.scalePlu || product.id.slice(0, 12);
-    $: showBarcode = design.showBarcode !== false;
+    $: barcodeValue = String(product.barcode || '').trim();
+    $: showBarcode = design.showBarcode !== false && Boolean(barcodeValue);
     $: barcodeHeight = labelHeight >= 70 ? 92 : labelHeight >= 50 ? 70 : labelHeight >= 30 ? 44 : 28;
     $: previewScale = preview
         ? Math.min(1.6, Math.max(0.35, Math.min(360 / (labelWidth * 3.78), 420 / (labelHeight * 3.78))))

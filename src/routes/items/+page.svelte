@@ -22,6 +22,7 @@
         getGoodsMenuCount,
         getGoodsMenuEditorProducts,
         getProductsPage,
+        getProductImage,
     } from "$lib/stores/database";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
@@ -69,11 +70,15 @@
         .map((rule) => rule.productLength))].sort((a, b) => a - b);
     $: categoryNameById = new Map($categoriesDB.map((category) => [category.id, category.name]));
     $: taxNameById = new Map($taxRatesDB.map((taxRate) => [taxRate.id, taxRate.name]));
+    $: activeCategoryOptions = $categoriesDB
+        .filter((category) => category.isActive)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
+        .map((category) => ({ label: category.name, value: category.id }));
     $: itemCategoryOptions = [
         ...(!$categoriesDB.some(c => c.isActive && c.id === currentItem.categoryId) && currentItem.categoryId
             ? [{ label: `${getCategoryName(currentItem.categoryId)} (Inactive)`, value: currentItem.categoryId }]
             : []),
-        ...$categoriesDB.filter(c => c.isActive).map(c => ({ label: c.name, value: c.id })),
+        ...activeCategoryOptions,
     ];
 
     // Numpad for Price Input
@@ -242,14 +247,23 @@
         showModal = true;
     }
 
-    function openEditModal(item: Product) {
-        currentItem = { ...item };
+    async function openEditModal(item: Product) {
+        currentItem = { ...item, image: item.image || "" };
         originalItem = { ...item };
         priceString = item.price.toString();
         selectedPluLength = item.scalePlu?.length || configuredPluLengths[0] || 5;
         isEditing = true;
         imageUploadError = "";
         showModal = true;
+        try {
+            const image = await getProductImage(item.id);
+            if (showModal && isEditing && currentItem.id === item.id) {
+                currentItem = { ...currentItem, image };
+                originalItem = originalItem ? { ...originalItem, image } : originalItem;
+            }
+        } catch (error) {
+            console.warn("Could not load product image:", error);
+        }
     }
 
     const PALETTE = [
@@ -300,7 +314,7 @@
                 image.src = objectUrl;
             });
 
-            const maxSide = 360;
+            const maxSide = 256;
             const ratio = Math.min(1, maxSide / Math.max(image.width, image.height));
             const width = Math.max(1, Math.round(image.width * ratio));
             const height = Math.max(1, Math.round(image.height * ratio));
@@ -314,7 +328,7 @@
             ctx.drawImage(image, 0, 0, width, height);
 
             const blob = await new Promise<Blob | null>((resolve) => {
-                canvas.toBlob(resolve, "image/jpeg", 0.72);
+                canvas.toBlob(resolve, "image/jpeg", 0.65);
             });
             if (!blob) throw new Error("Could not prepare image");
             return blobToDataUrl(blob);
@@ -621,7 +635,9 @@
                 <div class="items-category-filter min-w-[200px]">
                     <CustomSelect
                         bind:value={selectedCategoryId}
-                        options={[{label: 'All Categories', value: 'all'}, ...$categoriesDB.filter(c => c.isActive).map(c => ({label: c.name, value: c.id}))]}
+                        options={[{label: 'All Categories', value: 'all'}, ...activeCategoryOptions]}
+                        menuMinWidth="min(340px, calc(100vw - 2rem))"
+                        largeOptions
                     />
                 </div>
                 <div class="items-status-filter min-w-[170px]">
@@ -690,7 +706,7 @@
                                 style="background-color: {item.color || '#3b82f6'}"
                             >
                                 {#if item.image}
-                                    <img class="h-full w-full object-cover" src={item.image} alt={item.name} />
+                                    <img class="h-full w-full bg-white object-contain" src={item.image} alt={item.name} />
                                 {/if}
                             </div>
                         </td>
@@ -786,7 +802,7 @@
                             style="background-color: {currentItem.color || '#3b82f6'}"
                         >
                             {#if currentItem.image}
-                                <img class="h-full w-full object-cover" src={currentItem.image} alt={currentItem.name || 'Item image'} />
+                                <img class="h-full w-full bg-white object-contain" src={currentItem.image} alt={currentItem.name || 'Item image'} />
                             {:else}
                                 <div class="flex h-full w-full items-center justify-center px-4 text-center text-sm font-bold text-white/85">
                                     {currentItem.name || "No image yet"}
@@ -800,7 +816,7 @@
                             <div>
                                 <p class="m-0 font-bold text-text-main">Add a small image for this product tile</p>
                                 <p class="m-0 mt-1 text-sm text-text-muted">
-                                    The app resizes it to a small JPEG before saving, then syncs it through the product record.
+                                    The app resizes it to a small JPEG before saving, then syncs it separately from the product record.
                                 </p>
                             </div>
                             <div class="item-image-actions flex flex-wrap gap-2">
@@ -900,6 +916,8 @@
                         label="Category *"
                         bind:value={currentItem.categoryId}
                         options={itemCategoryOptions}
+                        menuMinWidth="min(340px, calc(100vw - 2rem))"
+                        largeOptions
                     />
                 </div>
 

@@ -13,6 +13,7 @@
     } from '$lib/stores/database';
     import { currentEmployee, currentShiftId, logout } from '$lib/stores/session';
     import { toast } from '$lib/stores/toast';
+    import { hasPermission } from '$lib/permissions';
 
     type ShiftSummaryRow = Shift & {
         cashierName?: string;
@@ -58,6 +59,7 @@
 
     $: cashUpEnabled = ($settingsDB.find(setting => setting.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: reconcileCard = ($settingsDB.find(setting => setting.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
+    $: canViewShiftHistory = hasPermission($currentEmployee, 'open_reports', $settingsDB);
     $: activeOrderCount = Number(activeShift?.orderCount || 0);
     $: canClose = poundsToPence(countedCash) !== null && (!reconcileCard || poundsToPence(cardMachineTotal) !== null);
     $: pageCount = Math.max(1, Math.ceil(shiftsTotal / PAGE_SIZE));
@@ -74,7 +76,7 @@
 
     $: {
         const queryKey = `${previousFilterKey}|${page}`;
-        if (shiftsMounted && queryKey !== previousQueryKey) {
+        if (shiftsMounted && canViewShiftHistory && queryKey !== previousQueryKey) {
             previousQueryKey = queryKey;
             scheduleShiftsLoad();
         }
@@ -90,7 +92,7 @@
         activeShiftKey = $currentShiftId;
         previousFilterKey = `${appliedSearchQuery}|${statusFilter}`;
         previousQueryKey = `${previousFilterKey}|${page}`;
-        void loadShiftsPage();
+        if (canViewShiftHistory) void loadShiftsPage();
         void loadActiveShift(activeShiftKey);
     });
 
@@ -110,6 +112,7 @@
     }
 
     async function loadShiftsPage() {
+        if (!canViewShiftHistory) return;
         const run = ++shiftsRun;
         shiftsLoading = true;
         shiftsLoadError = '';
@@ -315,7 +318,7 @@
         <div class="feature-off"><strong>No open till session.</strong><span>Sign in and open a till session from the POS before using cash-up.</span></div>
     {/if}
 
-    {#if $currentEmployee?.role === 'admin'}
+    {#if canViewShiftHistory}
         <section class="history-panel">
             <div class="history-heading">
                 <div class="history-title"><span class="eyebrow">Audit history</span><h2>Previous Sessions</h2></div>

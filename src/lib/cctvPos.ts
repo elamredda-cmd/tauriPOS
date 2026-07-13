@@ -124,8 +124,18 @@ function alignedLine(label: string, value: string, width: number): string {
     return `${cleanLabel.padEnd(labelWidth, ' ')} ${cleanValue}`;
 }
 
-function divider(width: number): string {
-    return '-'.repeat(normaliseLineWidth(width));
+function compactProductLine(
+    name: string,
+    quantity: number,
+    unitPrice: number,
+    lineTotal: number,
+    width: number,
+): string {
+    const safeWidth = normaliseLineWidth(width);
+    const suffix = ` x${formatQuantity(quantity)} @${money(unitPrice)} =${money(lineTotal)}`;
+    const nameWidth = Math.max(1, safeWidth - suffix.length);
+    const productName = cleanText(name).slice(0, nameWidth).trimEnd();
+    return `${productName}${suffix}`.slice(0, safeWidth);
 }
 
 function withEnding(text: string): string {
@@ -222,26 +232,26 @@ export function formatCctvItemText(payload: CctvItemPayload, config = getCctvPos
     const quantity = Number.isFinite(payload.quantity) && Number(payload.quantity) > 0
         ? Number(payload.quantity)
         : 1;
-    const label = quantity === 1
-        ? cleanText(payload.name)
-        : `${formatQuantity(quantity)}x ${cleanText(payload.name)}`;
-    return alignedLine(label, `GBP ${money(payload.price * quantity)}`, config.lineWidth);
+    return compactProductLine(
+        payload.name,
+        quantity,
+        payload.price,
+        payload.price * quantity,
+        config.lineWidth,
+    );
 }
 
 export function formatCctvReceiptText(payload: CctvReceiptPayload, config = getCctvPosConfig()): string {
     const width = config.lineWidth;
-    const till = cleanText(payload.tillName || config.posName || `POS ${config.posNumber}`);
-    const cashier = cleanText(payload.cashierName);
-    const rows = [cleanText(`SALE COMPLETE - ${till}`).slice(0, width), divider(width)];
-
-    rows.push(...payload.lines.slice(0, 30).map((item) => {
-        const label = `${formatQuantity(item.quantity)}x ${cleanText(item.name)}`;
-        return alignedLine(label, `GBP ${money(item.lineTotal)}`, width);
-    }));
-    rows.push(divider(width));
-    if (payload.discount > 0) rows.push(alignedLine('DISCOUNT', `-GBP ${money(payload.discount)}`, width));
-    rows.push(alignedLine('TOTAL', `GBP ${money(payload.total)}`, width));
-    rows.push(cleanText(`${payload.paymentMethod.toUpperCase()}${cashier ? ` - ${cashier}` : ''}`).slice(0, width));
+    const rows = payload.lines.slice(0, 30).map((item) => compactProductLine(
+        item.name,
+        item.quantity,
+        item.unitPrice,
+        item.lineTotal,
+        width,
+    ));
+    if (payload.discount > 0) rows.push(alignedLine('DISCOUNT', `-${money(payload.discount)}`, width));
+    rows.push(alignedLine('TOTAL', money(payload.total), width));
     return rows.join('\r\n');
 }
 

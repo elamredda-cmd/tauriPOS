@@ -278,7 +278,7 @@
                                         style="background-color: {slot.product.color || '#3b82f6'}"
                                     >
                                         {#if slot.product.image}
-                                            <img class="absolute inset-0 h-full w-full object-cover" src={slot.product.image} alt={slot.product.name} />
+                                            <img class="absolute inset-0 h-full w-full bg-white object-contain" src={slot.product.image} alt={slot.product.name} />
                                         {/if}
                                         <div class="absolute bottom-2 right-2 rounded-sm bg-[var(--price-bg)] px-2 py-1 text-[0.9rem] font-bold text-[var(--price-text)]">
                                             {formatMoney(slot.product.price)}

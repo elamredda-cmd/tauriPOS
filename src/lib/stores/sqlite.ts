@@ -8,7 +8,7 @@ const PRODUCT_SEARCH_COUNT_CAP = 1000;
 const PRODUCT_CONTAINS_SEARCH_MIN_LENGTH = 3;
 
 const UPDATED_AT_INDEX_TABLES = [
-    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
@@ -68,6 +68,13 @@ export async function initDb() {
             isActive INTEGER DEFAULT 1,
             createdAt TEXT,
             updatedAt TEXT
+        )
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS product_images (
+            id TEXT PRIMARY KEY,
+            image TEXT NOT NULL DEFAULT '',
+            updatedAt TEXT NOT NULL
         )
     `);
 
@@ -231,12 +238,15 @@ export async function initDb() {
     await d.execute(`
         CREATE TABLE IF NOT EXISTS employees (
             id TEXT PRIMARY KEY,
+            storeId TEXT,
             name TEXT NOT NULL,
             pin TEXT,
             pinHash TEXT,
             role TEXT,
+            email TEXT,
             isActive INTEGER DEFAULT 1,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -541,6 +551,10 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_manager_approvals_action ON manager_approvals(action)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_manager_approvals_created ON manager_approvals(createdAt DESC, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt DESC, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created ON audit_logs(action, createdAt DESC, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_created ON audit_logs(entityType, createdAt DESC, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_stock_receipts_created ON stock_receipts(createdAt)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`);
 
@@ -718,6 +732,8 @@ async function runMigrations() {
     await addColumnIfMissing('products', 'updatedAt', 'TEXT');
     await dropColumnIfExists('products', 'showInPos');
     await dropColumnIfExists('categories', 'showOnPos');
+    await addColumnIfMissing('employees', 'storeId', 'TEXT');
+    await addColumnIfMissing('employees', 'email', 'TEXT');
     await addColumnIfMissing('employees', 'pinHash', 'TEXT');
 
     // Till cash-up and card reconciliation fields.
@@ -752,6 +768,16 @@ async function runMigrations() {
 /** One-shot data migrations (tracked via settings table). */
 async function runDataMigrations() {
     const d = await getDb();
+
+    // Keep large image payloads out of product rows. This makes product, price,
+    // and stock sync lightweight while preserving existing images.
+    await d.execute(`
+        INSERT OR IGNORE INTO product_images (id, image, updatedAt)
+        SELECT id, image, COALESCE(NULLIF(updatedAt, ''), NULLIF(createdAt, ''), ?)
+        FROM products
+        WHERE TRIM(COALESCE(image, '')) <> ''
+    `, [new Date().toISOString()]);
+    await d.execute(`UPDATE products SET image = NULL WHERE image IS NOT NULL AND image <> ''`);
 
     // Empty identifiers are not real identifiers. Convert them to NULL so
     // database-level unique indexes can allow many products without barcodes.
@@ -1146,8 +1172,9 @@ export async function getProductsByIds(
         const chunk = uniqueIds.slice(i, i + 500);
         const placeholders = chunk.map(() => '?').join(', ');
         const chunkRows = await d.select(
-            `SELECT ${compact ? PRODUCT_PICKER_COLUMNS : 'p.*'}
+            `SELECT ${compact ? PRODUCT_PICKER_COLUMNS : "p.*, COALESCE(pi.image, p.image, '') AS image"}
              FROM products p
+             ${compact ? '' : 'LEFT JOIN product_images pi ON pi.id = p.id'}
              WHERE p.id IN (${placeholders})${activeOnly ? ' AND p.isActive = 1' : ''}`,
             chunk,
         ) as any[];
@@ -1160,15 +1187,17 @@ export async function getPosScreenProducts(): Promise<any[]> {
     const d = await getDb();
     const [tileRows, goodsRows] = await Promise.all([
         d.select(`
-            SELECT p.*
+            SELECT p.*, COALESCE(pi.image, p.image, '') AS image
             FROM pos_tiles t
             CROSS JOIN products p ON p.id = t.productId
+            LEFT JOIN product_images pi ON pi.id = p.id
             WHERE p.isActive = 1
             ORDER BY t.pageId, t.position
         `) as Promise<any[]>,
         d.select(`
-            SELECT p.*
+            SELECT p.*, COALESCE(pi.image, p.image, '') AS image
             FROM products p
+            LEFT JOIN product_images pi ON pi.id = p.id
             WHERE p.isActive = 1
               AND p.showInGoods = 1
             ORDER BY COALESCE(NULLIF(p.goodsSortOrder, 0), 999999), p.name COLLATE NOCASE ASC
@@ -1193,6 +1222,42 @@ export async function getPosScreenProducts(): Promise<any[]> {
         rows.push(row);
     }
     return rows;
+}
+
+export async function getProductImage(productId: string): Promise<string> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT COALESCE(pi.image, p.image, '') AS image
+         FROM products p
+         LEFT JOIN product_images pi ON pi.id = p.id
+         WHERE p.id = ? LIMIT 1`,
+        [productId],
+    );
+    return String(rows[0]?.image || '');
+}
+
+export async function upsertProductImage(productId: string, image: string, updatedAt: string): Promise<void> {
+    await upsert('product_images', { id: productId, image, updatedAt }, 'id');
+}
+
+export async function attachProductImages(products: any[]): Promise<any[]> {
+    if (products.length === 0) return products;
+    const d = await getDb();
+    const imageById = new Map<string, string>();
+    const ids = [...new Set(products.map((product) => String(product?.id || '')).filter(Boolean))];
+    for (let index = 0; index < ids.length; index += 400) {
+        const chunk = ids.slice(index, index + 400);
+        const placeholders = chunk.map(() => '?').join(', ');
+        const rows: any[] = await d.select(
+            `SELECT id, image FROM product_images WHERE id IN (${placeholders})`,
+            chunk,
+        );
+        for (const row of rows) imageById.set(String(row.id), String(row.image || ''));
+    }
+    return products.map((product) => ({
+        ...product,
+        image: imageById.get(String(product.id)) ?? String(product.image || ''),
+    }));
 }
 
 export async function assertProductIdentifiersUnique(product: any): Promise<void> {

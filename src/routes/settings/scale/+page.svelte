@@ -113,7 +113,7 @@
                     <p class="settings-hero-kicker !text-success">Scale connection</p>
                     <h2 class="settings-hero-title">Connect the weighing scale</h2>
                     <p class="settings-hero-copy">
-                        Your Adam scale uses a serial cable. Choose the serial port from this page, then the Scale button on the till will fill the weight automatically.
+                        Your Adam scale uses a serial cable. Choose the serial port here, then press Read Scale in the till Scale dialog whenever you need the current weight.
                     </p>
                 </div>
                 <button
@@ -205,7 +205,7 @@
                                 on:change={(event) => updateSetting('scale_hardware_request_mode', String(event.detail))}
                             />
                             <div class="field">
-                                <label>Read Interval</label>
+                                <label>Read Timeout</label>
                                 <input
                                     type="number"
                                     min="500"
@@ -214,7 +214,7 @@
                                     value={scale.pollMs}
                                     on:change={(event) => updateSetting('scale_hardware_poll_ms', event.currentTarget.value || '1200')}
                                 />
-                                <small class="text-text-muted">Milliseconds between live reads in the till Scale dialog.</small>
+                                <small class="text-text-muted">Maximum milliseconds to wait after you press Read Scale. The app no longer reads continuously.</small>
                             </div>
                         </div>
                         {#if scaleTestStatus}

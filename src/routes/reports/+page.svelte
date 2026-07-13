@@ -3,7 +3,7 @@
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { formatMoney, settingsDB } from '$lib/stores/db';
+    import { formatMoney, settingsDB, storeDB } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import { currentEmployee } from '$lib/stores/session';
     import { hasPermission } from '$lib/permissions';
@@ -319,7 +319,8 @@
             toast('Open a report first', 'info');
             return;
         }
-        await printThermalReport(closeReportText, 'L&Bj POS end-of-day report', 'close');
+        const shopName = $storeDB.name?.trim() || 'Shop';
+        await printThermalReport(closeReportText, `${shopName} end-of-day report`, 'close');
     }
 
     function filledDailyTrend(start: string, end: string, points: DailySalesPoint[]) {
@@ -350,8 +351,9 @@
         period: string,
         data: { overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] },
     ) {
+        const shopName = $storeDB.name?.trim() || 'Shop';
         const lines = [
-            'L&Bj POS',
+            shopName,
             title,
             period,
             ''.padEnd(32, '-'),
@@ -365,7 +367,16 @@
             `Card: ${formatMoney(data.breakdown.totalCard)}`,
             `Loyalty: ${formatMoney(data.breakdown.totalLoyalty)}`,
         ];
-        lines.push(''.padEnd(32, '-'), `Printed: ${new Date().toLocaleString('en-GB')}`);
+        if (data.breakdown.unrecordedAmount !== 0) {
+            lines.push(`Unrecorded: ${formatMoney(data.breakdown.unrecordedAmount)}`);
+        }
+        if (data.topProducts.length > 0) {
+            lines.push(''.padEnd(32, '-'), 'Top products');
+            for (const product of data.topProducts.slice(0, 5)) {
+                lines.push(`${product.qtySold} x ${product.name}`, `  ${formatMoney(product.totalRevenue)}`);
+            }
+        }
+        lines.push(''.padEnd(32, '-'), `Generated: ${new Date().toLocaleString('en-GB')}`);
         return lines.join('\n');
     }
 

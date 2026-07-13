@@ -8,7 +8,7 @@ import { getScaleSaleDisplay } from '$lib/scaleSale';
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
 export type ReceiptPaperWidth = '58mm' | '80mm';
 export type ReceiptPrinterModel = 'generic_escpos' | 'star_tsp100';
-export type LabelPrinterProtocol = 'system' | 'escpos' | 'zpl' | 'tspl';
+export type LabelPrinterProtocol = 'system' | 'escpos' | 'star' | 'zpl' | 'tspl';
 
 export interface ReceiptPrinterConfig {
     enabled: boolean;
@@ -136,19 +136,43 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         fallbackConnection
     );
     const protocolRaw = setting(settings, 'label_printer_protocol', '');
-    const directProtocol = protocolRaw === 'escpos' || protocolRaw === 'zpl' || protocolRaw === 'tspl'
-        ? protocolRaw
+    const directProtocol: Exclude<LabelPrinterProtocol, 'system'> = protocolRaw === 'star'
+        || protocolRaw === 'zpl'
+        || protocolRaw === 'tspl'
+        || protocolRaw === 'escpos'
+        ? protocolRaw as Exclude<LabelPrinterProtocol, 'system'>
         : 'escpos';
     // System/driver mode must never be converted into a raw ESC/POS job. Raw
     // bytes sent to a Star driver are printed as text and appear as gibberish.
     const useSystemDriver = configuredOrFallbackConnection === 'system' || protocolRaw === 'system';
     const connection: PrinterConnectionType = useSystemDriver ? 'system' : configuredOrFallbackConnection;
+    const labelPort = portSetting(settings, 'label_printer_port', receipt.port || 9100);
+    const sameStarReceiptTarget = receipt.model === 'star_tsp100'
+        && connection === receipt.connection
+        && (
+            (connection === 'usb_raw'
+                && Boolean(labelPrinterName.trim())
+                && labelPrinterName.trim().toLowerCase() === receipt.printerName.trim().toLowerCase())
+            || (connection === 'network_escpos'
+                && Boolean(labelHost.trim())
+                && labelHost.trim().toLowerCase() === receipt.host.trim().toLowerCase()
+                && labelPort === receipt.port)
+            || ((connection === 'serial' || connection === 'bluetooth')
+                && Boolean(labelDevicePath.trim())
+                && labelDevicePath.trim().toLowerCase() === receipt.devicePath.trim().toLowerCase())
+        );
+    // TSP100 printers use Star Graphic raster framing in their native mode.
+    // Sending an ESC/POS bitmap to that mode can print binary data as text and
+    // can accidentally interpret bytes from the bitmap as drawer commands.
+    const effectiveProtocol = sameStarReceiptTarget
+        ? 'star'
+        : directProtocol;
     return {
         enabled: boolSetting(settings, 'label_printer_enabled', true),
         connection,
-        protocol: DIRECT_CONNECTIONS.has(connection) ? directProtocol : 'system',
+        protocol: DIRECT_CONNECTIONS.has(connection) ? effectiveProtocol : 'system',
         host: labelHost,
-        port: portSetting(settings, 'label_printer_port', receipt.port || 9100),
+        port: labelPort,
         printerName: labelPrinterName,
         devicePath: labelDevicePath,
         baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
@@ -541,7 +565,7 @@ function labelCopies(quantity: number): number {
 }
 
 function labelBarcodeValue(product: Product): string {
-    return cleanReceiptText(product.barcode || product.sku || product.scalePlu || product.id.slice(0, 12), 48);
+    return cleanReceiptText(product.barcode || '', 48);
 }
 
 function labelText(value: string, max = 36): string {
@@ -1355,6 +1379,46 @@ function buildEscposRasterProductLabels(
     return bytes;
 }
 
+function starAsciiNumber(value: number): number[] {
+    return Array.from(new TextEncoder().encode(String(Math.max(0, Math.floor(value)))));
+}
+
+function buildStarRasterProductLabels(
+    payload: ProductLabelPayload,
+    cutPaper: boolean,
+    dotsPerMm: number,
+    maxWidthDots: number
+): number[] {
+    const canvas = renderEscposLabelCanvas(payload, dotsPerMm, maxWidthDots);
+    const raster = canvasToMonoRaster(canvas);
+    const pageLength = Math.max(200, raster.height);
+    const endMode = cutPaper ? 13 : 1;
+    const bytes: number[] = [];
+
+    for (let copy = 0; copy < labelCopies(payload.quantity); copy += 1) {
+        bytes.push(
+            0x1b, 0x2a, 0x72, 0x41, // ESC * r A: enter Star raster mode
+            0x1b, 0x2a, 0x72, 0x50, ...starAsciiNumber(pageLength), 0x00,
+            0x1b, 0x2a, 0x72, 0x45, ...starAsciiNumber(endMode), 0x00,
+            0x1b, 0x2a, 0x72, 0x51, 0x31, 0x00,
+        );
+        for (let row = 0; row < raster.height; row += 1) {
+            const start = row * raster.bytesPerRow;
+            bytes.push(
+                0x62,
+                raster.bytesPerRow & 0xff,
+                (raster.bytesPerRow >> 8) & 0xff,
+                ...raster.data.slice(start, start + raster.bytesPerRow),
+            );
+        }
+        bytes.push(
+            0x1b, 0x0c, 0x04,       // ESC FF EOT: print exactly this raster page
+            0x1b, 0x2a, 0x72, 0x42, // ESC * r B: leave Star raster mode
+        );
+    }
+    return bytes;
+}
+
 function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number, cutPaper = false): number[] {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
     const raster = canvasToMonoRaster(canvas);
@@ -1401,6 +1465,14 @@ function buildRasterProductLabel(payload: ProductLabelPayload, config: LabelPrin
     const dotsPerMm = labelDotsPerMm(config.dpi);
     if (config.protocol === 'zpl') return buildZplRasterProductLabel(payload, dotsPerMm, config.cutPaper);
     if (config.protocol === 'tspl') return buildTsplRasterProductLabel(payload, config.gapLines, dotsPerMm, config.cutPaper);
+    if (config.protocol === 'star') {
+        return buildStarRasterProductLabels(
+            payload,
+            config.cutPaper,
+            dotsPerMm,
+            escposPrintableWidthDots(config.paperWidth, dotsPerMm),
+        );
+    }
     return buildEscposRasterProductLabels(
         payload,
         config.cutPaper,
@@ -1461,6 +1533,7 @@ export function buildProductLabel(payload: ProductLabelPayload, config = getLabe
     const dotsPerMm = labelDotsPerMm(config.dpi);
     if (config.protocol === 'tspl') return buildTsplProductLabel(payload, config.gapLines, dotsPerMm, config.cutPaper);
     if (config.protocol === 'zpl') return buildZplProductLabel(payload, dotsPerMm, config.cutPaper);
+    if (config.protocol === 'star') throw new Error('Star label rastering requires the app print window');
     return buildEscposProductLabels(payload, config.cutPaper, config.gapLines);
 }
 
@@ -1482,7 +1555,7 @@ async function sendProductLabelsJob(payload: ProductLabelPayload, config: LabelP
 export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
-    if (config.protocol === 'system') throw new Error('Choose ESC/POS, TSPL, or ZPL for direct label printing');
+    if (config.protocol === 'system') throw new Error('Choose Star Graphic, ESC/POS, TSPL, or ZPL for direct label printing');
     const copies = labelCopies(payload.quantity);
     if (config.cutPaper && copies > 1) {
         for (let copy = 0; copy < copies; copy += 1) {
@@ -1591,7 +1664,7 @@ export function buildLabelTest(config = getLabelPrinterConfig()): number[] {
 export async function sendLabelPrinterTest(config = getLabelPrinterConfig()): Promise<void> {
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose Network, USB raw, Serial, or Bluetooth for direct label test printing');
-    if (config.protocol === 'system') throw new Error('Choose ESC/POS, ZPL, or TSPL for direct label test printing');
+    if (config.protocol === 'system') throw new Error('Choose Star Graphic, ESC/POS, ZPL, or TSPL for direct label test printing');
     const data = typeof document !== 'undefined'
         ? buildRasterProductLabel(labelTestPayload(), config)
         : buildLabelTest(config);

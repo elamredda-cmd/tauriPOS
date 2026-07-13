@@ -159,6 +159,13 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             updatedAt TEXT
         )
     `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS product_images (
+            id VARCHAR(36) PRIMARY KEY,
+            image MEDIUMTEXT NOT NULL,
+            updatedAt VARCHAR(40) NOT NULL
+        )
+    `);
 
     // 2. Categories
     await d.execute(`
@@ -284,12 +291,15 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     await d.execute(`
         CREATE TABLE IF NOT EXISTS employees (
             id VARCHAR(36) PRIMARY KEY,
+            storeId VARCHAR(36),
             name TEXT NOT NULL,
             pin TEXT,
             pinHash TEXT,
             role TEXT,
+            email TEXT,
             isActive INT DEFAULT 1,
-            createdAt TEXT
+            createdAt TEXT,
+            updatedAt TEXT
         )
     `);
 
@@ -678,6 +688,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE loyalty_logs ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE employees ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE employees ADD COLUMN IF NOT EXISTS pinHash TEXT`,
+        `ALTER TABLE employees ADD COLUMN IF NOT EXISTS storeId VARCHAR(36)`,
+        `ALTER TABLE employees ADD COLUMN IF NOT EXISTS email TEXT`,
         `ALTER TABLE registers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE product_suppliers ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
@@ -736,12 +748,28 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // Bust the entire column cache after migrations so new columns are seen
     for (const k of Object.keys(tableColumnsCache)) delete tableColumnsCache[k];
 
+    // One-time-compatible migration from the legacy products.image column.
+    // INSERT IGNORE protects a newer independently-synced image row.
+    const imageMigrationResult: any = await d.execute(`
+        INSERT IGNORE INTO product_images (id, image, updatedAt)
+        SELECT id, image,
+               COALESCE(NULLIF(updatedAt, ''), NULLIF(createdAt, ''), DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+        FROM products
+        WHERE image IS NOT NULL AND image <> ''
+    `);
+
     await ensureSyncTimestampTriggers(d);
     await cleanupDuplicateProductIdentifiers(d);
     await cleanupDuplicatePromotionMemberships(d);
     await cleanupDuplicateOpenShifts(d);
     await ensureDeleteTombstoneTriggers(d);
     await ensureSyncChangeTriggers(d);
+    if (Number(imageMigrationResult?.rowsAffected || 0) > 0) {
+        await d.execute(
+            `INSERT INTO sync_change_log (table_name, changedAt)
+             VALUES ('product_images', DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))`,
+        );
+    }
     await cleanupDeletedOrOrphanedPromotionRows(d);
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
@@ -774,6 +802,10 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
         `CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`,
         `CREATE INDEX IF NOT EXISTS idx_manager_approvals_action ON manager_approvals(action(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_manager_approvals_created ON manager_approvals(createdAt(255), id)`,
+        `CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(createdAt(255), id)`,
+        `CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created ON audit_logs(action(255), createdAt(255), id)`,
+        `CREATE INDEX IF NOT EXISTS idx_audit_logs_entity_created ON audit_logs(entityType(255), createdAt(255), id)`,
         `CREATE INDEX IF NOT EXISTS idx_stock_receipts_created ON stock_receipts(createdAt(255))`,
         `CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`,
         `CREATE INDEX IF NOT EXISTS idx_orders_till ON orders(tillNumber(255))`,
@@ -795,7 +827,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
 }
 
 const TIMESTAMP_SYNC_TABLES = [
-    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
@@ -851,7 +883,7 @@ async function ensureSyncChangeTriggers(d: Database): Promise<void> {
 }
 
 const DELETE_SYNC_TABLES = [
-    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'customers', 'registers', 'suppliers', 'product_suppliers',
     'inventory_logs', 'orders', 'order_lines', 'payments',
@@ -1395,8 +1427,11 @@ export async function mysqlGetSyncPage(
     }
 
     const safeLimit = Math.max(1, Math.min(1000, Number(limit || 500)));
+    const selectColumns = table === 'products'
+        ? validCols.filter((column) => column !== 'image').map((column) => `\`${column}\``).join(', ')
+        : '*';
     const rows: any[] = await d.select(
-        `SELECT * FROM ${table}
+        `SELECT ${selectColumns} FROM ${table}
          WHERE ${where.join(' AND ')}
          ORDER BY updatedAt ASC, CAST(\`${idKey}\` AS CHAR) ASC
          LIMIT ?`,

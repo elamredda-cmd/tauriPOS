@@ -17,14 +17,14 @@ import * as sqlite from './sqlite';
 import * as mysql from './mysql';
 import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection } from './connection';
 import { get } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { currentEmployee } from './session';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
-    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/reports', '/shifts', '/customer-display',
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -78,7 +78,19 @@ const CUSTOMER_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
 ] as const;
+const EMPLOYEE_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
 const REPORTS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const LABEL_PRINT_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const AUDIT_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
 ] as const;
@@ -110,8 +122,11 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
     if (pathname === '/customers') return [...CUSTOMER_LIGHT_ROUTE_TABLES];
+    if (pathname === '/employees') return [...EMPLOYEE_LIGHT_ROUTE_TABLES];
     if (pathname === '/reports') return [...REPORTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/shifts') return [...SHIFTS_LIGHT_ROUTE_TABLES];
+    if (pathname === '/audit') return [...AUDIT_LIGHT_ROUTE_TABLES];
+    if (pathname === '/label-print') return [...LABEL_PRINT_LIGHT_ROUTE_TABLES];
     if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
     return [...POS_LIGHT_ROUTE_TABLES];
 }
@@ -1539,7 +1554,7 @@ async function applyTombstones(newSyncTime: string, strict = false): Promise<num
 
 // ─── Bulk push helpers (initial upload / repair) ────────────────────────────
 const PUSH_TABLES = [
-    'categories', 'products', 'pos_pages', 'pos_tiles',
+    'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
@@ -1560,7 +1575,7 @@ const REMOTE_REPLACE_DELETE_TABLES = [
     'product_suppliers', 'suppliers',
     'promo_group_items', 'promo_groups', 'discounts',
     'pos_tiles', 'pos_pages',
-    'products', 'categories', 'customers',
+    'product_images', 'products', 'categories', 'customers',
     'registers', 'tax_rates',
 ];
 
@@ -1968,6 +1983,42 @@ export async function remove(table: string, id: string, idKey: string = 'id'): P
     }
 }
 
+const EMPLOYEE_HISTORY_SQL = `
+    SELECT CASE WHEN
+        EXISTS (SELECT 1 FROM orders WHERE employeeId = ? LIMIT 1)
+        OR EXISTS (SELECT 1 FROM shifts WHERE employeeId = ? OR closedByEmployeeId = ? LIMIT 1)
+        OR EXISTS (SELECT 1 FROM audit_logs WHERE employeeId = ? LIMIT 1)
+        OR EXISTS (
+            SELECT 1 FROM manager_approvals
+            WHERE requestedByEmployeeId = ? OR approvedByEmployeeId = ? LIMIT 1
+        )
+        OR EXISTS (SELECT 1 FROM stock_receipts WHERE employeeId = ? LIMIT 1)
+        OR EXISTS (SELECT 1 FROM till_report_markers WHERE employeeId = ? LIMIT 1)
+    THEN 1 ELSE 0 END AS hasHistory
+`;
+
+/** Protect reports and audit trails before permanently removing a staff record. */
+export async function employeeHasLinkedHistory(employeeId: string): Promise<boolean> {
+    const params = Array(8).fill(employeeId);
+    const localDb = await sqlite.getDb();
+    const localRows: any[] = await localDb.select(EMPLOYEE_HISTORY_SQL, params);
+    if (Number(localRows[0]?.hasHistory || 0) === 1) return true;
+    if (!isMultiMode()) return false;
+
+    const remoteDb = await withTimeout(
+        getMysqlDb(),
+        2_000,
+        'Timed out while checking staff history on MariaDB',
+    );
+    if (!remoteDb) throw new Error('MariaDB is unavailable, so staff history cannot be verified');
+    const remoteRows: any[] = await withTimeout(
+        remoteDb.select(EMPLOYEE_HISTORY_SQL, params),
+        2_000,
+        'Timed out while checking staff history on MariaDB',
+    );
+    return Number(remoteRows[0]?.hasHistory || 0) === 1;
+}
+
 async function getLocalProductsForPromotionItems(items: any[]): Promise<any[]> {
     const productIds = Array.from(new Set(items.map(item => item.productId).filter(Boolean)));
     if (productIds.length === 0) return [];
@@ -2317,7 +2368,7 @@ export async function getAuditLogPage(options: {
          FROM audit_logs a
          LEFT JOIN employees e ON e.id = a.employeeId
          ${whereSql}
-         ORDER BY COALESCE(a.createdAt, '') DESC, a.id DESC
+         ORDER BY a.createdAt DESC, a.id ASC
          LIMIT ? OFFSET ?`,
         [...params, limit, offset],
     );
@@ -2345,7 +2396,7 @@ export async function getRecentManagerApprovals(limit = 25): Promise<any[]> {
     return d.select(
         `SELECT *
          FROM manager_approvals
-         ORDER BY COALESCE(createdAt, '') DESC, id DESC
+         ORDER BY createdAt DESC, id ASC
          LIMIT ?`,
         [Math.max(1, Math.min(100, Number(limit || 25)))],
     );
@@ -2382,6 +2433,23 @@ function hydrateProducts(rows: any[]): any[] {
 }
 
 export async function getProductsPage(options: sqlite.ProductPageOptions = {}): Promise<sqlite.ProductPageResult> {
+    if (!isTauri()) {
+        const query = String(options.query || '').trim().toLowerCase();
+        const status = options.status || 'active';
+        const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
+        const offset = Math.max(0, Number(options.offset || 0));
+        const rows = get(productsDB)
+            .filter((product) => status === 'all' || (status === 'active' ? product.isActive : !product.isActive))
+            .filter((product) => !options.categoryId || options.categoryId === 'all' || product.categoryId === options.categoryId)
+            .filter((product) => !query || [product.name, product.sku, product.barcode, product.scalePlu]
+                .some((value) => String(value || '').toLowerCase().includes(query)))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        return {
+            rows: rows.slice(offset, offset + limit),
+            total: rows.length,
+            totalIsCapped: false,
+        };
+    }
     const result = await sqlite.getProductsPage(options);
     return {
         rows: hydrateProducts(result.rows),
@@ -2464,34 +2532,62 @@ export async function findNextAvailableScalePlu(length: number, excludeId = ''):
     return sqlite.findNextAvailableScalePlu(length, excludeId);
 }
 
+export async function getProductImage(productId: string): Promise<string> {
+    return sqlite.getProductImage(productId);
+}
+
 // ─── Product Helpers ────────────────────────────────────────────────────────
 
 export async function addProduct(p: any): Promise<void> {
+    const hasImage = Object.prototype.hasOwnProperty.call(p, 'image');
+    const image = hasImage ? String(p.image || '') : '';
+    p = { ...p };
+    delete p.image;
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
     try {
         await sqlite.addProduct(p);
+        if (hasImage) await sqlite.upsertProductImage(p.id, image, p.updatedAt || new Date().toISOString());
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
     if (isMultiMode()) {
         await queueLocalProductSnapshot(p.id, p);
+        if (hasImage) {
+            await queueOffline('product_images', 'upsert', {
+                id: p.id,
+                image,
+                updatedAt: p.updatedAt || new Date().toISOString(),
+            });
+        }
         void flushOfflineQueue().catch((e) => console.warn('database: product add outbox flush failed:', e));
     }
 }
 
 export async function updateProduct(p: any): Promise<void> {
+    const hasImage = Object.prototype.hasOwnProperty.call(p, 'image');
+    const image = hasImage ? String(p.image || '') : '';
+    p = { ...p };
+    delete p.image;
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
     try {
         await sqlite.updateProduct(p);
+        if (hasImage) await sqlite.upsertProductImage(p.id, image, p.updatedAt || new Date().toISOString());
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
     if (isMultiMode()) {
         await queueLocalProductSnapshot(p.id, p);
+        if (hasImage) {
+            await queueOffline('product_images', 'upsert', {
+                id: p.id,
+                image,
+                updatedAt: p.updatedAt || new Date().toISOString(),
+            });
+        }
         void flushOfflineQueue().catch((e) => console.warn('database: product update outbox flush failed:', e));
     }
 }
@@ -2500,15 +2596,28 @@ export async function updateProductFields(
     patch: Record<string, any>,
     expected?: Record<string, any>,
 ): Promise<void> {
+    const hasImageField = Object.prototype.hasOwnProperty.call(patch, 'image');
+    const image = hasImageField ? String(patch.image || '') : '';
+    const hasImage = hasImageField && (!expected || image !== String(expected.image || ''));
+    patch = { ...patch };
+    delete patch.image;
     const stamped = await prepareProductGoodsMenuWrite(
         normalizeProductIdentifiers({ ...patch, updatedAt: new Date().toISOString() }),
     );
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
         await sqlite.updateProductFields(stamped);
-        patchProductInStore(stamped);
+        if (hasImage) await sqlite.upsertProductImage(stamped.id, image, stamped.updatedAt);
+        patchProductInStore({ ...stamped, ...(hasImage ? { image } : {}) });
         if (isMultiMode()) {
             await queueLocalProductSnapshot(stamped.id, stamped);
+            if (hasImage) {
+                await queueOffline('product_images', 'upsert', {
+                    id: stamped.id,
+                    image,
+                    updatedAt: stamped.updatedAt,
+                });
+            }
             void flushOfflineQueue().catch((e) => console.warn('database: product field outbox flush failed:', e));
         }
     } catch (e) {
@@ -3478,63 +3587,11 @@ export async function getTillSequence(): Promise<number> {
     return 0;
 }
 
-function sequenceFromTillName(name: string | null): number | null {
-    const match = (name || '').trim().match(/^till\s*(\d+)$/i);
-    if (!match) return null;
-    const parsed = parseInt(match[1], 10);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
 /**
- * Repair cloned/copy-pasted till databases where the human till name says
- * "Till 1" but the cached receipt block is still "2" from another machine.
- * This is local-only and affects future receipts, never historical receipts.
+ * Ensure this device has a receipt sequence. The till name is deliberately not
+ * considered here: it is a display label and must never change receipt numbers.
  */
 export async function ensureTillReceiptSequence(): Promise<number> {
-    const tillName = await getSettingValue('till_name');
-    const sequenceFromName = sequenceFromTillName(tillName);
-    const cached = await getSettingValue('till_seq');
-    const cachedSeq = cached ? parseInt(cached, 10) : 0;
-
-    if (sequenceFromName && sequenceFromName !== cachedSeq) {
-        const tillId = await getSettingValue('till_id');
-        let remoteConflict = false;
-        if (isMultiMode() && tillId && get(connectionState).mysqlOnline) {
-            try {
-                const remote = await getMysqlDb();
-                if (remote) {
-                    const blockStart = sequenceFromName * RECEIPT_BLOCK;
-                    const rows: any[] = await withTimeout(
-                        remote.select(
-                            `SELECT COUNT(*) AS count
-                             FROM orders
-                             WHERE orderNumber >= ? AND orderNumber < ?
-                               AND tillNumber <> ?`,
-                            [blockStart, blockStart + RECEIPT_BLOCK, tillId],
-                        ),
-                        RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS,
-                        'MariaDB receipt sequence conflict check timed out',
-                    );
-                    remoteConflict = Number(rows[0]?.count || 0) > 0;
-                }
-            } catch (e) {
-                console.warn('database: could not check till sequence conflicts:', e);
-            }
-        }
-
-        if (!remoteConflict) {
-            await sqlite.upsert('settings', {
-                key: 'till_seq',
-                value: String(sequenceFromName),
-                updatedAt: new Date().toISOString(),
-            }, 'key');
-            console.log(`database: repaired local till receipt sequence to #${sequenceFromName}`);
-            return sequenceFromName;
-        }
-
-        console.warn(`database: did not switch to receipt sequence #${sequenceFromName}; that block is already used by another till`);
-    }
-
     return getTillSequence();
 }
 
@@ -3689,6 +3746,7 @@ export interface SchemaValidationResult {
 
 const CRITICAL_SCHEMA: Record<string, string[]> = {
     products: ['id', 'price', 'costPrice', 'stockLevel', 'trackStock', 'allowPriceOverride', 'updatedAt'],
+    product_images: ['id', 'image', 'updatedAt'],
     discounts: ['id', 'kind', 'groupId', 'bundleQuantity', 'bundlePrice', 'updatedAt'],
     promo_groups: ['id', 'name', 'isActive', 'updatedAt'],
     promo_group_items: ['id', 'groupId', 'productId', 'updatedAt'],
@@ -3697,7 +3755,7 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
     payments: ['id', 'orderId', 'amount', 'cashAmount', 'cardAmount', 'updatedAt'],
     customers: ['id', 'name', 'postcode', 'loyaltyCode', 'loyaltyPoints', 'updatedAt'],
     loyalty_logs: ['id', 'customerId', 'orderId', 'pointsChange', 'reason', 'updatedAt'],
-    employees: ['id', 'pinHash', 'role', 'isActive', 'updatedAt'],
+    employees: ['id', 'storeId', 'pinHash', 'role', 'email', 'isActive', 'updatedAt'],
     inventory_logs: ['id', 'productId', 'quantityChange', 'referenceId', 'updatedAt'],
     audit_logs: ['id', 'employeeId', 'action', 'entityId', 'updatedAt'],
     shifts: ['id', 'registerId', 'employeeId', 'status', 'updatedAt'],
@@ -3827,7 +3885,7 @@ async function clearRemoteTombstones(remote: any): Promise<void> {
 }
 
 const LOCAL_CACHE_RESET_TABLES = [
-    'categories', 'products', 'pos_pages', 'pos_tiles',
+    'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
@@ -4065,6 +4123,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
     if (requested && PROMOTION_SYNC_TABLES.some(table => requested.has(table))) {
         for (const table of PROMOTION_SYNC_TABLES) requested.add(table);
     }
+    if (requested?.has('product_images')) requested.add('products');
     if (requested && lightRoute) {
         for (const table of LIGHT_ROUTE_SKIP_HYDRATION_TABLES) requested.delete(table);
     }
@@ -4116,7 +4175,8 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
         categoriesDB.set(cats.map(c => sqlite.rehydrateBooleans(c, ['isActive'])));
         posPagesDB.set(pages);
         tilesDB.set(tiles);
-        productsDB.set(prods.map(p => sqlite.rehydrateBooleans(p, [
+        const prodsWithImages = await sqlite.attachProductImages(prods);
+        productsDB.set(prodsWithImages.map(p => sqlite.rehydrateBooleans(p, [
             'isActive', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
         taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
@@ -4157,7 +4217,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
     if (shouldHydrate('products')) {
         const rows = lightRoute
             ? await sqlite.getPosScreenProducts()
-            : await sqlite.getAll('products');
+            : await sqlite.attachProductImages(await sqlite.getAll('products'));
         productsDB.set(rows.map(p => sqlite.rehydrateBooleans(p, [
             'isActive', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
@@ -4313,7 +4373,7 @@ const SYNC_PULL_PAGE_SIZE = 500;
 
 /** All tables — synced on the full cycle so product and pricing changes catch up without interrupting rapid scanning. */
 const ALL_SYNC_TABLES = [
-    'products', 'categories', 'pos_pages', 'pos_tiles',
+    'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
@@ -4986,7 +5046,7 @@ export async function wipeAndPullFromServer(): Promise<void> {
 
         // Wipe local tables
         const tablesToWipe = [
-            'categories', 'products', 'pos_pages', 'pos_tiles',
+            'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
             'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
             'employees', 'customers', 'registers',
             'suppliers', 'product_suppliers', 'inventory_logs',
