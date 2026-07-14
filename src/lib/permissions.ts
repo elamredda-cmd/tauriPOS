@@ -115,6 +115,8 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
     { path: '/stock-receiving', permission: 'open_stock_receiving' },
     { path: '/sync', permission: 'open_sync' },
     { path: '/audit', permission: 'open_audit' },
+    { path: '/settings/layout', permission: 'open_design' },
+    { path: '/settings/labels', permission: 'open_design' },
     { path: '/settings', permission: 'open_settings' },
 ];
 

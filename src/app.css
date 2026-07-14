@@ -346,6 +346,14 @@
   min-width: 0;
 }
 
+.pos-tile-text-backdrop {
+  background: linear-gradient(to bottom, rgb(0 0 0 / 28%), rgb(0 0 0 / 88%));
+}
+
+.pos-tile-text-backdrop .pos-tile-name {
+  text-shadow: 0 1px 3px rgb(0 0 0 / 90%);
+}
+
 .pos-tile-price small {
   font-size: .78em;
 }

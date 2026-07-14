@@ -1,7 +1,7 @@
 <script lang="ts">
     import Code39Barcode from './Code39Barcode.svelte';
     import { formatMoney, type Product, type Store } from '$lib/stores/db';
-    import type { LabelDesign } from '$lib/labels';
+    import { formatLabelPrintDate, labelSizeScale, type LabelDesign } from '$lib/labels';
 
     export let product: Product;
     export let store: Store;
@@ -17,7 +17,14 @@
     $: nameLines = isWideLabel && isTallLabel ? 2 : 1;
     $: barcodeValue = String(product.barcode || '').trim();
     $: showBarcode = design.showBarcode !== false && Boolean(barcodeValue);
-    $: barcodeHeight = labelHeight >= 70 ? 92 : labelHeight >= 50 ? 70 : labelHeight >= 30 ? 44 : 28;
+    $: barcodeHeight = Math.round(
+        (labelHeight >= 70 ? 92 : labelHeight >= 50 ? 70 : labelHeight >= 30 ? 44 : 28)
+        * labelSizeScale(design.barcodeSizePercent),
+    );
+    $: showPrintDate = design.showPrintDate === true;
+    $: printDate = formatLabelPrintDate();
+    $: datePosition = design.printDatePosition || 'bottom-right';
+    $: dateAtTop = datePosition.startsWith('top-');
     $: previewScale = preview
         ? Math.min(1.6, Math.max(0.35, Math.min(360 / (labelWidth * 3.78), 420 / (labelHeight * 3.78))))
         : 1;
@@ -26,9 +33,10 @@
         : design.fontFamily === 'condensed'
             ? 'Arial Narrow, Helvetica Condensed, Arial, sans-serif'
             : 'Arial, Helvetica, sans-serif';
-    $: textScale = design.textScale === 'small' ? 0.68 : design.textScale === 'large' ? 1.32 : 1;
-    $: nameScale = design.nameTextScale === 'small' ? 0.68 : design.nameTextScale === 'large' ? 1.32 : 1;
-    $: priceScale = design.priceTextScale === 'small' ? 0.68 : design.priceTextScale === 'large' ? 1.32 : 1;
+    $: textScale = labelSizeScale(design.textSizePercent);
+    $: nameScale = labelSizeScale(design.nameSizePercent);
+    $: priceScale = labelSizeScale(design.priceSizePercent);
+    $: dateReserve = showPrintDate ? Math.max(1.8, 2.25 * textScale) : 0;
 </script>
 
 <article
@@ -37,8 +45,9 @@
     class:tall={isTallLabel}
     class:preview
     class:noBarcode={!showBarcode}
-    style="--label-width:{labelWidth}mm;--label-height:{labelHeight}mm;--label-padding:{labelPadding}mm;--label-top-padding:{labelTopPadding}mm;--label-name-lines:{nameLines};--label-font:{labelFont};--label-text-scale:{textScale};--label-name-scale:{nameScale};--label-price-scale:{priceScale};--label-preview-scale:{previewScale};"
+    style="--label-width:{labelWidth}mm;--label-height:{labelHeight}mm;--label-padding:{labelPadding}mm;--label-top-padding:{labelTopPadding}mm;--label-date-top-reserve:{showPrintDate && dateAtTop ? dateReserve : 0}mm;--label-date-bottom-reserve:{showPrintDate && !dateAtTop ? dateReserve : 0}mm;--label-name-lines:{nameLines};--label-font:{labelFont};--label-text-scale:{textScale};--label-name-scale:{nameScale};--label-price-scale:{priceScale};--label-barcode-height:{barcodeHeight}px;--label-preview-scale:{previewScale};"
 >
+    {#if showPrintDate}<time class="print-date {datePosition}">{printDate}</time>{/if}
     {#if design.showStore}<small class="store">{store.name}</small>{/if}
     {#if design.showName}<h2>{product.name}</h2>{/if}
     {#if design.showPrice}<strong class="price">{formatMoney(product.price)}</strong>{/if}
@@ -51,16 +60,22 @@
 </article>
 
 <style>
-    .product-label { box-sizing: border-box; width: var(--label-width); height: var(--label-height); padding: var(--label-top-padding) var(--label-padding) var(--label-padding); overflow: hidden; display: grid; grid-template-rows: min-content min-content minmax(0, 1fr) min-content; gap: .25mm; align-content: stretch; color: #000; border: .25mm solid #000; background: #fff; font-family: var(--label-font); page-break-after: always; break-after: page; }
+    .product-label { position: relative; box-sizing: border-box; width: var(--label-width); height: var(--label-height); padding: calc(var(--label-top-padding) + var(--label-date-top-reserve)) var(--label-padding) calc(var(--label-padding) + var(--label-date-bottom-reserve)); overflow: hidden; display: grid; grid-template-rows: min-content min-content minmax(0, 1fr) min-content; gap: .25mm; align-content: stretch; color: #000; border: .25mm solid #000; background: #fff; font-family: var(--label-font); page-break-after: always; break-after: page; }
     .product-label.preview { max-width: 100%; transform-origin: top center; zoom: var(--label-preview-scale); }
     .store { overflow: hidden; font-size: calc(2.4mm * var(--label-text-scale)); font-weight: 800; text-align: center; text-transform: uppercase; white-space: nowrap; }
     h2 { margin: 0 0 .2mm; overflow: hidden; display: -webkit-box; font-family: var(--label-font); font-size: clamp(8px, calc(3.3mm * var(--label-name-scale)), 22px); line-height: 1.05; text-align: center; text-overflow: ellipsis; -webkit-line-clamp: var(--label-name-lines); line-clamp: var(--label-name-lines); -webkit-box-orient: vertical; }
     .price { margin: .2mm 0; font-size: clamp(13px, calc(4.6mm * var(--label-price-scale)), 38px); line-height: 1; text-align: center; }
-    .barcode { min-height: 0; overflow: hidden; display: flex; align-items: stretch; justify-content: center; }
+    .barcode { height: var(--label-barcode-height); max-height: 100%; min-height: 0; overflow: hidden; display: flex; align-self: end; align-items: stretch; justify-content: center; }
     .barcode :global(.loyalty-barcode) { box-sizing: border-box; width: 100%; height: 100%; padding: .35mm; border-radius: 0; }
-    .barcode :global(svg) { height: 100% !important; min-height: 8mm; }
+    .barcode :global(svg) { height: 100% !important; min-height: 0; }
     .barcode :global(strong) { display: none; }
     footer { display: flex; justify-content: center; flex-wrap: wrap; gap: 1mm 2mm; overflow: hidden; font-size: calc(2mm * var(--label-text-scale)); font-family: ui-monospace, monospace; white-space: nowrap; }
+    .print-date { position: absolute; z-index: 1; overflow: hidden; max-width: calc(100% - var(--label-padding) * 2); color: #000; font-family: var(--label-font); font-size: max(6px, calc(1.8mm * var(--label-text-scale))); font-weight: 700; line-height: 1; white-space: nowrap; }
+    .print-date.top-left, .print-date.top-center, .print-date.top-right { top: max(.2mm, var(--label-top-padding)); }
+    .print-date.bottom-left, .print-date.bottom-center, .print-date.bottom-right { bottom: .3mm; }
+    .print-date.top-left, .print-date.bottom-left { left: var(--label-padding); }
+    .print-date.top-center, .print-date.bottom-center { left: 50%; transform: translateX(-50%); }
+    .print-date.top-right, .print-date.bottom-right { right: var(--label-padding); }
     .noBarcode .price { align-self: center; }
     .template-compact { grid-template-columns: 1fr auto; grid-template-rows: auto 1fr auto; }
     .template-compact h2 { text-align: left; }

@@ -13,13 +13,16 @@
     }
 </script>
 
-<div class="flex flex-col gap-2">
-    <label class="text-sm text-text-muted font-medium">{label}</label>
+<fieldset class="flex flex-col gap-2 border-0 p-0 m-0">
+    <legend class="text-sm text-text-muted font-medium mb-2">{label}</legend>
     <div class="grid grid-cols-[repeat(auto-fill,minmax(40px,1fr))] gap-2">
         {#each colors as c}
-            <button 
-                class="w-10 h-10 rounded-sm border-2 flex items-center justify-center transition-transform hover:scale-105 {value === c ? 'border-text-main ring-2 ring-accent-primary' : 'border-transparent'}"
+            <button
+                type="button"
+                class="w-10 h-10 rounded-sm border-2 flex items-center justify-center {value === c ? 'border-text-main ring-2 ring-accent-primary' : 'border-transparent'}"
                 style="background: {c}" 
+                aria-label={`Use colour ${c}`}
+                aria-pressed={value === c}
                 on:click={() => select(c)}
             >
                 {#if value === c}
@@ -28,10 +31,16 @@
             </button>
         {/each}
         <div class="relative w-10 h-10">
-            <input type="color" bind:value class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-            <div class="w-full h-full flex items-center justify-center bg-bg-panel border border-border-flat rounded-sm text-lg pointer-events-none">
-                🎨
+            <input type="color" bind:value aria-label="Choose a custom colour" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            <div class="w-full h-full flex items-center justify-center bg-bg-panel border border-border-flat rounded-sm text-text-muted pointer-events-none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18" aria-hidden="true">
+                    <path d="M12 22a10 10 0 1 1 10-10c0 2.2-1.8 4-4 4h-1.8a1.5 1.5 0 0 0-1.2 2.4l.3.4A2 2 0 0 1 13.7 22H12z"></path>
+                    <circle cx="7.5" cy="10.5" r="1"></circle>
+                    <circle cx="10.5" cy="6.5" r="1"></circle>
+                    <circle cx="15" cy="7.5" r="1"></circle>
+                    <circle cx="17" cy="12" r="1"></circle>
+                </svg>
             </div>
         </div>
     </div>
-</div>
+</fieldset>

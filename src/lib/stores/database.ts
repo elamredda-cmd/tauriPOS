@@ -25,6 +25,7 @@ const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
     '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
+    '/design', '/design/scale', '/tiles', '/settings/layout', '/settings/labels',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -49,6 +50,16 @@ const ITEM_LIGHT_ROUTE_TABLES = [
     'settings',
 ] as const;
 const ADMIN_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const DESIGN_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const TILE_DESIGNER_LIGHT_ROUTE_TABLES = [
+    'pos_pages',
+    'pos_tiles',
     'employees',
     'settings',
 ] as const;
@@ -117,6 +128,10 @@ function isLightStoreRoute(): boolean {
 
 export function getLightRouteHydrationTables(pathname = typeof window !== 'undefined' ? window.location.pathname : '/'): string[] {
     if (pathname === '/admin') return [...ADMIN_LIGHT_ROUTE_TABLES];
+    if (pathname === '/tiles') return [...TILE_DESIGNER_LIGHT_ROUTE_TABLES];
+    if (pathname === '/design' || pathname === '/design/scale' || pathname === '/settings/layout' || pathname === '/settings/labels') {
+        return [...DESIGN_LIGHT_ROUTE_TABLES];
+    }
     if (pathname === '/items') return [...ITEM_LIGHT_ROUTE_TABLES];
     if (pathname === '/orders') return [...ORDERS_LIGHT_ROUTE_TABLES];
     if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
@@ -2440,6 +2455,7 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
         const offset = Math.max(0, Number(options.offset || 0));
         const rows = get(productsDB)
             .filter((product) => status === 'all' || (status === 'active' ? product.isActive : !product.isActive))
+            .filter((product) => !options.weighableOnly || product.isWeighable)
             .filter((product) => !options.categoryId || options.categoryId === 'all' || product.categoryId === options.categoryId)
             .filter((product) => !query || [product.name, product.sku, product.barcode, product.scalePlu]
                 .some((value) => String(value || '').toLowerCase().includes(query)))
@@ -2459,6 +2475,10 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
 }
 
 export async function getProductsByIds(ids: string[], activeOnly = true, compact = false): Promise<any[]> {
+    if (!isTauri()) {
+        const wanted = new Set(ids.map((id) => String(id || '').trim()).filter(Boolean));
+        return get(productsDB).filter((product) => wanted.has(product.id) && (!activeOnly || product.isActive));
+    }
     return hydrateProducts(await sqlite.getProductsByIds(ids, activeOnly, compact));
 }
 

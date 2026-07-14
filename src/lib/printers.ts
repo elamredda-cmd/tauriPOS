@@ -2,7 +2,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { formatMoney, settingsDB, type Order, type OrderLine, type Product, type Setting, type Store } from '$lib/stores/db';
 import type { ReceiptDesign } from '$lib/receipt';
-import { defaultLabelDesign, type LabelDesign, type LabelTextScale } from '$lib/labels';
+import {
+    defaultLabelDesign,
+    formatLabelPrintDate,
+    labelSizeScale,
+    type LabelDatePosition,
+    type LabelDesign,
+} from '$lib/labels';
 import { getScaleSaleDisplay } from '$lib/scaleSale';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
@@ -625,24 +631,43 @@ function labelPrice(product: Product): string {
     return `GBP ${money(product.price)}`;
 }
 
-function labelScaleValue(scale: LabelTextScale | undefined): number {
-    return scale === 'small' ? 0.68 : scale === 'large' ? 1.32 : 1;
-}
-
 function labelScale(design: LabelDesign): number {
-    return labelScaleValue(design.textScale);
+    return labelSizeScale(design.textSizePercent);
 }
 
 function labelNameScale(design: LabelDesign): number {
-    return labelScaleValue(design.nameTextScale || design.textScale);
+    return labelSizeScale(design.nameSizePercent);
 }
 
 function labelPriceScale(design: LabelDesign): number {
-    return labelScaleValue(design.priceTextScale || design.textScale);
+    return labelSizeScale(design.priceSizePercent);
+}
+
+function labelBarcodeScale(design: LabelDesign): number {
+    return labelSizeScale(design.barcodeSizePercent);
 }
 
 function labelShowsBarcode(design: LabelDesign): boolean {
     return design.showBarcode !== false;
+}
+
+function labelShowsPrintDate(design: LabelDesign): boolean {
+    return design.showPrintDate === true;
+}
+
+function labelDatePosition(design: LabelDesign): LabelDatePosition {
+    return design.printDatePosition || 'bottom-right';
+}
+
+function labelDateIsTop(design: LabelDesign): boolean {
+    return labelDatePosition(design).startsWith('top-');
+}
+
+function labelDateAlign(design: LabelDesign): 'left' | 'center' | 'right' {
+    const position = labelDatePosition(design);
+    if (position.endsWith('-left')) return 'left';
+    if (position.endsWith('-right')) return 'right';
+    return 'center';
 }
 
 function zplFont(size: number, design: LabelDesign, scale = labelScale(design)): string {
@@ -651,19 +676,20 @@ function zplFont(size: number, design: LabelDesign, scale = labelScale(design)):
 }
 
 function tsplScale(design: LabelDesign): number {
-    return design.textScale === 'large' ? 2 : 1;
+    return labelScale(design) >= 1.3 ? 2 : 1;
 }
 
-function tsplSizeScale(scale: LabelTextScale | undefined): number {
-    return scale === 'large' ? 2 : 1;
+function tsplSizeScale(percent: number | undefined): number {
+    return labelSizeScale(percent) >= 1.3 ? 2 : 1;
 }
 
 function tsplNameFont(design: LabelDesign): string {
-    return design.nameTextScale === 'small' ? '2' : design.nameTextScale === 'large' ? '4' : '3';
+    const scale = labelNameScale(design);
+    return scale < 0.85 ? '2' : scale >= 1.3 ? '4' : '3';
 }
 
 function tsplPriceFont(design: LabelDesign): string {
-    return design.priceTextScale === 'small' ? '3' : '4';
+    return labelPriceScale(design) < 0.85 ? '3' : '4';
 }
 
 function tsplFontWidth(font: string): number {
@@ -683,8 +709,25 @@ function estimatedBarcodeWidth(value: string, moduleWidth: number): number {
 }
 
 function tsplCenteredText(width: number, margin: number, y: number, font: string, scale: number, value: string): string {
+    return tsplAlignedText(width, margin, y, font, scale, value, 'center');
+}
+
+function tsplAlignedText(
+    width: number,
+    margin: number,
+    y: number,
+    font: string,
+    scale: number,
+    value: string,
+    align: 'left' | 'center' | 'right',
+): string {
     const escaped = tsplEscape(value);
-    const x = centeredX(width, margin, escaped.length * tsplFontWidth(font) * scale);
+    const contentWidth = Math.min(width - margin * 2, escaped.length * tsplFontWidth(font) * scale);
+    const x = align === 'left'
+        ? margin
+        : align === 'right'
+            ? Math.max(margin, width - margin - contentWidth)
+            : centeredX(width, margin, contentWidth);
     return `TEXT ${x},${y},"${font}",0,${scale},${scale},"${escaped}"`;
 }
 
@@ -694,14 +737,14 @@ function escposFontSelect(design: LabelDesign): number[] {
 
 function escposTextSize(design: LabelDesign, kind: 'normal' | 'name' | 'price'): number[] {
     const scale = kind === 'price'
-        ? design.priceTextScale || design.textScale
+        ? labelPriceScale(design)
         : kind === 'name'
-            ? design.nameTextScale || design.textScale
-            : design.textScale;
+            ? labelNameScale(design)
+            : labelScale(design);
     if (kind === 'price') {
-        return [0x1d, 0x21, scale === 'small' ? 0x10 : scale === 'large' ? 0x22 : 0x11];
+        return [0x1d, 0x21, scale < 0.85 ? 0x10 : scale >= 1.3 ? 0x22 : 0x11];
     }
-    return [0x1d, 0x21, scale === 'large' ? 0x01 : 0x00];
+    return [0x1d, 0x21, scale >= 1.3 ? 0x01 : 0x00];
 }
 
 function escposCut(cutPaper: boolean): number[] {
@@ -751,9 +794,18 @@ function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number, c
     const width = mmToDots(widthMm, dotsPerMm);
     const height = mmToDots(heightMm, dotsPerMm);
     const margin = labelMarginDots(width);
-    let y = 10;
+    const showDate = labelShowsPrintDate(design);
+    const dateAtTop = showDate && labelDateIsTop(design);
+    const dateHeight = showDate ? Math.max(18, Math.round(22 * labelScale(design))) : 0;
+    const bottomDateReserve = showDate && !dateAtTop ? dateHeight + 5 : 0;
+    let y = 10 + (dateAtTop ? dateHeight + 4 : 0);
     const lines = ['^XA', '^CI28', `^PW${width}`, `^LL${height}`, '^LH0,0', '^LT0'];
     if (cutPaper) lines.push('^MMC');
+    if (showDate) {
+        const alignment = labelDateAlign(design).charAt(0).toUpperCase();
+        const dateY = dateAtTop ? 6 : Math.max(6, height - dateHeight - 4);
+        lines.push(`^FO${margin},${dateY}${zplFont(17, design)}^FB${width - margin * 2},1,0,${alignment}^FD${formatLabelPrintDate()}^FS`);
+    }
     if (design.showStore && store.name) {
         lines.push(`^FO${margin},${y}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(store.name)}^FS`);
         y += Math.round(24 * labelScale(design));
@@ -775,16 +827,19 @@ function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number, c
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
     const footerReserve = footer.length > 0 ? 28 : 8;
-    const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
-    const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
+    const barcodeSpace = Math.max(0, height - y - footerReserve - bottomDateReserve - 8);
+    const barcodeHeight = Math.min(
+        Math.round(height * (heightMm >= 60 ? 0.34 : 0.3) * labelBarcodeScale(design)),
+        barcodeSpace,
+    );
     if (hasBarcode && barcode && barcodeHeight >= 28) {
         const moduleWidth = zplBarcodeModuleWidth(width, barcode);
         const barcodeX = centeredX(width, margin, estimatedBarcodeWidth(barcode, moduleWidth));
         lines.push(`^BY${moduleWidth},2,${barcodeHeight}`);
-        lines.push(`^FO${barcodeX},${Math.max(y, height - barcodeHeight - 34)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
+        lines.push(`^FO${barcodeX},${Math.max(y, height - bottomDateReserve - footerReserve - barcodeHeight)}^BCN,${barcodeHeight},${design.showBarcodeText ? 'Y' : 'N'},N,N^FD${zplEscape(barcode)}^FS`);
     }
     if (footer.length > 0) {
-        lines.push(`^FO${margin},${height - 24}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(footer.join('  '))}^FS`);
+        lines.push(`^FO${margin},${height - bottomDateReserve - 24}${zplFont(18, design)}^FB${width - margin * 2},1,0,C^FD${zplEscape(footer.join('  '))}^FS`);
     }
     lines.push(`^PQ${labelCopies(payload.quantity)},0,1,N`, '^XZ', '');
     return Array.from(new TextEncoder().encode(lines.join('\n')));
@@ -798,7 +853,11 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
     const height = mmToDots(heightMm, dotsPerMm);
     const margin = labelMarginDots(width);
     const scale = tsplScale(design);
-    let y = 10;
+    const showDate = labelShowsPrintDate(design);
+    const dateAtTop = showDate && labelDateIsTop(design);
+    const dateHeight = showDate ? Math.max(18, Math.round(22 * labelScale(design))) : 0;
+    const bottomDateReserve = showDate && !dateAtTop ? dateHeight + 5 : 0;
+    let y = 10 + (dateAtTop ? dateHeight + 4 : 0);
     const lines = [
         `SIZE ${widthMm} mm,${heightMm} mm`,
         `GAP ${Math.max(0, Math.min(12, gapLines))} mm,0`,
@@ -808,12 +867,24 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
         ...(cutPaper ? ['SET CUTTER ON'] : []),
         'CLS',
     ];
+    if (showDate) {
+        const dateY = dateAtTop ? 6 : Math.max(6, height - dateHeight - 4);
+        lines.push(tsplAlignedText(
+            width,
+            margin,
+            dateY,
+            '2',
+            scale,
+            formatLabelPrintDate(),
+            labelDateAlign(design),
+        ));
+    }
     if (design.showStore && store.name) {
         lines.push(tsplCenteredText(width, margin, y, '2', scale, store.name));
         y += 26 * scale;
     }
     if (design.showName) {
-        const nameScale = tsplSizeScale(design.nameTextScale || design.textScale);
+        const nameScale = tsplSizeScale(design.nameSizePercent);
         const nameFont = tsplNameFont(design);
         const maxLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
         const nameLines = wrapLabelText(product.name, labelTextColumns(design, 'name'), maxLines);
@@ -824,7 +895,7 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
         y += 4;
     }
     if (design.showPrice) {
-        const priceScale = tsplSizeScale(design.priceTextScale || design.textScale);
+        const priceScale = tsplSizeScale(design.priceSizePercent);
         lines.push(tsplCenteredText(width, margin, y, tsplPriceFont(design), priceScale, labelPrice(product)));
         y += Math.round((widthMm >= 70 ? 58 : 50) * labelPriceScale(design));
     }
@@ -834,14 +905,17 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
     if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
     const footerReserve = footer.length > 0 ? 28 : 8;
-    const barcodeSpace = Math.max(0, height - y - footerReserve - 8);
-    const barcodeHeight = Math.min(Math.round(height * (heightMm >= 60 ? 0.34 : 0.3)), barcodeSpace);
+    const barcodeSpace = Math.max(0, height - y - footerReserve - bottomDateReserve - 8);
+    const barcodeHeight = Math.min(
+        Math.round(height * (heightMm >= 60 ? 0.34 : 0.3) * labelBarcodeScale(design)),
+        barcodeSpace,
+    );
     if (hasBarcode && barcode && barcodeHeight >= 28) {
         const barcodeWidth = tsplBarcodeWidth(width, barcode);
         const barcodeX = centeredX(width, margin, estimatedBarcodeWidth(barcode, barcodeWidth.narrow));
-        lines.push(`BARCODE ${barcodeX},${Math.max(y, height - barcodeHeight - 28)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,${barcodeWidth.narrow},${barcodeWidth.wide},"${tsplEscape(barcode)}"`);
+        lines.push(`BARCODE ${barcodeX},${Math.max(y, height - bottomDateReserve - footerReserve - barcodeHeight)},"128",${barcodeHeight},${design.showBarcodeText ? 1 : 0},0,${barcodeWidth.narrow},${barcodeWidth.wide},"${tsplEscape(barcode)}"`);
     }
-    if (footer.length > 0) lines.push(tsplCenteredText(width, margin, height - 24, '1', scale, footer.join('  ')));
+    if (footer.length > 0) lines.push(tsplCenteredText(width, margin, height - bottomDateReserve - 24, '1', scale, footer.join('  ')));
     lines.push(`PRINT ${labelCopies(payload.quantity)}`, '');
     return Array.from(new TextEncoder().encode(lines.join('\r\n')));
 }
@@ -943,12 +1017,18 @@ type FittedWrappedText = {
     lineHeight: number;
 };
 
-function labelBarcodeHeightDots(heightMm: number, availableHeight: number, dotsPerMm = 8): number {
+function labelBarcodeHeightDots(
+    heightMm: number,
+    availableHeight: number,
+    dotsPerMm = 8,
+    scale = 1,
+): number {
     if (availableHeight <= 0) return 0;
     const targetMm = heightMm >= 60 ? 14 : heightMm >= 40 ? 10 : heightMm >= 30 ? 7 : 5.5;
     const minMm = heightMm >= 30 ? 5 : 4;
-    const target = Math.round(targetMm * dotsPerMm);
-    const minimum = Math.round(minMm * dotsPerMm);
+    const safeScale = Math.max(0.5, Math.min(1.7, scale));
+    const target = Math.round(targetMm * dotsPerMm * safeScale);
+    const minimum = Math.round(minMm * dotsPerMm * Math.min(1, safeScale));
     if (availableHeight < minimum) return 0;
     return Math.min(target, availableHeight);
 }
@@ -1142,7 +1222,7 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
     const height = mmToDots(heightMm, dotsPerMm);
     if (maxWidthDots > 0 && width > maxWidthDots) width = Math.max(80, maxWidthDots);
     const padding = labelPaddingDots(widthMm, dotsPerMm);
-    const topPadding = labelTopPaddingDots(widthMm, dotsPerMm);
+    const baseTopPadding = labelTopPaddingDots(widthMm, dotsPerMm);
     const bottomPadding = Math.max(1, Math.round(0.25 * dotsPerMm));
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -1159,6 +1239,21 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
     const nameSize = Math.round((widthMm >= 70 ? 3.8 : 3.3) * dotsPerMm * labelNameScale(design));
     const standardPriceSize = Math.round((widthMm >= 70 ? 6.2 : 4.6) * dotsPerMm * labelPriceScale(design));
     const shelfPriceSize = Math.round(6.8 * dotsPerMm * labelPriceScale(design));
+    const showDate = labelShowsPrintDate(design);
+    const dateAtTop = showDate && labelDateIsTop(design);
+    const dateText = showDate ? formatLabelPrintDate() : '';
+    const dateSize = showDate
+        ? fitSingleLineCanvasText(
+            ctx,
+            design,
+            dateText,
+            printableWidth,
+            8,
+            Math.round(1.8 * dotsPerMm * labelScale(design)),
+            700,
+        )
+        : 0;
+    const dateHeight = showDate ? canvasLineHeight(dateSize, 1.0) : 0;
     const footerParts: string[] = [];
     const barcode = labelBarcodeValue(product);
     const hasBarcode = labelShowsBarcode(design) && Boolean(code39Safe(barcode));
@@ -1167,15 +1262,22 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
     if (design.showSku && product.sku) footerParts.push(`SKU ${product.sku}`);
     if (design.showPlu && product.scalePlu) footerParts.push(`PLU ${product.scalePlu}`);
     const gap = Math.max(1, Math.round(0.2 * dotsPerMm));
+    const topPadding = baseTopPadding + (dateAtTop ? dateHeight + gap : 0);
     const footerText = footerParts.join('  ');
     const footerSize = footerParts.length > 0
         ? fitSingleLineCanvasText(ctx, design, footerText, printableWidth, 8, smallSize, 700)
         : 0;
     const footerHeight = footerParts.length > 0 ? canvasLineHeight(footerSize, 1.0) : 0;
-    const maxBottom = Math.max(topPadding, height - bottomPadding);
+    const bottomDateReserve = showDate && !dateAtTop ? dateHeight + gap : 0;
+    const maxBottom = Math.max(topPadding, height - bottomPadding - bottomDateReserve);
     const reservedFooter = footerHeight > 0 ? footerHeight + gap : 0;
     const barcodeHeight = hasBarcode
-        ? labelBarcodeHeightDots(heightMm, maxBottom - topPadding - reservedFooter, dotsPerMm)
+        ? labelBarcodeHeightDots(
+            heightMm,
+            maxBottom - topPadding - reservedFooter,
+            dotsPerMm,
+            labelBarcodeScale(design),
+        )
         : 0;
     const reservedBarcode = barcodeHeight > 0 ? barcodeHeight + gap : 0;
     const textAreaHeight = Math.max(12, maxBottom - topPadding - reservedFooter - reservedBarcode);
@@ -1294,6 +1396,16 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
         const footerY = Math.min(Math.max(y + gap, topPadding), maxBottom - footerHeight);
         setCanvasFont(ctx, design, footerSize, 700);
         drawCanvasLine(ctx, footerText, centerX, footerY);
+    }
+
+    if (showDate) {
+        const align = labelDateAlign(design);
+        const dateX = align === 'left' ? padding : align === 'right' ? width - padding : centerX;
+        const dateY = dateAtTop
+            ? baseTopPadding
+            : Math.max(baseTopPadding, height - bottomPadding - dateHeight);
+        setCanvasFont(ctx, design, dateSize, 700);
+        drawCanvasLine(ctx, dateText, dateX, dateY, align);
     }
 
     return canvas;
@@ -1486,6 +1598,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
     const { product, store, design } = payload;
     const centerOn = [0x1b, 0x61, 0x01];
     const leftOn = [0x1b, 0x61, 0x00];
+    const rightOn = [0x1b, 0x61, 0x02];
     const boldOn = [0x1b, 0x45, 0x01];
     const boldOff = [0x1b, 0x45, 0x00];
     const normalSize = [0x1d, 0x21, 0x00];
@@ -1496,11 +1609,25 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
     const columns = labelTextColumns(design);
     const nameColumns = labelTextColumns(design, 'name');
     const nameLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
-    const barcodeHeight = heightMm >= 60 ? 92 : heightMm >= 40 ? 76 : 58;
+    const barcodeHeight = Math.max(
+        24,
+        Math.min(180, Math.round((heightMm >= 60 ? 92 : heightMm >= 40 ? 76 : 58) * labelBarcodeScale(design))),
+    );
     const barcodeModuleWidth = widthMm >= 76 && barcode.length <= 18 ? 3 : 2;
+    const showDate = labelShowsPrintDate(design);
+    const dateAtTop = showDate && labelDateIsTop(design);
+    const dateAlignment = labelDateAlign(design);
+    const dateAlignBytes = dateAlignment === 'left' ? leftOn : dateAlignment === 'right' ? rightOn : centerOn;
+    const dateBytes = [
+        ...dateAlignBytes,
+        ...escposTextSize(design, 'normal'),
+        ...line(formatLabelPrintDate(), 'latin1'),
+        ...centerOn,
+    ];
     const bytes: number[] = [];
     for (let copy = 0; copy < labelCopies(payload.quantity); copy += 1) {
         bytes.push(0x1b, 0x40, ...centerOn, ...escposFontSelect(design), ...escposTextSize(design, 'normal'));
+        if (showDate && dateAtTop) bytes.push(...dateBytes);
         if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, columns), 'latin1'), ...boldOff);
         if (design.showName) {
             bytes.push(...escposTextSize(design, 'name'));
@@ -1523,6 +1650,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
         if (design.showSku && product.sku) footer.push(`SKU ${product.sku}`);
         if (design.showPlu && product.scalePlu) footer.push(`PLU ${product.scalePlu}`);
         if (footer.length > 0) bytes.push(...line(labelText(footer.join('  '), columns), 'latin1'));
+        if (showDate && !dateAtTop) bytes.push(...dateBytes);
         bytes.push(...leftOn, ...feedLines(gapLines));
     }
     bytes.push(...escposCut(cutPaper));

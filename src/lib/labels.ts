@@ -3,6 +3,13 @@ import type { Setting } from '$lib/stores/db';
 export type LabelTemplate = 'compact' | 'standard' | 'barcode' | 'shelf';
 export type LabelFontFamily = 'standard' | 'condensed' | 'serif';
 export type LabelTextScale = 'small' | 'normal' | 'large';
+export type LabelDatePosition =
+    | 'top-left'
+    | 'top-center'
+    | 'top-right'
+    | 'bottom-left'
+    | 'bottom-center'
+    | 'bottom-right';
 
 export interface LabelDesign {
     widthMm: number;
@@ -12,6 +19,10 @@ export interface LabelDesign {
     textScale: LabelTextScale;
     nameTextScale: LabelTextScale;
     priceTextScale: LabelTextScale;
+    textSizePercent: number;
+    nameSizePercent: number;
+    priceSizePercent: number;
+    barcodeSizePercent: number;
     showBarcode: boolean;
     showStore: boolean;
     showName: boolean;
@@ -19,6 +30,8 @@ export interface LabelDesign {
     showBarcodeText: boolean;
     showSku: boolean;
     showPlu: boolean;
+    showPrintDate: boolean;
+    printDatePosition: LabelDatePosition;
 }
 
 export const labelSizePresets = [
@@ -46,6 +59,10 @@ export const defaultLabelDesign: LabelDesign = {
     textScale: 'normal',
     nameTextScale: 'normal',
     priceTextScale: 'normal',
+    textSizePercent: 100,
+    nameSizePercent: 100,
+    priceSizePercent: 100,
+    barcodeSizePercent: 100,
     showBarcode: true,
     showStore: false,
     showName: true,
@@ -53,7 +70,39 @@ export const defaultLabelDesign: LabelDesign = {
     showBarcodeText: true,
     showSku: false,
     showPlu: false,
+    showPrintDate: false,
+    printDatePosition: 'bottom-right',
 };
+
+const labelDatePositions = new Set<LabelDatePosition>([
+    'top-left',
+    'top-center',
+    'top-right',
+    'bottom-left',
+    'bottom-center',
+    'bottom-right',
+]);
+
+function legacyScalePercent(scale: unknown): number {
+    return scale === 'small' ? 68 : scale === 'large' ? 132 : 100;
+}
+
+export function clampLabelSizePercent(value: unknown, minimum = 50, maximum = 200): number {
+    const number = Number(value);
+    return Number.isFinite(number)
+        ? Math.max(minimum, Math.min(maximum, Math.round(number)))
+        : 100;
+}
+
+export function labelSizeScale(value: unknown): number {
+    return clampLabelSizePercent(value) / 100;
+}
+
+export function formatLabelPrintDate(date = new Date()): string {
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    return `${day}/${month}/${date.getFullYear()}`;
+}
 
 export function getLabelDesign(settings: Setting[]): LabelDesign {
     const raw = settings.find((setting) => setting.key === 'label_design')?.value;
@@ -64,8 +113,30 @@ export function getLabelDesign(settings: Setting[]): LabelDesign {
         return {
             ...defaultLabelDesign,
             ...parsed,
-            nameTextScale: parsed.nameTextScale || legacyTextScale,
-            priceTextScale: parsed.priceTextScale || legacyTextScale,
+            // Convert old three-step sizes once while preserving their appearance.
+            textScale: 'normal',
+            nameTextScale: 'normal',
+            priceTextScale: 'normal',
+            textSizePercent: clampLabelSizePercent(
+                parsed.textSizePercent ?? legacyScalePercent(legacyTextScale),
+                60,
+                180,
+            ),
+            nameSizePercent: clampLabelSizePercent(
+                parsed.nameSizePercent ?? legacyScalePercent(parsed.nameTextScale || legacyTextScale),
+                60,
+                180,
+            ),
+            priceSizePercent: clampLabelSizePercent(
+                parsed.priceSizePercent ?? legacyScalePercent(parsed.priceTextScale || legacyTextScale),
+                60,
+                200,
+            ),
+            barcodeSizePercent: clampLabelSizePercent(parsed.barcodeSizePercent, 50, 170),
+            showPrintDate: parsed.showPrintDate === true,
+            printDatePosition: labelDatePositions.has(parsed.printDatePosition)
+                ? parsed.printDatePosition
+                : defaultLabelDesign.printDatePosition,
         };
     } catch {
         return { ...defaultLabelDesign };

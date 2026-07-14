@@ -1489,6 +1489,7 @@ export interface ProductPageOptions {
     query?: string;
     categoryId?: string;
     status?: ProductStatusFilter;
+    weighableOnly?: boolean;
     limit?: number;
     offset?: number;
     compact?: boolean;
@@ -1525,6 +1526,10 @@ function buildProductFilterWhere(options: ProductPageOptions): { whereSql: strin
     if (options.categoryId && options.categoryId !== 'all') {
         where.push('p.categoryId = ?');
         params.push(options.categoryId);
+    }
+
+    if (options.weighableOnly) {
+        where.push('p.isWeighable = 1');
     }
 
     return {

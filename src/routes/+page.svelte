@@ -2765,7 +2765,7 @@
                                     />
                                 {/if}
                                 <div
-                                    class="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/80 via-black/40 to-transparent"
+                                    class="pos-tile-text-backdrop absolute bottom-0 left-0 right-0 p-2"
                                 >
                                     <div class="pos-tile-caption flex items-end justify-between gap-2">
                                         <h3
@@ -2989,7 +2989,7 @@
                         <div
                             class="cart-line-quantity text-[11px] md:text-xs font-bold text-accent-primary min-w-[18px] md:min-w-[22px] pt-0.5"
                         >
-                            {scaleDisplay.label}
+                            {scaleDisplay.kind === 'price' ? 'Label' : scaleDisplay.label}
                         </div>
                         <div class="flex-1 min-w-0">
                             <div class="cart-line-title">
@@ -3023,7 +3023,7 @@
                                 </div>
                             {:else}
                                 <div class="text-[9px] md:text-[10px] text-text-muted font-semibold leading-tight truncate">
-                                    {formatMoney(item.price)}
+                                    {scaleDisplay.kind === 'price' ? 'Label total' : formatMoney(item.price)}
                                 </div>
                                 <div class="text-[12px] md:text-[13px] font-black text-text-main leading-tight mt-0.5 truncate">
                                     {formatMoney(lineGross)}

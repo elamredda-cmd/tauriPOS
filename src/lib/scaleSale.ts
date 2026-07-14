@@ -22,16 +22,6 @@ export function getScaleSaleDisplay(
     }
 
     if (/^Scale price barcode:/i.test(notes)) {
-        if (linePrice > 0 && pricePerKg > 0) {
-            const direction = quantity < 0 ? -1 : 1;
-            const kilograms = direction * linePrice / pricePerKg;
-            return {
-                kind: "weight",
-                kilograms,
-                label: `~${formatKilograms(kilograms)} kg`,
-                estimated: true,
-            };
-        }
         return { kind: "price", label: "Price label" };
     }
 
