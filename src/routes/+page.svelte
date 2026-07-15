@@ -134,6 +134,7 @@
     let showGoodsModal = false;
     let goodsPriceString = "0";
     let showHeldOrders = false;
+    let heldOrderView: "this" | "other" = "this";
     let showPaymentModal = false;
     let showDiscountModal = false;
     let selectedManualDiscountId = "";
@@ -1343,6 +1344,11 @@
         showTrolleyFeedback("Cart cleared", "success");
     }
 
+    function openHeldOrders() {
+        heldOrderView = "this";
+        showHeldOrders = true;
+    }
+
     async function holdOrder() {
         if (isHoldingOrder) return;
         if (cart.length === 0) {
@@ -1735,6 +1741,9 @@
     }
     $: ownHeldOrderCount = heldOrdersForTill.filter((order) => order.tillNumber === tillId).length;
     $: otherTillHeldOrderCount = heldOrdersForTill.length - ownHeldOrderCount;
+    $: visibleHeldOrders = heldOrdersForTill.filter((order) =>
+        heldOrderView === "this" ? order.tillNumber === tillId : order.tillNumber !== tillId
+    );
     $: isMenuDisabled = cart.length > 0 || ownHeldOrderCount > 0;
 
     function handleMenuClick(path: string) {
@@ -2965,7 +2974,7 @@
                 disabled={heldOrdersLoading}
                 title={`Retrieve held trolleys: ${ownHeldOrderCount} this till, ${otherTillHeldOrderCount} other tills`}
                 aria-label={`Retrieve held trolleys: ${heldOrdersForTill.length} total`}
-                on:click|stopPropagation={() => (showHeldOrders = true)}
+                on:click|stopPropagation={openHeldOrders}
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -3914,12 +3923,28 @@
                     on:click={() => (showHeldOrders = false)}>✕</button
                 >
             </div>
-            <div class="held-order-summary" aria-label="Held trolley totals">
-                <span class="is-own"><b>{ownHeldOrderCount}</b> This till</span>
-                <span class="is-shared"><b>{otherTillHeldOrderCount}</b> Other tills</span>
+            <div class="held-order-tabs" aria-label="Choose held trolley source">
+                <button
+                    type="button"
+                    class:is-active={heldOrderView === "this"}
+                    class="is-own"
+                    on:click={() => (heldOrderView = "this")}
+                >
+                    <b>{ownHeldOrderCount}</b>
+                    <span>This till</span>
+                </button>
+                <button
+                    type="button"
+                    class:is-active={heldOrderView === "other"}
+                    class="is-shared"
+                    on:click={() => (heldOrderView = "other")}
+                >
+                    <b>{otherTillHeldOrderCount}</b>
+                    <span>Other tills</span>
+                </button>
             </div>
             <div class="overflow-y-auto flex flex-col gap-2">
-                {#each heldOrdersForTill as ho, holdIndex}
+                {#each visibleHeldOrders as ho, holdIndex}
                     {@const lines = heldOrderLinesByOrder.get(ho.id) || []}
                     {@const isOtherTill = ho.tillNumber !== tillId}
                     <button
@@ -3960,10 +3985,10 @@
                     >
                         Loading held orders...
                     </p>{/if}
-                {#if !heldOrdersLoading && heldOrdersForTill.length === 0}<p
+                {#if !heldOrdersLoading && visibleHeldOrders.length === 0}<p
                         class="text-center text-text-muted p-5"
                     >
-                        No held orders
+                        {heldOrderView === "this" ? "No trolleys held on this till" : "No trolleys held on other tills"}
                     </p>{/if}
             </div>
         </div>
