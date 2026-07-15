@@ -3737,86 +3737,111 @@
 
             <div class="payment-body flex flex-col md:flex-row gap-3 md:gap-4 min-h-0">
                 <div class="payment-summary flex-1 flex flex-col gap-3 min-h-0">
-                    <div
-                        class="payment-total-card flex justify-between items-center p-3 md:p-4 bg-bg-panel rounded-sm border border-border-flat"
-                    >
-                        <span class="text-sm md:text-base text-text-muted"
-                            >Total to Pay</span
-                        >
-                        <span class="text-2xl md:text-[2rem] font-black text-success"
-                            >{formatMoney(paymentDue)}</span
-                        >
+                    <div class="payment-total-card">
+                        <div class="payment-total-copy">
+                            <span>Amount due</span>
+                            <small>{cart.length} {cart.length === 1 ? 'line' : 'lines'} in trolley</small>
+                        </div>
+                        <strong>{formatMoney(paymentDue)}</strong>
                     </div>
                     {#if loyaltyCreditUsed > 0}
-                        <div class="flex justify-between text-sm text-success px-2">
+                        <div class="payment-loyalty-applied">
                             <span>Order {formatMoney(total)} minus loyalty credit</span>
                             <strong>-{formatMoney(loyaltyCreditUsed)}</strong>
                         </div>
                     {/if}
 
-                    <div class="payment-methods flex gap-2">
+                    <div class="payment-methods" role="group" aria-label="Payment method">
                         <button
-                            class="flat-card flex-1 p-2.5 text-sm md:text-base font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
-                            'cash'
-                                ? '!bg-accent-primary !text-white !border-accent-primary'
-                                : ''}"
+                            type="button"
+                            class:is-active={paymentMethod === "cash"}
+                            aria-pressed={paymentMethod === "cash"}
                             on:click={() => selectPaymentMethod("cash")}
-                            >Cash</button
+                        >
+                            <span class="payment-method-symbol">£</span>
+                            <span>Cash</span>
+                        </button
                         >
                         <button
-                            class="flat-card flex-1 p-2.5 text-sm md:text-base font-bold cursor-pointer flex justify-center items-center gap-2 {paymentMethod ===
-                            'card'
-                                ? '!bg-accent-primary !text-white !border-accent-primary'
-                                : ''}"
+                            type="button"
+                            class:is-active={paymentMethod === "card"}
+                            aria-pressed={paymentMethod === "card"}
                             on:click={() => selectPaymentMethod("card")}
-                            >Card</button
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                                <path d="M3 10h18M7 15h4"></path>
+                            </svg>
+                            <span>Card</span>
+                        </button
                         >
                     </div>
 
                     {#if paymentMethod === "cash"}
-                        <div class="payment-quick-grid grid grid-cols-2 gap-2">
-                            <button
-                                class="payment-quick-button payment-quick-full flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                                disabled={isCompletingSale}
-                                on:click={() => setAmountAndComplete(paymentDue)}
-                            >
-                                <div class="text-sm font-black">Pay Full</div>
-                                <div class="text-xs text-text-muted">(Exact)</div>
-                            </button>
+                        <div class="payment-cash-options">
+                            <div class="payment-section-heading">
+                                <span>Quick cash</span>
+                                <small>Amount received</small>
+                            </div>
+                            <div class="payment-quick-grid">
+                                <button
+                                    type="button"
+                                    class="payment-quick-button"
+                                    disabled={isCompletingSale}
+                                    on:click={() => setAmountAndComplete(paymentDue)}
+                                >
+                                    <span>Pay full</span>
+                                    <strong>{formatMoney(paymentDue)}</strong>
+                                    <small>Exact cash</small>
+                                </button>
                             {#if nextPoundAmount !== null}
                                 <button
-                                    class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer !border-success disabled:opacity-50 disabled:cursor-not-allowed"
+                                    type="button"
+                                    class="payment-quick-button payment-quick-rounded"
                                     disabled={isCompletingSale}
                                     on:click={() =>
                                         setAmountAndComplete(nextPoundAmount!)}
                                 >
-                                    <div class="text-sm font-black text-success">
-                                        {formatMoney(nextPoundAmount)}
-                                    </div>
-                                    <div class="text-[0.7rem] text-text-muted">
-                                        Chg: {formatMoney(nextPoundAmount - paymentDue)}
-                                    </div>
+                                    <span>Rounded cash</span>
+                                    <strong>{formatMoney(nextPoundAmount)}</strong>
+                                    <small>{formatMoney(nextPoundAmount - paymentDue)} change</small>
                                 </button>
                             {/if}
+                            </div>
+                            <div class="payment-section-heading payment-notes-heading">
+                                <span>Cash notes</span>
+                            </div>
+                            <div class="payment-note-grid">
                             {#each fixedQuickAmounts as amt}
                                 <button
-                                    class="payment-quick-button flat-card flex flex-col items-center justify-center gap-0.5 p-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                    type="button"
+                                    class="payment-note-button"
                                     disabled={isCompletingSale}
                                     on:click={() => addQuickAmount(amt)}
                                 >
-                                    <div class="text-sm font-black">
-                                        + {formatMoney(amt)}
-                                    </div>
+                                    <span>+</span>
+                                    <strong>{formatMoney(amt)}</strong>
                                 </button>
                             {/each}
+                            </div>
                         </div>
                     {:else}
-                        <div class="payment-card-note min-h-[52px] text-xs text-text-muted leading-snug rounded-sm bg-bg-panel border border-border-flat p-2">
+                        <div class="payment-card-summary">
                             {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
-                                <p>Cash part locked: {formatMoney(paymentInputAmount)}. Card will take {formatMoney(paymentDue - paymentInputAmount)}.</p>
-                                <button class="mt-1 underline text-accent-primary font-bold" on:click={() => selectPaymentMethod("cash")}>Edit cash part</button>
+                                <div class="payment-card-amount">
+                                    <span>Card balance</span>
+                                    <strong>{formatMoney(paymentDue - paymentInputAmount)}</strong>
+                                </div>
+                                <div class="payment-split-row">
+                                    <span>Cash received</span>
+                                    <b>{formatMoney(paymentInputAmount)}</b>
+                                </div>
+                                <button class="payment-edit-cash" on:click={() => selectPaymentMethod("cash")}>Edit cash</button>
                             {:else}
-                                <p>Full card payment. For split payment, enter the cash amount on Cash first, then choose Card.</p>
+                                <div class="payment-card-amount">
+                                    <span>Card payment</span>
+                                    <strong>{formatMoney(paymentDue)}</strong>
+                                </div>
                             {/if}
                         </div>
                     {/if}
@@ -3877,32 +3902,48 @@
                     </div>
                 </div>
 
-                <div
-                    class="payment-pad w-full md:w-full flex flex-col bg-bg-panel p-2.5 md:p-3 rounded-md"
-                >
-                    <div class="flex gap-2 mb-2">
-                        <div class="np-display payment-display flex-1 !h-14 md:!h-16 !text-2xl md:!text-[2rem]">
-                            {formatMoney(paymentInputAmount)}
+                <div class="payment-pad">
+                    {#if paymentMethod === "cash"}
+                        <div class="payment-pad-heading">
+                            <span>Amount received</span>
+                            <small>Cash entry</small>
                         </div>
-                        <button
-                            class="np-btn np-clear w-[56px] md:w-[64px] !h-14 md:!h-16"
-                            disabled={isCompletingSale}
-                            on:click={clearPaymentInput}>C</button
-                        >
-                    </div>
-                    <div class="np-grid payment-np-grid {paymentMethod === 'card' || isCompletingSale ? 'opacity-35 pointer-events-none' : ''}">
-                        {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
+                        <div class="payment-display-row">
+                            <div class="np-display payment-display">
+                                {formatMoney(paymentInputAmount)}
+                            </div>
                             <button
-                                class="np-btn payment-np-button !h-14 md:!h-[68px] !text-xl md:!text-2xl {key === '⌫'
-                                    ? '!text-warning'
-                                    : ''}"
+                                class="payment-clear-button"
+                                aria-label="Clear amount received"
+                                title="Clear amount"
                                 disabled={isCompletingSale}
-                                on:click={() => handlePaymentPadKey(key)}
-                            >
-                                {key}
-                            </button>
-                        {/each}
-                    </div>
+                                on:click={clearPaymentInput}
+                            >Clear</button>
+                        </div>
+                        <div class="np-grid payment-np-grid {isCompletingSale ? 'opacity-35 pointer-events-none' : ''}">
+                            {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
+                                <button
+                                    class="np-btn payment-np-button {key === '⌫' ? '!text-warning' : ''}"
+                                    disabled={isCompletingSale}
+                                    on:click={() => handlePaymentPadKey(key)}
+                                >
+                                    {key}
+                                </button>
+                            {/each}
+                        </div>
+                    {:else}
+                        <div class="payment-card-terminal">
+                            <div class="payment-card-terminal-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                                    <rect x="3" y="5" width="18" height="14" rx="2"></rect>
+                                    <path d="M3 10h18M7 15h4"></path>
+                                </svg>
+                            </div>
+                            <span>Card terminal</span>
+                            <strong>{formatMoney(paymentInputAmount > 0 && paymentInputAmount < paymentDue ? paymentDue - paymentInputAmount : paymentDue)}</strong>
+                            <small>Complete the card transaction, then confirm the sale.</small>
+                        </div>
+                    {/if}
                 </div>
             </div>
         </div>
