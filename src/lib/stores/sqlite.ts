@@ -2022,7 +2022,7 @@ async function getPaymentsForOrderIds(d: Database, orderIds: string[]): Promise<
     );
 }
 
-/** Fetch only held orders for the current till plus their lines for the POS modal. */
+/** Fetch shared held orders, keeping this till's holds first in the POS modal. */
 export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<PosHeldOrdersResult> {
     const d = await getDb();
     const safeLimit = Math.max(1, Math.min(200, Number(limit || 100)));
@@ -2030,8 +2030,8 @@ export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<Po
     const orders: any[] = await d.select(
         `${orderSummarySelect()}
          WHERE o.status = 'hold'
-           AND (? = '' OR COALESCE(o.tillNumber, '') = '' OR o.tillNumber = ?)
-         ORDER BY COALESCE(NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
+         ORDER BY CASE WHEN ? <> '' AND o.tillNumber = ? THEN 0 ELSE 1 END,
+                  COALESCE(NULLIF(o.createdAt, ''), NULLIF(o.updatedAt, '')) DESC,
                   o.orderNumber DESC
          LIMIT ?`,
         [till, till, safeLimit],

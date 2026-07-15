@@ -864,6 +864,12 @@
     background: rgba(245, 158, 11, .10);
 }
 
+.pos-retrieve-button.has-shared-orders {
+    color: #0284c7;
+    border-color: rgba(14, 165, 233, .62);
+    background: rgba(14, 165, 233, .12);
+}
+
 .pos-retrieve-button b {
     min-width: 1.45rem;
     height: 1.45rem;
@@ -877,9 +883,197 @@
     font-size: .72rem;
 }
 
+.pos-retrieve-button.has-orders:not(.has-shared-orders) b {
+    color: #111827;
+    background: #fbbf24;
+}
+
+.pos-retrieve-button.has-shared-orders b {
+    color: #fff;
+    background: #0284c7;
+}
+
 .pos-retrieve-button:disabled {
     cursor: wait;
     opacity: .65;
+}
+
+.held-order-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.held-order-summary span {
+    min-width: 0;
+    height: 2.4rem;
+    padding: 0 .65rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    border: 1px solid var(--border-flat);
+    border-radius: .375rem;
+    font-size: .75rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.held-order-summary b {
+    width: 1.55rem;
+    height: 1.55rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    border-radius: .25rem;
+    font-size: .78rem;
+}
+
+.held-order-summary .is-own {
+    color: #b45309;
+    border-color: rgba(245, 158, 11, .42);
+    background: rgba(245, 158, 11, .08);
+}
+
+.held-order-summary .is-own b {
+    color: #111827;
+    background: #fbbf24;
+}
+
+.held-order-summary .is-shared {
+    color: #0284c7;
+    border-color: rgba(14, 165, 233, .45);
+    background: rgba(14, 165, 233, .08);
+}
+
+.held-order-summary .is-shared b {
+    color: #fff;
+    background: #0284c7;
+}
+
+.held-order-card {
+    width: 100%;
+    min-height: 7rem;
+    padding: .75rem;
+    display: grid;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    align-items: stretch;
+    gap: .75rem;
+    color: var(--text-main);
+    border: 1px solid rgba(245, 158, 11, .45);
+    border-radius: .375rem;
+    background: rgba(245, 158, 11, .07);
+    text-align: left;
+    transition: border-color .15s ease, background-color .15s ease;
+}
+
+.held-order-card:hover:not(:disabled) {
+    border-color: #f59e0b;
+    background: rgba(245, 158, 11, .12);
+}
+
+.held-order-card.is-other-till {
+    border-color: rgba(14, 165, 233, .48);
+    background: rgba(14, 165, 233, .07);
+}
+
+.held-order-card.is-other-till:hover:not(:disabled) {
+    border-color: #0ea5e9;
+    background: rgba(14, 165, 233, .12);
+}
+
+.held-order-card:disabled {
+    cursor: not-allowed;
+    opacity: .52;
+}
+
+.held-order-number {
+    width: 2.25rem;
+    height: 2.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: start;
+    color: #111827;
+    border-radius: .3rem;
+    background: #fbbf24;
+    font-size: .9rem;
+    font-weight: 900;
+}
+
+.held-order-card.is-other-till .held-order-number {
+    color: #fff;
+    background: #0284c7;
+}
+
+.held-order-content {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+}
+
+.held-order-heading {
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .75rem;
+}
+
+.held-order-heading > div {
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .35rem;
+}
+
+.held-order-heading strong {
+    font-size: .88rem;
+}
+
+.held-order-heading span {
+    max-width: 10rem;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: .72rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.held-order-heading time {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: .72rem;
+    font-weight: 700;
+}
+
+.held-order-lines {
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: .2rem .45rem;
+    color: var(--text-muted);
+    font-size: .76rem;
+    line-height: 1.25;
+}
+
+.held-order-lines span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.held-order-total {
+    min-height: 1.25rem;
+    margin-top: auto;
+    color: var(--text-main);
+    font-size: 1rem;
+    font-weight: 900;
+    text-align: right;
 }
 
 [class*="hover:-translate-y"]:hover,

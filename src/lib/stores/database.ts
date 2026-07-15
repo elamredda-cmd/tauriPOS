@@ -22,6 +22,7 @@ import { currentEmployee } from './session';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+export const POS_HELD_ORDERS_CHANGED_EVENT = 'pos-held-orders-changed';
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
     '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
@@ -2507,6 +2508,19 @@ export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<sq
     };
 }
 
+/**
+ * Claim a shared held order before restoring it into a trolley. MariaDB's
+ * conditional delete is atomic and its delete trigger publishes a tombstone.
+ */
+export async function claimHeldOrder(orderId: string): Promise<boolean> {
+    if (!isMultiMode()) return true;
+    if (!get(connectionState).mysqlOnline) {
+        throw new Error('The main database must be online to retrieve a shared held order');
+    }
+    await flushOfflineQueue();
+    return mysql.mysqlClaimHeldOrder(orderId);
+}
+
 export async function getPosRecentReceipts(limit = 10): Promise<sqlite.PosRecentReceiptsResult> {
     const result = await sqlite.getPosRecentReceipts(limit);
     return {
@@ -4412,6 +4426,13 @@ const ALL_SYNC_TABLES = [
 ];
 const ALL_SYNC_TABLE_SET = new Set(ALL_SYNC_TABLES);
 
+function notifyPosHeldOrdersChanged(changedTables: Set<string>, removed = 0): void {
+    if (typeof window === 'undefined') return;
+    if (removed > 0 || changedTables.has('orders') || changedTables.has('order_lines')) {
+        window.dispatchEvent(new Event(POS_HELD_ORDERS_CHANGED_EVENT));
+    }
+}
+
 function overlapWatermark(since: string | null): string | null {
     if (!since) return since;
     const time = new Date(since).getTime();
@@ -4650,6 +4671,7 @@ async function syncChangedTables(tableNames: Iterable<string>): Promise<{
     if (totalChanges > 0 || removed > 0 || transactionPurged) {
         await hydrateSvelteStores((removed > 0 || transactionPurged) ? undefined : changedTables);
     }
+    notifyPosHeldOrdersChanged(changedTables, removed);
     return { allSucceeded, transactionPurged };
 }
 
@@ -4766,6 +4788,7 @@ export async function runFastSyncCycle(): Promise<void> {
             console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
             await hydrateSvelteStores((removed > 0 || repairedPromotions > 0) ? undefined : changedTables);
         }
+        notifyPosHeldOrdersChanged(changedTables, removed);
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
     } catch (e: any) {
@@ -4840,6 +4863,7 @@ export async function runSyncCycle(): Promise<void> {
         if (totalChanges > 0 || removed > 0 || transactionPurged || repairedPromotions > 0) {
             await hydrateSvelteStores((removed > 0 || transactionPurged || repairedPromotions > 0) ? undefined : changedTables);
         }
+        notifyPosHeldOrdersChanged(changedTables, removed);
 
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
         console.log('database: full sync complete ✅');

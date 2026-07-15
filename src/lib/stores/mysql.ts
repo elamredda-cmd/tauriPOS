@@ -1314,6 +1314,16 @@ export async function mysqlRemove(table: string, id: string, idKey: string = 'id
     await d.execute(`DELETE FROM ${table} WHERE \`${idKey}\` = ?`, [id]);
 }
 
+/** Atomically consume a held order so two tills cannot retrieve it together. */
+export async function mysqlClaimHeldOrder(orderId: string): Promise<boolean> {
+    const d = await getDb();
+    const result = await d.execute(
+        `DELETE FROM orders WHERE id = ? AND status = 'hold'`,
+        [orderId],
+    );
+    return Number(result?.rowsAffected || 0) === 1;
+}
+
 /**
  * Fetch all rows from a table.
  */

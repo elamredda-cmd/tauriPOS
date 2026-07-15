@@ -66,6 +66,9 @@
         getLatestTillReceipt,
         getOrderDetails,
         getOrderReversalContext,
+        claimHeldOrder,
+        flushOfflineQueue,
+        POS_HELD_ORDERS_CHANGED_EVENT,
         type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
@@ -792,6 +795,8 @@
         }
         document.addEventListener("pointerup", handlePosPointerUp);
         document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+        const handleHeldOrdersChanged = () => void refreshHeldOrderSummaries();
+        window.addEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
         focusScannerSoon();
 
         return () => {
@@ -800,6 +805,7 @@
             clearScannerBuffer();
             document.removeEventListener("pointerup", handlePosPointerUp);
             document.removeEventListener("keydown", handleGlobalScannerKeydown, true);
+            window.removeEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
         };
     });
 
@@ -1402,13 +1408,29 @@
             isHoldingOrder = true;
             await upsert("orders", newOrder);
             for (const line of lines) await upsert("order_lines", line);
+            let sharedAcrossTills = $connectionState.mode !== "multi";
+            if ($connectionState.mode === "multi" && $connectionState.mysqlOnline) {
+                try {
+                    await flushOfflineQueue();
+                    sharedAcrossTills = true;
+                } catch (syncError) {
+                    console.warn("Held order is waiting to synchronize:", syncError);
+                }
+            }
             if (!newOrder.tillNumber || newOrder.tillNumber === tillId) {
                 heldOrdersForTill = [enrichOrderSummary(newOrder as Order), ...heldOrdersForTill];
                 heldOrderLinesByOrder = new Map(heldOrderLinesByOrder).set(orderId, lines as OrderLine[]);
             }
             cart = [];
             selectedCartIndex = 0;
-            toast("Receipt held successfully");
+            toast(
+                $connectionState.mode === "multi"
+                    ? sharedAcrossTills
+                        ? "Trolley held and shared across tills"
+                        : "Trolley held on this till and will share when sync reconnects"
+                    : "Trolley held successfully",
+                "success",
+            );
         } catch (error) {
             try {
                 await removeSql("orders", orderId);
@@ -1423,11 +1445,16 @@
     }
 
     async function retrieveOrder(orderId: string) {
+        if (retrievingHeldOrderId) return;
         if (cart.length > 0) {
             toast(
                 "Cannot retrieve while trolley has items. Please clear trolley first.",
                 "error",
             );
+            return;
+        }
+        if ($connectionState.mode === "multi" && !$connectionState.mysqlOnline) {
+            toast("The main database must be online to safely retrieve a shared trolley", "error");
             return;
         }
         const heldOrder = heldOrdersForTill.find((order) => order.id === orderId);
@@ -1447,13 +1474,33 @@
             quantityLocked: l.notes?.startsWith("Scale price barcode:") || l.notes?.startsWith("Scale weight barcode:") || l.notes?.startsWith("Manual scale:") || false,
             skipStockAdjustment: l.notes?.startsWith("Scale price barcode:") || l.notes?.startsWith("Scale weight barcode:") || l.notes?.startsWith("Manual scale:") || false,
         }));
-        // Cascade delete in SQLite (order_lines.orderId has ON DELETE CASCADE).
+        retrievingHeldOrderId = orderId;
         try {
-            await removeSql("orders", orderId);
+            const claimed = await claimHeldOrder(orderId);
+            if (!claimed) {
+                heldOrdersForTill = heldOrdersForTill.filter((order) => order.id !== orderId);
+                const staleLines = new Map(heldOrderLinesByOrder);
+                staleLines.delete(orderId);
+                heldOrderLinesByOrder = staleLines;
+                toast("This trolley was already retrieved on another till", "error");
+                void triggerSync();
+                return;
+            }
+            // Cascade delete in SQLite (order_lines.orderId has ON DELETE CASCADE).
+            try {
+                await removeSql("orders", orderId);
+            } catch (cleanupError) {
+                if ($connectionState.mode !== "multi") throw cleanupError;
+                // The server claim already produced a tombstone, so local cleanup
+                // will finish on the next sync without losing the restored trolley.
+                console.warn("Held order local cleanup is waiting for sync:", cleanupError);
+            }
         } catch (e) {
             console.error(e);
             toast("Could not retrieve the held order. Try again.", "error");
             return;
+        } finally {
+            retrievingHeldOrderId = "";
         }
         cart = restoredCart;
         selectedManualDiscountId = $discountsDB.some((discount) =>
@@ -1465,7 +1512,13 @@
         nextHeldLines.delete(orderId);
         heldOrderLinesByOrder = nextHeldLines;
         showHeldOrders = false;
-        toast("Order retrieved");
+        toast(
+            heldOrder?.tillNumber && heldOrder.tillNumber !== tillId
+                ? `Trolley retrieved from ${heldOrder.tillName || heldOrder.tillNumber}`
+                : "Trolley retrieved",
+            "success",
+        );
+        void triggerSync();
     }
 
     function openChangePrice() {
@@ -1618,8 +1671,10 @@
     let heldOrdersForTill: PosOrderSummary[] = [];
     let heldOrderLinesByOrder = new Map<string, OrderLine[]>();
     let heldOrdersLoading = false;
+    let retrievingHeldOrderId = "";
     let posSummaryTillKey = "";
-    let posSummaryLoadToken = 0;
+    let heldOrderLoadToken = 0;
+    let latestReceiptLoadToken = 0;
     let latestTillReceiptOrder: PosOrderSummary | null = null;
 
     function groupLinesByOrderId(lines: OrderLine[]): Map<string, OrderLine[]> {
@@ -1641,38 +1696,53 @@
         };
     }
 
-    async function refreshPosOrderSummaries() {
+    async function refreshHeldOrderSummaries() {
         if (!tillId) return;
-        const token = ++posSummaryLoadToken;
+        const token = ++heldOrderLoadToken;
         heldOrdersLoading = true;
         try {
-            const [heldResult, latestReceipt] = await Promise.all([
-                getPosHeldOrders(tillId),
-                getLatestTillReceipt(tillId),
-            ]);
-            if (token !== posSummaryLoadToken) return;
+            const heldResult = await getPosHeldOrders(tillId);
+            if (token !== heldOrderLoadToken) return;
             heldOrdersForTill = heldResult.orders as PosOrderSummary[];
             heldOrderLinesByOrder = groupLinesByOrderId(heldResult.lines as OrderLine[]);
-            latestTillReceiptOrder = latestReceipt as PosOrderSummary | null;
         } catch (error) {
-            console.warn("Could not refresh POS order summaries:", error);
+            console.warn("Could not refresh held trolleys:", error);
         } finally {
-            if (token === posSummaryLoadToken) heldOrdersLoading = false;
+            if (token === heldOrderLoadToken) heldOrdersLoading = false;
         }
+    }
+
+    async function refreshLatestTillReceipt() {
+        if (!tillId) return;
+        const token = ++latestReceiptLoadToken;
+        try {
+            const latestReceipt = await getLatestTillReceipt(tillId);
+            if (token === latestReceiptLoadToken) {
+                latestTillReceiptOrder = latestReceipt as PosOrderSummary | null;
+            }
+        } catch (error) {
+            console.warn("Could not refresh latest till receipt:", error);
+        }
+    }
+
+    async function refreshPosOrderSummaries() {
+        await Promise.all([refreshHeldOrderSummaries(), refreshLatestTillReceipt()]);
     }
 
     $: if (tillId && tillId !== posSummaryTillKey) {
         posSummaryTillKey = tillId;
         void refreshPosOrderSummaries();
     }
-    $: isMenuDisabled = cart.length > 0 || heldOrdersForTill.length > 0;
+    $: ownHeldOrderCount = heldOrdersForTill.filter((order) => order.tillNumber === tillId).length;
+    $: otherTillHeldOrderCount = heldOrdersForTill.length - ownHeldOrderCount;
+    $: isMenuDisabled = cart.length > 0 || ownHeldOrderCount > 0;
 
     function handleMenuClick(path: string) {
         if (isMenuDisabled) {
             const msg =
                 cart.length > 0
                     ? "You have products in the trolley"
-                    : "You have held orders";
+                    : "You have held orders on this till";
             toast(msg, "error");
             return;
         }
@@ -2891,9 +2961,10 @@
             <button
                 class="pos-retrieve-button"
                 class:has-orders={heldOrdersForTill.length > 0}
+                class:has-shared-orders={otherTillHeldOrderCount > 0}
                 disabled={heldOrdersLoading}
-                title={`Retrieve held orders (${heldOrdersForTill.length})`}
-                aria-label={`Retrieve held orders (${heldOrdersForTill.length})`}
+                title={`Retrieve held trolleys: ${ownHeldOrderCount} this till, ${otherTillHeldOrderCount} other tills`}
+                aria-label={`Retrieve held trolleys: ${heldOrdersForTill.length} total`}
                 on:click|stopPropagation={() => (showHeldOrders = true)}
             >
                 <svg
@@ -3837,45 +3908,52 @@
             on:click|stopPropagation
         >
             <div class="modal-header">
-                <h3>Retrieve Held Orders ({heldOrdersForTill.length})</h3>
+                <h3>Retrieve Trolleys ({heldOrdersForTill.length})</h3>
                 <button
                     class="modal-close"
                     on:click={() => (showHeldOrders = false)}>✕</button
                 >
             </div>
+            <div class="held-order-summary" aria-label="Held trolley totals">
+                <span class="is-own"><b>{ownHeldOrderCount}</b> This till</span>
+                <span class="is-shared"><b>{otherTillHeldOrderCount}</b> Other tills</span>
+            </div>
             <div class="overflow-y-auto flex flex-col gap-2">
-                {#each heldOrdersForTill as ho}
+                {#each heldOrdersForTill as ho, holdIndex}
                     {@const lines = heldOrderLinesByOrder.get(ho.id) || []}
-                    <div
-                        class="flat-card p-4 cursor-pointer flex flex-col gap-2 hover:border-accent-primary {cart.length >
-                        0
-                            ? 'opacity-50 cursor-not-allowed grayscale hover:!border-border-flat'
-                            : ''}"
+                    {@const isOtherTill = ho.tillNumber !== tillId}
+                    <button
+                        type="button"
+                        class="held-order-card"
+                        class:is-other-till={isOtherTill}
+                        disabled={cart.length > 0 || Boolean(retrievingHeldOrderId)}
                         on:click={() => retrieveOrder(ho.id)}
                     >
-                        <div class="flex justify-between items-center">
-                            <strong>Held Order</strong>
-                            <span class="text-text-muted text-[0.8rem]"
-                                >{new Date(ho.createdAt).toLocaleTimeString(
-                                    "en-GB",
-                                    { hour: "2-digit", minute: "2-digit" },
-                                )}</span
-                            >
+                        <span class="held-order-number">{holdIndex + 1}</span>
+                        <div class="held-order-content">
+                            <div class="held-order-heading">
+                                <div>
+                                    <strong>{isOtherTill ? 'Shared trolley' : 'This till'}</strong>
+                                    <span>{isOtherTill ? ho.tillName || ho.tillNumber || 'Other till' : tillName}</span>
+                                </div>
+                                <time datetime={ho.createdAt}>
+                                    {new Date(ho.createdAt).toLocaleTimeString("en-GB", {
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                    })}
+                                </time>
+                            </div>
+                            <div class="held-order-lines">
+                                {#each lines.slice(0, 3) as l}<span
+                                        >{getScaleSaleDisplay(l.notes, l.quantity, l.unitPrice, l.originalPrice).label} {l.productName}</span
+                                    >{/each}
+                                {#if lines.length > 3}<span>+{lines.length - 3} more</span>{/if}
+                            </div>
+                            <div class="held-order-total money">
+                                {retrievingHeldOrderId === ho.id ? 'Retrieving...' : formatMoney(ho.total)}
+                            </div>
                         </div>
-                        <div class="flex flex-wrap gap-1">
-                            {#each lines.slice(0, 3) as l}<span
-                                    class="text-[0.8rem] text-text-muted"
-                                    >{getScaleSaleDisplay(l.notes, l.quantity, l.unitPrice, l.originalPrice).label} {l.productName}</span
-                                >{/each}
-                            {#if lines.length > 3}<span
-                                    class="text-[0.8rem] text-text-muted"
-                                    >+{lines.length - 3} more...</span
-                                >{/if}
-                        </div>
-                        <div class="text-right text-[1.1rem] money">
-                            {formatMoney(ho.total)}
-                        </div>
-                    </div>
+                    </button>
                 {/each}
                 {#if heldOrdersLoading}<p
                         class="text-center text-text-muted p-5"
