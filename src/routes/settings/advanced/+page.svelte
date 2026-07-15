@@ -46,7 +46,9 @@
     let restoreProgress = 0;
     let restoreProgressTitle = '';
     let restoreProgressDetail = '';
+    type PurgeProgressState = 'idle' | 'deleting' | 'success';
     let purgeStatus = '';
+    let purgeProgressState: PurgeProgressState = 'idle';
     let purgeResponsibilityAccepted = false;
     let purgeFinalConfirmation = false;
     let migrationConfirmed = false;
@@ -529,15 +531,28 @@
             return;
         }
         busy = true;
+        purgeProgressState = 'deleting';
         purgeStatus = 'Deleting history from every till...';
         try {
             await purgeAllTransactions();
-            purgeStatus = 'Database history was deleted. Reloading...';
-            window.location.reload();
         } catch (error) {
             purgeStatus = `Database deletion failed: ${error}`;
             busy = false;
+            purgeProgressState = 'idle';
             purgeFinalConfirmation = false;
+            toast(purgeStatus, 'error');
+            return;
+        }
+
+        busy = false;
+        purgeProgressState = 'success';
+        purgeStatus = 'History deleted successfully. Returning to the main POS...';
+        toast('History deleted successfully', 'success');
+        await new Promise(resolve => setTimeout(resolve, 900));
+        try {
+            await goto('/', { replaceState: true, invalidateAll: true });
+        } catch {
+            window.location.replace('/');
         }
     }
 </script>
@@ -832,6 +847,27 @@
         </section>
     </div>
 </MgmtPage>
+
+{#if purgeProgressState !== 'idle'}
+    <div class="purge-progress-overlay" role="status" aria-live="assertive" aria-busy={purgeProgressState === 'deleting'}>
+        <div class="purge-progress-dialog" class:purge-complete={purgeProgressState === 'success'}>
+            <div class="purge-progress-icon" aria-hidden="true">
+                {purgeProgressState === 'success' ? '✓' : '…'}
+            </div>
+            <div>
+                <h3>{purgeProgressState === 'success' ? 'History deleted' : 'Deleting sales history'}</h3>
+                <p>
+                    {purgeProgressState === 'success'
+                        ? 'The POS is ready. Returning to the main screen.'
+                        : 'Updating MariaDB and this till. Keep the app open until this finishes.'}
+                </p>
+            </div>
+            <div class="purge-progress-track" aria-hidden="true">
+                <span style={`width: ${purgeProgressState === 'success' ? 100 : 35}%`}></span>
+            </div>
+        </div>
+    </div>
+{/if}
 {/if}
 
 <style>
@@ -903,6 +939,16 @@
     .purge-disclaimer p { margin: .3rem 0 0; color: var(--text-muted); }
     .purge-warning { color: var(--danger); }
     .purge-warning { margin: 0 0 .8rem; font-weight: 800; }
+    .purge-progress-overlay { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 1rem; background: rgba(0, 0, 0, .68); }
+    .purge-progress-dialog { width: min(430px, 100%); padding: 1.2rem; display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: .85rem; align-items: center; border: 1px solid var(--danger); border-radius: .7rem; background: var(--bg-panel); box-shadow: 0 18px 45px rgba(0, 0, 0, .28); }
+    .purge-progress-dialog.purge-complete { border-color: var(--success); }
+    .purge-progress-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: .45rem; color: white; background: var(--danger); font-size: 1.45rem; font-weight: 950; }
+    .purge-complete .purge-progress-icon { background: var(--success); }
+    .purge-progress-dialog h3 { margin: 0; color: var(--text-main); font-size: 1.05rem; }
+    .purge-progress-dialog p { margin: .3rem 0 0; color: var(--text-muted); line-height: 1.45; }
+    .purge-progress-track { grid-column: 1 / -1; height: .45rem; overflow: hidden; border-radius: 999px; background: var(--border-flat); }
+    .purge-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--danger); }
+    .purge-complete .purge-progress-track span { background: var(--success); }
     @media (max-width: 900px) {
         .backup-heading { flex-direction: column; }
         .backup-state { width: 100%; min-width: 0; }

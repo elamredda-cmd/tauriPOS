@@ -4591,7 +4591,10 @@ async function writeLocalSyncChangeCursor(value: number): Promise<void> {
     }, 'key');
 }
 
-async function syncChangedTables(tableNames: Iterable<string>): Promise<boolean> {
+async function syncChangedTables(tableNames: Iterable<string>): Promise<{
+    allSucceeded: boolean;
+    transactionPurged: boolean;
+}> {
     const requested = new Set(Array.from(tableNames, table => String(table || '')));
     const mysqlDb = await getMysqlDb();
     if (!mysqlDb) throw new Error('MariaDB connection is unavailable');
@@ -4629,39 +4632,57 @@ async function syncChangedTables(tableNames: Iterable<string>): Promise<boolean>
     }
     await setTableWatermarks(successfulTables, through);
 
-    if (totalChanges > 0 || removed > 0) {
-        await hydrateSvelteStores(removed > 0 ? undefined : changedTables);
+    // Settings can contain the shop-wide transaction purge marker. Apply it in
+    // this lightweight path so connected tills clear SQLite within one change
+    // poll instead of waiting for the five-minute full reconciliation.
+    const transactionPurged = successfulTables.has('settings')
+        ? await applyTransactionPurgeMarker()
+        : false;
+
+    if (totalChanges > 0 || removed > 0 || transactionPurged) {
+        await hydrateSvelteStores((removed > 0 || transactionPurged) ? undefined : changedTables);
     }
-    return allSucceeded;
+    return { allSucceeded, transactionPurged };
 }
 
 /** Poll one tiny MariaDB cursor, then pull only tables which actually changed. */
 export async function runChangeSyncCycle(): Promise<void> {
     if (!isMultiMode() || isChangeSyncRunning || isFastSyncRunning || isSyncRunning) return;
-    if (!get(connectionState).mysqlOnline) return;
     if (await pauseSyncIfRestorePending()) return;
     isChangeSyncRunning = true;
+    let reloadAfterPurge = false;
     try {
-        const localCursor = await readLocalSyncChangeCursor();
-        const window = await mysql.mysqlGetSyncChangeWindow(localCursor ?? 0);
-        const cursorExpired = localCursor !== null
-            && window.minSeq > 0
-            && localCursor < window.minSeq - 1;
-        const needsBaseline = localCursor === null || cursorExpired;
+        // A previous poll may already have downloaded the marker before the
+        // till lost connectivity or closed. Applying the local marker does not
+        // require MariaDB to still be online.
+        const pendingLocalPurge = await applyTransactionPurgeMarker();
+        if (pendingLocalPurge) {
+            await hydrateSvelteStores();
+            reloadAfterPurge = true;
+        } else if (get(connectionState).mysqlOnline) {
+            const localCursor = await readLocalSyncChangeCursor();
+            const syncWindow = await mysql.mysqlGetSyncChangeWindow(localCursor ?? 0);
+            const cursorExpired = localCursor !== null
+                && syncWindow.minSeq > 0
+                && localCursor < syncWindow.minSeq - 1;
+            const needsBaseline = localCursor === null || cursorExpired;
 
-        if (needsBaseline) {
-            const baselineTables = new Set<string>([...ALL_SYNC_TABLES, 'tombstones']);
-            if (await syncChangedTables(baselineTables)) {
-                await writeLocalSyncChangeCursor(window.maxSeq);
+            if (needsBaseline) {
+                const baselineTables = new Set<string>([...ALL_SYNC_TABLES, 'tombstones']);
+                const result = await syncChangedTables(baselineTables);
+                if (result.allSucceeded) {
+                    await writeLocalSyncChangeCursor(syncWindow.maxSeq);
+                }
+                reloadAfterPurge = result.transactionPurged;
+            } else if (syncWindow.changes.length > 0) {
+                const tables = new Set(syncWindow.changes.map(change => change.tableName));
+                const result = await syncChangedTables(tables);
+                if (result.allSucceeded) {
+                    await writeLocalSyncChangeCursor(syncWindow.maxSeq);
+                    connectionState.update(state => ({ ...state, mysqlOnline: true, syncError: null }));
+                }
+                reloadAfterPurge = result.transactionPurged;
             }
-            return;
-        }
-        if (window.changes.length === 0) return;
-
-        const tables = new Set(window.changes.map(change => change.tableName));
-        if (await syncChangedTables(tables)) {
-            await writeLocalSyncChangeCursor(window.maxSeq);
-            connectionState.update(state => ({ ...state, mysqlOnline: true, syncError: null }));
         }
     } catch (error) {
         console.warn('database: change-cursor sync failed:', error);
@@ -4669,6 +4690,9 @@ export async function runChangeSyncCycle(): Promise<void> {
         connectionState.update(state => ({ ...state, mysqlOnline: false, syncError: String(error) }));
     } finally {
         isChangeSyncRunning = false;
+    }
+    if (reloadAfterPurge && typeof window !== 'undefined') {
+        window.location.reload();
     }
 }
 

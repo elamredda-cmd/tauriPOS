@@ -99,6 +99,7 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
         fallbackConnection
     );
     const model = normalizeReceiptPrinterModel(setting(settings, 'receipt_printer_model', 'generic_escpos'));
+    const configuredEncoding = setting(settings, 'receipt_printer_encoding', 'latin1') === 'utf8' ? 'utf8' : 'latin1';
     return {
         enabled: boolSetting(settings, 'receipt_printer_enabled', true),
         connection,
@@ -120,7 +121,10 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
             'receipt_printer_open_drawer_after_payment',
             boolSetting(settings, 'receipt_printer_open_drawer_after_cash', false)
         ),
-        encoding: setting(settings, 'receipt_printer_encoding', 'latin1') === 'utf8' ? 'utf8' : 'latin1',
+        // Star Line mode uses selectable single-byte code pages rather than
+        // UTF-8. Keep the bytes aligned with the Windows-1252 command emitted
+        // by receiptCommands so symbols such as GBP print consistently.
+        encoding: model === 'star_tsp100' ? 'latin1' : configuredEncoding,
     };
 }
 
@@ -216,6 +220,7 @@ function receiptCut(config: ReceiptPrinterConfig): number[] {
 
 type ReceiptCommands = {
     init: number[];
+    codePage: number[];
     font: number[];
     center: number[];
     left: number[];
@@ -229,6 +234,8 @@ function receiptCommands(config: ReceiptPrinterConfig, largeTitle = false): Rece
     if (config.model === 'star_tsp100') {
         return {
             init: [0x1b, 0x40],
+            // Star Line: ESC GS t 32 selects Windows-1252 (Western Europe).
+            codePage: [0x1b, 0x1d, 0x74, 0x20],
             font: [0x1b, 0x4d],
             center: [0x1b, 0x1d, 0x61, 0x01],
             left: [0x1b, 0x1d, 0x61, 0x00],
@@ -240,6 +247,7 @@ function receiptCommands(config: ReceiptPrinterConfig, largeTitle = false): Rece
     }
     return {
         init: [0x1b, 0x40],
+        codePage: [],
         font: [0x1b, 0x4d, 0x00],
         center: [0x1b, 0x61, 0x01],
         left: [0x1b, 0x61, 0x00],
@@ -327,6 +335,7 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
     const commands = receiptCommands(config);
     const bytes = [
         ...commands.init,
+        ...commands.codePage,
         ...commands.font,
         ...commands.center,
         ...commands.boldOn,
@@ -357,6 +366,7 @@ export function buildEscposTextReport(text: string, config = getReceiptPrinterCo
     const commands = receiptCommands(config);
     const bytes = [
         ...commands.init,
+        ...commands.codePage,
         ...commands.font,
         ...commands.left,
     ];
@@ -435,6 +445,7 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
         .slice(0, 32);
     const bytes = [
         ...commands.init,
+        ...commands.codePage,
         ...receiptFontSelect,
         ...commands.center,
         ...titleFontSelect,

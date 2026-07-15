@@ -28,6 +28,9 @@
     $: drawerManualEnabled = ($settingsDB.find((item) => item.key === 'cash_drawer_enabled')?.value ?? (drawerTarget ? 'true' : 'false')) !== 'false';
     $: receiptMode = receiptConnections.find((option) => option.value === receipt.connection);
     $: labelMode = labelConnections.find((option) => option.value === label.connection);
+    $: receiptEncodingOptions = receipt.model === 'star_tsp100'
+        ? [{ label: 'Windows-1252 / UK (required by Star)', value: 'latin1' }]
+        : encodingOptions;
     $: receiptPrinterOptions = printerOptionsFor(receipt.printerName);
     $: labelPrinterOptions = printerOptionsFor(label.printerName);
     $: drawerPrinterOptions = printerOptionsFor(
@@ -456,7 +459,7 @@
                                 <CustomSelect
                                     label="Character Encoding"
                                     value={receipt.encoding}
-                                    options={encodingOptions}
+                                    options={receiptEncodingOptions}
                                     on:change={(event) => updateSetting('receipt_printer_encoding', String(event.detail))}
                                 />
                             </div>
