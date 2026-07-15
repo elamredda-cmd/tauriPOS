@@ -99,6 +99,8 @@
     let reportPrintBusy = false;
     let closeReportPrintBusy = false;
     let periodReportBusy = false;
+    $: canOpenReports = hasPermission($currentEmployee, 'open_reports', $settingsDB);
+    $: canEndDay = hasPermission($currentEmployee, 'end_day_close', $settingsDB);
 
     async function withReportTimeout<T>(operation: Promise<T>): Promise<T> {
         let timeoutId: ReturnType<typeof setTimeout>;
@@ -474,7 +476,8 @@
             }
         }
         mounted = true;
-        await loadData();
+        if (canOpenReports) await loadData();
+        else loading = false;
     });
 
     $: paymentMagnitude = Math.abs(breakdown.totalCash)
@@ -521,8 +524,9 @@
     $: closeReportIncludesPreviousDays = Boolean(closeReportStartDay && closeReportStartDay < localDateValue(new Date()));
 </script>
 
-<MgmtPage title="Sales Reports">
+<MgmtPage title={canOpenReports ? 'Sales Reports' : 'End Day / Z Report'}>
     <div class="report-page h-full overflow-y-auto p-3 md:p-5 xl:p-6 flex flex-col gap-4 md:gap-5">
+        {#if canOpenReports}
         <section class="report-controls bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
             <div class="flex flex-col gap-4">
                 <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
@@ -914,7 +918,17 @@
                 {/if}
             </section>
         </div>
+        {:else}
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Restricted Access</div>
+                <h2 class="m-0 mt-1 text-2xl leading-tight">End Day / Z Report</h2>
+                <p class="m-0 mt-2 text-sm text-text-muted">
+                    This role can close a reporting period, but cannot browse sales reports, staff totals, products, or previous report ranges.
+                </p>
+            </section>
+        {/if}
 
+        {#if canOpenReports || canEndDay}
         <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
             <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                 <div>
@@ -935,6 +949,7 @@
                 </div>
             </div>
         </section>
+        {/if}
     </div>
 </MgmtPage>
 

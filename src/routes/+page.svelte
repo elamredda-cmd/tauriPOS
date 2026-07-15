@@ -1853,17 +1853,17 @@
         }
     }
 
-    async function openDrawerAfterSuccessfulPayment() {
+    async function openDrawerAfterSuccessfulPayment(transactionLabel = "Sale") {
         if (!receiptPrinterConfig.openDrawerAfterPayment) return;
         try {
             await openCashDrawer(cashDrawerConfig);
         } catch (error) {
             console.warn("Drawer failed after payment:", error);
-            toast(`Sale completed, but drawer did not open: ${error}`, "error");
+            toast(`${transactionLabel} completed, but drawer did not open: ${error}`, "error");
         }
     }
 
-    async function printReceiptAfterSuccessfulPayment(bundle: SaleBundle) {
+    async function printReceiptAfterSuccessfulPayment(bundle: SaleBundle, transactionLabel = "Sale") {
         if (!receiptPrinterConfig.autoPrintAfterPayment) return;
         try {
             await sendEscposReceipt({
@@ -1876,7 +1876,7 @@
             }, receiptPrinterConfig);
         } catch (error) {
             console.warn("Receipt auto-print failed:", error);
-            toast(`Sale completed, but receipt did not print: ${error}`, "error");
+            toast(`${transactionLabel} completed, but receipt did not print: ${error}`, "error");
         }
     }
 
@@ -1915,6 +1915,10 @@
         }
         if (voiding && original.status !== "completed") {
             toast("A partially refunded sale cannot be voided", "error");
+            return;
+        }
+        if (voiding && original.shiftId !== $currentShiftId) {
+            toast("Void is only available during the original open till session. Use Refund for an older sale.", "error");
             return;
         }
         let refundAmount = remainingRefund;
@@ -2030,6 +2034,10 @@
                 originalStatusUpdate: status,
             });
             applyCompletedSaleToStores(committedReversal);
+            if (paymentAllocation.cashAmount > 0) {
+                void openDrawerAfterSuccessfulPayment(voiding ? "Void" : "Refund");
+            }
+            void printReceiptAfterSuccessfulPayment(committedReversal, voiding ? "Void" : "Refund");
             await refreshPosOrderSummaries();
             toast(voiding ? "Order voided and reversed" : "Refund recorded", "success");
             await openRecentTransactions();
@@ -2045,6 +2053,10 @@
     }
 
     function requestReversal(orderId: string, partial: boolean, voiding: boolean) {
+        if ($connectionState.mode === "multi" && !$connectionState.mysqlOnline) {
+            toast("Refunds and voids require the main database to be online so another till cannot reverse the same sale.", "error");
+            return;
+        }
         if (!hasPermission($currentEmployee, "refund_void", $settingsDB)) {
             void requirePermission(
                 "refund_void",
@@ -3998,7 +4010,7 @@
                                         disabled={isReversingOrder}
                                         on:click={() =>
                                             requestReversal(selectedOrder.id, true, false)}
-                                        >Partial Ref</button
+                                        >Amount Ref</button
                                     >
                                     <button
                                         class="btn flex-1 !text-warning"
@@ -4240,9 +4252,9 @@
             on:click|stopPropagation
         >
             <div>
-                <h2 class="m-0 text-xl">Partial Refund</h2>
+                <h2 class="m-0 text-xl">Amount Refund</h2>
                 <p class="text-text-muted mt-1">
-                    Enter the refund amount in pounds. The amount must be smaller than the remaining balance.
+                    Enter the amount in pounds. This is a price adjustment and does not return item quantities to stock.
                 </p>
             </div>
             <TouchDigitPad
@@ -4279,10 +4291,10 @@
     bind:show={showReversalConfirm}
     title={pendingReversal?.voiding ? "Void This Sale?" : "Confirm Refund?"}
     message={pendingReversal?.voiding
-        ? "This will void the complete sale, restore stock originally deducted, and record a reversal. This action cannot be undone."
+        ? "This will void the complete sale, restore stock, and record a reversal. Void is allowed only in the original open till session. Complete any card reversal on the external terminal before confirming."
         : pendingReversal?.partial
-            ? `Refund ${formatMoney(toPence(Number(partialRefundInput || 0)))} from this sale? This action cannot be undone.`
-            : "This will refund the remaining sale balance and restore stock originally deducted. This action cannot be undone."}
+            ? `Refund ${formatMoney(toPence(Number(partialRefundInput || 0)))} as an amount adjustment? Stock quantities will not change. Complete any card refund on the external terminal first.`
+            : "This will refund the remaining sale balance and restore stock. Complete any card refund on the external terminal before confirming."}
     confirmText={isReversingOrder ? "Processing..." : pendingReversal?.voiding ? "Void Sale" : "Confirm Refund"}
     variant="danger"
     on:confirm={confirmPendingReversal}

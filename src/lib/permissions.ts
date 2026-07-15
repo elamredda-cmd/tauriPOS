@@ -149,9 +149,18 @@ export function canAccessPath(
 
     if (matchesPath(pathname, '/admin')) {
         const matrix = parseRolePermissions(settings);
-        return (Object.keys(permissionLabels) as PermissionKey[])
-            .filter((key) => key.startsWith('open_'))
-            .some((key) => matrix[employee.role]?.includes(key));
+        return matrix[employee.role]?.includes('end_day_close')
+            || (Object.keys(permissionLabels) as PermissionKey[])
+                .filter((key) => key.startsWith('open_'))
+                .some((key) => matrix[employee.role]?.includes(key));
+    }
+
+    // Closing a reporting period is intentionally independent from access to
+    // detailed sales reports. The reports route renders a restricted Z-report
+    // view when this is the employee's only reporting permission.
+    if (matchesPath(pathname, '/reports')) {
+        return hasPermission(employee, 'open_reports', settings)
+            || hasPermission(employee, 'end_day_close', settings);
     }
 
     const permission = permissionForPath(pathname);

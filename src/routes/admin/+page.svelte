@@ -14,6 +14,7 @@
         description: string;
         path: string;
         permission?: PermissionKey;
+        alternativePermission?: PermissionKey;
         accent: string;
         icon:
             | 'design'
@@ -51,7 +52,7 @@
         { title: 'Orders', group: 'Sales', description: 'Receipts, returns, and past orders.', path: '/orders', permission: 'open_reports', accent: '#3b82f6', icon: 'orders' },
         { title: 'Till Sessions', group: 'Till', description: 'Open sessions and cash-up history.', path: '/shifts', permission: 'open_reports', accent: '#10b981', icon: 'shifts' },
         { title: 'Stock Receiving', group: 'Stock', description: 'Receive stock and update quantities.', path: '/stock-receiving', permission: 'open_stock_receiving', accent: '#f97316', icon: 'stock' },
-        { title: 'Reports', group: 'Sales', description: 'Sales, close reports, and totals.', path: '/reports', permission: 'open_reports', accent: '#06b6d4', icon: 'reports' },
+        { title: 'Reports', group: 'Sales', description: 'Sales, close reports, and totals.', path: '/reports', permission: 'open_reports', alternativePermission: 'end_day_close', accent: '#06b6d4', icon: 'reports' },
         { title: 'Sync Dashboard', group: 'System', description: 'Database sync and connection status.', path: '/sync', permission: 'open_sync', accent: '#8b5cf6', icon: 'sync' },
         { title: 'Audit Log', group: 'System', description: 'Review key changes and staff actions.', path: '/audit', permission: 'open_audit', accent: '#ef4444', icon: 'audit' },
         { title: 'Settings', group: 'System', description: 'Printers, receipt, labels, and devices.', path: '/settings', permission: 'open_settings', accent: '#0f766e', icon: 'settings' },
@@ -71,12 +72,23 @@
         .join('') || 'AD';
     $: rolePermissions = parseRolePermissions($settingsDB);
     $: adminViewEntries = adminEntries.map((entry): AdminViewEntry => {
-        const allowed = !entry.permission ||
-            Boolean($currentEmployee?.isActive && rolePermissions[$currentEmployee.role]?.includes(entry.permission));
+        const employeePermissions = $currentEmployee?.isActive
+            ? rolePermissions[$currentEmployee.role] || []
+            : [];
+        const allowed = !entry.permission
+            || employeePermissions.includes(entry.permission)
+            || Boolean(entry.alternativePermission && employeePermissions.includes(entry.alternativePermission));
+        const closeOnly = entry.path === '/reports'
+            && employeePermissions.includes('end_day_close')
+            && !employeePermissions.includes('open_reports');
         return {
             ...entry,
+            title: closeOnly ? 'End Day / Z Report' : entry.title,
+            description: closeOnly ? 'Close this till or the whole reporting period.' : entry.description,
             allowed,
-            lockedLabel: entry.permission ? permissionLabels[entry.permission] : entry.title,
+            lockedLabel: entry.alternativePermission
+                ? `${permissionLabels[entry.permission!]} or ${permissionLabels[entry.alternativePermission]}`
+                : entry.permission ? permissionLabels[entry.permission] : entry.title,
         };
     });
 

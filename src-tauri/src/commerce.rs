@@ -356,16 +356,52 @@ async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error
 
 const RECEIPT_BLOCK: i64 = 1_000_000;
 
+struct ReversalValidationContext {
+    original_status: String,
+    original_shift_id: String,
+    original_customer_id: String,
+    remaining: i64,
+    original_subtotal: i64,
+    original_discount_amount: i64,
+    original_tax_total: i64,
+    previous_subtotal: i64,
+    previous_discount_amount: i64,
+    previous_tax_total: i64,
+    expected_stock: Vec<(String, i64)>,
+    expected_line_quantities: Vec<(String, i64)>,
+    void_period_closed: bool,
+    original_payment: (i64, i64, i64),
+    previous_payment: (i64, i64, i64),
+    original_points: i64,
+    previous_points_adjustment: i64,
+}
+
+fn same_quantities(expected: &[(String, i64)], actual: &[(String, i64)]) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().all(|(product_id, quantity)| {
+            actual.iter().any(|(actual_id, actual_quantity)| {
+                actual_id == product_id && actual_quantity == quantity
+            })
+        })
+}
+
 fn validate_reversal_bundle(
     bundle: &SaleBundle,
-    original_status: &str,
-    remaining: i64,
-    expected_stock: &[(String, i64)],
+    context: &ReversalValidationContext,
 ) -> Result<(), sqlx::Error> {
     let o = &bundle.order;
-    let refund_amount = o.total.abs();
+    let refund_amount = o
+        .total
+        .checked_abs()
+        .ok_or_else(|| sqlx::Error::Protocol("Invalid reversal amount".into()))?;
     let target_status = bundle.original_status_update.as_deref().unwrap_or("");
     let is_void = bundle.audit.action == "order_voided" || o.notes.starts_with("Void of receipt");
+    let line_discount = bundle
+        .lines
+        .iter()
+        .map(|line| line.discount_amount)
+        .sum::<i64>();
+    let line_tax = bundle.lines.iter().map(|line| line.tax_amount).sum::<i64>();
 
     if o.status != "completed"
         || bundle.lines.is_empty()
@@ -376,13 +412,26 @@ fn validate_reversal_bundle(
         || bundle.payment.card_amount > 0
         || bundle.payment.cash_amount.abs() + bundle.payment.card_amount.abs() > refund_amount
         || o.amount_tendered != o.total
+        || o.customer_id != context.original_customer_id
+        || o.subtotal > 0
+        || o.discount_amount > 0
+        || o.tax_total > 0
         || bundle.audit.entity_id != o.original_order_id
         || bundle.original_order_to_update.as_deref() != Some(o.original_order_id.as_str())
-        || bundle
-            .lines
-            .iter()
-            .any(|line| line.order_id != o.id || line.line_total > 0)
+        || bundle.lines.iter().any(|line| {
+            line.order_id != o.id
+                || line.line_total > 0
+                || line.discount_amount > 0
+                || line.tax_amount > 0
+                || !context
+                    .expected_line_quantities
+                    .iter()
+                    .any(|(product_id, _)| product_id == &line.product_id)
+        })
         || bundle.lines.iter().map(|line| line.line_total).sum::<i64>() != o.total
+        || line_discount != o.discount_amount
+        || line_tax != o.tax_total
+        || bundle.loyalty_changes.len() > 1
         || bundle.loyalty_changes.iter().any(|change| {
             change.order_id != o.id
                 || change.customer_id != o.customer_id
@@ -392,12 +441,63 @@ fn validate_reversal_bundle(
         return Err(sqlx::Error::Protocol("Invalid reversal bundle".into()));
     }
 
+    let cumulative_subtotal = context.previous_subtotal + o.subtotal.abs();
+    let cumulative_discount = context.previous_discount_amount + o.discount_amount.abs();
+    let cumulative_tax = context.previous_tax_total + o.tax_total.abs();
+    if cumulative_subtotal > context.original_subtotal.abs()
+        || cumulative_discount > context.original_discount_amount.abs()
+        || cumulative_tax > context.original_tax_total.abs()
+    {
+        return Err(sqlx::Error::Protocol(
+            "Reversal financial values exceed the original sale".into(),
+        ));
+    }
+
+    let cash = bundle.payment.cash_amount.abs();
+    let card = bundle.payment.card_amount.abs();
+    let loyalty = refund_amount - cash - card;
+    let cumulative_payment = (
+        context.previous_payment.0 + cash,
+        context.previous_payment.1 + card,
+        context.previous_payment.2 + loyalty,
+    );
+    if loyalty < 0
+        || cumulative_payment.0 > context.original_payment.0
+        || cumulative_payment.1 > context.original_payment.1
+        || cumulative_payment.2 > context.original_payment.2
+    {
+        return Err(sqlx::Error::Protocol(
+            "Refund payment allocation exceeds the original payment".into(),
+        ));
+    }
+
+    let current_points = bundle
+        .loyalty_changes
+        .iter()
+        .map(|change| change.points_change)
+        .sum::<i64>();
+    let cumulative_points = context.previous_points_adjustment + current_points;
+    if (context.original_points == 0 && cumulative_points != 0)
+        || (context.original_points != 0
+            && cumulative_points != 0
+            && cumulative_points.signum() == context.original_points.signum())
+        || cumulative_points.abs() > context.original_points.abs()
+    {
+        return Err(sqlx::Error::Protocol(
+            "Invalid loyalty adjustment for reversal".into(),
+        ));
+    }
+
     let expected_status = if is_void {
-        if original_status != "completed" || refund_amount != remaining {
+        if context.original_status != "completed"
+            || refund_amount != context.remaining
+            || o.shift_id != context.original_shift_id
+            || context.void_period_closed
+        {
             return Err(sqlx::Error::Protocol("Invalid void request".into()));
         }
         "voided"
-    } else if refund_amount == remaining {
+    } else if refund_amount == context.remaining {
         "refunded"
     } else {
         "partially_refunded"
@@ -415,6 +515,15 @@ fn validate_reversal_bundle(
     if bundle.audit.action != expected_action {
         return Err(sqlx::Error::Protocol(
             "Invalid reversal audit action".into(),
+        ));
+    }
+
+    if expected_status != "partially_refunded"
+        && (cumulative_payment != context.original_payment
+            || cumulative_points != -context.original_points)
+    {
+        return Err(sqlx::Error::Protocol(
+            "Full reversal does not restore the original payment and loyalty balance".into(),
         ));
     }
 
@@ -446,15 +555,26 @@ fn validate_reversal_bundle(
                 actual_stock.push((change.product_id.clone(), change.delta));
             }
         }
-        let stock_matches = expected_stock.len() == actual_stock.len()
-            && expected_stock.iter().all(|(product_id, quantity)| {
-                actual_stock.iter().any(|(actual_id, actual_quantity)| {
-                    actual_id == product_id && actual_quantity == quantity
-                })
-            });
-        if !stock_matches {
+        if !same_quantities(&context.expected_stock, &actual_stock) {
             return Err(sqlx::Error::Protocol(
                 "Invalid reversal stock restoration; synchronize and try again".into(),
+            ));
+        }
+
+        let mut actual_lines: Vec<(String, i64)> = Vec::new();
+        for line in &bundle.lines {
+            if let Some(existing) = actual_lines
+                .iter_mut()
+                .find(|(product_id, _)| product_id == &line.product_id)
+            {
+                existing.1 += line.quantity.abs();
+            } else {
+                actual_lines.push((line.product_id.clone(), line.quantity.abs()));
+            }
+        }
+        if !same_quantities(&context.expected_line_quantities, &actual_lines) {
+            return Err(sqlx::Error::Protocol(
+                "Full reversal quantities do not match the original sale".into(),
             ));
         }
     }
@@ -472,12 +592,28 @@ async fn validate_sqlite_reversal(
     if o.original_order_id.is_empty() || o.total >= 0 {
         return Err(sqlx::Error::Protocol("Invalid refund transaction".into()));
     }
-    let original: Option<(i64, String)> =
-        sqlx::query_as("SELECT total, status FROM orders WHERE id = ? LIMIT 1")
-            .bind(&o.original_order_id)
-            .fetch_optional(&mut **tx)
-            .await?;
-    let Some((original_total, original_status)) = original else {
+    let original: Option<(i64, String, String, String, String, i64, i64, i64, String)> =
+        sqlx::query_as(
+            "SELECT total, status, COALESCE(shiftId, ''), COALESCE(tillNumber, ''),
+                    COALESCE(completedAt, ''), subtotal, discountAmount, taxTotal,
+                    COALESCE(customerId, '')
+             FROM orders WHERE id = ? LIMIT 1",
+        )
+        .bind(&o.original_order_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some((
+        original_total,
+        original_status,
+        original_shift_id,
+        original_till_number,
+        original_completed_at,
+        original_subtotal,
+        original_discount_amount,
+        original_tax_total,
+        original_customer_id,
+    )) = original
+    else {
         return Err(sqlx::Error::Protocol("Original sale was not found".into()));
     };
     if original_status != "completed" && original_status != "partially_refunded" {
@@ -485,13 +621,15 @@ async fn validate_sqlite_reversal(
             "Sale is not available for refund".into(),
         ));
     }
-    let previously_refunded: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(ABS(total)), 0) FROM orders WHERE type = 'return' AND originalOrderId = ?",
+    let previous_financials: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(SUM(ABS(total)), 0), COALESCE(SUM(ABS(subtotal)), 0),
+                COALESCE(SUM(ABS(discountAmount)), 0), COALESCE(SUM(ABS(taxTotal)), 0)
+         FROM orders WHERE type = 'return' AND originalOrderId = ?",
     )
     .bind(&o.original_order_id)
     .fetch_one(&mut **tx)
     .await?;
-    let remaining = (original_total - previously_refunded).max(0);
+    let remaining = (original_total - previous_financials.0).max(0);
     if o.total.abs() > remaining {
         return Err(sqlx::Error::Protocol(
             "Refund exceeds the remaining sale balance".into(),
@@ -504,7 +642,80 @@ async fn validate_sqlite_reversal(
     .bind(&o.original_order_id)
     .fetch_all(&mut **tx)
     .await?;
-    validate_reversal_bundle(bundle, &original_status, remaining, &expected_stock)
+    let expected_line_quantities: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT productId, SUM(ABS(quantity)) FROM order_lines
+         WHERE orderId = ? GROUP BY productId",
+    )
+    .bind(&o.original_order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let original_payment: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+                COALESCE(SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0),
+                COALESCE(SUM(ABS(amount)
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0)
+         FROM payments WHERE orderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let previous_payment: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+                COALESCE(SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0),
+                COALESCE(SUM(ABS(p.amount)
+                    - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END
+                    - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0)
+         FROM payments p JOIN orders r ON r.id = p.orderId
+         WHERE r.type = 'return' AND r.originalOrderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let original_points: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(pointsChange), 0) FROM loyalty_logs WHERE orderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let previous_points_adjustment: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(l.pointsChange), 0) FROM loyalty_logs l
+         JOIN orders r ON r.id = l.orderId
+         WHERE r.type = 'return' AND r.originalOrderId = ? AND l.reason = 'refund_adjustment'",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let last_close_marker: Option<String> = sqlx::query_scalar(
+        "SELECT MAX(markerTime) FROM till_report_markers WHERE tillNumber = '' OR tillNumber = ?",
+    )
+    .bind(&original_till_number)
+    .fetch_one(&mut **tx)
+    .await?;
+    let context = ReversalValidationContext {
+        original_status,
+        original_shift_id,
+        original_customer_id,
+        remaining,
+        original_subtotal,
+        original_discount_amount,
+        original_tax_total,
+        previous_subtotal: previous_financials.1,
+        previous_discount_amount: previous_financials.2,
+        previous_tax_total: previous_financials.3,
+        expected_stock,
+        expected_line_quantities,
+        void_period_closed: last_close_marker.as_deref().is_some_and(|marker| {
+            !original_completed_at.is_empty() && original_completed_at.as_str() <= marker
+        }),
+        original_payment,
+        previous_payment,
+        original_points,
+        previous_points_adjustment,
+    };
+    validate_reversal_bundle(bundle, &context)
 }
 
 async fn validate_mysql_reversal(
@@ -518,13 +729,28 @@ async fn validate_mysql_reversal(
     if o.original_order_id.is_empty() || o.total >= 0 {
         return Err(sqlx::Error::Protocol("Invalid refund transaction".into()));
     }
-    let original: Option<(i64, String)> = sqlx::query_as(
-        "SELECT total, CAST(status AS CHAR) FROM orders WHERE id = ? LIMIT 1 FOR UPDATE",
-    )
-    .bind(&o.original_order_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some((original_total, original_status)) = original else {
+    let original: Option<(i64, String, String, String, String, i64, i64, i64, String)> =
+        sqlx::query_as(
+            "SELECT total, CAST(status AS CHAR), CAST(COALESCE(shiftId, '') AS CHAR),
+                CAST(COALESCE(tillNumber, '') AS CHAR), CAST(COALESCE(completedAt, '') AS CHAR),
+                subtotal, discountAmount, taxTotal, CAST(COALESCE(customerId, '') AS CHAR)
+         FROM orders WHERE id = ? LIMIT 1 FOR UPDATE",
+        )
+        .bind(&o.original_order_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let Some((
+        original_total,
+        original_status,
+        original_shift_id,
+        original_till_number,
+        original_completed_at,
+        original_subtotal,
+        original_discount_amount,
+        original_tax_total,
+        original_customer_id,
+    )) = original
+    else {
         return Err(sqlx::Error::Protocol("Original sale was not found".into()));
     };
     if original_status != "completed" && original_status != "partially_refunded" {
@@ -532,13 +758,17 @@ async fn validate_mysql_reversal(
             "Sale is not available for refund".into(),
         ));
     }
-    let previously_refunded: i64 = sqlx::query_scalar(
-        "SELECT CAST(COALESCE(SUM(ABS(total)), 0) AS SIGNED) FROM orders WHERE type = 'return' AND originalOrderId = ?",
+    let previous_financials: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT CAST(COALESCE(SUM(ABS(total)), 0) AS SIGNED),
+                CAST(COALESCE(SUM(ABS(subtotal)), 0) AS SIGNED),
+                CAST(COALESCE(SUM(ABS(discountAmount)), 0) AS SIGNED),
+                CAST(COALESCE(SUM(ABS(taxTotal)), 0) AS SIGNED)
+         FROM orders WHERE type = 'return' AND originalOrderId = ?",
     )
     .bind(&o.original_order_id)
     .fetch_one(&mut **tx)
     .await?;
-    let remaining = (original_total - previously_refunded).max(0);
+    let remaining = (original_total - previous_financials.0).max(0);
     if o.total.abs() > remaining {
         return Err(sqlx::Error::Protocol(
             "Refund exceeds the remaining sale balance".into(),
@@ -551,7 +781,80 @@ async fn validate_mysql_reversal(
     .bind(&o.original_order_id)
     .fetch_all(&mut **tx)
     .await?;
-    validate_reversal_bundle(bundle, &original_status, remaining, &expected_stock)
+    let expected_line_quantities: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT CAST(productId AS CHAR), CAST(SUM(ABS(quantity)) AS SIGNED) FROM order_lines
+         WHERE orderId = ? GROUP BY productId",
+    )
+    .bind(&o.original_order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let original_payment: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+                CAST(COALESCE(SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(ABS(amount)
+                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END
+                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0) AS SIGNED)
+         FROM payments WHERE orderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let previous_payment: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+                CAST(COALESCE(SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(ABS(p.amount)
+                    - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END
+                    - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0) AS SIGNED)
+         FROM payments p JOIN orders r ON r.id = p.orderId
+         WHERE r.type = 'return' AND r.originalOrderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let original_points: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(pointsChange), 0) AS SIGNED) FROM loyalty_logs WHERE orderId = ?",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let previous_points_adjustment: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(l.pointsChange), 0) AS SIGNED) FROM loyalty_logs l
+         JOIN orders r ON r.id = l.orderId
+         WHERE r.type = 'return' AND r.originalOrderId = ? AND l.reason = 'refund_adjustment'",
+    )
+    .bind(&o.original_order_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let last_close_marker: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(MAX(markerTime) AS CHAR) FROM till_report_markers WHERE tillNumber = '' OR tillNumber = ?",
+    )
+    .bind(&original_till_number)
+    .fetch_one(&mut **tx)
+    .await?;
+    let context = ReversalValidationContext {
+        original_status,
+        original_shift_id,
+        original_customer_id,
+        remaining,
+        original_subtotal,
+        original_discount_amount,
+        original_tax_total,
+        previous_subtotal: previous_financials.1,
+        previous_discount_amount: previous_financials.2,
+        previous_tax_total: previous_financials.3,
+        expected_stock,
+        expected_line_quantities,
+        void_period_closed: last_close_marker.as_deref().is_some_and(|marker| {
+            !original_completed_at.is_empty() && original_completed_at.as_str() <= marker
+        }),
+        original_payment,
+        previous_payment,
+        original_points,
+        previous_points_adjustment,
+    };
+    validate_reversal_bundle(bundle, &context)
 }
 
 async fn allocate_local_receipt(
@@ -2079,6 +2382,7 @@ mod tests {
             "CREATE TABLE customers (id TEXT PRIMARY KEY, loyaltyPoints INTEGER, updatedAt TEXT)",
             "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, customerId TEXT, orderId TEXT, pointsChange INTEGER, reason TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
+            "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY, tillNumber TEXT, markerTime TEXT)",
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
@@ -2245,6 +2549,7 @@ mod tests {
         };
         refund.stock_changes = vec![];
         if status == "refunded" {
+            refund.lines[0].quantity = -1;
             refund.stock_changes = vec![StockChange {
                 product_id: "product-1".into(),
                 delta: 1,
@@ -2257,6 +2562,14 @@ mod tests {
         refund.original_order_to_update = Some(original_id.into());
         refund.original_status_update = Some(status.into());
         refund
+    }
+
+    fn void_bundle(id: &str, original_id: &str) -> SaleBundle {
+        let mut reversal = refund_bundle(id, original_id, 100, "refunded");
+        reversal.order.notes = "Void of receipt 1".into();
+        reversal.audit.action = "order_voided".into();
+        reversal.original_status_update = Some("voided".into());
+        reversal
     }
 
     #[test]
@@ -2338,6 +2651,96 @@ mod tests {
             refund.stock_changes.clear();
             let result = insert_sqlite_bundle(&pool, &refund).await;
             assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn legacy_cash_payment_without_split_columns_can_be_refunded() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let mut sale = bundle("legacy-cash-sale", "till-1:1000001", "legacy-cash-payment");
+            sale.payment.cash_amount = 0;
+            insert_sqlite_bundle(&pool, &sale).await.unwrap();
+
+            insert_sqlite_bundle(
+                &pool,
+                &refund_bundle("legacy-cash-refund", "legacy-cash-sale", 100, "refunded"),
+            )
+            .await
+            .unwrap();
+
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM orders WHERE id = 'legacy-cash-sale'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(status, "refunded");
+        });
+    }
+
+    #[test]
+    fn void_requires_original_open_shift_and_rejects_closed_periods() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            insert_sqlite_bundle(
+                &pool,
+                &bundle(
+                    "sale-valid-void",
+                    "till-1:1000001",
+                    "original-payment-valid-void",
+                ),
+            )
+            .await
+            .unwrap();
+            insert_sqlite_bundle(&pool, &void_bundle("valid-void", "sale-valid-void"))
+                .await
+                .unwrap();
+
+            insert_sqlite_bundle(
+                &pool,
+                &bundle(
+                    "sale-protected-void",
+                    "till-1:1000002",
+                    "payment-protected-void",
+                ),
+            )
+            .await
+            .unwrap();
+            let mut wrong_shift = void_bundle("wrong-shift-void", "sale-protected-void");
+            wrong_shift.order.shift_id = "another-shift".into();
+            assert!(insert_sqlite_bundle(&pool, &wrong_shift).await.is_err());
+
+            sqlx::query(
+                "INSERT INTO till_report_markers (id, tillNumber, markerTime)
+                 VALUES ('closed-period', 'till-1:1000002', '2026-06-07T12:00:01.000Z')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(insert_sqlite_bundle(
+                &pool,
+                &void_bundle("closed-period-void", "sale-protected-void"),
+            )
+            .await
+            .is_err());
+        });
+    }
+
+    #[test]
+    fn refund_financial_fields_cannot_exceed_original_sale() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            insert_sqlite_bundle(
+                &pool,
+                &bundle("sale-financials", "till-1:1000001", "payment-financials"),
+            )
+            .await
+            .unwrap();
+
+            let mut refund = refund_bundle("bad-financials", "sale-financials", 100, "refunded");
+            refund.order.tax_total = -18;
+            refund.lines[0].tax_amount = -18;
+            assert!(insert_sqlite_bundle(&pool, &refund).await.is_err());
         });
     }
 

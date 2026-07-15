@@ -37,7 +37,7 @@
         price_override: 'Change a selling price during checkout',
         refund_void: 'Refund an order or void a completed sale',
         manual_discount: 'Apply a non-automatic discount at checkout',
-        end_day_close: 'Close a reporting period and create a Z report',
+        end_day_close: 'Open the restricted close-period screen and create a Z report without access to detailed sales reports',
     };
 
     let selectedRole: Employee['role'] = 'manager';

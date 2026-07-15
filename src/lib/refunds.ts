@@ -51,38 +51,39 @@ export function getRemainingRefundAmount(
 
 export function allocateRefundPayment(
     refundAmount: number,
-    payments: Array<{ amount: number; cashAmount: number; cardAmount: number }>,
-    previousReversalPayments: Array<{ amount: number; cashAmount: number; cardAmount: number }> = [],
+    payments: Array<{ method?: string; amount: number; cashAmount: number; cardAmount: number }>,
+    previousReversalPayments: Array<{ method?: string; amount: number; cashAmount: number; cardAmount: number }> = [],
 ) {
-    const cash = payments.reduce((sum, payment) => sum + Math.max(0, payment.cashAmount || 0), 0);
-    const card = payments.reduce((sum, payment) => sum + Math.max(0, payment.cardAmount || 0), 0);
-    const loyalty = payments.reduce(
-        (sum, payment) => sum + Math.max(0, payment.amount - (payment.cashAmount || 0) - (payment.cardAmount || 0)),
-        0,
-    );
-    const previouslyRefunded = previousReversalPayments.reduce(
-        (sum, payment) => sum + Math.abs(Math.min(0, payment.amount)),
-        0,
-    );
+    const paymentParts = (payment: { method?: string; amount: number; cashAmount: number; cardAmount: number }) => {
+        const amount = Math.abs(payment.amount || 0);
+        let cashAmount = Math.abs(payment.cashAmount || 0);
+        let cardAmount = Math.abs(payment.cardAmount || 0);
+        // Older receipts can predate the split columns. Recover their component
+        // from the recorded payment method instead of treating it as loyalty.
+        if (cashAmount === 0 && cardAmount === 0) {
+            if (payment.method === 'cash') cashAmount = amount;
+            if (payment.method === 'card') cardAmount = amount;
+        }
+        return {
+            amount,
+            cashAmount,
+            cardAmount,
+            loyaltyAmount: Math.max(0, amount - cashAmount - cardAmount),
+        };
+    };
+    const originalParts = payments.map(paymentParts);
+    const previousParts = previousReversalPayments.map(paymentParts);
+    const cash = originalParts.reduce((sum, payment) => sum + payment.cashAmount, 0);
+    const card = originalParts.reduce((sum, payment) => sum + payment.cardAmount, 0);
+    const loyalty = originalParts.reduce((sum, payment) => sum + payment.loyaltyAmount, 0);
+    const previouslyRefunded = previousParts.reduce((sum, payment) => sum + payment.amount, 0);
     const [targetCash, targetCard, targetLoyalty] = allocateProportionally(
         refundAmount + previouslyRefunded,
         [cash, card, loyalty],
     );
-    const cashAmount = Math.max(0, targetCash - previousReversalPayments.reduce(
-        (sum, payment) => sum + Math.abs(Math.min(0, payment.cashAmount || 0)),
-        0,
-    ));
-    const cardAmount = Math.max(0, targetCard - previousReversalPayments.reduce(
-        (sum, payment) => sum + Math.abs(Math.min(0, payment.cardAmount || 0)),
-        0,
-    ));
-    const loyaltyAmount = Math.max(0, targetLoyalty - previousReversalPayments.reduce(
-        (sum, payment) => {
-            const loyaltyPart = payment.amount - (payment.cashAmount || 0) - (payment.cardAmount || 0);
-            return sum + Math.abs(Math.min(0, loyaltyPart));
-        },
-        0,
-    ));
+    const cashAmount = Math.max(0, targetCash - previousParts.reduce((sum, payment) => sum + payment.cashAmount, 0));
+    const cardAmount = Math.max(0, targetCard - previousParts.reduce((sum, payment) => sum + payment.cardAmount, 0));
+    const loyaltyAmount = Math.max(0, targetLoyalty - previousParts.reduce((sum, payment) => sum + payment.loyaltyAmount, 0));
     const method = cashAmount > 0 && cardAmount > 0
         ? 'split'
         : cashAmount > 0

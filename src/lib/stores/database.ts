@@ -2790,9 +2790,17 @@ interface CommitSaleResult {
 export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
     if (isMultiMode() && bundle.order?.type === 'return') {
         const state = get(connectionState);
+        if (!state.mysqlOnline) {
+            throw new Error('Refunds and voids require the main MariaDB database to be online');
+        }
         if (state.mysqlOnline) {
             if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
             try {
+                const pendingBeforeReversal = await pendingReportWriteCount();
+                if (pendingBeforeReversal > 0) await flushOfflineQueue();
+                if (await pendingReportWriteCount() > 0) {
+                    throw new Error('Pending sales or report closes must synchronize before a refund or void');
+                }
                 const committed = await invoke<CommitSaleResult>('commit_online_reversal', {
                     mysqlUri: buildMysqlUri(state.mysqlConfig),
                     bundle,
@@ -3067,7 +3075,7 @@ async function pendingReportWriteCount(): Promise<number> {
     const rows: any[] = await d.select(
         `SELECT COUNT(*) AS count FROM _offline_queue
          WHERE operation = 'saleBundle'
-            OR table_name IN ('orders','order_lines','payments')`,
+            OR table_name IN ('orders','order_lines','payments','till_report_markers')`,
     );
     return Number(rows[0]?.count || 0);
 }
