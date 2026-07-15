@@ -98,7 +98,7 @@
     }
 </script>
 
-<MgmtPage title="Role Permissions" backFallback="/settings">
+<MgmtPage title="Role Permissions" backFallback="/employees">
     <button
         slot="actions"
         class="btn btn-secondary"

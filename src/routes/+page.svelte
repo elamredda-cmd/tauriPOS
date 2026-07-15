@@ -4200,7 +4200,7 @@
             </div>
             {#if managerApprovers.length === 0}
                 <div class="rounded-xl border border-danger/40 bg-danger/10 p-4 text-danger">
-                    No active manager, supervisor, or administrator has this permission. Update Role Permissions in Settings.
+                    No active manager, supervisor, or administrator has this permission. Update Role Permissions in Staff.
                 </div>
             {:else}
                 <CustomSelect

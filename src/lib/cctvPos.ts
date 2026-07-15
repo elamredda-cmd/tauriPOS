@@ -89,14 +89,14 @@ export function getCctvPosConfig(settings: Setting[] = get(settingsDB)): CctvPos
         posName: setting(settings, 'cctv_pos_name', 'POS 1'),
         sourceIp: setting(settings, 'cctv_pos_source_ip'),
         encoding: setting(settings, 'cctv_pos_encoding', 'latin1') === 'utf8' ? 'utf8' : 'latin1',
-        lineWidth: normaliseLineWidth(Number(setting(settings, 'cctv_pos_line_width', '40'))),
+        lineWidth: normaliseLineWidth(Number(setting(settings, 'cctv_pos_line_width', '32'))),
         sendItems: boolSetting(settings, 'cctv_pos_send_items', true),
         sendReceipts: boolSetting(settings, 'cctv_pos_send_receipts', true),
     };
 }
 
 function money(pence: number): string {
-    return `${(Number(pence || 0) / 100).toFixed(2)}`;
+    return `£${(Number(pence || 0) / 100).toFixed(2)}`;
 }
 
 function cleanText(value: string): string {
@@ -107,8 +107,11 @@ function cleanText(value: string): string {
 }
 
 function normaliseLineWidth(value: number): number {
-    if (!Number.isFinite(value)) return 40;
-    return Math.max(24, Math.min(64, Math.round(value)));
+    if (!Number.isFinite(value)) return 32;
+    // Recorder overlays are commonly narrower than their configuration UI
+    // suggests. Keep automatic messages within 32 columns so the price does
+    // not wrap onto a second line on compact CCTV overlays.
+    return Math.max(24, Math.min(32, Math.round(value)));
 }
 
 function formatQuantity(value: number | undefined): string {
@@ -133,6 +136,19 @@ function compactProductLine(
 ): string {
     const safeWidth = normaliseLineWidth(width);
     const suffix = ` x${formatQuantity(quantity)} @${money(unitPrice)} =${money(lineTotal)}`;
+    const nameWidth = Math.max(1, safeWidth - suffix.length);
+    const productName = cleanText(name).slice(0, nameWidth).trimEnd();
+    return `${productName}${suffix}`.slice(0, safeWidth);
+}
+
+function compactScannedItemLine(
+    name: string,
+    quantity: number,
+    lineTotal: number,
+    width: number,
+): string {
+    const safeWidth = normaliseLineWidth(width);
+    const suffix = ` x${formatQuantity(quantity)} ${money(lineTotal)}`;
     const nameWidth = Math.max(1, safeWidth - suffix.length);
     const productName = cleanText(name).slice(0, nameWidth).trimEnd();
     return `${productName}${suffix}`.slice(0, safeWidth);
@@ -232,10 +248,9 @@ export function formatCctvItemText(payload: CctvItemPayload, config = getCctvPos
     const quantity = Number.isFinite(payload.quantity) && Number(payload.quantity) > 0
         ? Number(payload.quantity)
         : 1;
-    return compactProductLine(
+    return compactScannedItemLine(
         payload.name,
         quantity,
-        payload.price,
         payload.price * quantity,
         config.lineWidth,
     );

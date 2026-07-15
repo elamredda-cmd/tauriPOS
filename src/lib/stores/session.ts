@@ -14,9 +14,14 @@ type RememberedEmployeeSession = {
 };
 
 function readRememberedEmployeeSession(): RememberedEmployeeSession | null {
-    if (typeof localStorage === 'undefined') return null;
+    if (typeof sessionStorage === 'undefined') return null;
     try {
-        const raw = localStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        // Remove the former persistent login. Employee authentication should
+        // survive a page reload, but never a full application restart.
+        if (typeof localStorage !== 'undefined') {
+            localStorage.removeItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        }
+        const raw = sessionStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
         if (!raw) return null;
         const saved = JSON.parse(raw) as Partial<RememberedEmployeeSession>;
         if (!saved.employeeId || typeof saved.expiresAt !== 'number') return null;
@@ -32,9 +37,9 @@ function readRememberedEmployeeSession(): RememberedEmployeeSession | null {
 }
 
 function rememberEmployeeSession(employee: Employee): void {
-    if (typeof localStorage === 'undefined') return;
+    if (typeof sessionStorage === 'undefined') return;
     try {
-        localStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, JSON.stringify({
+        sessionStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, JSON.stringify({
             employeeId: employee.id,
             expiresAt: Date.now() + REMEMBERED_EMPLOYEE_SESSION_MS,
         }));
@@ -44,9 +49,13 @@ function rememberEmployeeSession(employee: Employee): void {
 }
 
 export function clearRememberedEmployeeSession(): void {
-    if (typeof localStorage === 'undefined') return;
     try {
-        localStorage.removeItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.removeItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        }
+        if (typeof localStorage !== 'undefined') {
+            localStorage.removeItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        }
     } catch {
         // Nothing else to do; the active in-memory session is still controlled below.
     }

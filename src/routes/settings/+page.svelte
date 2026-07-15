@@ -198,12 +198,6 @@
                 <strong class="mt-4 block text-sm text-success">Open integrations &rarr;</strong>
             </a>
             {#if $currentEmployee?.role === 'admin'}
-                <a href="/settings/permissions" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                    <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Admin only</span>
-                    <b class="mt-2 block text-xl">Role Permissions</b>
-                    <p class="mt-2 text-sm text-text-muted">Control what managers, supervisors, and cashiers can open or approve.</p>
-                    <strong class="mt-4 block text-sm text-accent-primary">Set access &rarr;</strong>
-                </a>
                 <a href="/settings/advanced" class="group rounded-2xl border border-danger/60 bg-danger/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-danger hover:bg-danger/15">
                     <span class="text-xs font-black uppercase tracking-[0.16em] text-danger">Admin only</span>
                     <b class="mt-2 block text-xl">Advanced Maintenance</b>

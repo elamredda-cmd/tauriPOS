@@ -24,7 +24,7 @@ const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items']
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const LIGHT_STORE_ROUTES = new Set([
-    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
     '/design', '/design/scale', '/tiles', '/settings/layout', '/settings/labels',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
@@ -137,7 +137,7 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/discounts') return [...DISCOUNTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
     if (pathname === '/customers') return [...CUSTOMER_LIGHT_ROUTE_TABLES];
-    if (pathname === '/employees') return [...EMPLOYEE_LIGHT_ROUTE_TABLES];
+    if (pathname === '/employees' || pathname === '/employees/permissions') return [...EMPLOYEE_LIGHT_ROUTE_TABLES];
     if (pathname === '/reports') return [...REPORTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/shifts') return [...SHIFTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/audit') return [...AUDIT_LIGHT_ROUTE_TABLES];

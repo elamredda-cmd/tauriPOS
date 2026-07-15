@@ -33,10 +33,9 @@
         return new Date(date.getTime() - offset).toISOString().split('T')[0];
     }
 
-    // Date range defaults to current month
+    // Reports open on today's trading date by default.
     const today = new Date();
-    const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-    let startDate = localDateValue(firstOfMonth);
+    let startDate = localDateValue(today);
     let endDate = localDateValue(today);
 
     type DatePreset = 'today' | 'week' | 'month' | 'year';

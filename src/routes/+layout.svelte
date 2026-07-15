@@ -26,7 +26,7 @@
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
     import { applyTypography } from '$lib/typography';
     import { page } from '$app/stores';
-    import { currentEmployee, currentShiftId, REMEMBERED_EMPLOYEE_SESSION_KEY } from '$lib/stores/session';
+    import { currentEmployee, currentShiftId } from '$lib/stores/session';
     import { canAccessPath } from '$lib/permissions';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
@@ -263,7 +263,6 @@
             // Remove legacy app data while preserving device-only preferences.
             const customerDisplayMonitor = localStorage.getItem('customer_display_monitor');
             const customerDisplayAutoOpen = localStorage.getItem('customer_display_auto_open');
-            const rememberedEmployeeSession = localStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
             localStorage.clear();
             if (customerDisplayMonitor !== null) {
                 localStorage.setItem('customer_display_monitor', customerDisplayMonitor);
@@ -271,10 +270,6 @@
             if (customerDisplayAutoOpen !== null) {
                 localStorage.setItem('customer_display_auto_open', customerDisplayAutoOpen);
             }
-            if (rememberedEmployeeSession !== null) {
-                localStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, rememberedEmployeeSession);
-            }
-
             console.log("POS initialized ✅");
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {

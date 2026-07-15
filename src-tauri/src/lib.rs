@@ -951,7 +951,7 @@ mod cctv_tests {
         send_cctv_pos_text_blocking(
             "127.0.0.1".into(),
             port,
-            "TEST GBP 1.23\r\n\r\n".into(),
+            "TEST £1.23\r\n\r\n".into(),
             Some(500),
             Some("latin1".into()),
         )
@@ -959,7 +959,7 @@ mod cctv_tests {
 
         assert_eq!(
             receiver.join().expect("receiver thread should finish"),
-            b"TEST GBP 1.23\r\n\r\n"
+            b"TEST \xa31.23\r\n\r\n"
         );
     }
 }

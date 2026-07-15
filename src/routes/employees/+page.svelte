@@ -222,12 +222,23 @@
 </script>
 
 <MgmtPage title="Staff">
-    <button slot="actions" class="btn btn-primary add-staff-button" on:click={add}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" aria-hidden="true">
-            <path d="M12 5v14M5 12h14"></path>
-        </svg>
-        <span>Add Staff Member</span>
-    </button>
+    <div slot="actions" class="staff-page-actions">
+        {#if $currentEmployee?.role === 'admin'}
+            <a class="btn btn-secondary role-permissions-button" href="/employees/permissions">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"></path>
+                    <path d="m9 12 2 2 4-4"></path>
+                </svg>
+                <span>Role Permissions</span>
+            </a>
+        {/if}
+        <button class="btn btn-primary add-staff-button" on:click={add}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14"></path>
+            </svg>
+            <span>Add Staff Member</span>
+        </button>
+    </div>
 
     <div class="staff-shell">
         <div class="staff-summary" aria-label="Staff summary">
@@ -345,8 +356,9 @@
 />
 
 <style>
-    .add-staff-button { min-height: 48px; display: inline-flex; align-items: center; gap: .55rem; }
-    .add-staff-button svg { width: 20px; height: 20px; }
+    .staff-page-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .65rem; }
+    .role-permissions-button, .add-staff-button { min-height: 48px; display: inline-flex; align-items: center; gap: .55rem; }
+    .role-permissions-button svg, .add-staff-button svg { width: 20px; height: 20px; }
     .staff-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     .staff-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--border-flat); background: var(--border-flat); }
     .staff-summary > div { min-width: 0; padding: .8rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; background: var(--bg-card); }

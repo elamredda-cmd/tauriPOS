@@ -26,9 +26,9 @@
     ];
 
     const cctvLineWidthOptions = [
-        { label: '32 characters - compact', value: '32' },
-        { label: '40 characters - standard', value: '40' },
-        { label: '48 characters - wide', value: '48' },
+        { label: '24 characters - narrow', value: '24' },
+        { label: '28 characters - standard', value: '28' },
+        { label: '32 characters - wide', value: '32' },
     ];
 
     function switchCardClass(active: boolean): string {
