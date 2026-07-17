@@ -185,6 +185,12 @@
                 <p class="mt-2 text-sm text-text-muted">Open the live basket and total on a second monitor.</p>
                 <strong class="mt-4 block text-sm text-accent-primary">Configure display &rarr;</strong>
             </a>
+            <a href="/settings/payments" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
+                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Checkout</span>
+                <b class="mt-2 block text-xl">Card Payments</b>
+                <p class="mt-2 text-sm text-text-muted">Connect and manage card terminal providers separately for this till.</p>
+                <strong class="mt-4 block text-sm text-success">Choose provider &rarr;</strong>
+            </a>
             <a href="/settings/feedback" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Operator feedback</span>
                 <b class="mt-2 block text-xl">Sound &amp; Haptics</b>

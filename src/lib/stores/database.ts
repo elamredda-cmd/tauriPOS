@@ -1098,6 +1098,10 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'label_printer_gap_lines', 'label_printer_dpi',
     'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
     'scale_hardware_poll_ms', 'scale_hardware_request_mode',
+    // Speaker and vibration support differs by till. Keep operator feedback
+    // independent so changing a noisy till does not alter every other till.
+    'feedback_button_sound_enabled', 'feedback_item_sound_enabled', 'feedback_scan_sound_enabled',
+    'feedback_haptics_enabled', 'feedback_sale_sound_enabled', 'barcode_error_sound',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done', SERVER_DATA_EPOCH_SEEN_KEY,
 ]);
@@ -1457,6 +1461,12 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
         [marker, marker],
     );
     await d.execute(`DELETE FROM payments WHERE orderId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
+    await d.execute(
+        `DELETE FROM payment_terminal_attempts
+         WHERE status NOT IN ('approved', 'commit_failed')
+           AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?)`,
+        [marker],
+    );
     await d.execute(`DELETE FROM order_lines WHERE orderId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
     await d.execute(`DELETE FROM cash_movements WHERE shiftId IN (SELECT id FROM shifts WHERE ${oldShift})`, [marker]);
     await d.execute(`DELETE FROM orders WHERE ${oldOrder}`, [marker]);

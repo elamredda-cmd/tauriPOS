@@ -15,9 +15,17 @@ function settingEnabled(key: string, defaultValue = true): boolean {
 
 function vibrate(pattern: number | number[]) {
     if (!settingEnabled("feedback_haptics_enabled")) return;
-    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+    if (supportsHapticFeedback()) {
         navigator.vibrate(pattern);
     }
+}
+
+export function supportsHapticFeedback(): boolean {
+    return typeof navigator !== "undefined" && typeof navigator.vibrate === "function";
+}
+
+export function playHapticFeedback() {
+    vibrate(35);
 }
 
 function createAudioContext(): AudioContext | null {
@@ -117,7 +125,15 @@ export function primeSoundEngine() {
 
 /** Very short, tactile confirmation for every successful cart addition. */
 export function playItemAddedSound() {
-    if (settingEnabled("feedback_item_sound_enabled")) tone(1350, 34, 0.14, "square");
+    // A sine tone stays clean on the small, low-quality speakers commonly
+    // fitted to older tills. The previous square wave could sound like a buzz.
+    if (settingEnabled("feedback_item_sound_enabled")) tone(1040, 42, 0.085, "sine");
+    vibrate(8);
+}
+
+/** Short confirmation used only after a barcode successfully resolves. */
+export function playScanSuccessSound() {
+    if (settingEnabled("feedback_scan_sound_enabled")) tone(1120, 38, 0.08, "sine");
     vibrate(8);
 }
 

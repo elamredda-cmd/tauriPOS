@@ -592,6 +592,20 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         )
     `);
 
+    // Operational lease for card readers shared by more than one till. This is
+    // intentionally excluded from normal data sync and setup backups.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS payment_terminal_locks (
+            terminalKey VARCHAR(191) PRIMARY KEY,
+            tillId VARCHAR(64) NOT NULL,
+            tillName VARCHAR(255) NOT NULL,
+            paymentReference VARCHAR(255) NOT NULL,
+            acquiredAt DATETIME(3) NOT NULL,
+            expiresAt DATETIME(3) NOT NULL,
+            INDEX idx_payment_terminal_locks_expiry (expiresAt)
+        )
+    `);
+
     // ─── Migrations for existing databases ─────────────────────────────────
     const migrations = [
         // Orders
@@ -1271,6 +1285,91 @@ export interface MysqlConnectedTill {
     tillName: string;
     lastSeenAt: string;
     secondsAgo: number;
+}
+
+export interface MysqlPaymentTerminalLock {
+    terminalKey: string;
+    tillId: string;
+    tillName: string;
+    paymentReference: string;
+    acquiredAt: string;
+    expiresAt: string;
+}
+
+export interface MysqlPaymentTerminalLockResult {
+    acquired: boolean;
+    lock: MysqlPaymentTerminalLock | null;
+}
+
+export async function mysqlAcquirePaymentTerminalLock(
+    terminalKey: string,
+    tillId: string,
+    tillName: string,
+    paymentReference: string,
+    leaseSeconds = 180,
+): Promise<MysqlPaymentTerminalLockResult> {
+    const d = await getDb();
+    const lease = Math.max(30, Math.min(600, Math.floor(leaseSeconds)));
+    await d.execute(
+        `INSERT IGNORE INTO payment_terminal_locks
+            (terminalKey, tillId, tillName, paymentReference, acquiredAt, expiresAt)
+         VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3), TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(3)))`,
+        [terminalKey, tillId, tillName || 'Till', paymentReference, lease],
+    );
+    await d.execute(
+        `UPDATE payment_terminal_locks
+         SET tillId = ?, tillName = ?, paymentReference = ?,
+             acquiredAt = UTC_TIMESTAMP(3),
+             expiresAt = TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(3))
+         WHERE terminalKey = ?
+           AND (expiresAt <= UTC_TIMESTAMP(3) OR (tillId = ? AND paymentReference = ?))`,
+        [tillId, tillName || 'Till', paymentReference, lease, terminalKey, tillId, paymentReference],
+    );
+    const rows = await d.select<MysqlPaymentTerminalLock[]>(
+        `SELECT CAST(terminalKey AS CHAR) AS terminalKey,
+                CAST(tillId AS CHAR) AS tillId,
+                CAST(tillName AS CHAR) AS tillName,
+                CAST(paymentReference AS CHAR) AS paymentReference,
+                CAST(acquiredAt AS CHAR) AS acquiredAt,
+                CAST(expiresAt AS CHAR) AS expiresAt
+         FROM payment_terminal_locks WHERE terminalKey = ? LIMIT 1`,
+        [terminalKey],
+    );
+    const lock = rows[0] || null;
+    return {
+        acquired: Boolean(lock && lock.tillId === tillId && lock.paymentReference === paymentReference),
+        lock,
+    };
+}
+
+export async function mysqlRefreshPaymentTerminalLock(
+    terminalKey: string,
+    tillId: string,
+    paymentReference: string,
+    leaseSeconds = 180,
+): Promise<boolean> {
+    const d = await getDb();
+    const lease = Math.max(30, Math.min(600, Math.floor(leaseSeconds)));
+    const result = await d.execute(
+        `UPDATE payment_terminal_locks
+         SET expiresAt = TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(3))
+         WHERE terminalKey = ? AND tillId = ? AND paymentReference = ?`,
+        [lease, terminalKey, tillId, paymentReference],
+    );
+    return Number(result.rowsAffected || 0) === 1;
+}
+
+export async function mysqlReleasePaymentTerminalLock(
+    terminalKey: string,
+    tillId: string,
+    paymentReference: string,
+): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+        `DELETE FROM payment_terminal_locks
+         WHERE terminalKey = ? AND tillId = ? AND paymentReference = ?`,
+        [terminalKey, tillId, paymentReference],
+    );
 }
 
 export async function mysqlTouchTillPresence(tillId: string, tillName: string): Promise<void> {

@@ -1,0 +1,56 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sumup-get-config"
+description = "Enables the sumup_get_config command without any pre-configured scope."
+commands.allow = ["sumup_get_config"]
+
+[[permission]]
+identifier = "allow-sumup-save-config"
+description = "Enables the sumup_save_config command without any pre-configured scope."
+commands.allow = ["sumup_save_config"]
+
+[[permission]]
+identifier = "allow-sumup-clear-secrets"
+description = "Enables the sumup_clear_secrets command without any pre-configured scope."
+commands.allow = ["sumup_clear_secrets"]
+
+[[permission]]
+identifier = "allow-sumup-list-readers"
+description = "Enables the sumup_list_readers command without any pre-configured scope."
+commands.allow = ["sumup_list_readers"]
+
+[[permission]]
+identifier = "allow-sumup-pair-reader"
+description = "Enables the sumup_pair_reader command without any pre-configured scope."
+commands.allow = ["sumup_pair_reader"]
+
+[[permission]]
+identifier = "allow-sumup-reader-status"
+description = "Enables the sumup_reader_status command without any pre-configured scope."
+commands.allow = ["sumup_reader_status"]
+
+[[permission]]
+identifier = "allow-sumup-create-checkout"
+description = "Enables the sumup_create_checkout command without any pre-configured scope."
+commands.allow = ["sumup_create_checkout"]
+
+[[permission]]
+identifier = "allow-sumup-transaction-status"
+description = "Enables the sumup_transaction_status command without any pre-configured scope."
+commands.allow = ["sumup_transaction_status"]
+
+[[permission]]
+identifier = "allow-sumup-transaction-by-reference"
+description = "Enables the sumup_transaction_by_reference command without any pre-configured scope."
+commands.allow = ["sumup_transaction_by_reference"]
+
+[[permission]]
+identifier = "allow-sumup-refund-transaction"
+description = "Enables the sumup_refund_transaction command without any pre-configured scope."
+commands.allow = ["sumup_refund_transaction"]
+
+[[permission]]
+identifier = "allow-sumup-terminate-checkout"
+description = "Enables the sumup_terminate_checkout command without any pre-configured scope."
+commands.allow = ["sumup_terminate_checkout"]

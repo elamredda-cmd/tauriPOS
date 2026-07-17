@@ -139,7 +139,7 @@
 
     function handleGlobalButtonFeedback(event: PointerEvent) {
         const control = (event.target as HTMLElement | null)?.closest('button, a[href], [role="button"]') as HTMLElement | null;
-        if (!control || control.matches(':disabled, [aria-disabled="true"], .menu-link-disabled')) return;
+        if (!control || control.matches(':disabled, [aria-disabled="true"], .menu-link-disabled, [data-feedback-silent="true"]')) return;
         playCartButtonFeedback();
     }
 

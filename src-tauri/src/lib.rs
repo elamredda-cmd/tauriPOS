@@ -1,4 +1,6 @@
 mod commerce;
+mod dojo;
+mod sumup;
 
 use serde::Serialize;
 use std::{
@@ -1266,6 +1268,28 @@ pub fn run() {
             commerce::validate_local_database_backup,
             commerce::restore_latest_local_backup,
             commerce::restore_local_database_from_path,
+            dojo::dojo_get_config,
+            dojo::dojo_save_config,
+            dojo::dojo_clear_secret,
+            dojo::dojo_list_terminals,
+            dojo::dojo_terminal_status,
+            dojo::dojo_create_payment,
+            dojo::dojo_terminal_session_status,
+            dojo::dojo_payment_intent_status,
+            dojo::dojo_cancel_terminal_session,
+            dojo::dojo_respond_signature,
+            dojo::dojo_refund_payment_intent,
+            sumup::sumup_get_config,
+            sumup::sumup_save_config,
+            sumup::sumup_clear_secrets,
+            sumup::sumup_list_readers,
+            sumup::sumup_pair_reader,
+            sumup::sumup_reader_status,
+            sumup::sumup_create_checkout,
+            sumup::sumup_transaction_status,
+            sumup::sumup_transaction_by_reference,
+            sumup::sumup_refund_transaction,
+            sumup::sumup_terminate_checkout,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

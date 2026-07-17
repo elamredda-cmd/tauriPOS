@@ -1,5 +1,7 @@
 # Shop POS
 
+See [the complete system design](docs/SYSTEM_DESIGN.md) for architecture diagrams, data ownership, synchronization, commerce flows, hardware integrations, backup and restore, security, deployment, and the Sunmi companion.
+
 This Tauri POS supports:
 
 - Local mode: one till using its own SQLite database.

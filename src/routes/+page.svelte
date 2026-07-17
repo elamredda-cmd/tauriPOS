@@ -3,7 +3,7 @@
     import { get } from "svelte/store";
     import { goto } from "$app/navigation";
     import { isTauri } from "@tauri-apps/api/core";
-    import { playErrorSound, playItemAddedSound, playSuccessSound } from "$lib/sounds";
+    import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
     import {
         productsDB,
         employeesDB,
@@ -64,6 +64,7 @@
         getPosHeldOrders,
         getPosRecentReceipts,
         getLatestTillReceipt,
+        getProductsByIds,
         getOrderDetails,
         getOrderReversalContext,
         claimHeldOrder,
@@ -91,6 +92,50 @@
     import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { canAccessPath, hasPermission, permissionForPath, permissionLabels, type PermissionKey } from "$lib/permissions";
+    import {
+        acquireSumupLock,
+        createSumupCheckout,
+        delay,
+        getRecoverableSumupAttempts,
+        getSumupReaderStatus,
+        getSumupTransactionByReference,
+        getSumupTransactionStatus,
+        loadSumupConfig,
+        localOrderExists,
+        pruneSumupAttempts,
+        refreshSumupLock,
+        releaseSumupLock,
+        refundSumupTransaction,
+        saveSumupAttempt,
+        sumupConfig as sumupConfigStore,
+        sumupTerminalKey,
+        terminateSumupCheckout,
+        updateSumupAttempt,
+        type SumupConfig,
+        type SumupPaymentAttempt,
+        type SumupTransactionStatus,
+    } from "$lib/sumup";
+    import {
+        acquireDojoLock,
+        cancelDojoTerminalSession,
+        createDojoPayment,
+        dojoConfig as dojoConfigStore,
+        dojoTerminalKey,
+        getDojoPaymentIntentStatus,
+        getDojoTerminalSessionStatus,
+        getRecoverableDojoAttempts,
+        loadDojoConfig,
+        pruneDojoAttempts,
+        refreshDojoLock,
+        refundDojoPaymentIntent,
+        releaseDojoLock,
+        respondToDojoSignature,
+        saveDojoAttempt,
+        updateDojoAttempt,
+        type DojoConfig,
+        type DojoPaymentAttempt,
+        type DojoPaymentIntentStatus,
+    } from "$lib/dojo";
 
     type PosOrderSummary = Order & {
         cashierName?: string;
@@ -141,6 +186,12 @@
     let paymentMethod: "cash" | "card" = "cash";
     let amountTenderedString = "0";
     let hasTypedPayment = false;
+    let terminalPaymentStage: "idle" | "reserving" | "sending" | "waiting" | "cancelling" | "approved" | "saving" = "idle";
+    let terminalPaymentMessage = "";
+    let terminalCancelRequested = false;
+    let activeDojoSessionId = "";
+    let recoveringSumupPayments = false;
+    let recoveringDojoPayments = false;
     let cartItemEls: HTMLElement[] = [];
     let cartScrollFrame: number | undefined;
     let lastCartScrollIndex = -1;
@@ -158,10 +209,23 @@
     $: loyaltyPointsEarned = selectedCustomer && loyaltyConfig.enabled ? pointsForSpend(paymentDue, loyaltyConfig) : 0;
     $: paymentInputAmount = parseInt(amountTenderedString) || 0;
     $: cardCashPartInvalid = paymentMethod === "card" && paymentInputAmount > 0 && paymentInputAmount >= paymentDue;
+    $: activeManagedProvider = $dojoConfigStore.enabled && $dojoConfigStore.ready
+        ? "dojo" as const
+        : $sumupConfigStore.enabled && $sumupConfigStore.ready
+            ? "sumup" as const
+            : null;
+    $: managedCardEnabled = activeManagedProvider !== null;
+    $: managedProviderName = activeManagedProvider === "dojo" ? "Dojo" : activeManagedProvider === "sumup" ? "SumUp" : "Card";
+    $: managedTerminalName = activeManagedProvider === "dojo"
+        ? ($dojoConfigStore.terminalName || "Dojo terminal")
+        : activeManagedProvider === "sumup"
+            ? ($sumupConfigStore.readerName || "SumUp Solo")
+            : "Card terminal";
     $: paymentCompleteDisabled =
         isCompletingSale ||
         (paymentMethod === "cash" && paymentInputAmount < paymentDue) ||
-        cardCashPartInvalid;
+        cardCashPartInvalid ||
+        (paymentMethod === "card" && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline));
     $: customerMatches = customerSearch.trim()
         ? $customersDB.filter((customer) => {
             const query = customerSearch.trim().toLowerCase();
@@ -784,6 +848,9 @@
 
         // Auto-generate and cache till identity for this machine
         if (isTauri()) {
+            void Promise.allSettled([loadSumupConfig(), loadDojoConfig()])
+                .then(() => Promise.allSettled([recoverApprovedSumupSales(), recoverApprovedDojoSales()]))
+                .catch((error) => console.warn("Could not initialize card terminals:", error));
             getOrCreateTillId().then(async id => {
                 tillId = id;
                 await ensureTillReceiptSequence();
@@ -812,6 +879,11 @@
 
     onDestroy(() => {
         if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
+        if (terminalPaymentStage !== "idle") {
+            terminalCancelRequested = true;
+            if (activeDojoSessionId) void cancelDojoTerminalSession(activeDojoSessionId).catch(() => undefined);
+            else void terminateSumupCheckout().catch(() => undefined);
+        }
     });
 
     let tillId = '';
@@ -1018,7 +1090,7 @@
         quantityLocked?: boolean;
         skipStockAdjustment?: boolean;
         note?: string;
-    }) {
+    }, feedback: "item" | "scan" = "item") {
         const existing = product.forceSeparateLine ? -1 : cart.findIndex((i) => i.id === product.id);
         if (existing >= 0) {
             if (cart[existing].quantity >= MAX_CART_QUANTITY) {
@@ -1043,7 +1115,8 @@
             selectedCartIndex = cart.length - 1;
         }
         cart = [...cart];
-        playItemAddedSound();
+        if (feedback === "scan") playScanSuccessSound();
+        else playItemAddedSound();
         sendCctvCartProductName(cart[selectedCartIndex]);
     }
 
@@ -1178,7 +1251,7 @@
                     id: product.id,
                     name: product.name,
                     price: product.price,
-                });
+                }, "scan");
                 return;
             }
             const parsed = parseScaleBarcode(query, getBarcodeRules($settingsDB));
@@ -1209,7 +1282,7 @@
                         forceSeparateLine: true,
                         quantityLocked: true,
                         skipStockAdjustment: true,
-                    });
+                    }, "scan");
                     return;
                 }
                 addToCart({
@@ -1223,7 +1296,7 @@
                     forceSeparateLine: true,
                     quantityLocked: true,
                     skipStockAdjustment: true,
-                });
+                }, "scan");
                 return;
             }
             notFoundBarcode = query;
@@ -1611,18 +1684,29 @@
             return;
         }
         if (cart[selectedCartIndex]) {
-            const updatedItem = { ...cart[selectedCartIndex], price: newPence };
-            const product = $productById.get(updatedItem.id);
-            if (!product) {
-                toast("This item is no longer available", "error");
-                return;
-            }
+            const cartIndex = selectedCartIndex;
+            const currentItem = cart[cartIndex];
+            const updatedItem = { ...currentItem, price: newPence };
             try {
+                let product = $productById.get(updatedItem.id);
+                if (!product) {
+                    const rows = await getProductsByIds([updatedItem.id], false, false);
+                    product = rows[0] as Product | undefined;
+                }
+                if (!product) {
+                    toast("This item is no longer available", "error");
+                    return;
+                }
                 await updateProductFields(
                     { id: updatedItem.id, price: newPence },
                     { price: product.price },
                 );
-                cart[selectedCartIndex] = updatedItem;
+                rememberProductInPosCache({ ...product, price: newPence });
+                if (cart[cartIndex]?.id !== currentItem.id) {
+                    toast("The selected trolley item changed. Please try again.", "error");
+                    return;
+                }
+                cart[cartIndex] = updatedItem;
                 cart = [...cart];
                 toast("Price updated permanently");
             } catch (error) {
@@ -1959,6 +2043,14 @@
         }
     }
 
+    function dojoPaymentIntentId(payments: Payment[]): string {
+        for (const payment of payments) {
+            const match = String(payment.reference || "").match(/\[id:(pi_[^\]]+)\]/i);
+            if (match?.[1]) return match[1];
+        }
+        return "";
+    }
+
     async function reverseOrder(orderId: string, partial: boolean, voiding: boolean, approvedByManager = false) {
         if (isReversingOrder) return;
         if (!approvedByManager && !hasPermission($currentEmployee, "refund_void", $settingsDB)) {
@@ -2070,7 +2162,32 @@
             createdAt: timestamp,
             updatedAt: timestamp,
         };
-        reversalOrder.paymentMethod = paymentAllocation.method;
+        const originalSumupPayments = originalPayments.filter((entry) =>
+            Math.abs(Number(entry.cardAmount || 0)) > 0
+            && (String(entry.method || "").includes("sumup") || String(entry.reference || "").startsWith("SumUp "))
+        );
+        const originalDojoPayments = originalPayments.filter((entry) =>
+            Math.abs(Number(entry.cardAmount || 0)) > 0
+            && (String(entry.method || "").includes("dojo") || String(entry.reference || "").startsWith("Dojo "))
+        );
+        const sumupRefundAmount = originalSumupPayments.length > 0 ? paymentAllocation.cardAmount : 0;
+        const dojoRefundAmount = originalDojoPayments.length > 0 ? paymentAllocation.cardAmount : 0;
+        const previousSumupRefundAmount = sumupRefundAmount > 0
+            ? previousReversalPayments
+                .filter((entry) => String(entry.method || "").includes("sumup") || String(entry.reference || "").startsWith("SumUp "))
+                .reduce((sum, entry) => sum + Math.abs(Number(entry.cardAmount || 0)), 0)
+            : 0;
+        const previousDojoRefundAmount = dojoRefundAmount > 0
+            ? previousReversalPayments
+                .filter((entry) => String(entry.method || "").includes("dojo") || String(entry.reference || "").startsWith("Dojo "))
+                .reduce((sum, entry) => sum + Math.abs(Number(entry.cardAmount || 0)), 0)
+            : 0;
+        if (sumupRefundAmount > 0) {
+            payment.method = paymentAllocation.cashAmount > 0 ? "split+sumup" : "sumup";
+        } else if (dojoRefundAmount > 0) {
+            payment.method = paymentAllocation.cashAmount > 0 ? "split+dojo" : "dojo";
+        }
+        reversalOrder.paymentMethod = payment.method;
         const originalStockMovements = reversalContext.originalStockMovements;
         const stockChanges = partial ? [] : originalStockMovements.map((soldMovement) => ({
                 productId: soldMovement.productId,
@@ -2091,27 +2208,69 @@
                 reason: "refund_adjustment",
                 createdAt: timestamp,
             }];
+        const reversalBundle: SaleBundle = {
+            order: reversalOrder,
+            lines: reversalLines,
+            payment,
+            stockChanges,
+            loyaltyChanges,
+            audit: {
+                id: uuid(),
+                employeeId: $currentEmployee?.id || "",
+                action: voiding ? "order_voided" : partial ? "order_partially_refunded" : "order_refunded",
+                entityType: "order",
+                entityId: original.id,
+                oldData: JSON.stringify({ status: original.status }),
+                newData: JSON.stringify({ status, refundAmount, reversalId }),
+                createdAt: timestamp,
+            },
+            originalOrderToUpdate: original.id,
+            originalStatusUpdate: status,
+        };
+        let managedRefundApproved: "sumup" | "dojo" | null = null;
         try {
             isReversingOrder = true;
-            const committedReversal = await commitSale({
-                order: reversalOrder,
-                lines: reversalLines,
-                payment,
-                stockChanges,
-                loyaltyChanges,
-                audit: {
-                    id: uuid(),
-                    employeeId: $currentEmployee?.id || "",
-                    action: voiding ? "order_voided" : partial ? "order_partially_refunded" : "order_refunded",
-                    entityType: "order",
-                    entityId: original.id,
-                    oldData: JSON.stringify({ status: original.status }),
-                    newData: JSON.stringify({ status, refundAmount, reversalId }),
-                    createdAt: timestamp,
-                },
-                originalOrderToUpdate: original.id,
-                originalStatusUpdate: status,
-            });
+            if (sumupRefundAmount > 0) {
+                const activeSumupConfig = get(sumupConfigStore);
+                if (!activeSumupConfig.enabled || !activeSumupConfig.ready) {
+                    throw new Error("This sale used SumUp. Enable the correct SumUp merchant on this till before refunding it.");
+                }
+                await processManagedSumupRefund(
+                    activeSumupConfig,
+                    reversalBundle,
+                    original.id,
+                    originalSumupPayments.reduce((sum, entry) => sum + Math.abs(Number(entry.cardAmount || 0)), 0),
+                    previousSumupRefundAmount,
+                    sumupRefundAmount,
+                    voiding,
+                );
+                managedRefundApproved = "sumup";
+            } else if (dojoRefundAmount > 0) {
+                const activeDojoConfig = get(dojoConfigStore);
+                if (!activeDojoConfig.enabled || !activeDojoConfig.ready) {
+                    throw new Error("This sale used Dojo. Enable the correct Dojo account on this till before refunding it.");
+                }
+                const paymentIntentId = dojoPaymentIntentId(originalDojoPayments);
+                if (!paymentIntentId) {
+                    throw new Error("The original Dojo payment-intent ID is missing. No refund was sent.");
+                }
+                await processManagedDojoRefund(
+                    activeDojoConfig,
+                    reversalBundle,
+                    paymentIntentId,
+                    originalDojoPayments.reduce((sum, entry) => sum + Math.abs(Number(entry.cardAmount || 0)), 0),
+                    previousDojoRefundAmount,
+                    dojoRefundAmount,
+                    voiding,
+                );
+                managedRefundApproved = "dojo";
+            }
+            const committedReversal = await commitSale(reversalBundle);
+            if (managedRefundApproved === "sumup") {
+                await updateSumupAttempt(reversalId, "completed", { saleBundle: committedReversal });
+            } else if (managedRefundApproved === "dojo") {
+                await updateDojoAttempt(reversalId, "completed", { saleBundle: committedReversal });
+            }
             applyCompletedSaleToStores(committedReversal);
             if (paymentAllocation.cashAmount > 0) {
                 void openDrawerAfterSuccessfulPayment(voiding ? "Void" : "Refund");
@@ -2121,7 +2280,17 @@
             toast(voiding ? "Order voided and reversed" : "Refund recorded", "success");
             await openRecentTransactions();
         } catch (e) {
-            toast(`Reversal failed: ${e}`, "error");
+            if (managedRefundApproved) {
+                const updateAttempt = managedRefundApproved === "dojo" ? updateDojoAttempt : updateSumupAttempt;
+                await updateAttempt(reversalId, "commit_failed", {
+                    error: String(e),
+                    saleBundle: reversalBundle,
+                }).catch(() => undefined);
+                toast(`${managedRefundApproved === "dojo" ? "Dojo" : "SumUp"} accepted the card refund. The POS record will save automatically when the database is ready. Do not refund it again.`, "error");
+                setTimeout(() => void (managedRefundApproved === "dojo" ? recoverApprovedDojoSales() : recoverApprovedSumupSales()), 2_000);
+            } else {
+                toast(`Reversal failed: ${e}`, "error");
+            }
         } finally {
             isReversingOrder = false;
             pendingReversal = null;
@@ -2200,6 +2369,9 @@
         amountTenderedString = "0";
         paymentMethod = "cash";
         hasTypedPayment = false;
+        terminalPaymentStage = "idle";
+        terminalPaymentMessage = "";
+        terminalCancelRequested = false;
         customerSearch = "";
         selectedCustomerId = "";
         useLoyaltyCredit = false;
@@ -2406,6 +2578,650 @@
         }
     }
 
+    function sumupReaderMessage(state: string): string {
+        switch (state) {
+            case "SELECTING_TIP": return "Waiting for the customer to choose a tip";
+            case "WAITING_FOR_CARD": return "Ask the customer to tap or insert their card";
+            case "WAITING_FOR_PIN": return "Waiting for the customer to enter their PIN";
+            case "WAITING_FOR_SIGNATURE": return "Waiting for the customer signature";
+            case "UPDATING_FIRMWARE": return "The Solo is updating and cannot take payment yet";
+            case "IDLE": return "Payment sent. Waiting for the Solo to start";
+            default: return "Waiting for the SumUp Solo";
+        }
+    }
+
+    function verifySumupApproval(
+        status: SumupTransactionStatus,
+        expectedReference: string,
+        expectedAmount: number,
+        expectedCurrency: string,
+    ) {
+        if (status.foreignTransactionId !== expectedReference) {
+            throw new Error("SumUp approved a transaction with a different sale reference. Do not retry the card; check SumUp transactions.");
+        }
+        if (status.amount === undefined || Math.round(status.amount * 100) !== expectedAmount) {
+            throw new Error("SumUp returned a different payment amount. Do not retry the card; check SumUp transactions.");
+        }
+        if ((status.currency || "").toUpperCase() !== expectedCurrency.toUpperCase()) {
+            throw new Error("SumUp returned a different currency. Do not retry the card; check SumUp transactions.");
+        }
+        if (!status.transactionId) {
+            throw new Error("SumUp approved the card but did not return its transaction ID. Do not retry the card; check SumUp transactions.");
+        }
+    }
+
+    function dojoTerminalMessage(notification: string | undefined): string {
+        switch (notification) {
+            case "PresentCard": return "Ask the customer to tap or insert their card";
+            case "EnterPin": return "Waiting for the customer to enter their PIN";
+            case "RemoveCard": return "Ask the customer to remove their card";
+            case "PleaseWait": return "Dojo is processing the card";
+            case "SignatureVerification": return "Customer signature needs approval";
+            default: return "Waiting for the Dojo terminal";
+        }
+    }
+
+    function verifyDojoApproval(
+        status: DojoPaymentIntentStatus,
+        expectedPaymentIntentId: string,
+        expectedReference: string,
+        expectedAmount: number,
+        expectedCurrency: string,
+    ) {
+        if (status.id !== expectedPaymentIntentId || status.reference !== expectedReference) {
+            throw new Error("Dojo captured a payment with a different sale reference. Do not retry the card; check the Dojo portal.");
+        }
+        if (status.amount !== expectedAmount) {
+            throw new Error("Dojo returned a different payment amount. Do not retry the card; check the Dojo portal.");
+        }
+        if ((status.currency || "").toUpperCase() !== expectedCurrency.toUpperCase()) {
+            throw new Error("Dojo returned a different currency. Do not retry the card; check the Dojo portal.");
+        }
+        if (status.status !== "Captured") {
+            throw new Error(`Dojo terminal completed but the payment intent is ${status.status}. Do not retry until it is checked.`);
+        }
+    }
+
+    async function processManagedDojoPayment(
+        config: DojoConfig,
+        bundle: SaleBundle,
+        amount: number,
+    ): Promise<void> {
+        const reference = bundle.order.id;
+        const attempt: DojoPaymentAttempt = {
+            id: reference,
+            provider: "dojo",
+            terminalKey: dojoTerminalKey(config),
+            clientTransactionId: "",
+            amount,
+            currency: config.currency,
+            status: "prepared",
+            saleBundle: bundle,
+            error: "",
+            createdAt: now(),
+            updatedAt: now(),
+        };
+        await saveDojoAttempt(attempt);
+
+        let lockHeld = false;
+        let approved = false;
+        let paymentIntentId = "";
+        let terminalSessionId = "";
+        let signatureHandled = false;
+        terminalCancelRequested = false;
+        terminalPaymentStage = "reserving";
+        terminalPaymentMessage = "Reserving the shared Dojo terminal";
+
+        try {
+            const lockResult = await acquireDojoLock(config, tillId, tillName, reference);
+            if (!lockResult.acquired) {
+                const holder = lockResult.lock?.tillName || "another till";
+                throw new Error(`The Dojo terminal is currently being used by ${holder}`);
+            }
+            lockHeld = true;
+            terminalPaymentStage = "sending";
+            terminalPaymentMessage = `Sending ${formatMoney(amount)} to ${config.terminalName || "Dojo terminal"}`;
+
+            const payment = await createDojoPayment(amount, reference, `Sale from ${tillName || "POS"}`);
+            paymentIntentId = payment.paymentIntentId;
+            terminalSessionId = payment.terminalSessionId;
+            activeDojoSessionId = terminalSessionId;
+            await updateDojoAttempt(reference, "started", { clientTransactionId: paymentIntentId });
+            terminalPaymentStage = "waiting";
+            terminalPaymentMessage = "Ask the customer to tap or insert their card";
+
+            let deadline = Date.now() + 180_000;
+            let nextLeaseRefresh = Date.now() + 25_000;
+            let cancellationSentAt = 0;
+            while (Date.now() < deadline) {
+                if (terminalCancelRequested && cancellationSentAt === 0) {
+                    terminalPaymentStage = "cancelling";
+                    terminalPaymentMessage = "Cancelling the payment on the Dojo terminal";
+                    await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
+                    cancellationSentAt = Date.now();
+                    deadline = Math.min(deadline, cancellationSentAt + 25_000);
+                }
+
+                const session = await getDojoTerminalSessionStatus(terminalSessionId);
+                terminalPaymentMessage = dojoTerminalMessage(session.latestNotification);
+                if (session.status === "SignatureVerificationRequired" && !signatureHandled) {
+                    signatureHandled = true;
+                    terminalPaymentMessage = "Check the signature and choose accept or reject";
+                    const accepted = confirm("Dojo requires signature verification. Compare the customer's signature, then press OK to accept it or Cancel to reject it.");
+                    await respondToDojoSignature(terminalSessionId, accepted);
+                    terminalPaymentMessage = accepted ? "Signature accepted. Completing payment" : "Signature rejected";
+                }
+
+                if (["Captured", "SignatureVerificationAccepted"].includes(session.status)) {
+                    const paymentStatus = session.payment || await getDojoPaymentIntentStatus(paymentIntentId);
+                    verifyDojoApproval(paymentStatus, paymentIntentId, reference, amount, config.currency);
+                    const terminalReference = paymentStatus.transactionId || paymentIntentId;
+                    const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
+                    bundle.payment.reference = `Dojo ${terminalReference} [id:${paymentIntentId}]${loyaltyReference}`;
+                    approved = true;
+                    terminalPaymentStage = "approved";
+                    terminalPaymentMessage = "Card approved. Saving the sale";
+                    await updateDojoAttempt(reference, "approved", {
+                        clientTransactionId: paymentIntentId,
+                        saleBundle: bundle,
+                    }).catch((error) => {
+                        console.error("Could not update the approved Dojo recovery journal:", error);
+                    });
+                    return;
+                }
+
+                if (["Canceled", "Declined", "SignatureVerificationRejected"].includes(session.status)) {
+                    const cancelled = session.status === "Canceled";
+                    await updateDojoAttempt(reference, cancelled ? "cancelled" : "failed", {
+                        clientTransactionId: paymentIntentId,
+                        error: `Dojo status: ${session.status}`,
+                    });
+                    throw new Error(cancelled ? "The Dojo payment was cancelled" : "The card payment was not approved");
+                }
+                if (session.status === "Expired") {
+                    await updateDojoAttempt(reference, "failed", {
+                        clientTransactionId: paymentIntentId,
+                        error: "Dojo terminal session expired with an uncertain result",
+                    });
+                    throw new Error("The Dojo session expired. Check the terminal screen or Dojo portal before retrying, because the result may be uncertain.");
+                }
+                if (session.status === "Authorized") {
+                    throw new Error("Dojo authorized but did not capture this Auto payment. Check the Dojo portal before retrying.");
+                }
+
+                if (Date.now() >= nextLeaseRefresh) {
+                    nextLeaseRefresh = Date.now() + 25_000;
+                    if (!(await refreshDojoLock(config, tillId, reference))) {
+                        await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
+                        throw new Error("This till lost the shared-terminal reservation. Check Dojo before retrying.");
+                    }
+                }
+                await delay(1_200);
+            }
+
+            await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
+            await updateDojoAttempt(reference, "failed", {
+                clientTransactionId: paymentIntentId,
+                error: "Timed out waiting for the terminal result",
+            });
+            throw new Error("Dojo did not return a final result in time. Check the terminal and Dojo portal before retrying.");
+        } catch (error) {
+            if (!approved) {
+                const message = String(error);
+                await updateDojoAttempt(reference, message.toLowerCase().includes("cancel") ? "cancelled" : "failed", {
+                    clientTransactionId: paymentIntentId,
+                    error: message,
+                }).catch(() => undefined);
+            }
+            throw error;
+        } finally {
+            activeDojoSessionId = "";
+            if (lockHeld) {
+                await releaseDojoLock(config, tillId, reference).catch((error) => {
+                    console.warn("Could not release Dojo terminal lock:", error);
+                });
+            }
+        }
+    }
+
+    async function processManagedSumupPayment(
+        config: SumupConfig,
+        bundle: SaleBundle,
+        amount: number,
+    ): Promise<void> {
+        const reference = bundle.order.id;
+        const attempt: SumupPaymentAttempt = {
+            id: reference,
+            provider: "sumup",
+            terminalKey: sumupTerminalKey(config),
+            clientTransactionId: "",
+            amount,
+            currency: config.currency,
+            status: "prepared",
+            saleBundle: bundle,
+            error: "",
+            createdAt: now(),
+            updatedAt: now(),
+        };
+        await saveSumupAttempt(attempt);
+
+        let lockHeld = false;
+        let approved = false;
+        let clientTransactionId = "";
+        terminalCancelRequested = false;
+        terminalPaymentStage = "reserving";
+        terminalPaymentMessage = "Reserving the shared Solo";
+
+        try {
+            const lockResult = await acquireSumupLock(config, tillId, tillName, reference);
+            if (!lockResult.acquired) {
+                const holder = lockResult.lock?.tillName || "another till";
+                throw new Error(`The SumUp Solo is currently being used by ${holder}`);
+            }
+            lockHeld = true;
+            terminalPaymentStage = "sending";
+            terminalPaymentMessage = `Sending ${formatMoney(amount)} to ${config.readerName || "SumUp Solo"}`;
+
+            const checkout = await createSumupCheckout(
+                amount,
+                reference,
+                `Sale from ${tillName || "POS"}`,
+            );
+            clientTransactionId = checkout.clientTransactionId;
+            await updateSumupAttempt(reference, "started", { clientTransactionId });
+            terminalPaymentStage = "waiting";
+            terminalPaymentMessage = "Ask the customer to tap or insert their card";
+
+            let deadline = Date.now() + 180_000;
+            let nextReaderCheck = 0;
+            let nextLeaseRefresh = Date.now() + 25_000;
+            let cancellationSentAt = 0;
+            while (Date.now() < deadline) {
+                if (terminalCancelRequested && cancellationSentAt === 0) {
+                    terminalPaymentStage = "cancelling";
+                    terminalPaymentMessage = "Cancelling the payment on the Solo";
+                    await terminateSumupCheckout().catch(() => undefined);
+                    cancellationSentAt = Date.now();
+                    deadline = Math.min(deadline, cancellationSentAt + 20_000);
+                }
+
+                const status = await getSumupTransactionStatus(clientTransactionId);
+                const outcome = (status.simpleStatus || status.status).toUpperCase();
+                if (outcome === "SUCCESSFUL" || outcome === "PAID_OUT") {
+                    verifySumupApproval(status, reference, amount, config.currency);
+                    const terminalReference = status.transactionCode || status.transactionId;
+                    const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
+                    bundle.payment.reference = `SumUp ${terminalReference} [id:${status.transactionId}]${loyaltyReference}`;
+                    approved = true;
+                    terminalPaymentStage = "approved";
+                    terminalPaymentMessage = "Card approved. Saving the sale";
+                    await updateSumupAttempt(reference, "approved", {
+                        clientTransactionId,
+                        saleBundle: bundle,
+                    }).catch((error) => {
+                        console.error("Could not update the approved SumUp recovery journal:", error);
+                    });
+                    return;
+                }
+                if (["FAILED", "CANCELLED", "CANCEL_FAILED", "NON_COLLECTION"].includes(outcome)) {
+                    const failedStatus = outcome === "CANCELLED" ? "cancelled" : "failed";
+                    await updateSumupAttempt(reference, failedStatus, {
+                        clientTransactionId,
+                        error: `SumUp status: ${outcome}`,
+                    });
+                    throw new Error(outcome === "CANCELLED" ? "The SumUp payment was cancelled" : "The card payment was not approved");
+                }
+
+                if (Date.now() >= nextReaderCheck) {
+                    nextReaderCheck = Date.now() + 4_000;
+                    let readerConfirmsCancellation = false;
+                    try {
+                        const reader = await getSumupReaderStatus();
+                        if (reader.status === "OFFLINE") {
+                            terminalPaymentMessage = "The Solo went offline. Waiting briefly for it to reconnect";
+                        } else {
+                            terminalPaymentMessage = sumupReaderMessage(reader.state);
+                        }
+                        if (
+                            cancellationSentAt > 0
+                            && reader.state === "IDLE"
+                            && outcome === "NOT_FOUND"
+                            && Date.now() - cancellationSentAt >= 4_000
+                        ) {
+                            readerConfirmsCancellation = true;
+                        }
+                    } catch {
+                        // Transaction polling remains authoritative if reader telemetry is unavailable.
+                    }
+                    if (readerConfirmsCancellation) {
+                        await updateSumupAttempt(reference, "cancelled", {
+                            clientTransactionId,
+                            error: "Cancelled by the operator before card approval",
+                        });
+                        throw new Error("SumUp payment cancelled");
+                    }
+                }
+                if (Date.now() >= nextLeaseRefresh) {
+                    nextLeaseRefresh = Date.now() + 25_000;
+                    if (!(await refreshSumupLock(config, tillId, reference))) {
+                        await terminateSumupCheckout().catch(() => undefined);
+                        throw new Error("This till lost the shared-reader reservation. Check SumUp before retrying.");
+                    }
+                }
+                await delay(1_200);
+            }
+
+            await terminateSumupCheckout().catch(() => undefined);
+            await updateSumupAttempt(reference, "failed", {
+                clientTransactionId,
+                error: "Timed out waiting for the terminal result",
+            });
+            throw new Error("SumUp did not return a final result in time. Check the Solo and SumUp transactions before retrying.");
+        } catch (error) {
+            if (!approved) {
+                const message = String(error);
+                const cancelled = message.toLowerCase().includes("cancel");
+                await updateSumupAttempt(reference, cancelled ? "cancelled" : "failed", {
+                    clientTransactionId,
+                    error: message,
+                }).catch(() => undefined);
+            }
+            throw error;
+        } finally {
+            if (lockHeld) {
+                await releaseSumupLock(config, tillId, reference).catch((error) => {
+                    console.warn("Could not release SumUp reader lock:", error);
+                });
+            }
+        }
+    }
+
+    async function processManagedSumupRefund(
+        config: SumupConfig,
+        bundle: SaleBundle,
+        originalOrderId: string,
+        originalCardAmount: number,
+        previouslyRefundedAmount: number,
+        refundAmount: number,
+        voiding: boolean,
+    ): Promise<void> {
+        const reference = bundle.order.id;
+        const attempt: SumupPaymentAttempt = {
+            id: reference,
+            provider: "sumup",
+            terminalKey: sumupTerminalKey(config),
+            clientTransactionId: "",
+            amount: refundAmount,
+            currency: config.currency,
+            status: "prepared",
+            saleBundle: bundle,
+            error: "",
+            createdAt: now(),
+            updatedAt: now(),
+        };
+        await saveSumupAttempt(attempt);
+
+        let lockHeld = false;
+        let approved = false;
+        let transactionId = "";
+        try {
+            const lockResult = await acquireSumupLock(config, tillId, tillName, reference);
+            if (!lockResult.acquired) {
+                const holder = lockResult.lock?.tillName || "another till";
+                throw new Error(`The SumUp account is currently being used by ${holder}`);
+            }
+            lockHeld = true;
+
+            const transaction = await getSumupTransactionByReference(originalOrderId);
+            if (transaction.foreignTransactionId !== originalOrderId || !transaction.transactionId) {
+                throw new Error("The original SumUp transaction could not be verified. No local refund was recorded.");
+            }
+            transactionId = transaction.transactionId;
+            if (transaction.amount === undefined || Math.round(transaction.amount * 100) !== originalCardAmount) {
+                throw new Error("The original SumUp amount does not match this sale. No refund was sent.");
+            }
+            if ((transaction.currency || "").toUpperCase() !== config.currency.toUpperCase()) {
+                throw new Error("The original SumUp currency does not match this till. No refund was sent.");
+            }
+            if (transaction.refundedAmount === undefined) {
+                throw new Error("SumUp did not return its refunded total. Check the SumUp transaction before retrying.");
+            }
+            const remoteRefunded = Math.round(transaction.refundedAmount * 100);
+            if (remoteRefunded !== previouslyRefundedAmount) {
+                throw new Error(
+                    remoteRefunded > previouslyRefundedAmount
+                        ? "SumUp already shows an additional refund. Sync the tills and review the transaction before retrying."
+                        : "The POS refund history is ahead of SumUp. Review the transaction before retrying.",
+                );
+            }
+
+            const terminalReference = transaction.transactionCode || transactionId;
+            bundle.payment.reference = `${voiding ? "SumUp void" : "SumUp refund"} ${terminalReference} [id:${transactionId}]`;
+            await updateSumupAttempt(reference, "started", {
+                clientTransactionId: transactionId,
+                saleBundle: bundle,
+            });
+
+            try {
+                await refundSumupTransaction(transactionId, refundAmount);
+            } catch (error) {
+                // A lost HTTP response can hide an accepted refund. Re-read the
+                // authoritative transaction before allowing the operator to retry.
+                await delay(1_500);
+                const checked = await getSumupTransactionByReference(originalOrderId).catch(() => null);
+                const checkedRefunded = checked?.refundedAmount === undefined
+                    ? -1
+                    : Math.round(checked.refundedAmount * 100);
+                if (checkedRefunded < previouslyRefundedAmount + refundAmount) {
+                    throw new Error(`${error}. The refund result is uncertain; check SumUp before retrying.`);
+                }
+            }
+
+            approved = true;
+            await updateSumupAttempt(reference, "approved", {
+                clientTransactionId: transactionId,
+                saleBundle: bundle,
+            }).catch((error) => {
+                console.error("Could not update the approved SumUp refund journal:", error);
+            });
+        } catch (error) {
+            if (!approved) {
+                await updateSumupAttempt(reference, "failed", {
+                    clientTransactionId: transactionId,
+                    error: String(error),
+                    saleBundle: bundle,
+                }).catch(() => undefined);
+            }
+            throw error;
+        } finally {
+            if (lockHeld) {
+                await releaseSumupLock(config, tillId, reference).catch((error) => {
+                    console.warn("Could not release SumUp refund lock:", error);
+                });
+            }
+        }
+    }
+
+    async function processManagedDojoRefund(
+        config: DojoConfig,
+        bundle: SaleBundle,
+        paymentIntentId: string,
+        originalCardAmount: number,
+        previouslyRefundedAmount: number,
+        refundAmount: number,
+        voiding: boolean,
+    ): Promise<void> {
+        const reference = bundle.order.id;
+        const attempt: DojoPaymentAttempt = {
+            id: reference,
+            provider: "dojo",
+            terminalKey: dojoTerminalKey(config),
+            clientTransactionId: paymentIntentId,
+            amount: refundAmount,
+            currency: config.currency,
+            status: "prepared",
+            saleBundle: bundle,
+            error: "",
+            createdAt: now(),
+            updatedAt: now(),
+        };
+        await saveDojoAttempt(attempt);
+
+        let lockHeld = false;
+        let approved = false;
+        try {
+            const lockResult = await acquireDojoLock(config, tillId, tillName, reference);
+            if (!lockResult.acquired) {
+                const holder = lockResult.lock?.tillName || "another till";
+                throw new Error(`The Dojo account is currently being used by ${holder}`);
+            }
+            lockHeld = true;
+
+            const paymentIntent = await getDojoPaymentIntentStatus(paymentIntentId);
+            if (paymentIntent.id !== paymentIntentId || paymentIntent.reference !== bundle.order.originalOrderId) {
+                throw new Error("The original Dojo payment could not be verified. No refund was sent.");
+            }
+            if (paymentIntent.amount !== originalCardAmount) {
+                throw new Error("The original Dojo amount does not match this sale. No refund was sent.");
+            }
+            if ((paymentIntent.currency || "").toUpperCase() !== config.currency.toUpperCase()) {
+                throw new Error("The original Dojo currency does not match this till. No refund was sent.");
+            }
+            if (paymentIntent.refundedAmount === undefined) {
+                throw new Error("Dojo did not return its refunded total. Check the Dojo portal before retrying.");
+            }
+            if (paymentIntent.refundedAmount !== previouslyRefundedAmount) {
+                throw new Error(
+                    paymentIntent.refundedAmount > previouslyRefundedAmount
+                        ? "Dojo already shows an additional refund. Sync the tills and review the payment before retrying."
+                        : "The POS refund history is ahead of Dojo. Review the payment before retrying.",
+                );
+            }
+
+            const terminalReference = paymentIntent.transactionId || paymentIntentId;
+            bundle.payment.reference = `${voiding ? "Dojo void" : "Dojo refund"} ${terminalReference} [id:${paymentIntentId}]`;
+            await updateDojoAttempt(reference, "started", {
+                clientTransactionId: paymentIntentId,
+                saleBundle: bundle,
+            });
+
+            try {
+                await refundDojoPaymentIntent(paymentIntentId, refundAmount, reference);
+            } catch (error) {
+                // The idempotency key makes an exact retry safe, but first read
+                // Dojo so a lost successful response is not treated as failure.
+                await delay(1_500);
+                const checked = await getDojoPaymentIntentStatus(paymentIntentId).catch(() => null);
+                if ((checked?.refundedAmount ?? -1) < previouslyRefundedAmount + refundAmount) {
+                    throw new Error(`${error}. The refund result is uncertain; check Dojo before retrying.`);
+                }
+            }
+
+            let confirmed: DojoPaymentIntentStatus | null = null;
+            for (let check = 0; check < 6; check++) {
+                confirmed = await getDojoPaymentIntentStatus(paymentIntentId);
+                if ((confirmed.refundedAmount ?? -1) >= previouslyRefundedAmount + refundAmount) break;
+                await delay(500);
+            }
+            if ((confirmed?.refundedAmount ?? -1) < previouslyRefundedAmount + refundAmount) {
+                throw new Error("Dojo accepted the refund request but has not confirmed the refunded amount. Check the Dojo portal before retrying.");
+            }
+            approved = true;
+            await updateDojoAttempt(reference, "approved", {
+                clientTransactionId: paymentIntentId,
+                saleBundle: bundle,
+            }).catch((error) => {
+                console.error("Could not update the approved Dojo refund journal:", error);
+            });
+        } catch (error) {
+            if (!approved) {
+                await updateDojoAttempt(reference, "failed", {
+                    clientTransactionId: paymentIntentId,
+                    error: String(error),
+                    saleBundle: bundle,
+                }).catch(() => undefined);
+            }
+            throw error;
+        } finally {
+            if (lockHeld) {
+                await releaseDojoLock(config, tillId, reference).catch((error) => {
+                    console.warn("Could not release Dojo refund lock:", error);
+                });
+            }
+        }
+    }
+
+    async function cancelManagedTerminalPayment() {
+        if (!isCompletingSale || terminalPaymentStage === "approved" || terminalPaymentStage === "saving") return;
+        terminalCancelRequested = true;
+        terminalPaymentStage = "cancelling";
+        terminalPaymentMessage = `Cancelling the payment on the ${activeManagedProvider === "dojo" ? "Dojo terminal" : "Solo"}`;
+    }
+
+    async function recoverApprovedSumupSales() {
+        if (recoveringSumupPayments) return;
+        recoveringSumupPayments = true;
+        try {
+            const attempts = await getRecoverableSumupAttempts();
+            for (const attempt of attempts) {
+                try {
+                    if (await localOrderExists(attempt.saleBundle.order.id)) {
+                        await updateSumupAttempt(attempt.id, "completed");
+                        continue;
+                    }
+                    const recovered = await commitSale(attempt.saleBundle);
+                    applyCompletedSaleToStores(recovered);
+                    await updateSumupAttempt(attempt.id, "completed", { saleBundle: recovered });
+                    const isRefund = recovered.order.type === "return";
+                    const recoveryLabel = isRefund ? "SumUp refund" : "SumUp sale";
+                    toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
+                    if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
+                        void openDrawerAfterSuccessfulPayment("Recovered refund");
+                    }
+                    void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
+                } catch (error) {
+                    await updateSumupAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
+                    toast("An approved SumUp payment still needs to be saved. Keep this till open and check the database connection.", "error");
+                }
+            }
+            await pruneSumupAttempts();
+        } finally {
+            recoveringSumupPayments = false;
+        }
+    }
+
+    async function recoverApprovedDojoSales() {
+        if (recoveringDojoPayments) return;
+        recoveringDojoPayments = true;
+        try {
+            const attempts = await getRecoverableDojoAttempts();
+            for (const attempt of attempts) {
+                try {
+                    if (await localOrderExists(attempt.saleBundle.order.id)) {
+                        await updateDojoAttempt(attempt.id, "completed");
+                        continue;
+                    }
+                    const recovered = await commitSale(attempt.saleBundle);
+                    applyCompletedSaleToStores(recovered);
+                    await updateDojoAttempt(attempt.id, "completed", { saleBundle: recovered });
+                    const isRefund = recovered.order.type === "return";
+                    const recoveryLabel = isRefund ? "Dojo refund" : "Dojo sale";
+                    toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
+                    if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
+                        void openDrawerAfterSuccessfulPayment("Recovered refund");
+                    }
+                    void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
+                } catch (error) {
+                    await updateDojoAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
+                    toast("An approved Dojo payment still needs to be saved. Keep this till open and check the database connection.", "error");
+                }
+            }
+            await pruneDojoAttempts();
+        } finally {
+            recoveringDojoPayments = false;
+        }
+    }
+
     async function completeSale() {
         if (isCompletingSale) return;
         if (!$currentEmployee || !$currentShiftId || !tillId) {
@@ -2435,8 +3251,12 @@
             return;
         }
         isCompletingSale = true;
+        let approvedManagedBundle: SaleBundle | null = null;
+        let approvedManagedProvider: "sumup" | "dojo" | null = null;
         try {
             await ensureTillReceiptSequence();
+            const activeSumupConfig = get(sumupConfigStore);
+            const activeDojoConfig = get(dojoConfigStore);
 
             // Determine split amounts
             let cashAmount = 0;
@@ -2470,9 +3290,26 @@
                 cardAmount = 0;
                 change = 0;
             }
+            const usesManagedSumup = !trainingModeEnabled
+                && paymentMethod === "card"
+                && cardAmount > 0
+                && activeManagedProvider === "sumup"
+                && activeSumupConfig.enabled
+                && activeSumupConfig.ready;
+            const usesManagedDojo = !trainingModeEnabled
+                && paymentMethod === "card"
+                && cardAmount > 0
+                && activeManagedProvider === "dojo"
+                && activeDojoConfig.enabled
+                && activeDojoConfig.ready;
+            const basePaymentMethod = usesManagedDojo
+                ? (method === 'split' ? 'split+dojo' : 'dojo')
+                : usesManagedSumup
+                    ? (method === 'split' ? 'split+sumup' : 'sumup')
+                    : method;
             const recordedPaymentMethod = loyaltyCreditUsed > 0 && method !== 'loyalty'
-                ? `${method}+loyalty`
-                : method;
+                ? `${basePaymentMethod}+loyalty`
+                : basePaymentMethod;
 
             const timestamp = now();
 
@@ -2578,6 +3415,15 @@
                 }] : []),
             ] : [];
 
+            const saleBundle: SaleBundle = {
+                order: newOrder,
+                lines,
+                payment,
+                stockChanges,
+                loyaltyChanges,
+                audit,
+            };
+
             if (trainingModeEnabled) {
                 cart = [];
                 selectedCartIndex = 0;
@@ -2595,7 +3441,30 @@
                 return;
             }
 
-            const committedSale = await commitSale({ order: newOrder, lines, payment, stockChanges, loyaltyChanges, audit });
+            if (usesManagedSumup) {
+                await processManagedSumupPayment(activeSumupConfig, saleBundle, cardAmount);
+                approvedManagedBundle = saleBundle;
+                approvedManagedProvider = "sumup";
+                terminalPaymentStage = "saving";
+                terminalPaymentMessage = "Card approved. Saving the sale";
+            } else if (usesManagedDojo) {
+                await processManagedDojoPayment(activeDojoConfig, saleBundle, cardAmount);
+                approvedManagedBundle = saleBundle;
+                approvedManagedProvider = "dojo";
+                terminalPaymentStage = "saving";
+                terminalPaymentMessage = "Card approved. Saving the sale";
+            }
+
+            const committedSale = await commitSale(saleBundle);
+            if (approvedManagedBundle && approvedManagedProvider) {
+                if (approvedManagedProvider === "dojo") {
+                    await updateDojoAttempt(approvedManagedBundle.order.id, "completed", { saleBundle: committedSale });
+                } else {
+                    await updateSumupAttempt(approvedManagedBundle.order.id, "completed", { saleBundle: committedSale });
+                }
+                approvedManagedBundle = null;
+                approvedManagedProvider = null;
+            }
             applyCompletedSaleToStores(committedSale);
             void openDrawerAfterSuccessfulPayment();
             void printReceiptAfterSuccessfulPayment(committedSale);
@@ -2639,9 +3508,27 @@
             void triggerSync();
         } catch (e) {
             console.error(e);
-            toast(`Sale was not completed: ${e}`, "error");
+            if (approvedManagedBundle && approvedManagedProvider) {
+                const updateAttempt = approvedManagedProvider === "dojo" ? updateDojoAttempt : updateSumupAttempt;
+                await updateAttempt(approvedManagedBundle.order.id, "commit_failed", {
+                    error: String(e),
+                    saleBundle: approvedManagedBundle,
+                }).catch(() => undefined);
+                cart = [];
+                selectedCartIndex = 0;
+                showPaymentModal = false;
+                selectedCustomerId = "";
+                useLoyaltyCredit = false;
+                toast("Card approved. The sale is safely queued and will save automatically when the database is ready. Do not charge it again.", "error");
+                setTimeout(() => void (approvedManagedProvider === "dojo" ? recoverApprovedDojoSales() : recoverApprovedSumupSales()), 2_000);
+            } else {
+                toast(`Sale was not completed: ${e}`, "error");
+            }
         } finally {
             isCompletingSale = false;
+            terminalCancelRequested = false;
+            terminalPaymentStage = "idle";
+            terminalPaymentMessage = "";
         }
     }
 </script>
@@ -3151,18 +4038,27 @@
 
         <!-- Selection Controls & Quantity -->
         <div class="pos-cart-controls flex gap-1 md:gap-2 p-2 md:p-4 pb-0 shrink-0">
-            <button
-                disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
-                title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Increase quantity"}
-                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
-                on:click={increaseQty}>+</button
-            >
-            <button
-                disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
-                title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Decrease quantity"}
-                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
-                on:click={decreaseQty}>-</button
-            >
+            <div class="flex-[3] min-w-0 h-8 md:h-10 lg:h-12 grid grid-cols-[1fr_minmax(34px,0.8fr)_1fr] overflow-hidden rounded-md border border-border-flat bg-bg-card">
+                <button
+                    disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
+                    title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Increase quantity"}
+                    aria-label="Increase selected item quantity"
+                    class="flex min-w-0 items-center justify-center border-r border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+                    on:click={increaseQty}>+</button
+                >
+                <output
+                    class="flex min-w-0 items-center justify-center bg-bg-panel px-1 text-sm md:text-base lg:text-lg font-black tabular-nums text-text-main"
+                    aria-label="Selected item quantity"
+                    aria-live="polite"
+                >{selectedCartItem?.quantity ?? 0}</output>
+                <button
+                    disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked || selectedCartItem.quantity <= 1}
+                    title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Decrease quantity"}
+                    aria-label="Decrease selected item quantity"
+                    class="flex min-w-0 items-center justify-center border-l border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+                    on:click={decreaseQty}>−</button
+                >
+            </div>
             <button
                 disabled={selectedCartIndex <= 0}
                 class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
@@ -3754,6 +4650,7 @@
                     <div class="payment-methods" role="group" aria-label="Payment method">
                         <button
                             type="button"
+                            disabled={isCompletingSale}
                             class:is-active={paymentMethod === "cash"}
                             aria-pressed={paymentMethod === "cash"}
                             on:click={() => selectPaymentMethod("cash")}
@@ -3764,6 +4661,7 @@
                         >
                         <button
                             type="button"
+                            disabled={isCompletingSale}
                             class:is-active={paymentMethod === "card"}
                             aria-pressed={paymentMethod === "card"}
                             on:click={() => selectPaymentMethod("card")}
@@ -3772,7 +4670,7 @@
                                 <rect x="3" y="5" width="18" height="14" rx="2"></rect>
                                 <path d="M3 10h18M7 15h4"></path>
                             </svg>
-                            <span>Card</span>
+                            <span>{managedProviderName}</span>
                         </button
                         >
                     </div>
@@ -3871,6 +4769,19 @@
                                     Change: £0.00
                                 </div>
                             {/if}
+                        {:else if managedCardEnabled && isCompletingSale}
+                            <div
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-base md:text-lg font-black text-success p-2 bg-success/10 rounded-sm"
+                                aria-live="polite"
+                            >
+                                {terminalPaymentMessage || `Connecting to ${managedProviderName}`}
+                            </div>
+                        {:else if managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)}
+                            <div
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-sm md:text-base font-black text-danger p-2 bg-danger/10 rounded-sm"
+                            >
+                                MariaDB must be online to protect the shared Solo
+                            </div>
                         {:else if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
                             <div
                                 class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm"
@@ -3897,7 +4808,9 @@
                             disabled={paymentCompleteDisabled}
                             on:click={completeSale}
                         >
-                            {isCompletingSale ? 'Saving Sale…' : 'Complete Sale'}
+                            {isCompletingSale
+                                ? (managedCardEnabled && paymentMethod === 'card' ? `Processing ${managedProviderName}...` : 'Saving Sale...')
+                                : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : 'Complete Sale')}
                         </button>
                     </div>
                 </div>
@@ -3939,9 +4852,18 @@
                                     <path d="M3 10h18M7 15h4"></path>
                                 </svg>
                             </div>
-                            <span>Card terminal</span>
+                            <span>{managedTerminalName}</span>
                             <strong>{formatMoney(paymentInputAmount > 0 && paymentInputAmount < paymentDue ? paymentDue - paymentInputAmount : paymentDue)}</strong>
-                            <small>Complete the card transaction, then confirm the sale.</small>
+                            {#if managedCardEnabled}
+                                <small>{terminalPaymentMessage || `The sale saves only after ${managedProviderName} confirms approval.`}</small>
+                                {#if isCompletingSale && !['approved', 'saving'].includes(terminalPaymentStage)}
+                                    <button class="btn btn-danger mt-3 w-full" disabled={terminalPaymentStage === 'cancelling'} on:click={cancelManagedTerminalPayment}>
+                                        {terminalPaymentStage === 'cancelling' ? 'Cancelling...' : 'Cancel Terminal'}
+                                    </button>
+                                {/if}
+                            {:else}
+                                <small>Complete the card transaction, then confirm the sale.</small>
+                            {/if}
                         </div>
                     {/if}
                 </div>

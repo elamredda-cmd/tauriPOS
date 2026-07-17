@@ -135,6 +135,21 @@ export async function initDb() {
             identitySignature TEXT
         )
     `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS payment_terminal_attempts (
+            id TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            terminalKey TEXT NOT NULL,
+            clientTransactionId TEXT DEFAULT '',
+            amount INTEGER NOT NULL,
+            currency TEXT NOT NULL,
+            status TEXT NOT NULL,
+            saleBundle TEXT NOT NULL,
+            error TEXT DEFAULT '',
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL
+        )
+    `);
 
     // 4. Tiles Table
     await d.execute(`
@@ -570,6 +585,7 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_cash_movements_shift ON cash_movements(shiftId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt DESC, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_offline_queue_due ON _offline_queue(next_attempt_at, created_at)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_payment_terminal_attempt_status ON payment_terminal_attempts(status, updatedAt)`);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu_active ON products(scalePlu, isActive)`);

@@ -1,0 +1,56 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dojo-get-config"
+description = "Enables the dojo_get_config command without any pre-configured scope."
+commands.allow = ["dojo_get_config"]
+
+[[permission]]
+identifier = "allow-dojo-save-config"
+description = "Enables the dojo_save_config command without any pre-configured scope."
+commands.allow = ["dojo_save_config"]
+
+[[permission]]
+identifier = "allow-dojo-clear-secret"
+description = "Enables the dojo_clear_secret command without any pre-configured scope."
+commands.allow = ["dojo_clear_secret"]
+
+[[permission]]
+identifier = "allow-dojo-list-terminals"
+description = "Enables the dojo_list_terminals command without any pre-configured scope."
+commands.allow = ["dojo_list_terminals"]
+
+[[permission]]
+identifier = "allow-dojo-terminal-status"
+description = "Enables the dojo_terminal_status command without any pre-configured scope."
+commands.allow = ["dojo_terminal_status"]
+
+[[permission]]
+identifier = "allow-dojo-create-payment"
+description = "Enables the dojo_create_payment command without any pre-configured scope."
+commands.allow = ["dojo_create_payment"]
+
+[[permission]]
+identifier = "allow-dojo-terminal-session-status"
+description = "Enables the dojo_terminal_session_status command without any pre-configured scope."
+commands.allow = ["dojo_terminal_session_status"]
+
+[[permission]]
+identifier = "allow-dojo-payment-intent-status"
+description = "Enables the dojo_payment_intent_status command without any pre-configured scope."
+commands.allow = ["dojo_payment_intent_status"]
+
+[[permission]]
+identifier = "allow-dojo-cancel-terminal-session"
+description = "Enables the dojo_cancel_terminal_session command without any pre-configured scope."
+commands.allow = ["dojo_cancel_terminal_session"]
+
+[[permission]]
+identifier = "allow-dojo-respond-signature"
+description = "Enables the dojo_respond_signature command without any pre-configured scope."
+commands.allow = ["dojo_respond_signature"]
+
+[[permission]]
+identifier = "allow-dojo-refund-payment-intent"
+description = "Enables the dojo_refund_payment_intent command without any pre-configured scope."
+commands.allow = ["dojo_refund_payment_intent"]

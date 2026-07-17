@@ -1391,6 +1391,7 @@ async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
             .map_err(|e| format!("Could not remove order-linked loyalty history: {e}"))?;
         }
         for table in [
+            "payment_terminal_attempts",
             "payments",
             "order_lines",
             "cash_movements",
@@ -1454,6 +1455,7 @@ async fn validate_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
             "orders",
             "order_lines",
             "payments",
+            "payment_terminal_attempts",
             "shifts",
             "cash_movements",
         ] {
@@ -2260,6 +2262,7 @@ mod tests {
                 "CREATE TABLE orders (id TEXT PRIMARY KEY)",
                 "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT)",
                 "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT)",
+                "CREATE TABLE payment_terminal_attempts (id TEXT PRIMARY KEY)",
                 "CREATE TABLE shifts (id TEXT PRIMARY KEY)",
                 "CREATE TABLE cash_movements (id TEXT PRIMARY KEY, shiftId TEXT)",
                 "CREATE TABLE inventory_logs (id TEXT PRIMARY KEY, referenceId TEXT)",
@@ -2275,6 +2278,7 @@ mod tests {
                 "INSERT INTO orders VALUES ('order-1')",
                 "INSERT INTO order_lines VALUES ('line-1', 'order-1')",
                 "INSERT INTO payments VALUES ('payment-1', 'order-1')",
+                "INSERT INTO payment_terminal_attempts VALUES ('terminal-attempt-1')",
                 "INSERT INTO shifts VALUES ('shift-1')",
                 "INSERT INTO cash_movements VALUES ('cash-1', 'shift-1')",
                 "INSERT INTO inventory_logs VALUES ('stock-sale', 'order-1')",
@@ -2327,6 +2331,7 @@ mod tests {
                 "orders",
                 "order_lines",
                 "payments",
+                "payment_terminal_attempts",
                 "shifts",
                 "cash_movements",
                 "daily_sales_summary",

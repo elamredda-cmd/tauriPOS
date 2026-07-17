@@ -1,8 +1,8 @@
 <script lang="ts">
-    import { onDestroy } from 'svelte';
     import PageBackButton from '$lib/components/PageBackButton.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
+    import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import {
         posPagesDB,
         activePosPages,
@@ -27,6 +27,7 @@
     let activePageId = '';
     let currentPageIndex = 0;
     let tileProducts: Product[] = [];
+    let tileProductsLoading = false;
     let loadedTileProductSignature = '';
     let tileProductLoadVersion = 0;
 
@@ -41,12 +42,13 @@
     let showTileSearchModal = false;
     let pendingTilePosition = 1;
     let searchTerm = '';
+    let appliedSearchTerm = '';
+    let hasProductSearchRun = false;
     let availableProducts: Product[] = [];
     let productSearchLoading = false;
     let productSearchError = '';
     let productSearchTotal = 0;
     let productSearchTotalCapped = false;
-    let productSearchTimer: ReturnType<typeof setTimeout> | undefined;
     let productSearchVersion = 0;
 
     let showEditTileModal = false;
@@ -62,18 +64,23 @@
         }
     }
 
-    $: allTileProductIds = [...new Set($tilesDB.map((tile) => tile.productId).filter(Boolean))];
-    $: {
-        const signature = allTileProductIds.slice().sort().join('|');
-        if (signature !== loadedTileProductSignature) {
-            loadedTileProductSignature = signature;
-            void loadTileProducts(allTileProductIds);
-        }
-    }
-
     $: activePageTiles = $tilesDB
         .filter((tile) => tile.pageId === activePageId)
         .sort((a, b) => a.position - b.position);
+    $: visiblePositionStart = currentPageIndex * POS_TILES_PER_PAGE + 1;
+    $: visiblePositionEnd = visiblePositionStart + POS_TILES_PER_PAGE - 1;
+    $: visibleTileProductIds = [...new Set(activePageTiles
+        .filter((tile) => tile.position >= visiblePositionStart && tile.position <= visiblePositionEnd)
+        .map((tile) => tile.productId)
+        .filter(Boolean))];
+    $: {
+        const signature = `${activePageId}:${currentPageIndex}:${visibleTileProductIds.slice().sort().join('|')}`;
+        if (signature !== loadedTileProductSignature) {
+            loadedTileProductSignature = signature;
+            void loadTileProducts(visibleTileProductIds);
+        }
+    }
+
     $: activePageTileProductIds = new Set(activePageTiles.map((tile) => tile.productId));
     $: activeProductById = new Map(tileProducts.map((product) => [product.id, product]));
     $: tileByPosition = new Map(activePageTiles.map((tile) => [tile.position, tile]));
@@ -92,14 +99,18 @@
         const version = ++tileProductLoadVersion;
         if (ids.length === 0) {
             tileProducts = [];
+            tileProductsLoading = false;
             return;
         }
+        tileProductsLoading = true;
         try {
             const rows = await getProductsByIds(ids, false, false) as Product[];
             if (version === tileProductLoadVersion) tileProducts = rows;
         } catch (error) {
             console.error('Tile products were not loaded:', error);
             if (version === tileProductLoadVersion) tileProducts = [];
+        } finally {
+            if (version === tileProductLoadVersion) tileProductsLoading = false;
         }
     }
 
@@ -183,15 +194,23 @@
     function handleEmptyTileClick(absolutePos: number) {
         pendingTilePosition = absolutePos;
         searchTerm = '';
+        appliedSearchTerm = '';
+        hasProductSearchRun = false;
         availableProducts = [];
         productSearchError = '';
         showTileSearchModal = true;
+    }
+
+    function runProductSearch() {
+        appliedSearchTerm = searchTerm.trim();
+        hasProductSearchRun = true;
         void loadAvailableProducts();
     }
 
-    function scheduleProductSearch() {
-        if (productSearchTimer) clearTimeout(productSearchTimer);
-        productSearchTimer = setTimeout(() => void loadAvailableProducts(), 180);
+    function handleProductSearchKeydown(event: KeyboardEvent) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runProductSearch();
     }
 
     async function loadAvailableProducts() {
@@ -200,10 +219,11 @@
         productSearchError = '';
         try {
             const result = await getProductsPage({
-                query: searchTerm,
+                query: appliedSearchTerm,
                 status: 'active',
-                limit: 100,
+                limit: 50,
                 offset: 0,
+                compact: true,
             });
             if (version !== productSearchVersion) return;
             availableProducts = (result.rows as Product[])
@@ -273,9 +293,6 @@
         else if (showPageModal) showPageModal = false;
     }
 
-    onDestroy(() => {
-        if (productSearchTimer) clearTimeout(productSearchTimer);
-    });
 </script>
 
 <svelte:head>
@@ -336,8 +353,13 @@
                                 type="button"
                                 class="product-tile"
                                 class:missing={!slot.product}
+                                disabled={tileProductsLoading && !slot.product}
                                 style="--product-color: {slot.product?.color || '#3b82f6'}"
-                                aria-label={slot.product ? `Edit position ${absolutePos}, ${slot.product.name}` : `Remove unavailable item from position ${absolutePos}`}
+                                aria-label={slot.product
+                                    ? `Edit position ${absolutePos}, ${slot.product.name}`
+                                    : tileProductsLoading
+                                        ? `Loading item in position ${absolutePos}`
+                                        : `Remove unavailable item from position ${absolutePos}`}
                                 on:click={() => handleAssignedTileClick(slot.tile)}
                             >
                                 {#if slot.product}
@@ -350,6 +372,10 @@
                                         <strong>{slot.product.name}</strong>
                                         <b>{formatMoney(slot.product.price)}</b>
                                     </span>
+                                {:else if tileProductsLoading}
+                                    <span class="tile-loading-spinner" aria-hidden="true"></span>
+                                    <strong>Loading item</strong>
+                                    <span>Position {absolutePos}</span>
                                 {:else}
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                         <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
@@ -435,12 +461,21 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12"></path><path d="M18 6 6 18"></path></svg>
                 </button>
             </header>
-            <div class="picker-search">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
-                <input bind:value={searchTerm} on:input={scheduleProductSearch} placeholder="Search name, SKU, barcode, or PLU" data-touch-keyboard="button" aria-label="Search products" />
+            <div class="picker-search-row">
+                <div class="picker-search">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                    <input id="tile-product-search" bind:value={searchTerm} on:keydown={handleProductSearchKeydown} placeholder="Search name, SKU, barcode, or PLU" data-touch-keyboard="button" aria-label="Search products" />
+                    <TouchKeyboardButton targetId="tile-product-search" label="Open product search keyboard" embedded />
+                </div>
+                <button type="button" class="picker-find" disabled={productSearchLoading} on:click={runProductSearch}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                    {productSearchLoading ? 'Finding...' : 'Find'}
+                </button>
             </div>
             <div class="picker-status">
-                {#if productSearchLoading}
+                {#if !hasProductSearchRun}
+                    Enter an item name or code, then press Find. Leave it empty to browse the first 50.
+                {:else if productSearchLoading}
                     Searching products...
                 {:else if productSearchError}
                     Product search failed
@@ -458,7 +493,7 @@
                         <b>{formatMoney(product.price)}</b>
                     </button>
                 {/each}
-                {#if !productSearchLoading && !productSearchError && availableProducts.length === 0}
+                {#if hasProductSearchRun && !productSearchLoading && !productSearchError && availableProducts.length === 0}
                     <div class="picker-empty">No unassigned products match this search.</div>
                 {/if}
                 {#if productSearchError}
@@ -536,6 +571,8 @@
     .product-tile.missing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .3rem; background: color-mix(in srgb, var(--danger) 9%, var(--bg-card)); color: var(--danger); text-align: center; }
     .product-tile.missing svg { width: 28px; height: 28px; }
     .product-tile.missing span { color: var(--text-muted); font-size: .72rem; }
+    .tile-loading-spinner { width: 24px; height: 24px; border: 3px solid var(--border-flat); border-top-color: var(--accent-primary); border-radius: 50%; animation: tile-spin .7s linear infinite; }
+    @keyframes tile-spin { to { transform: rotate(360deg); } }
     .empty-tile { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .3rem; border-style: dashed; background: transparent; color: var(--text-muted); }
     .empty-tile:hover { border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 7%, transparent); color: var(--accent-primary); }
     .empty-tile svg { width: 27px; height: 27px; }
@@ -560,9 +597,14 @@
     .dialog-close { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
     .dialog-close svg { width: 20px; height: 20px; }
     .product-picker { width: min(680px, 95vw); height: min(650px, 90vh); overflow: hidden; }
-    .picker-search { min-height: 50px; display: flex; align-items: center; gap: .6rem; padding: 0 .8rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); }
+    .picker-search-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: .55rem; }
+    .picker-search { position: relative; min-height: 50px; display: flex; align-items: center; gap: .6rem; padding: 0 .8rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); }
     .picker-search svg { width: 21px; height: 21px; flex: 0 0 auto; color: var(--text-muted); }
-    .picker-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); }
+    .picker-search input { min-width: 0; flex: 1; padding-right: 2.5rem; border: 0; outline: 0; background: transparent; color: var(--text-main); }
+    .picker-find { min-height: 50px; padding: 0 .8rem; display: flex; align-items: center; justify-content: center; gap: .4rem; border: 1px solid var(--accent-primary); border-radius: .4rem; background: var(--accent-primary); color: white; font-size: .8rem; font-weight: 900; }
+    .picker-find:hover { filter: brightness(1.08); }
+    .picker-find:disabled { opacity: .58; cursor: wait; }
+    .picker-find svg { width: 18px; height: 18px; }
     .picker-status { min-height: 24px; color: var(--text-muted); font-size: .72rem; font-weight: 750; }
     .product-results { min-height: 0; flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .35rem; }
     .product-results > button:not(.retry-search) { min-height: 58px; padding: .45rem .65rem; display: grid; grid-template-columns: 7px minmax(0,1fr) auto; align-items: center; gap: .7rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-main); text-align: left; }
@@ -580,5 +622,5 @@
     .remove-product-summary div { min-width: 0; display: flex; flex-direction: column; }
     .remove-product-summary span { color: var(--text-muted); font-size: .78rem; }
     @media (max-height: 680px) and (min-width: 721px) { .tile-designer-header { min-height: 66px; } .tile-designer-main { padding-top: .5rem; } .pos-page-tabs { min-height: 43px; } .pos-page-tab, .add-pos-page { height: 41px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 43px; } }
-    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } }
+    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } .picker-search-row { grid-template-columns: minmax(0,1fr) 90px; } }
 </style>

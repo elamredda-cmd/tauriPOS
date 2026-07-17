@@ -195,10 +195,20 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
 
 function encodeText(text: string, encoding: 'latin1' | 'utf8'): number[] {
     if (encoding === 'utf8') return Array.from(new TextEncoder().encode(text));
-    return Array.from(text).map((char) => {
+    const bytes: number[] = [];
+    for (const char of Array.from(text)) {
+        if (char === '£') {
+            // ESC R 3 selects the UK international set where ASCII # prints as
+            // the pound glyph. Reset to USA immediately so real # characters
+            // elsewhere (for example receipt numbers) remain unchanged. Both
+            // Star Line and ESC/POS printers support this command.
+            bytes.push(0x1b, 0x52, 0x03, 0x23, 0x1b, 0x52, 0x00);
+            continue;
+        }
         const code = char.charCodeAt(0);
-        return code <= 0xff ? code : 63;
-    });
+        bytes.push(code <= 0xff ? code : 63);
+    }
+    return bytes;
 }
 
 function line(text = '', encoding: 'latin1' | 'utf8' = 'latin1'): number[] {
@@ -349,6 +359,7 @@ export function buildEscposTestReceipt(config = getReceiptPrinterConfig()): numb
         ...line(`Model: ${config.model === 'star_tsp100' ? 'Star TSP100' : 'Generic ESC/POS'}`, config.encoding),
         ...line(`Paper: ${config.paperWidth}`, config.encoding),
         ...line('If you can read this, printing works.', config.encoding),
+        ...line('Currency test: £1.00', config.encoding),
         ...line(divider, config.encoding),
         ...line('Item              Qty     Total', config.encoding),
         ...line('Test Product       1       1.00', config.encoding),
