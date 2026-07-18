@@ -448,14 +448,40 @@
         closeReportSaving = true;
         try {
             const saveMarker = closeReportTillNumber ? saveReportMarker : saveLiveReportMarker;
-            await saveMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
+            const marker = await saveMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
                 employeeId: $currentEmployee?.id || '',
                 reportText: closeReportText,
                 reportTotal: tillReportData.overview.totalRevenue,
             });
+            let sentToOwnerApp = false;
+            try {
+                const { queueOwnerClosedReport } = await import('$lib/ownerCloudReporter');
+                sentToOwnerApp = await queueOwnerClosedReport({
+                    reportId: String(marker.id),
+                    businessDate: localDateValue(new Date(closeReportEnd)),
+                    periodStart: closeReportStart,
+                    periodEnd: closeReportEnd,
+                    scope: closeReportTillNumber ? 'till' : 'system',
+                    tillId: closeReportTillNumber,
+                    tillName: closeReportTillNumber ? tillName : 'Whole system',
+                    closedById: $currentEmployee?.id || '',
+                    closedByName: $currentEmployee?.name || 'Unknown employee',
+                    reportText: closeReportText,
+                    overview: tillReportData.overview,
+                    breakdown: tillReportData.breakdown,
+                    topProducts: tillReportData.topProducts,
+                });
+            } catch (error) {
+                console.warn('Could not queue the owner-app end-of-day report:', error);
+            }
             closeReportCanEnd = false;
             closeReportConfirming = false;
-            toast('Report period ended', 'success');
+            toast(
+                sentToOwnerApp
+                    ? 'Report period ended and sent to the owner app'
+                    : 'Report period ended. The owner-app report will send when cloud reporting reconnects.',
+                sentToOwnerApp ? 'success' : 'info',
+            );
         } catch (error) {
             toast(`Could not end report period: ${error}`, 'error');
         } finally {

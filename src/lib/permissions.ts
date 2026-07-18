@@ -120,7 +120,12 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
     { path: '/settings', permission: 'open_settings' },
 ];
 
-const adminOnlyPaths = ['/employees/permissions', '/settings/permissions', '/settings/advanced'];
+const adminOnlyPaths = [
+    '/employees/permissions',
+    '/settings/permissions',
+    '/settings/advanced',
+    '/settings/owner-app',
+];
 const signedInOperationalPaths = ['/shifts', '/label-print', '/about'];
 const publicPaths = ['/', '/customer-display'];
 

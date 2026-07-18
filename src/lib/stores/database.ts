@@ -19,11 +19,14 @@ import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, res
 import { get } from 'svelte/store';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { currentEmployee } from './session';
+import { notifyOwnerCloudDataChanged } from '$lib/ownerCloudEvents';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
 export const POS_HELD_ORDERS_CHANGED_EVENT = 'pos-held-orders-changed';
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
+const RECEIPT_BLOCK = 1_000_000;
+const RECEIPT_HIGH_WATER_KEY = 'receipt_number_high_water';
 const LIGHT_STORE_ROUTES = new Set([
     '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
     '/design', '/design/scale', '/tiles', '/settings/layout', '/settings/labels',
@@ -1074,6 +1077,7 @@ async function tryMysql(): Promise<boolean> {
 // every till the same till_id, leak DB credentials, and clobber sync state.
 const LOCAL_ONLY_SETTING_KEYS = new Set([
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_seq',
+    RECEIPT_HIGH_WATER_KEY,
     'automatic_setup_backup_enabled', 'automatic_setup_backup_time',
     'automatic_setup_backup_directory', 'backup_directory',
     'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
@@ -1442,6 +1446,7 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
     const salesAuditTypes = `'order','shift','cash_movement','report'`;
     const salesAuditActions = `'sale_completed','order_refunded','order_partially_refunded','order_voided','refund_completed','report_period_closed'`;
 
+    await preserveLocalReceiptHighWater(d);
     await d.execute(`DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
     await d.execute(
         `DELETE FROM audit_logs
@@ -1485,6 +1490,41 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
         `DELETE FROM tombstones WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')`
     );
     await sqlite.upsert('settings', { key: 'transaction_purge_applied_at', value: marker, updatedAt: marker }, 'key');
+}
+
+async function preserveLocalReceiptHighWater(d: any): Promise<void> {
+    const settingsRows: any[] = await d.select(
+        `SELECT key, value FROM settings WHERE key IN (?, ?)`,
+        ['till_seq', RECEIPT_HIGH_WATER_KEY],
+    );
+    const readSetting = (key: string) => String(settingsRows.find(row => row.key === key)?.value || '');
+    const tillSeq = Math.max(0, parseInt(readSetting('till_seq'), 10) || 0);
+    const savedHighWater = Math.max(0, parseInt(readSetting(RECEIPT_HIGH_WATER_KEY), 10) || 0);
+
+    let maxIssued = 0;
+    let applicableSavedHighWater = savedHighWater;
+    if (tillSeq > 0) {
+        const blockStart = tillSeq * RECEIPT_BLOCK;
+        const blockEnd = blockStart + RECEIPT_BLOCK;
+        const rows: any[] = await d.select(
+            `SELECT MAX(orderNumber) AS maxNum FROM orders WHERE orderNumber >= ? AND orderNumber < ?`,
+            [blockStart, blockEnd],
+        );
+        maxIssued = Number(rows[0]?.maxNum || 0);
+        if (savedHighWater < blockStart || savedHighWater >= blockEnd) applicableSavedHighWater = 0;
+    } else {
+        const rows: any[] = await d.select(`SELECT MAX(orderNumber) AS maxNum FROM orders WHERE orderNumber > 0`);
+        maxIssued = Number(rows[0]?.maxNum || 0);
+    }
+
+    const highWater = Math.max(maxIssued, applicableSavedHighWater);
+    if (highWater <= 0) return;
+    const stamp = new Date().toISOString();
+    await sqlite.upsert('settings', {
+        key: RECEIPT_HIGH_WATER_KEY,
+        value: String(highWater),
+        updatedAt: stamp,
+    }, 'key');
 }
 
 async function applyTransactionPurgeMarker(): Promise<boolean> {
@@ -2829,6 +2869,7 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
                     mysqlUri: buildMysqlUri(state.mysqlConfig),
                     bundle,
                 });
+                notifyOwnerCloudDataChanged();
                 return committed.bundle;
             } catch (e) {
                 connectionState.update(s => ({ ...s, syncError: String(e) }));
@@ -2848,6 +2889,7 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
                 connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(e) }));
             });
     }
+    notifyOwnerCloudDataChanged();
     return bundle;
 }
 
@@ -3594,8 +3636,6 @@ export async function getGlobalMaxOrderNumber(): Promise<number> {
 // + local sequence). Because a till only ever issues numbers inside its block
 // and computes the next one from its own local orders, receipt numbers can
 // never collide across tills — even when several tills are offline at once.
-const RECEIPT_BLOCK = 1_000_000;
-
 /** Read a single settings value from local SQLite (null if absent). */
 async function getSettingValue(key: string): Promise<string | null> {
     const d = await sqlite.getDb();
@@ -4104,13 +4144,15 @@ export async function replaceMariaDbDataFromThisTill(): Promise<void> {
 export async function getNextOrderNumber(): Promise<number> {
     const startStr = await getSettingValue('starting_receipt_number');
     const startNum = startStr ? (parseInt(startStr, 10) || 1) : 1;
+    const highWaterStr = await getSettingValue(RECEIPT_HIGH_WATER_KEY);
+    const highWater = highWaterStr ? Math.max(0, parseInt(highWaterStr, 10) || 0) : 0;
 
     const tillSeq = await getTillSequence();
 
     // Single mode (or sequence not yet claimed) → legacy global sequence.
     if (!isMultiMode() || tillSeq <= 0) {
         const globalMax = await getGlobalMaxOrderNumber();
-        return Math.max(globalMax + 1, startNum);
+        return Math.max(Math.max(globalMax, highWater) + 1, startNum);
     }
 
     // Multi mode → next number inside THIS till's block, from local orders only.
@@ -4121,7 +4163,11 @@ export async function getNextOrderNumber(): Promise<number> {
         [blockStart, blockStart + RECEIPT_BLOCK]
     );
     const localMax = rows[0]?.maxNum || 0;
-    if (localMax >= blockStart) return localMax + 1;
+    const blockHighWater = highWater >= blockStart && highWater < blockStart + RECEIPT_BLOCK
+        ? highWater
+        : 0;
+    const maxIssued = Math.max(localMax, blockHighWater);
+    if (maxIssued >= blockStart) return maxIssued + 1;
     // First receipt in this block — honour the configured starting number as an offset.
     return blockStart + Math.max(startNum, 1);
 }
@@ -4999,6 +5045,8 @@ export async function purgeAllTransactions(): Promise<void> {
     }
 
     try {
+        const localDb = await sqlite.getDb();
+        await preserveLocalReceiptHighWater(localDb);
         let marker = new Date().toISOString();
         if (isMultiMode()) {
             const server = await getMysqlDb();

@@ -204,6 +204,12 @@
                 <strong class="mt-4 block text-sm text-success">Open integrations &rarr;</strong>
             </a>
             {#if $currentEmployee?.role === 'admin'}
+                <a href="/settings/owner-app" class="group rounded-2xl border border-accent-primary/60 bg-accent-primary/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-accent-primary/15">
+                    <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Admin only</span>
+                    <b class="mt-2 block text-xl">Owner App Pairing</b>
+                    <p class="mt-2 text-sm text-text-muted">Show this shop's shared QR for the live owner dashboard.</p>
+                    <strong class="mt-4 block text-sm text-accent-primary">Show shop QR &rarr;</strong>
+                </a>
                 <a href="/settings/advanced" class="group rounded-2xl border border-danger/60 bg-danger/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-danger hover:bg-danger/15">
                     <span class="text-xs font-black uppercase tracking-[0.16em] text-danger">Admin only</span>
                     <b class="mt-2 block text-xl">Advanced Maintenance</b>

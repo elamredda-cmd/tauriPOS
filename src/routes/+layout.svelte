@@ -37,6 +37,8 @@
     let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
     let syncStartupRunning = false;
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
+    let stopOwnerCloudReporter: (() => void) | null = null;
+    let ownerCloudStartupTimer: ReturnType<typeof setTimeout> | null = null;
     let restorePendingMariaDbReplace = false;
     let lightStoreHydrationRunning = false;
     let queuedLightHydrationPath: string | null = null;
@@ -274,6 +276,17 @@
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {
                 stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
+                ownerCloudStartupTimer = setTimeout(async () => {
+                    try {
+                        const configModule = await import('$lib/ownerCloudConfig');
+                        const config = await configModule.getOwnerCloudConfig();
+                        if (!configModule.isOwnerCloudConfigured(config)) return;
+                        const reporterModule = await import('$lib/ownerCloudReporter');
+                        stopOwnerCloudReporter = reporterModule.startOwnerCloudReporter();
+                    } catch (error) {
+                        console.warn('owner cloud: delayed startup failed', error);
+                    }
+                }, 7000);
                 startAutomaticBackupSchedule();
             }
 
@@ -293,6 +306,8 @@
 
     onDestroy(() => {
         stopCustomerDisplayAutoOpen?.();
+        stopOwnerCloudReporter?.();
+        if (ownerCloudStartupTimer) clearTimeout(ownerCloudStartupTimer);
         clearSyncStartupRetry();
         clearAutomaticBackupSchedule();
     });

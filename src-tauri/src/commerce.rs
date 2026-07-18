@@ -355,6 +355,7 @@ async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error
 }
 
 const RECEIPT_BLOCK: i64 = 1_000_000;
+const RECEIPT_HIGH_WATER_KEY: &str = "receipt_number_high_water";
 
 struct ReversalValidationContext {
     original_status: String,
@@ -873,11 +874,19 @@ async fn allocate_local_receipt(
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'starting_receipt_number'")
             .fetch_optional(&mut **tx)
             .await?;
+    let high_water: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+        .bind(RECEIPT_HIGH_WATER_KEY)
+        .fetch_optional(&mut **tx)
+        .await?;
     let start_num = start
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(1);
     let till_seq = till_seq
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(0);
+    let high_water = high_water
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(0);
@@ -892,8 +901,13 @@ async fn allocate_local_receipt(
         .bind(block_end)
         .fetch_one(&mut **tx)
         .await?;
-        match local_max {
-            Some(max) if max >= block_start => max + 1,
+        let block_high_water = if high_water >= block_start && high_water < block_end {
+            high_water
+        } else {
+            0
+        };
+        match local_max.unwrap_or(0).max(block_high_water) {
+            max if max >= block_start => max + 1,
             _ => block_start + start_num,
         }
     } else {
@@ -901,7 +915,7 @@ async fn allocate_local_receipt(
             sqlx::query_scalar("SELECT MAX(orderNumber) FROM orders WHERE orderNumber > 0")
                 .fetch_one(&mut **tx)
                 .await?;
-        let next = global_max.unwrap_or(0) + 1;
+        let next = global_max.unwrap_or(0).max(high_water) + 1;
         next.max(start_num)
     };
 
@@ -2834,6 +2848,46 @@ mod tests {
             assert_eq!(second.order.order_number, 2_000_002);
             assert_eq!(first.order.receipt_key, "till-2:2000001");
             assert_eq!(second.order.receipt_key, "till-2:2000002");
+        });
+    }
+
+    #[test]
+    fn local_transaction_continues_multi_till_receipts_after_history_purge() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES ('till_seq', '2'), ('receipt_number_high_water', '2000456')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let mut sale = bundle("order-after-purge", "", "payment-after-purge");
+            sale.order.order_number = 0;
+            sale.order.till_number = "till-2".into();
+            let committed = insert_sqlite_bundle(&pool, &sale).await.unwrap();
+
+            assert_eq!(committed.order.order_number, 2_000_457);
+            assert_eq!(committed.order.receipt_key, "till-2:2000457");
+        });
+    }
+
+    #[test]
+    fn local_transaction_continues_standalone_receipts_after_history_purge() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            sqlx::query(
+                "INSERT INTO settings (key, value) VALUES ('receipt_number_high_water', '456')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let mut sale = bundle("order-after-purge", "", "payment-after-purge");
+            sale.order.order_number = 0;
+            let committed = insert_sqlite_bundle(&pool, &sale).await.unwrap();
+
+            assert_eq!(committed.order.order_number, 457);
         });
     }
 
