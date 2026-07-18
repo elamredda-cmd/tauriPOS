@@ -5,7 +5,6 @@ import {
     inMemoryPersistence,
     setPersistence,
     signInAnonymously,
-    signInWithEmailAndPassword,
     signOut,
 } from 'firebase/auth';
 import { doc, getDoc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
@@ -15,6 +14,7 @@ import {
     getDb,
     getOrdersPage,
     getReportSnapshot,
+    type ReportSnapshot,
 } from '$lib/stores/database';
 import { getOrCreateOwnerAppPairingCode, getOwnerCloudConfig } from '$lib/ownerCloudConfig';
 import { OWNER_CLOUD_DATA_CHANGED_EVENT, OWNER_CLOUD_STATUS_EVENT } from '$lib/ownerCloudEvents';
@@ -95,6 +95,52 @@ function cleanNumber(value: unknown): number {
     return Number.isFinite(number) ? Math.round(number) : 0;
 }
 
+function emptyReportSnapshot(): ReportSnapshot {
+    return {
+        overview: {
+            totalRevenue: 0,
+            totalTransactions: 0,
+            refundTransactions: 0,
+            avgTransactionValue: 0,
+            totalItemsSold: 0,
+        },
+        breakdown: {
+            totalCash: 0,
+            totalCard: 0,
+            totalLoyalty: 0,
+            cashTxCount: 0,
+            cardTxCount: 0,
+            splitTxCount: 0,
+            loyaltyTxCount: 0,
+            totalAmount: 0,
+            unrecordedAmount: 0,
+            unrecordedTxCount: 0,
+        },
+        topProducts: [],
+        tillOptions: [],
+        tillSummaries: [],
+        dailyTrend: [],
+        business: {
+            grossSales: 0,
+            refunds: 0,
+            voids: 0,
+            voidTransactions: 0,
+            netSales: 0,
+            taxTotal: 0,
+            discountTotal: 0,
+            costTotal: 0,
+            grossProfit: 0,
+        },
+        employeeSales: [],
+        source: 'sqlite',
+    };
+}
+
+function snapshotSectionError(label: string, error: unknown): string {
+    console.warn(`owner cloud: ${label} section failed`, error);
+    return `${label} is temporarily unavailable`;
+}
+
 async function ensureReporterSession() {
     const config = await getOwnerCloudConfig();
     const identity = await ensureDatabaseIdentityForSync();
@@ -111,28 +157,20 @@ async function ensureReporterSession() {
         authPersistenceReady = true;
     }
 
-    const hasLegacyReporter = Boolean(
-        config.enabled && config.reporterEmail && config.reporterPassword,
-    );
-    if (hasLegacyReporter) {
-        if (auth.currentUser?.email?.toLowerCase() !== config.reporterEmail.toLowerCase()) {
-            if (auth.currentUser) await signOut(auth);
-            await signInWithEmailAndPassword(auth, config.reporterEmail, config.reporterPassword);
-        }
-    } else {
-        if (auth.currentUser && !auth.currentUser.isAnonymous) await signOut(auth);
-        if (!auth.currentUser) await signInAnonymously(auth);
-        const user = auth.currentUser;
-        if (!user) throw new Error('Could not create the shop reporter session');
-        const db = getFirestore(app);
-        await setDoc(doc(db, 'shops', identity.shopId, 'devices', user.uid), {
-            active: true,
-            role: 'reporter',
-            name: 'L&Bj POS',
-            reporterSecret: pairingCode,
-            registeredAt: serverTimestamp(),
-        }, { merge: true });
-    }
+    // Reporter credentials from the original manually provisioned flow may still
+    // exist in restored settings. The shop QR secret is now the only authority.
+    if (auth.currentUser && !auth.currentUser.isAnonymous) await signOut(auth);
+    if (!auth.currentUser) await signInAnonymously(auth);
+    const user = auth.currentUser;
+    if (!user) throw new Error('Could not create the shop reporter session');
+    const db = getFirestore(app);
+    await setDoc(doc(db, 'shops', identity.shopId, 'devices', user.uid), {
+        active: true,
+        role: 'reporter',
+        name: 'L&Bj POS',
+        reporterSecret: pairingCode,
+        registeredAt: serverTimestamp(),
+    }, { merge: true });
     return {
         config: { ...config, enabled: true, pairingCode },
         db: getFirestore(app),
@@ -144,7 +182,7 @@ async function buildSnapshot() {
     const identity = await ensureDatabaseIdentityForSync();
     if (!identity?.shopId) throw new Error('Shop identity is unavailable');
 
-    const [report, ordersPage, connectedTills, stockState] = await Promise.all([
+    const [reportResult, ordersResult, tillsResult, stockResult] = await Promise.allSettled([
         getReportSnapshot(businessDate, businessDate, 'revenue', 12),
         getOrdersPage({ status: 'all', limit: 30, offset: 0 }),
         getConnectedTills(),
@@ -169,6 +207,30 @@ async function buildSnapshot() {
             return { enabled, lowStockRows };
         })(),
     ]);
+
+    const sectionWarnings: string[] = [];
+    const report = reportResult.status === 'fulfilled'
+        ? reportResult.value
+        : emptyReportSnapshot();
+    if (reportResult.status === 'rejected') {
+        sectionWarnings.push(snapshotSectionError('Sales report', reportResult.reason));
+    }
+    const ordersPage = ordersResult.status === 'fulfilled'
+        ? ordersResult.value
+        : { rows: [], lines: [], payments: [], total: 0, overallTotal: 0 };
+    if (ordersResult.status === 'rejected') {
+        sectionWarnings.push(snapshotSectionError('Recent orders', ordersResult.reason));
+    }
+    const connectedTills = tillsResult.status === 'fulfilled' ? tillsResult.value : [];
+    if (tillsResult.status === 'rejected') {
+        sectionWarnings.push(snapshotSectionError('Till status', tillsResult.reason));
+    }
+    const stockState = stockResult.status === 'fulfilled'
+        ? stockResult.value
+        : { enabled: false, lowStockRows: [] };
+    if (stockResult.status === 'rejected') {
+        sectionWarnings.push(snapshotSectionError('Stock status', stockResult.reason));
+    }
 
     const linesByOrder = new Map<string, any[]>();
     for (const line of ordersPage.lines) {
@@ -253,7 +315,7 @@ async function buildSnapshot() {
         businessDate,
         currency: 'GBP',
         source: report.source,
-        warning: report.warning || '',
+        warning: [report.warning, ...sectionWarnings].filter(Boolean).join(' '),
         grossSales: cleanNumber(report.business.grossSales),
         refunds: cleanNumber(report.business.refunds),
         voids: cleanNumber(report.business.voids),
@@ -412,8 +474,25 @@ export async function publishOwnerCloudSnapshot(): Promise<void> {
             return;
         }
         emitStatus('connecting', 'Preparing live shop data');
-        const snapshot = await buildSnapshot();
-        const currentRef = doc(session.db, 'shops', snapshot.shopId, 'dashboard', 'current');
+        const identity = await ensureDatabaseIdentityForSync();
+        if (!identity?.shopId) throw new Error('Shop identity is unavailable');
+        const currentRef = doc(session.db, 'shops', identity.shopId, 'dashboard', 'current');
+        let snapshot;
+        try {
+            snapshot = await buildSnapshot();
+        } catch (error) {
+            await setDoc(currentRef, {
+                schemaVersion: 1,
+                shopId: identity.shopId,
+                shopName: identity.shopName || 'Shop',
+                businessDate: localDateKey(),
+                currency: 'GBP',
+                warning: `The POS is online, but detailed reporting failed: ${String(error)}`,
+                dataUpdatedAt: serverTimestamp(),
+                lastSeenAt: serverTimestamp(),
+            }, { merge: true });
+            throw error;
+        }
         await setDoc(currentRef, {
             ...snapshot,
             dataUpdatedAt: serverTimestamp(),
@@ -424,7 +503,10 @@ export async function publishOwnerCloudSnapshot(): Promise<void> {
         } catch (error) {
             console.warn('owner cloud: queued closed report retry failed', error);
         }
-        emitStatus('live', 'Owner app data is live');
+        emitStatus(
+            'live',
+            snapshot.warning ? `Owner app is live. ${snapshot.warning}` : 'Owner app data is live',
+        );
     })().catch(error => {
         console.warn('owner cloud: snapshot publish failed', error);
         emitStatus(navigator.onLine ? 'error' : 'offline', String(error));
