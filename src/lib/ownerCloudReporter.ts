@@ -5,6 +5,7 @@ import {
     inMemoryPersistence,
     setPersistence,
     signInAnonymously,
+    signInWithEmailAndPassword,
     signOut,
 } from 'firebase/auth';
 import { doc, getDoc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
@@ -157,10 +158,27 @@ async function ensureReporterSession() {
         authPersistenceReady = true;
     }
 
-    // Reporter credentials from the original manually provisioned flow may still
-    // exist in restored settings. The shop QR secret is now the only authority.
-    if (auth.currentUser && !auth.currentUser.isAnonymous) await signOut(auth);
-    if (!auth.currentUser) await signInAnonymously(auth);
+    const hasProvisionedReporter = Boolean(
+        config.enabled && config.reporterEmail && config.reporterPassword,
+    );
+    if (hasProvisionedReporter) {
+        if (auth.currentUser?.email?.toLowerCase() !== config.reporterEmail.toLowerCase()) {
+            if (auth.currentUser) await signOut(auth);
+            await signInWithEmailAndPassword(auth, config.reporterEmail, config.reporterPassword);
+        }
+    } else {
+        if (auth.currentUser && !auth.currentUser.isAnonymous) await signOut(auth);
+        try {
+            if (!auth.currentUser) await signInAnonymously(auth);
+        } catch (error: any) {
+            if (error?.code === 'auth/admin-restricted-operation') {
+                throw new Error(
+                    'Firebase client account creation is disabled and this shop has no provisioned POS reporter account',
+                );
+            }
+            throw error;
+        }
+    }
     const user = auth.currentUser;
     if (!user) throw new Error('Could not create the shop reporter session');
     const db = getFirestore(app);
@@ -170,7 +188,7 @@ async function ensureReporterSession() {
         name: 'L&Bj POS',
         reporterSecret: pairingCode,
         registeredAt: serverTimestamp(),
-    }, { merge: true });
+    });
     return {
         config: { ...config, enabled: true, pairingCode },
         db: getFirestore(app),
