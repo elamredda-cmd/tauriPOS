@@ -10,12 +10,19 @@ export function isValidOwnerAppShopId(shopId: string): boolean {
     return SHOP_ID_PATTERN.test(shopId.trim());
 }
 
-export function createOwnerAppPairingUri(shopId: string, pairingCode: string): string {
+export function createOwnerAppPairingUri(shopId: string, pairingCode = ''): string {
     const normalized = shopId.trim();
     if (!isValidOwnerAppShopId(normalized)) {
         throw new Error('The shop identity is not ready for owner-app pairing');
     }
     const normalizedCode = pairingCode.trim();
+    if (!normalizedCode) {
+        const query = new URLSearchParams({
+            v: '1',
+            shop: normalized,
+        });
+        return `${OWNER_APP_PAIRING_SCHEME}://${OWNER_APP_PAIRING_HOST}${OWNER_APP_PAIRING_PATH}?${query.toString()}`;
+    }
     if (!PAIRING_CODE_PATTERN.test(normalizedCode)) {
         throw new Error('Secure owner-app pairing is not configured for this shop');
     }
