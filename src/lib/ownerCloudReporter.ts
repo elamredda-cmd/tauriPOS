@@ -1,8 +1,10 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
     getAuth,
+    indexedDBLocalPersistence,
     inMemoryPersistence,
     setPersistence,
+    signInAnonymously,
     signInWithEmailAndPassword,
     signOut,
 } from 'firebase/auth';
@@ -14,7 +16,7 @@ import {
     getOrdersPage,
     getReportSnapshot,
 } from '$lib/stores/database';
-import { getOwnerCloudConfig, isOwnerCloudConfigured } from '$lib/ownerCloudConfig';
+import { getOrCreateOwnerAppPairingCode, getOwnerCloudConfig } from '$lib/ownerCloudConfig';
 import { OWNER_CLOUD_DATA_CHANGED_EVENT, OWNER_CLOUD_STATUS_EVENT } from '$lib/ownerCloudEvents';
 
 const FIREBASE_CONFIG = {
@@ -95,18 +97,46 @@ function cleanNumber(value: unknown): number {
 
 async function ensureReporterSession() {
     const config = await getOwnerCloudConfig();
-    if (!isOwnerCloudConfigured(config)) return null;
+    const identity = await ensureDatabaseIdentityForSync();
+    if (!identity?.shopId) throw new Error('Shop identity is unavailable');
+    const pairingCode = config.pairingCode || await getOrCreateOwnerAppPairingCode();
     const app = getApps().length > 0 ? getApp() : initializeApp(FIREBASE_CONFIG);
     const auth = getAuth(app);
     if (!authPersistenceReady) {
-        await setPersistence(auth, inMemoryPersistence);
+        try {
+            await setPersistence(auth, indexedDBLocalPersistence);
+        } catch {
+            await setPersistence(auth, inMemoryPersistence);
+        }
         authPersistenceReady = true;
     }
-    if (auth.currentUser?.email?.toLowerCase() !== config.reporterEmail.toLowerCase()) {
-        if (auth.currentUser) await signOut(auth);
-        await signInWithEmailAndPassword(auth, config.reporterEmail, config.reporterPassword);
+
+    const hasLegacyReporter = Boolean(
+        config.enabled && config.reporterEmail && config.reporterPassword,
+    );
+    if (hasLegacyReporter) {
+        if (auth.currentUser?.email?.toLowerCase() !== config.reporterEmail.toLowerCase()) {
+            if (auth.currentUser) await signOut(auth);
+            await signInWithEmailAndPassword(auth, config.reporterEmail, config.reporterPassword);
+        }
+    } else {
+        if (auth.currentUser && !auth.currentUser.isAnonymous) await signOut(auth);
+        if (!auth.currentUser) await signInAnonymously(auth);
+        const user = auth.currentUser;
+        if (!user) throw new Error('Could not create the shop reporter session');
+        const db = getFirestore(app);
+        await setDoc(doc(db, 'shops', identity.shopId, 'devices', user.uid), {
+            active: true,
+            role: 'reporter',
+            name: 'L&Bj POS',
+            reporterSecret: pairingCode,
+            registeredAt: serverTimestamp(),
+        }, { merge: true });
     }
-    return { config, db: getFirestore(app) };
+    return {
+        config: { ...config, enabled: true, pairingCode },
+        db: getFirestore(app),
+    };
 }
 
 async function buildSnapshot() {

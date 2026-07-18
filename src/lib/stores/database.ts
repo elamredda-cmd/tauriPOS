@@ -2315,6 +2315,46 @@ export async function getAll(table: string): Promise<any[]> {
     return sqlite.getAll(table);
 }
 
+/** Create a shop-wide setting once and return the shared MariaDB value. */
+export async function ensureSharedSettingValue(key: string, candidate: string): Promise<string> {
+    const stamp = new Date().toISOString();
+    if (isMultiMode()) {
+        try {
+            const mysqlDb = await getMysqlDb();
+            if (mysqlDb) {
+                await mysqlDb.execute(
+                    `INSERT INTO settings (\`key\`, value, updatedAt)
+                     VALUES (?, ?, ?)
+                     ON DUPLICATE KEY UPDATE \`key\` = VALUES(\`key\`)`,
+                    [key, candidate, stamp],
+                );
+                const remoteRows: any[] = await mysqlDb.select(
+                    'SELECT value, updatedAt FROM settings WHERE `key` = ? LIMIT 1',
+                    [key],
+                );
+                const value = String(remoteRows[0]?.value || candidate);
+                await sqlite.upsert('settings', {
+                    key,
+                    value,
+                    updatedAt: String(remoteRows[0]?.updatedAt || stamp),
+                }, 'key');
+                return value;
+            }
+        } catch (error) {
+            console.warn(`database: could not create shared setting ${key}, using local cache:`, error);
+        }
+    }
+
+    const localDb = await sqlite.getDb();
+    const existing: any[] = await localDb.select(
+        'SELECT value FROM settings WHERE key = ? LIMIT 1',
+        [key],
+    );
+    if (existing[0]?.value) return String(existing[0].value);
+    await sqlite.upsert('settings', { key, value: candidate, updatedAt: stamp }, 'key');
+    return candidate;
+}
+
 export interface CustomerUsage {
     orders: number;
     loyaltyEntries: number;

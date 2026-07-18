@@ -1,4 +1,4 @@
-import { getAll } from '$lib/stores/database';
+import { ensureSharedSettingValue, getAll } from '$lib/stores/database';
 
 export const OWNER_CLOUD_SETTING_KEYS = {
     enabled: 'owner_cloud_enabled',
@@ -29,4 +29,22 @@ export async function getOwnerCloudConfig(): Promise<OwnerCloudConfig> {
 
 export function isOwnerCloudConfigured(config: OwnerCloudConfig): boolean {
     return Boolean(config.enabled && config.reporterEmail && config.reporterPassword && config.pairingCode);
+}
+
+function createPairingCode(): string {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/g, '');
+}
+
+export async function getOrCreateOwnerAppPairingCode(): Promise<string> {
+    const config = await getOwnerCloudConfig();
+    if (config.pairingCode) return config.pairingCode;
+    return ensureSharedSettingValue(
+        OWNER_CLOUD_SETTING_KEYS.pairingCode,
+        createPairingCode(),
+    );
 }

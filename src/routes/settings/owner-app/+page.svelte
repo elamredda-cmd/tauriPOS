@@ -6,6 +6,7 @@
     import { ensureDatabaseIdentityForSync } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { createOwnerAppPairingUri, formatOwnerAppShopCode } from '$lib/ownerAppPairing';
+    import { getOrCreateOwnerAppPairingCode } from '$lib/ownerCloudConfig';
 
     let shopId = '';
     let pairingUri = '';
@@ -19,8 +20,9 @@
         try {
             const identity = await ensureDatabaseIdentityForSync();
             if (!identity?.shopId) throw new Error('Shop identity is unavailable');
+            const pairingCode = await getOrCreateOwnerAppPairingCode();
             shopId = identity.shopId;
-            pairingUri = createOwnerAppPairingUri(identity.shopId);
+            pairingUri = createOwnerAppPairingUri(identity.shopId, pairingCode);
             qrDataUrl = await QRCode.toDataURL(pairingUri, {
                 width: 560,
                 margin: 2,

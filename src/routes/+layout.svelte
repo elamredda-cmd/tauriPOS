@@ -278,9 +278,6 @@
                 stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
                 ownerCloudStartupTimer = setTimeout(async () => {
                     try {
-                        const configModule = await import('$lib/ownerCloudConfig');
-                        const config = await configModule.getOwnerCloudConfig();
-                        if (!configModule.isOwnerCloudConfigured(config)) return;
                         const reporterModule = await import('$lib/ownerCloudReporter');
                         stopOwnerCloudReporter = reporterModule.startOwnerCloudReporter();
                     } catch (error) {
