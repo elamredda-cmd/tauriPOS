@@ -42,6 +42,7 @@ let changeTimer: ReturnType<typeof setTimeout> | null = null;
 let publishPromise: Promise<void> | null = null;
 let reporterStarted = false;
 let authPersistenceReady = false;
+let hasPublishedSnapshot = false;
 
 export interface OwnerClosedReportInput {
     reportId: string;
@@ -89,6 +90,14 @@ function emitStatus(status: CloudStatus, message: string): void {
     window.dispatchEvent(new CustomEvent(OWNER_CLOUD_STATUS_EVENT, {
         detail: { status, message, changedAt: new Date().toISOString() },
     }));
+}
+
+function ownerCloudErrorMessage(error: unknown): string {
+    const message = String(error instanceof Error ? error.message : error);
+    if (/permission-denied|missing or insufficient permissions/i.test(message)) {
+        return 'Scan this shop QR in L&Bj Owner to approve the POS, then send the snapshot again';
+    }
+    return message;
 }
 
 function cleanNumber(value: unknown): number {
@@ -516,6 +525,7 @@ export async function publishOwnerCloudSnapshot(): Promise<void> {
             dataUpdatedAt: serverTimestamp(),
             lastSeenAt: serverTimestamp(),
         });
+        hasPublishedSnapshot = true;
         try {
             await flushClosedReportOutbox(session);
         } catch (error) {
@@ -527,7 +537,7 @@ export async function publishOwnerCloudSnapshot(): Promise<void> {
         );
     })().catch(error => {
         console.warn('owner cloud: snapshot publish failed', error);
-        emitStatus(navigator.onLine ? 'error' : 'offline', String(error));
+        emitStatus(navigator.onLine ? 'error' : 'offline', ownerCloudErrorMessage(error));
     }).finally(() => {
         publishPromise = null;
     });
@@ -536,6 +546,10 @@ export async function publishOwnerCloudSnapshot(): Promise<void> {
 
 async function publishHeartbeat(): Promise<void> {
     try {
+        if (!hasPublishedSnapshot) {
+            await publishOwnerCloudSnapshot();
+            return;
+        }
         const session = await ensureReporterSession();
         if (!session) return;
         const identity = await ensureDatabaseIdentityForSync();
@@ -545,7 +559,7 @@ async function publishHeartbeat(): Promise<void> {
         }, { merge: true });
         emitStatus('live', 'Owner app data is live');
     } catch (error) {
-        emitStatus(navigator.onLine ? 'error' : 'offline', String(error));
+        emitStatus(navigator.onLine ? 'error' : 'offline', ownerCloudErrorMessage(error));
     }
 }
 
@@ -574,5 +588,6 @@ export function startOwnerCloudReporter(): () => void {
         fullRefreshTimer = null;
         heartbeatTimer = null;
         changeTimer = null;
+        hasPublishedSnapshot = false;
     };
 }
