@@ -1076,7 +1076,7 @@ async function tryMysql(): Promise<boolean> {
 // These keys identify or configure a single machine. Syncing them would give
 // every till the same till_id, leak DB credentials, and clobber sync state.
 const LOCAL_ONLY_SETTING_KEYS = new Set([
-    'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_seq',
+    'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_name_manual', 'till_seq',
     RECEIPT_HIGH_WATER_KEY,
     'automatic_setup_backup_enabled', 'automatic_setup_backup_time',
     'automatic_setup_backup_directory', 'backup_directory',
@@ -1126,7 +1126,8 @@ function isPushableSetting(key: string): boolean {
 
 // ─── Shop / database identity guard ─────────────────────────────────────────
 // This prevents a till from silently merging Shop A's local SQLite cache with
-// Shop B's MariaDB database. Licensing will build on top of this later.
+// Shop B's MariaDB database. The signed manual licence is bound to this same
+// stable shop identity, independently of the individual till name or ID.
 
 const APP_IDENTITY_ID = 'main';
 const DATABASE_IDENTITY_MISMATCH_CODE = 'DATABASE_IDENTITY_MISMATCH';
@@ -1314,6 +1315,32 @@ export async function ensureLocalShopIdentity(shopName = ''): Promise<AppIdentit
     const identity = makeIdentity(shopName.trim() || await getLocalStoreName());
     await saveLocalAppIdentity(identity);
     return identity;
+}
+
+/**
+ * Publish the locally verified manual licence to the shared shop identity.
+ * The native command writes SQLite first; this mirrors the signed token to
+ * MariaDB or leaves it in the durable outbox when the server is unavailable.
+ */
+export async function syncManualLicenseIdentity(): Promise<void> {
+    if (!isMultiMode()) return;
+    const identity = await getLocalAppIdentity();
+    if (!identity?.identitySignature) return;
+
+    if (get(connectionState).mysqlOnline) {
+        try {
+            await saveRemoteAppIdentity(identity);
+            return;
+        } catch (error) {
+            console.warn('database: licence sync deferred:', error);
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: false,
+                syncError: String(error),
+            }));
+        }
+    }
+    await queueOffline('app_identity', 'upsert', identity, 'id');
 }
 
 export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | null> {
@@ -1620,6 +1647,7 @@ async function applyTombstones(newSyncTime: string, strict = false): Promise<num
 
 // ─── Bulk push helpers (initial upload / repair) ────────────────────────────
 const PUSH_TABLES = [
+    'app_identity',
     'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
@@ -1630,7 +1658,7 @@ const PUSH_TABLES = [
     'stock_receipts', 'stock_receipt_lines'
 ];
 
-const PRESERVE_DURING_RESTORE_TABLES = new Set(['employees', 'settings', 'app_identity']);
+const PRESERVE_DURING_RESTORE_TABLES = new Set(['employees', 'settings', 'app_identity', 'registers']);
 
 const REMOTE_REPLACE_DELETE_TABLES = [
     'stock_receipt_lines', 'stock_receipts',
@@ -1642,7 +1670,7 @@ const REMOTE_REPLACE_DELETE_TABLES = [
     'promo_group_items', 'promo_groups', 'discounts',
     'pos_tiles', 'pos_pages',
     'product_images', 'products', 'categories', 'customers',
-    'registers', 'tax_rates',
+    'tax_rates',
 ];
 
 /** Push every local table to MariaDB (skips device-local settings keys). */
@@ -3463,6 +3491,11 @@ export async function getTillName(): Promise<string> {
 
 export async function setTillName(name: string): Promise<void> {
     await sqlite.setTillName(name);
+    await sqlite.upsert('settings', {
+        key: 'till_name_manual',
+        value: 'true',
+        updatedAt: new Date().toISOString(),
+    }, 'key');
     const id = await sqlite.getOrCreateTillId();
     const d = await sqlite.getDb();
     const existing: any[] = await d.select(`SELECT * FROM registers WHERE id = ? LIMIT 1`, [id]);
@@ -3693,7 +3726,10 @@ export async function getTillSequence(): Promise<number> {
     const cached = await getSettingValue('till_seq');
     if (cached) {
         const n = parseInt(cached, 10);
-        if (n > 0) return n;
+        if (n > 0) {
+            await ensureSequentialDefaultTillName(n);
+            return n;
+        }
     }
     if (!isMultiMode()) return 0;
     if (!get(connectionState).mysqlOnline) return 0;
@@ -3710,6 +3746,7 @@ export async function getTillSequence(): Promise<number> {
         if (seq > 0) {
             await sqlite.upsert('settings',
                 { key: 'till_seq', value: String(seq), updatedAt: new Date().toISOString() }, 'key');
+            await ensureSequentialDefaultTillName(seq);
             console.log(`database: claimed till sequence #${seq} for receipt numbering`);
             return seq;
         }
@@ -3717,6 +3754,25 @@ export async function getTillSequence(): Promise<number> {
         console.warn('database: could not claim till sequence:', e);
     }
     return 0;
+}
+
+async function ensureSequentialDefaultTillName(sequence: number): Promise<void> {
+    if (!isMultiMode() || sequence <= 0) return;
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT key, value FROM settings WHERE key IN ('till_name', 'till_name_manual')`,
+    );
+    const values = new Map(rows.map((row) => [String(row.key), String(row.value || '')]));
+    if (values.get('till_name_manual') === 'true') return;
+
+    const currentName = (values.get('till_name') || '').trim();
+    if (currentName && !/^Till\s+\d+$/i.test(currentName)) return;
+
+    const desiredName = `Till ${sequence}`;
+    if (currentName === desiredName) return;
+
+    await sqlite.setTillName(desiredName);
+    await getTillName();
 }
 
 /**
@@ -3896,7 +3952,7 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
     stock_receipts: ['id', 'employeeId', 'totalCost', 'status', 'updatedAt'],
     stock_receipt_lines: ['id', 'receiptId', 'productId', 'quantity', 'unitCost', 'updatedAt'],
     tombstones: ['id', 'table_name', 'row_id', 'updatedAt'],
-    app_identity: ['id', 'shopId', 'shopName', 'licenseId', 'updatedAt'],
+    app_identity: ['id', 'shopId', 'shopName', 'licenseId', 'identitySignature', 'updatedAt'],
 };
 
 export async function validateDatabaseSchemas(): Promise<SchemaValidationResult> {
@@ -3984,6 +4040,25 @@ async function replaceLocalEmployeesFromServer(remote: any, localDb: any): Promi
     for (const employee of employees) {
         await sqlite.upsert('employees', employee, 'id');
     }
+}
+
+async function ensureCurrentRegisterOnServer(remote: any, localDb: any): Promise<void> {
+    const tillId = await sqlite.getOrCreateTillId();
+    const tillName = await sqlite.getTillName();
+    const [remoteRows, localRows] = await Promise.all([
+        remote.select('SELECT * FROM registers WHERE id = ? LIMIT 1', [tillId]),
+        localDb.select('SELECT * FROM registers WHERE id = ? LIMIT 1', [tillId]),
+    ]);
+    const existing = remoteRows[0] || localRows[0] || {};
+    const stamp = new Date().toISOString();
+    await mysql.mysqlUpsert('registers', {
+        id: tillId,
+        storeId: existing.storeId || 'store-main',
+        name: tillName.trim() || 'Till',
+        isActive: true,
+        createdAt: existing.createdAt || stamp,
+        updatedAt: stamp,
+    });
 }
 
 async function adoptRemoteIdentityLocally(remote: any): Promise<AppIdentity> {
@@ -4156,6 +4231,7 @@ export async function replaceMariaDbDataFromThisTill(): Promise<void> {
         await clearRemoteTombstones(remote);
 
         await forcePushTables(localDb, { skipTables: PRESERVE_DURING_RESTORE_TABLES });
+        await ensureCurrentRegisterOnServer(remote, localDb);
         await verifyProductUploadCount(localDb);
         await verifyPushedTableCounts(localDb, {
             skipTables: PRESERVE_DURING_RESTORE_TABLES,
@@ -4500,6 +4576,7 @@ async function runHeartbeat(): Promise<void> {
 
 /** Tables that should appear on other tills quickly without keeping weak tills busy at idle. */
 const FAST_SYNC_TABLES = [
+    'app_identity',
     'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
     'customers', 'loyalty_logs',
     'till_report_markers', 'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
@@ -4511,6 +4588,7 @@ const SYNC_PULL_PAGE_SIZE = 500;
 
 /** All tables — synced on the full cycle so product and pricing changes catch up without interrupting rapid scanning. */
 const ALL_SYNC_TABLES = [
+    'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',

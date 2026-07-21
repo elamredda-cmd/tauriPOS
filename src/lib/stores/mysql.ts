@@ -841,6 +841,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
 }
 
 const TIMESTAMP_SYNC_TABLES = [
+    'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',

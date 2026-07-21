@@ -21,6 +21,10 @@ fn main() {
         "validate_local_database_backup",
         "restore_latest_local_backup",
         "restore_local_database_from_path",
+        "manual_license_status",
+        "create_manual_license_request",
+        "activate_manual_license",
+        "activate_manual_license_file",
     ]);
 
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(app_manifest))

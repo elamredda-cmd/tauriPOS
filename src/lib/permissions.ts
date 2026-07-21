@@ -126,7 +126,7 @@ const adminOnlyPaths = [
     '/settings/advanced',
     '/settings/owner-app',
 ];
-const signedInOperationalPaths = ['/shifts', '/label-print', '/about'];
+const signedInOperationalPaths = ['/shifts', '/label-print', '/about', '/settings/licence'];
 const publicPaths = ['/', '/customer-display'];
 
 function matchesPath(pathname: string, route: string): boolean {

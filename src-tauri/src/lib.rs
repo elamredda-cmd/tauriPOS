@@ -1,5 +1,6 @@
 mod commerce;
 mod dojo;
+mod licensing;
 mod sumup;
 
 use serde::Serialize;
@@ -1268,6 +1269,10 @@ pub fn run() {
             commerce::validate_local_database_backup,
             commerce::restore_latest_local_backup,
             commerce::restore_local_database_from_path,
+            licensing::manual_license_status,
+            licensing::create_manual_license_request,
+            licensing::activate_manual_license,
+            licensing::activate_manual_license_file,
             dojo::dojo_get_config,
             dojo::dojo_save_config,
             dojo::dojo_clear_secret,
