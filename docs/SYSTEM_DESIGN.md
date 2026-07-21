@@ -1,7 +1,7 @@
 # L&Bj POS System Design
 
 - **Document status:** Current implementation baseline
-- **Last verified:** 17 July 2026
+- **Last verified:** 19 July 2026
 - **Primary application:** Tauri desktop POS
 - **Companion application:** Flutter/Sunmi catalogue and label client
 
@@ -33,7 +33,7 @@ The separate Sunmi/Android application is an administrative catalogue client. It
 ### 2.2 Current non-goals
 
 - There is no hosted application backend or REST API between clients and MariaDB.
-- There is no complete licensing service, activation server, or yearly subscription enforcement yet.
+- There is no hosted licensing service, online revocation, payment/subscription collection, or automatic renewal. Signed offline annual shop licences are available in setup mode.
 - There is no runtime printer-plugin loader. Printer protocols and payment providers are compiled into the application.
 - There is no cloud account, cross-shop cloud replication, or remote shop management service.
 - The Sunmi companion is not a checkout, order, refund, or cash-management client.
@@ -444,7 +444,7 @@ erDiagram
 | `audit_logs`, `manager_approvals` | Security and privileged-action evidence. | SQLite and MariaDB |
 | `daily_sales_summary`, `till_report_markers` | Reporting summaries and closure markers. | SQLite and MariaDB |
 | `settings` | Shared shop options plus explicitly filtered local-till settings. | SQLite and MariaDB |
-| `app_identity` | Shop ID, data epoch, optional future license metadata. | SQLite and MariaDB |
+| `app_identity` | Stable shop ID plus the signed offline licence token and licence reference. | SQLite and MariaDB |
 | `tombstones` | Deleted-row propagation. | SQLite and MariaDB |
 | `_offline_queue` | Durable local write outbox. | SQLite only |
 | `_sync_conflicts` | Quarantined non-retryable writes. | SQLite only |
@@ -462,6 +462,7 @@ erDiagram
 - MariaDB server UTC is the synchronization clock. Its triggers stamp `updatedAt` on shared inserts and updates.
 - Per-table pull watermarks overlap by five seconds to avoid missing rows on timestamp boundaries.
 - Each till receives a numeric till sequence. Receipt numbers use non-overlapping blocks of 1,000,000 per till; changing a till display name does not change its sequence.
+- In multi-till mode, an untouched generic display name follows that sequence (`Till 1`, `Till 2`, and so on). A name saved by an operator is device-local and is never overwritten automatically. Standalone mode does not claim a shared sequence and keeps its local name.
 - `receiptKey` is unique and is used with the order ID to make remote sale replay idempotent.
 
 ## 10. Synchronization Design
@@ -882,7 +883,7 @@ In multi-till mode, a live system close is blocked when MariaDB is offline, tran
 | Backup | Contents | Retention and destination |
 |---|---|---|
 | Manual full backup | Complete local SQLite snapshot, including transaction history, settings, identity, and current queue state. | Operator-selected destination or configured backup directory. |
-| Automatic shop-setup backup | Products, customers, staff, configuration, layouts, promotions, stock state, and other setup data; transaction history is sanitized. | Runs after configured local time, one per day, retaining today and yesterday. |
+| Automatic shop-setup backup | Products, customers, staff, configuration, layouts, promotions, stock state, and other setup data; transaction history and source register identities are sanitized. | Runs after configured local time, one per day, retaining today and yesterday. |
 | Pre-restore safety backup | Current local database immediately before replacement. | Created automatically as part of restore safety. |
 
 The configured base folder receives `LBj POS Backups/<TillName>-<TillId8>/` so two tills do not overwrite one another. A cloud-synchronized folder such as Google Drive can be selected, but the POS writes ordinary local files; the cloud provider performs its own synchronization.
@@ -905,6 +906,8 @@ flowchart TD
     Confirm --> Epoch["Increment server_data_epoch"]
     Epoch --> Other["Other tills clear stale cache and repull"]
 ```
+
+A restore never adopts register identities from its source backup. The target SQLite database is rebuilt with only that machine's preserved `till_id` and display name. In multi-till mode, shared replacement preserves MariaDB's existing register rows and upserts only the restoring machine, so restoring one till cannot duplicate or remove another till.
 
 A local restore does not silently overwrite MariaDB. In multi-till mode it enters a protected pending state until the operator explicitly confirms the shared replacement. This prevents normal sync from immediately undoing the restored state or merging two unrelated snapshots.
 
@@ -1020,17 +1023,13 @@ This design is suitable for a trusted shop LAN. It should not be treated as a ze
 
 ## 24. Licensing Readiness
 
-`app_identity` already has fields such as `licenseId` and `identitySignature`, but no licensing server, activation protocol, signed entitlement, renewal check, grace period, or feature enforcement is implemented. Changing a till name must not be used as licensing identity; till identity and shop identity are separate stable IDs.
+The desktop app now has a serverless manual licensing foundation. Settings > Shop Licence creates an `LBJREQ1` request from the stable shop identity. The private issuer tool converts that request into an Ed25519-signed `LBJ1` entitlement containing the shop ID, customer, issue date, expiry date, till allowance, and enabled features. Rust verifies the signature, shop binding, expiry, and active-till allowance before storing the token in `app_identity`.
 
-A future licensing design should add:
+The public verification key is compiled into the application. The private signing key is kept outside the repository and must never be shipped to a till. In multi-till mode, the verified token uses the shared `app_identity` row and synchronizes through MariaDB. A standalone till stores it only in local SQLite. A till rename does not change the shop ID or invalidate the licence.
 
-1. A vendor-hosted HTTPS licensing API.
-2. A signed shop entitlement containing shop ID, allowed till count, expiry, and product edition.
-3. Per-device enrollment with revocation and a bounded offline grace period.
-4. Local signature verification in Rust rather than a UI-only check.
-5. A privacy-safe activation/audit record and recovery process for replaced hardware.
+Current builds intentionally use **setup mode**: status and activation are functional, but an absent or expired licence does not block sales. Commercial enforcement is compile-time opt-in through `LBJ_LICENSE_ENFORCEMENT=enforce`; native sale and online reversal entry points then reject unlicensed, expired, wrong-shop, or over-limit use. Existing queued sales remain syncable so enforcement cannot strand transactions already accepted offline.
 
-Licensing should be added after the operational feature set stabilizes but before broad commercial distribution.
+This offline design does not provide immediate revocation, automatic billing, remote device removal, or reliable clock-tamper protection. A future vendor service can retain the signed local entitlement while adding renewal, revocation, a bounded offline grace period, and activation history. Operational commands are documented in `docs/MANUAL_LICENSING.md`.
 
 ## 25. Build, Packaging, and Installation
 
@@ -1165,7 +1164,7 @@ There is no broad TypeScript unit-test suite or complete automated end-to-end ha
 ### Phase 3: Commercial platform
 
 - Introduce a local shop gateway or vendor backend to remove direct database credentials from general clients.
-- Implement signed license activation and allowed-till enforcement.
+- Add hosted renewal, revocation, device recovery, and subscription management around the signed offline licence foundation.
 - Add a signed auto-update channel with staged rollout and rollback.
 - Define a provider adapter interface before adding more payment-terminal companies.
 - Define a versioned printer-driver/provider extension boundary; do not load unsigned arbitrary runtime code.

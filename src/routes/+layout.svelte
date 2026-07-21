@@ -30,6 +30,7 @@
     import { canAccessPath } from '$lib/permissions';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
+    import LicenseNoticeDialog from '$lib/components/LicenseNoticeDialog.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
 
     let dbReady = false;
@@ -397,6 +398,7 @@
     </div>
 {/if}
 {#if $page.url.pathname !== '/customer-display'}
+<LicenseNoticeDialog enabled={dbReady} />
 <Toast />
 <GlobalTouchInput />
 {/if}

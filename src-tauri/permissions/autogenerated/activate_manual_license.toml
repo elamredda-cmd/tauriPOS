@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-activate-manual-license"
+description = "Enables the activate_manual_license command without any pre-configured scope."
+commands.allow = ["activate_manual_license"]
+
+[[permission]]
+identifier = "deny-activate-manual-license"
+description = "Denies the activate_manual_license command without any pre-configured scope."
+commands.deny = ["activate_manual_license"]

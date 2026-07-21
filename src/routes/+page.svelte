@@ -854,8 +854,8 @@
             getOrCreateTillId().then(async id => {
                 tillId = id;
                 await ensureTillReceiptSequence();
+                tillName = await getTillName();
             });
-            getTillName().then(name => { tillName = name; });
         } else {
             tillId = "browser-preview-till";
             tillName = "Browser Preview";
@@ -3684,13 +3684,15 @@
                     </svg>
                     {headerTime}
                 </time>
-                <div
-                    class="sync-pill {syncStyle}"
-                    title={$connectionState.syncError || syncLabel}
-                >
-                    <span></span>
-                    {syncLabel}
-                </div>
+                {#if $connectionState.mode === "multi"}
+                    <div
+                        class="sync-pill {syncStyle}"
+                        title={$connectionState.syncError || syncLabel}
+                    >
+                        <span></span>
+                        {syncLabel}
+                    </div>
+                {/if}
             </div>
         </header>
 

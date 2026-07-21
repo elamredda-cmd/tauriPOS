@@ -14,3 +14,6 @@ src-tauri/target/
 src-tauri/Cargo.lock
 *.log
 check_results*.txt
+
+# Private licence issuer application lives outside this repository.
+/license-issuer-app/

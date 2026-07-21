@@ -1149,6 +1149,7 @@ pub async fn commit_local_sale(
     app: AppHandle,
     bundle: SaleBundle,
 ) -> Result<CommitSaleResult, String> {
+    crate::licensing::require_sale_access(&app).await?;
     let uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
     let pool = SqlitePool::connect(&uri).await.map_err(|e| e.to_string())?;
     let bundle = insert_sqlite_bundle(&pool, &bundle)
@@ -1173,6 +1174,7 @@ pub async fn commit_online_reversal(
     mysql_uri: String,
     bundle: SaleBundle,
 ) -> Result<CommitSaleResult, String> {
+    crate::licensing::require_sale_access(&app).await?;
     let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
     let local_pool = SqlitePool::connect(&local_uri)
         .await
@@ -1353,6 +1355,14 @@ async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
         .await
         .map_err(|e| format!("Could not prepare the automatic setup backup: {e}"))?;
     let result = async {
+        // A setup backup is portable shop data, not a clone of the source
+        // machine. The restoring till recreates its own register identity.
+        if tables.contains("registers") {
+            sqlx::query("DELETE FROM registers")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Could not remove till identities from setup backup: {e}"))?;
+        }
         if tables.contains("orders") && tables.contains("inventory_logs") {
             sqlx::query(
                 "DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders)",
@@ -1425,7 +1435,7 @@ async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
             sqlx::query(
                 "DELETE FROM _offline_queue
                  WHERE operation = 'saleBundle'
-                    OR table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
+                    OR table_name IN ('registers','orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
             )
             .execute(&mut *tx)
             .await
@@ -1434,7 +1444,7 @@ async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
         if tables.contains("tombstones") {
             sqlx::query(
                 "DELETE FROM tombstones
-                 WHERE table_name IN ('orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
+                 WHERE table_name IN ('registers','orders','order_lines','payments','shifts','cash_movements','inventory_logs','audit_logs','manager_approvals')",
             )
             .execute(&mut *tx)
             .await
@@ -1466,6 +1476,7 @@ async fn validate_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
         .map_err(|e| format!("Could not verify the automatic setup backup: {e}"))?;
     let result = async {
         for table in [
+            "registers",
             "orders",
             "order_lines",
             "payments",
@@ -1954,31 +1965,120 @@ async fn restore_preserved_local_setup(
     target: &PathBuf,
     preserve_from: Option<&str>,
 ) -> Result<(), String> {
-    let Some(preserve_from) = preserve_from else {
-        return Ok(());
-    };
-    if !PathBuf::from(preserve_from).exists() {
-        return Ok(());
-    }
-
     let target_uri = format!("sqlite://{}", target.display());
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect(&target_uri)
         .await
         .map_err(|e| format!("Could not reopen restored database to preserve settings: {e}"))?;
-    let attach = format!(
-        "ATTACH DATABASE '{}' AS preserved",
-        quote_sqlite_text(preserve_from)
-    );
-    sqlx::query(&attach)
+    let preserve_path = preserve_from
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    if let Some(path) = &preserve_path {
+        let attach = format!(
+            "ATTACH DATABASE '{}' AS preserved",
+            quote_sqlite_text(&path.display().to_string())
+        );
+        sqlx::query(&attach)
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Could not read safety backup to preserve settings: {e}"))?;
+
+        copy_preserved_table(&pool, "employees", None).await?;
+        copy_preserved_table(&pool, "settings", None).await?;
+        copy_preserved_table(&pool, "app_identity", None).await?;
+    } else {
+        // A first-machine restore has no target identity to preserve. Remove
+        // the source machine's identity and let normal startup create a new one.
+        sqlx::query(
+            "DELETE FROM settings
+             WHERE key IN ('till_id', 'till_name', 'till_name_manual', 'till_seq')",
+        )
         .execute(&pool)
         .await
-        .map_err(|e| format!("Could not read safety backup to preserve settings: {e}"))?;
+        .map_err(|e| format!("Could not remove the source till identity: {e}"))?;
+    }
 
-    copy_preserved_table(&pool, "employees", None).await?;
-    copy_preserved_table(&pool, "settings", None).await?;
-    copy_preserved_table(&pool, "app_identity", None).await?;
+    // Never adopt register rows from the backup. When a target identity was
+    // preserved above, rebuild exactly that till; otherwise leave the table
+    // empty so normal startup can create a fresh machine identity.
+    if table_exists(&pool, "main", "registers").await? {
+        let till_id: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'till_id' LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| format!("Could not read the target till identity: {e}"))?;
+        let till_name: Option<String> =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'till_name' LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| format!("Could not read the target till name: {e}"))?;
+
+        sqlx::query("DELETE FROM registers")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Could not clear restored till identities: {e}"))?;
+
+        if let Some(till_id) = till_id.filter(|value| !value.trim().is_empty()) {
+            let name = till_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "Till 1".to_string());
+            sqlx::query("INSERT INTO registers (id, name) VALUES (?, ?)")
+                .bind(till_id.trim())
+                .bind(name.trim())
+                .execute(&pool)
+                .await
+                .map_err(|e| format!("Could not restore this till's register identity: {e}"))?;
+
+            let columns: std::collections::HashSet<_> = table_columns(&pool, "main", "registers")
+                .await?
+                .into_iter()
+                .collect();
+            if columns.contains("storeId") {
+                sqlx::query("UPDATE registers SET storeId = 'store-main' WHERE id = ?")
+                    .bind(till_id.trim())
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| format!("Could not restore the till's store identity: {e}"))?;
+            }
+            if columns.contains("isActive") {
+                sqlx::query("UPDATE registers SET isActive = 1 WHERE id = ?")
+                    .bind(till_id.trim())
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| format!("Could not activate the restored till: {e}"))?;
+            }
+            let stamp = chrono::Utc::now().to_rfc3339();
+            if columns.contains("createdAt") {
+                sqlx::query("UPDATE registers SET createdAt = ? WHERE id = ?")
+                    .bind(&stamp)
+                    .bind(till_id.trim())
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| format!("Could not timestamp the restored till: {e}"))?;
+            }
+            if columns.contains("updatedAt") {
+                sqlx::query("UPDATE registers SET updatedAt = ? WHERE id = ?")
+                    .bind(&stamp)
+                    .bind(till_id.trim())
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| format!("Could not timestamp the restored till: {e}"))?;
+            }
+        }
+    }
+    if table_exists(&pool, "main", "_offline_queue").await? {
+        sqlx::query("DELETE FROM _offline_queue WHERE table_name = 'registers'")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Could not clear restored register sync work: {e}"))?;
+    }
+    if table_exists(&pool, "main", "tombstones").await? {
+        sqlx::query("DELETE FROM tombstones WHERE table_name = 'registers'")
+            .execute(&pool)
+            .await
+            .map_err(|e| format!("Could not clear restored register deletion markers: {e}"))?;
+    }
 
     sqlx::query(
         "DELETE FROM settings
@@ -2012,9 +2112,11 @@ async fn restore_preserved_local_setup(
             .map_err(|e| format!("Could not clear MariaDB restore marker: {e}"))?;
     }
 
-    let _ = sqlx::query("DETACH DATABASE preserved")
-        .execute(&pool)
-        .await;
+    if preserve_path.is_some() {
+        let _ = sqlx::query("DETACH DATABASE preserved")
+            .execute(&pool)
+            .await;
+    }
     pool.close().await;
     Ok(())
 }
@@ -2259,6 +2361,137 @@ mod tests {
     }
 
     #[test]
+    fn restore_keeps_only_the_target_till_identity() {
+        tauri::async_runtime::block_on(async {
+            let dir = temporary_backup_test_dir("restore-register-identity");
+            let target = dir.join("restored.db");
+            let preserved = dir.join("current-till.db");
+
+            let target_pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=rwc", target.display()))
+                .await
+                .unwrap();
+            for sql in [
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
+                "CREATE TABLE registers (id TEXT PRIMARY KEY, storeId TEXT, name TEXT NOT NULL, isActive INTEGER DEFAULT 1, createdAt TEXT, updatedAt TEXT)",
+                "CREATE TABLE _offline_queue (id TEXT PRIMARY KEY, table_name TEXT)",
+                "CREATE TABLE tombstones (id TEXT PRIMARY KEY, table_name TEXT)",
+                "INSERT INTO settings VALUES ('till_id', 'source-till', '')",
+                "INSERT INTO settings VALUES ('till_name', 'Source Till', '')",
+                "INSERT INTO registers VALUES ('source-till', 'store-main', 'Source Till', 1, '', '')",
+                "INSERT INTO registers VALUES ('legacy-till', 'store-main', 'Main Register', 1, '', '')",
+                "INSERT INTO _offline_queue VALUES ('register-work', 'registers')",
+                "INSERT INTO _offline_queue VALUES ('product-work', 'products')",
+                "INSERT INTO tombstones VALUES ('register-delete', 'registers')",
+                "INSERT INTO tombstones VALUES ('product-delete', 'products')",
+            ] {
+                sqlx::query(sql).execute(&target_pool).await.unwrap();
+            }
+            target_pool.close().await;
+
+            let preserved_pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=rwc", preserved.display()))
+                .await
+                .unwrap();
+            for sql in [
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
+                "CREATE TABLE registers (id TEXT PRIMARY KEY, storeId TEXT, name TEXT NOT NULL, isActive INTEGER DEFAULT 1, createdAt TEXT, updatedAt TEXT)",
+                "INSERT INTO settings VALUES ('till_id', 'target-till', '')",
+                "INSERT INTO settings VALUES ('till_name', 'Front Till', '')",
+                "INSERT INTO registers VALUES ('target-till', 'store-main', 'Front Till', 1, '', '')",
+                "INSERT INTO registers VALUES ('old-local-till', 'store-main', 'Old Till', 1, '', '')",
+            ] {
+                sqlx::query(sql).execute(&preserved_pool).await.unwrap();
+            }
+            preserved_pool.close().await;
+
+            restore_preserved_local_setup(&target, preserved.to_str())
+                .await
+                .unwrap();
+
+            let restored_pool =
+                SqlitePool::connect(&format!("sqlite://{}?mode=ro", target.display()))
+                    .await
+                    .unwrap();
+            let registers: Vec<(String, String, i64)> =
+                sqlx::query_as("SELECT id, name, isActive FROM registers ORDER BY id")
+                    .fetch_all(&restored_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                registers,
+                vec![("target-till".into(), "Front Till".into(), 1)]
+            );
+
+            let queued_tables: Vec<String> =
+                sqlx::query_scalar("SELECT table_name FROM _offline_queue ORDER BY table_name")
+                    .fetch_all(&restored_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(queued_tables, vec!["products"]);
+            let tombstone_tables: Vec<String> =
+                sqlx::query_scalar("SELECT table_name FROM tombstones ORDER BY table_name")
+                    .fetch_all(&restored_pool)
+                    .await
+                    .unwrap();
+            assert_eq!(tombstone_tables, vec!["products"]);
+            restored_pool.close().await;
+
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
+    #[test]
+    fn first_machine_restore_does_not_adopt_the_source_till() {
+        tauri::async_runtime::block_on(async {
+            let dir = temporary_backup_test_dir("restore-without-target-identity");
+            let target = dir.join("restored.db");
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&format!("sqlite://{}?mode=rwc", target.display()))
+                .await
+                .unwrap();
+            for sql in [
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
+                "CREATE TABLE registers (id TEXT PRIMARY KEY, name TEXT NOT NULL)",
+                "INSERT INTO settings VALUES ('till_id', 'source-till', '')",
+                "INSERT INTO settings VALUES ('till_name', 'Source Till', '')",
+                "INSERT INTO settings VALUES ('till_seq', '4', '')",
+                "INSERT INTO registers VALUES ('source-till', 'Source Till')",
+                "INSERT INTO registers VALUES ('legacy-till', 'Main Register')",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+            pool.close().await;
+
+            restore_preserved_local_setup(&target, None).await.unwrap();
+
+            let restored_pool =
+                SqlitePool::connect(&format!("sqlite://{}?mode=ro", target.display()))
+                    .await
+                    .unwrap();
+            let register_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM registers")
+                .fetch_one(&restored_pool)
+                .await
+                .unwrap();
+            let identity_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM settings
+                 WHERE key IN ('till_id', 'till_name', 'till_name_manual', 'till_seq')",
+            )
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
+            assert_eq!(register_count, 0);
+            assert_eq!(identity_count, 0);
+            restored_pool.close().await;
+
+            fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
+    #[test]
     fn automatic_setup_backup_strips_sales_and_keeps_only_two_daily_files() {
         tauri::async_runtime::block_on(async {
             let dir = temporary_backup_test_dir("automatic-setup-backup");
@@ -2273,6 +2506,7 @@ mod tests {
             for sql in [
                 "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
                 "CREATE TABLE products (id TEXT PRIMARY KEY, name TEXT, price INTEGER, costPrice INTEGER)",
+                "CREATE TABLE registers (id TEXT PRIMARY KEY, name TEXT)",
                 "CREATE TABLE orders (id TEXT PRIMARY KEY)",
                 "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT)",
                 "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT)",
@@ -2289,6 +2523,8 @@ mod tests {
                 "CREATE TABLE tombstones (id TEXT PRIMARY KEY, table_name TEXT)",
                 "INSERT INTO settings VALUES ('store_info', '{}', '')",
                 "INSERT INTO products VALUES ('product-1', 'Product', 100, 50)",
+                "INSERT INTO registers VALUES ('source-till', 'Source Till')",
+                "INSERT INTO registers VALUES ('legacy-till', 'Main Register')",
                 "INSERT INTO orders VALUES ('order-1')",
                 "INSERT INTO order_lines VALUES ('line-1', 'order-1')",
                 "INSERT INTO payments VALUES ('payment-1', 'order-1')",
@@ -2305,7 +2541,9 @@ mod tests {
                 "INSERT INTO daily_sales_summary VALUES ('summary-1')",
                 "INSERT INTO till_report_markers VALUES ('marker-1')",
                 "INSERT INTO _offline_queue VALUES ('queue-sale', 'saleBundle', 'orders')",
+                "INSERT INTO _offline_queue VALUES ('queue-register', 'upsert', 'registers')",
                 "INSERT INTO tombstones VALUES ('tomb-sale', 'orders')",
+                "INSERT INTO tombstones VALUES ('tomb-register', 'registers')",
             ] {
                 sqlx::query(sql).execute(&pool).await.unwrap();
             }
@@ -2342,6 +2580,7 @@ mod tests {
             let backup_uri = format!("sqlite://{}?mode=ro", latest.display());
             let backup_pool = SqlitePool::connect(&backup_uri).await.unwrap();
             for table in [
+                "registers",
                 "orders",
                 "order_lines",
                 "payments",
