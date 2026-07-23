@@ -14,6 +14,11 @@
 import Database from '@tauri-apps/plugin-sql';
 import { connectionState, type MysqlConfig } from './connection';
 import { get } from 'svelte/store';
+import {
+    loyaltyCodeValidationError,
+    normalizeLoyaltyCode,
+    planCustomerLoyaltyCodeRepairs,
+} from '../customerLoyaltyCode';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -774,6 +779,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
 
     await ensureSyncTimestampTriggers(d);
     await cleanupDuplicateProductIdentifiers(d);
+    await cleanupCustomerLoyaltyCodes(d);
     await cleanupDuplicatePromotionMemberships(d);
     await cleanupDuplicateOpenShifts(d);
     await ensureDeleteTombstoneTriggers(d);
@@ -785,6 +791,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         );
     }
     await cleanupDeletedOrOrphanedPromotionRows(d);
+    try { await d.execute(`DROP INDEX IF EXISTS idx_customers_loyalty_code ON customers`); } catch { /* legacy index may not exist */ }
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_loyalty_code ON customers(loyaltyCode)`);
 
     // ─── Indexes ─────────────────────────────────────────────────────────────
     // MariaDB supports CREATE INDEX IF NOT EXISTS from 10.5+.  We wrap each
@@ -811,7 +819,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status(255))`,
         `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId(255))`,
         `CREATE INDEX IF NOT EXISTS idx_loyalty_logs_customer ON loyalty_logs(customerId(255), createdAt(255))`,
-        `CREATE INDEX IF NOT EXISTS idx_customers_loyalty_code ON customers(loyaltyCode)`,
+        `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name(191), id)`,
         `CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method(255))`,
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
         `CREATE INDEX IF NOT EXISTS idx_till_markers_till ON till_report_markers(tillNumber)`,
@@ -1019,6 +1027,22 @@ async function cleanupDuplicateProductIdentifiers(d: Database): Promise<void> {
     }
 }
 
+async function cleanupCustomerLoyaltyCodes(d: Database): Promise<void> {
+    const rows = await d.select<Array<{ id: string; loyaltyCode: string | null }>>(
+        `SELECT CAST(id AS CHAR) AS id, CAST(loyaltyCode AS CHAR) AS loyaltyCode
+         FROM customers ORDER BY id`,
+    );
+    const repairs = planCustomerLoyaltyCodeRepairs(rows);
+    for (const repair of repairs) {
+        await d.execute(
+            `UPDATE customers
+             SET loyaltyCode = ?, updatedAt = DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')
+             WHERE id = ?`,
+            [repair.loyaltyCode, repair.id],
+        );
+    }
+}
+
 // ─── Column Introspection ────────────────────────────────────────────────────
 
 const tableColumnsCache: Record<string, string[]> = {};
@@ -1055,6 +1079,10 @@ function normalizeValue(v: any): any {
 export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
     if (table === 'products') {
         await mysqlSaveProductStrict(obj);
+        return;
+    }
+    if (table === 'customers') {
+        await mysqlSaveCustomerStrict(obj);
         return;
     }
     const d = await getDb();
@@ -1743,8 +1771,82 @@ function isPrimaryKeyDuplicate(error: unknown): boolean {
     return message.includes('duplicate entry') && message.includes('primary');
 }
 
+function isCustomerLoyaltyCodeConflict(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return message.includes('duplicate entry')
+        && message.includes('uq_customers_loyalty_code');
+}
+
 function wait(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function mysqlSaveCustomerStrict(customer: any): Promise<void> {
+    const d = await getDb();
+    const validCols = await getTableColumns('customers');
+    const loyaltyCode = normalizeLoyaltyCode(customer?.loyaltyCode);
+    if (loyaltyCode) {
+        const validationError = loyaltyCodeValidationError(loyaltyCode);
+        if (validationError) throw new Error(validationError);
+    }
+    const normalized = {
+        ...customer,
+        loyaltyCode: loyaltyCode || null,
+    };
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+            await mysqlUpsertCustomerById(d, normalized, validCols);
+            return;
+        } catch (error) {
+            if (isCustomerLoyaltyCodeConflict(error)) {
+                throw new Error('This loyalty code belongs to another customer.');
+            }
+            lastError = error;
+            if (attempt < 5 && (isTransientMysqlWriteConflict(error) || isPrimaryKeyDuplicate(error))) {
+                await wait(75 * attempt);
+                continue;
+            }
+            throw error;
+        }
+    }
+    throw lastError;
+}
+
+async function mysqlUpsertCustomerById(
+    d: Database,
+    customer: any,
+    validCols: string[],
+): Promise<void> {
+    const keys = Object.keys(customer).filter((key) => validCols.includes(key) && key !== 'updatedAt');
+    if (!keys.includes('id') || !String(customer.id || '').trim()) {
+        throw new Error('Customer ID is required');
+    }
+
+    const writeKeys = keys.filter((key) => key !== 'id');
+    const timeExpr = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    const updateAssignments = writeKeys.map((key) => `\`${key}\` = ?`);
+    if (validCols.includes('updatedAt')) updateAssignments.push(`\`updatedAt\` = ${timeExpr}`);
+    if (updateAssignments.length > 0) {
+        const result = await d.execute(
+            `UPDATE customers SET ${updateAssignments.join(', ')} WHERE id = ?`,
+            [...writeKeys.map((key) => normalizeValue(customer[key])), customer.id],
+        );
+        if (result.rowsAffected > 0) return;
+    }
+
+    const columns = keys.map((key) => `\`${key}\``);
+    const placeholders = keys.map(() => '?');
+    const values = keys.map((key) => normalizeValue(customer[key]));
+    if (validCols.includes('updatedAt')) {
+        columns.push('`updatedAt`');
+        placeholders.push(timeExpr);
+    }
+    await d.execute(
+        `INSERT INTO customers (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`,
+        values,
+    );
 }
 
 async function mysqlUpsertProductById(d: Database, product: any, validCols: string[]): Promise<void> {

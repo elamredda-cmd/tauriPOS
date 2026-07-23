@@ -17,15 +17,16 @@
     } from '$lib/permissions';
 
     const pagePermissions: PermissionKey[] = [
-        'open_items', 'open_discounts', 'open_reports', 'open_settings',
+        'open_items', 'open_customers', 'open_discounts', 'open_reports', 'open_settings',
         'open_employees', 'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
     ];
     const actionPermissions: PermissionKey[] = [
-        'price_override', 'refund_void', 'manual_discount', 'end_day_close',
+        'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ];
     const permissionKeys = [...pagePermissions, ...actionPermissions];
     const permissionDescriptions: Record<PermissionKey, string> = {
-        open_items: 'Products, categories, customers, suppliers, and tax rates',
+        open_items: 'Products, categories, suppliers, and tax rates',
+        open_customers: 'Customer profiles, contact details, and loyalty balances',
         open_discounts: 'Promotions, bundles, offers, and discounts',
         open_reports: 'Orders, sales reports, and previous till sessions',
         open_settings: 'Till appearance, printers, labels, scale, and integrations',
@@ -37,6 +38,7 @@
         price_override: 'Change a selling price during checkout',
         refund_void: 'Refund an order or void a completed sale',
         manual_discount: 'Apply a non-automatic discount at checkout',
+        open_cash_drawer: 'Open the cash drawer manually from the checkout screen',
         end_day_close: 'Open the restricted close-period screen and create a Z report without access to detailed sales reports',
     };
 

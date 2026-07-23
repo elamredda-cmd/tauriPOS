@@ -1,12 +1,16 @@
 import { writable, get } from 'svelte/store';
 import { isTauri } from '@tauri-apps/api/core';
 import { employeesDB, type Employee } from './db';
+import { toast } from './toast';
+import type { SupportSessionGrant } from '$lib/supportAccess';
 
 export const currentEmployee = writable<Employee | null>(null);
 export const currentShiftId = writable<string>('');
 
 export const REMEMBERED_EMPLOYEE_SESSION_KEY = 'pos_remembered_employee_session_v1';
 const REMEMBERED_EMPLOYEE_SESSION_MS = 12 * 60 * 60 * 1000;
+const SUPPORT_EMPLOYEE_PREFIX = 'lbj-support-';
+let supportExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 
 type RememberedEmployeeSession = {
     employeeId: string;
@@ -48,6 +52,50 @@ function rememberEmployeeSession(employee: Employee): void {
     }
 }
 
+function clearSupportExpiryTimer(): void {
+    if (!supportExpiryTimer) return;
+    clearTimeout(supportExpiryTimer);
+    supportExpiryTimer = null;
+}
+
+export function isSupportEmployee(employee: Employee | null | undefined): boolean {
+    return Boolean(employee?.isSupportSession || employee?.id.startsWith(SUPPORT_EMPLOYEE_PREFIX));
+}
+
+export function startSupportSession(grant: SupportSessionGrant): Employee {
+    const expiresAt = new Date(grant.expiresAt).getTime();
+    const remaining = expiresAt - Date.now();
+    if (!Number.isFinite(expiresAt) || remaining <= 0) {
+        throw new Error('This support session has already expired');
+    }
+    clearRememberedEmployeeSession();
+    clearSupportExpiryTimer();
+    const employee: Employee = {
+        id: `${SUPPORT_EMPLOYEE_PREFIX}${grant.sessionId}`,
+        storeId: 'store-main',
+        name: grant.actorName || 'L&Bj Support',
+        pin: '',
+        pinHash: '',
+        role: 'admin',
+        email: '',
+        isActive: true,
+        createdAt: grant.issuedAt,
+        updatedAt: grant.issuedAt,
+        isSupportSession: true,
+        supportSessionId: grant.sessionId,
+        supportExpiresAt: grant.expiresAt,
+    };
+    currentShiftId.set('');
+    currentEmployee.set(employee);
+    writeSessionAudit('employee_login', employee);
+    supportExpiryTimer = setTimeout(() => {
+        if (get(currentEmployee)?.id !== employee.id) return;
+        logout();
+        toast('L&Bj Support access expired. Create a new request to continue.', 'info');
+    }, remaining);
+    return employee;
+}
+
 export function clearRememberedEmployeeSession(): void {
     try {
         if (typeof sessionStorage !== 'undefined') {
@@ -62,6 +110,7 @@ export function clearRememberedEmployeeSession(): void {
 }
 
 export function restoreRememberedEmployeeSession(): Employee | null {
+    clearSupportExpiryTimer();
     const saved = readRememberedEmployeeSession();
     if (!saved) return null;
     const employee = get(employeesDB).find((e) => e.id === saved.employeeId && e.isActive) || null;
@@ -121,6 +170,7 @@ export async function verifyEmployeePin(employeeId: string, pin: string): Promis
 }
 
 async function finishAuthentication(employee: Employee | null, hash: string): Promise<Employee | null> {
+    clearSupportExpiryTimer();
     if (employee && !employee.pinHash) {
         employee = { ...employee, pinHash: hash, pin: '' };
         employeesDB.update((list) => list.map((e) => e.id === employee?.id ? employee! : e));
@@ -138,6 +188,7 @@ async function finishAuthentication(employee: Employee | null, hash: string): Pr
 export function logout(): void {
     const employee = get(currentEmployee);
     writeSessionAudit('employee_logout', employee);
+    clearSupportExpiryTimer();
     clearRememberedEmployeeSession();
     currentEmployee.set(null);
     currentShiftId.set('');

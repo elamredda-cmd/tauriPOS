@@ -33,7 +33,7 @@ The separate Sunmi/Android application is an administrative catalogue client. It
 ### 2.2 Current non-goals
 
 - There is no hosted application backend or REST API between clients and MariaDB.
-- There is no hosted licensing service, online revocation, payment/subscription collection, or automatic renewal. Signed offline annual shop licences are available in setup mode.
+- There is no hosted licensing service, online revocation, payment/subscription collection, or automatic renewal. Signed offline annual shop licences are enforced locally.
 - There is no runtime printer-plugin loader. Printer protocols and payment providers are compiled into the application.
 - There is no cloud account, cross-shop cloud replication, or remote shop management service.
 - The Sunmi companion is not a checkout, order, refund, or cash-management client.
@@ -1003,6 +1003,7 @@ Tauri still uses a native process plus one or more WebView2 processes on Windows
 - Backup integrity validation and staged replacement.
 - Safe offline upserts and visible conflict quarantine.
 - Provider configuration written atomically with restrictive Unix file permissions.
+- Restrictive production CSP and a separate read-only SQL capability for the customer-display window.
 
 ### 23.2 Current risks
 
@@ -1012,7 +1013,7 @@ Tauri still uses a native process plus one or more WebView2 processes on Windows
 | High | Local sale commit and sale-outbox insertion are two separate SQLite transactions. | Insert the outbox payload inside the native sale transaction, or reconcile completed local sales against MariaDB on startup. |
 | High | MariaDB password is stored in local SQLite settings; companion credentials use preferences. | Move secrets to Windows Credential Manager, macOS Keychain, and Android Keystore. |
 | High | Frontend permissions are not cryptographically bound to every native/SQL command. | Add native authorization tokens and command-level permission checks; narrow SQL capability. |
-| High | Tauri CSP is currently disabled. | Define a restrictive CSP and verify provider/customer-display requirements. |
+| High | The main window still has broad frontend SQL execution capability. | Replace general SQL access with narrow native commands for sensitive operations. |
 | Medium | PIN hashing uses unsalted SHA-256 and supports legacy plain values during migration. | Move to Argon2id or platform credential verification with per-user salts. |
 | Medium | Companion has no observed shop-identity mismatch guard or staff authentication. | Add shop identity validation, device enrollment, and an admin session. |
 | Medium | Provider secret JSON is permission-protected but not encrypted. | Use platform secret stores and rotate exposed credentials. |
@@ -1027,7 +1028,9 @@ The desktop app now has a serverless manual licensing foundation. Settings > Sho
 
 The public verification key is compiled into the application. The private signing key is kept outside the repository and must never be shipped to a till. In multi-till mode, the verified token uses the shared `app_identity` row and synchronizes through MariaDB. A standalone till stores it only in local SQLite. A till rename does not change the shop ID or invalidate the licence.
 
-Current builds intentionally use **setup mode**: status and activation are functional, but an absent or expired licence does not block sales. Commercial enforcement is compile-time opt-in through `LBJ_LICENSE_ENFORCEMENT=enforce`; native sale and online reversal entry points then reject unlicensed, expired, wrong-shop, or over-limit use. Existing queued sales remain syncable so enforcement cannot strand transactions already accepted offline.
+Normal builds enforce the 10-day trial and signed licence by default. Native sale and online reversal entry points reject unlicensed, expired, wrong-shop, over-limit, or non-POS entitlements. Managed terminal payment and refund flows also perform a native preflight before contacting the provider, while the final native commit remains authoritative. Enforcement can only be compiled out deliberately with `LBJ_LICENSE_ENFORCEMENT=off` (or `preview`, `disabled`, or `0`) for development. Existing queued sales remain syncable so enforcement cannot strand transactions already accepted offline.
+
+The Licence page can soft-retire an unused register without deleting its history. The current register cannot retire itself, connected multi-till registers cannot be retired, and reopening a retired till automatically makes it active again. A newly imported licence with a different ID must have a later issue timestamp than the installed verified entitlement.
 
 This offline design does not provide immediate revocation, automatic billing, remote device removal, or reliable clock-tamper protection. A future vendor service can retain the signed local entitlement while adding renewal, revocation, a bounded offline grace period, and activation history. Operational commands are documented in `docs/MANUAL_LICENSING.md`.
 
@@ -1147,7 +1150,7 @@ There is no broad TypeScript unit-test suite or complete automated end-to-end ha
 
 - Complete a two-till hardware acceptance test on the weakest supported Windows POS.
 - Add command-level native authorization and narrow Tauri SQL capabilities.
-- Enable a restrictive CSP.
+- Exercise the restrictive CSP against every supported payment, font, image, and customer-display workflow.
 - Move database and provider secrets into platform credential stores.
 - Add automated multi-till sync tests, including epoch restore and transaction purge.
 - Make sale commit plus outbox insertion one native SQLite transaction and add crash-recovery reconciliation tests.

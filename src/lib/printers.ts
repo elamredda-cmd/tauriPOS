@@ -10,8 +10,11 @@ import {
     type LabelDesign,
 } from '$lib/labels';
 import { getScaleSaleDisplay } from '$lib/scaleSale';
+import { printSystemReceipt, printSystemText } from '$lib/systemPrint';
+import { rasterizeMonochrome, type MonoRaster } from '$lib/labelRaster';
+import { executePrinterModuleRaw } from '$lib/printerModules';
 
-export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth';
+export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth' | 'module';
 export type ReceiptPaperWidth = '58mm' | '80mm';
 export type ReceiptPrinterModel = 'generic_escpos' | 'star_tsp100';
 export type LabelPrinterProtocol = 'system' | 'escpos' | 'star' | 'zpl' | 'tspl';
@@ -23,6 +26,8 @@ export interface ReceiptPrinterConfig {
     port: number;
     printerName: string;
     devicePath: string;
+    moduleId: string;
+    moduleDeviceId: string;
     baudRate: number;
     paperWidth: ReceiptPaperWidth;
     model: ReceiptPrinterModel;
@@ -41,6 +46,8 @@ export interface LabelPrinterConfig {
     port: number;
     printerName: string;
     devicePath: string;
+    moduleId: string;
+    moduleDeviceId: string;
     baudRate: number;
     cutPaper: boolean;
     gapLines: number;
@@ -67,8 +74,8 @@ function intSetting(settings: Setting[], key: string, fallback: number, min: num
     return Math.min(max, Math.max(min, value));
 }
 
-const DIRECT_CONNECTIONS = new Set<PrinterConnectionType>(['network_escpos', 'usb_raw', 'serial', 'bluetooth']);
-const ALL_CONNECTIONS = new Set<PrinterConnectionType>(['system', 'network_escpos', 'usb_raw', 'serial', 'bluetooth']);
+const DIRECT_CONNECTIONS = new Set<PrinterConnectionType>(['network_escpos', 'usb_raw', 'serial', 'bluetooth', 'module']);
+const ALL_CONNECTIONS = new Set<PrinterConnectionType>(['system', 'network_escpos', 'usb_raw', 'serial', 'bluetooth', 'module']);
 
 function normalizePrinterConnection(value: string, fallback: PrinterConnectionType): PrinterConnectionType {
     if (ALL_CONNECTIONS.has(value as PrinterConnectionType)) return value as PrinterConnectionType;
@@ -86,18 +93,21 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
     const host = setting(settings, 'receipt_printer_host');
     const printerName = setting(settings, 'receipt_printer_name');
     const devicePath = setting(settings, 'receipt_printer_device_path');
-    const fallbackConnection = host.trim()
+    const moduleId = setting(settings, 'receipt_printer_module_id');
+    const fallbackConnection = moduleId.trim()
+        ? 'module'
+        : host.trim()
         ? 'network_escpos'
         : printerName.trim()
             ? 'usb_raw'
             : devicePath.trim()
                 ? 'serial'
                 : 'system';
-    const configuredConnection = setting(settings, 'receipt_printer_connection', fallbackConnection);
-    const connection = normalizePrinterConnection(
-        configuredConnection === 'system' && fallbackConnection !== 'system' ? fallbackConnection : configuredConnection,
-        fallbackConnection
-    );
+    const configuredConnection = settings
+        .find((item) => item.key === 'receipt_printer_connection')
+        ?.value
+        ?.trim();
+    const connection = normalizePrinterConnection(configuredConnection || fallbackConnection, fallbackConnection);
     const model = normalizeReceiptPrinterModel(setting(settings, 'receipt_printer_model', 'generic_escpos'));
     const configuredEncoding = setting(settings, 'receipt_printer_encoding', 'latin1') === 'utf8' ? 'utf8' : 'latin1';
     return {
@@ -107,6 +117,8 @@ export function getReceiptPrinterConfig(settings: Setting[] = get(settingsDB)): 
         port: portSetting(settings, 'receipt_printer_port', 9100),
         printerName,
         devicePath,
+        moduleId,
+        moduleDeviceId: setting(settings, 'receipt_printer_module_device_id'),
         baudRate: portSetting(settings, 'receipt_printer_baud_rate', 9600),
         paperWidth: setting(settings, 'receipt_printer_paper_width', '80mm') === '58mm' ? '58mm' : '80mm',
         model,
@@ -133,8 +145,11 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
     const labelHost = setting(settings, 'label_printer_host');
     const labelPrinterName = setting(settings, 'label_printer_name');
     const labelDevicePath = setting(settings, 'label_printer_device_path');
+    const moduleId = setting(settings, 'label_printer_module_id');
     const configuredConnection = setting(settings, 'label_printer_connection', '');
-    const fallbackConnection = labelHost.trim()
+    const fallbackConnection = moduleId.trim()
+        ? 'module'
+        : labelHost.trim()
         ? 'network_escpos'
         : labelPrinterName.trim()
             ? 'usb_raw'
@@ -170,6 +185,10 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
             || ((connection === 'serial' || connection === 'bluetooth')
                 && Boolean(labelDevicePath.trim())
                 && labelDevicePath.trim().toLowerCase() === receipt.devicePath.trim().toLowerCase())
+            || (connection === 'module'
+                && Boolean(moduleId.trim())
+                && moduleId.trim() === receipt.moduleId.trim()
+                && setting(settings, 'label_printer_module_device_id').trim() === receipt.moduleDeviceId.trim())
         );
     // TSP100 printers use Star Graphic raster framing in their native mode.
     // Sending an ESC/POS bitmap to that mode can print binary data as text and
@@ -185,10 +204,12 @@ export function getLabelPrinterConfig(settings: Setting[] = get(settingsDB)): La
         port: labelPort,
         printerName: labelPrinterName,
         devicePath: labelDevicePath,
+        moduleId,
+        moduleDeviceId: setting(settings, 'label_printer_module_device_id'),
         baudRate: portSetting(settings, 'label_printer_baud_rate', receipt.baudRate || 9600),
         cutPaper: boolSetting(settings, 'label_printer_cut_paper', false),
         gapLines: intSetting(settings, 'label_printer_gap_lines', directProtocol === 'tspl' ? 2 : 0, 0, 12),
-        dpi: intSetting(settings, 'label_printer_dpi', 203, 100, 1200),
+        dpi: intSetting(settings, 'label_printer_dpi', 203, 100, 600),
         paperWidth: receipt.paperWidth,
     };
 }
@@ -399,6 +420,10 @@ async function sendDirectPrinterData(args: {
     port?: number;
     printerName?: string;
     devicePath?: string;
+    moduleId?: string;
+    moduleDeviceId?: string;
+    baudRate?: number;
+    protocol?: string;
     documentName?: string;
 }) {
     if (args.connection === 'network_escpos') {
@@ -425,6 +450,19 @@ async function sendDirectPrinterData(args: {
         await invoke('send_device_printer_data', {
             devicePath: args.devicePath.trim(),
             data: args.data,
+            baudRate: args.baudRate || 9600,
+            timeoutMs: 2000,
+        });
+        return;
+    }
+    if (args.connection === 'module') {
+        if (!args.moduleId?.trim()) throw new Error('Choose an installed printer module');
+        await executePrinterModuleRaw({
+            moduleId: args.moduleId.trim(),
+            deviceId: args.moduleDeviceId?.trim(),
+            data: args.data,
+            documentName: args.documentName || 'L&Bj POS print job',
+            protocol: args.protocol,
         });
         return;
     }
@@ -527,26 +565,46 @@ export async function sendEscposNetworkTest(config = getReceiptPrinterConfig()):
 
 export async function sendReceiptPrinterTest(config = getReceiptPrinterConfig()): Promise<void> {
     if (!config.enabled) throw new Error('Receipt printer is disabled');
-    if (!isDirectConnection(config.connection)) throw new Error('Choose Network, USB raw, Serial, or Bluetooth for direct test printing');
+    if (config.connection === 'system') {
+        await printSystemText(
+            'L&Bj POS',
+            `RECEIPT PRINTER TEST\n\n${new Date().toLocaleString('en-GB')}\n\nSystem / driver printing is ready.`,
+            config.paperWidth,
+        );
+        return;
+    }
+    if (!isDirectConnection(config.connection)) throw new Error('Choose a configured receipt printer connection');
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
+        moduleId: config.moduleId,
+        moduleDeviceId: config.moduleDeviceId,
+        baudRate: config.baudRate,
+        protocol: config.model === 'star_tsp100' ? 'star-line' : 'escpos',
         data: buildEscposTestReceipt(config),
         documentName: 'L&Bj POS receipt test',
     });
 }
 
 async function printReceiptPayload(payload: ReceiptPayload, config: ReceiptPrinterConfig): Promise<void> {
-    if (!isDirectConnection(config.connection)) throw new Error('Printing needs Network, USB raw, Serial, or Bluetooth direct mode');
+    if (config.connection === 'system') {
+        await printSystemReceipt(payload);
+        return;
+    }
+    if (!isDirectConnection(config.connection)) throw new Error('Choose a configured receipt printer connection');
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
+        moduleId: config.moduleId,
+        moduleDeviceId: config.moduleDeviceId,
+        baudRate: config.baudRate,
+        protocol: config.model === 'star_tsp100' ? 'star-line' : 'escpos',
         data: buildEscposReceipt(payload, config),
         documentName: `Receipt ${payload.order.orderNumber || ''}`.trim(),
     });
@@ -569,13 +627,21 @@ export async function printEscposTextReport(
     config = getReceiptPrinterConfig()
 ): Promise<void> {
     if (!config.enabled) throw new Error('Receipt printer is disabled');
-    if (!isDirectConnection(config.connection)) throw new Error('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first');
+    if (config.connection === 'system') {
+        await printSystemText(documentName, text, config.paperWidth);
+        return;
+    }
+    if (!isDirectConnection(config.connection)) throw new Error('Choose a configured receipt printer connection');
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
+        moduleId: config.moduleId,
+        moduleDeviceId: config.moduleDeviceId,
+        baudRate: config.baudRate,
+        protocol: config.model === 'star_tsp100' ? 'star-line' : 'escpos',
         data: buildEscposTextReport(text, config),
         documentName,
     });
@@ -587,6 +653,11 @@ type ProductLabelPayload = {
     design: LabelDesign;
     quantity: number;
 };
+
+export interface ProductLabelPrintOptions {
+    signal?: { cancelled: boolean };
+    onCopiesSent?: (copies: number) => void;
+}
 
 function labelCopies(quantity: number): number {
     return Math.max(1, Math.min(500, Math.floor(Number(quantity) || 1)));
@@ -1433,41 +1504,40 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
     return canvas;
 }
 
-function canvasToMonoRaster(canvas: HTMLCanvasElement): { bytesPerRow: number; height: number; data: number[] } {
+async function canvasToMonoRaster(canvas: HTMLCanvasElement): Promise<MonoRaster> {
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Could not read label image');
-    const { width, height } = canvas;
-    const data = ctx.getImageData(0, 0, width, height).data;
-    const bytesPerRow = Math.ceil(width / 8);
-    const raster: number[] = [];
-    for (let y = 0; y < height; y += 1) {
-        for (let byteIndex = 0; byteIndex < bytesPerRow; byteIndex += 1) {
-            let byte = 0;
-            for (let bit = 0; bit < 8; bit += 1) {
-                const x = byteIndex * 8 + bit;
-                if (x >= width) continue;
-                const offset = (y * width + x) * 4;
-                const red = data[offset];
-                const green = data[offset + 1];
-                const blue = data[offset + 2];
-                const alpha = data[offset + 3];
-                const luminance = (red * 0.299 + green * 0.587 + blue * 0.114) * (alpha / 255) + 255 * (1 - alpha / 255);
-                if (luminance < 180) byte |= 0x80 >> bit;
-            }
-            raster.push(byte);
-        }
-    }
-    return { bytesPerRow, height, data: raster };
+    return rasterizeMonochrome(ctx.getImageData(0, 0, canvas.width, canvas.height));
 }
 
-function canvasToEscposRaster(canvas: HTMLCanvasElement): number[] {
-    const raster = canvasToMonoRaster(canvas);
+function appendBytes(target: number[], source: ArrayLike<number>): void {
+    const chunkSize = 8_192;
+    for (let offset = 0; offset < source.length; offset += chunkSize) {
+        const chunkLength = Math.min(chunkSize, source.length - offset);
+        const chunk = Array.from({ length: chunkLength }, (_, index) => source[offset + index]);
+        target.push(...chunk);
+    }
+}
+
+const ESC_POS_RASTER_BAND_BYTES = 32 * 1024;
+
+export function encodeEscposRaster(
+    raster: MonoRaster,
+    maxBandBytes = ESC_POS_RASTER_BAND_BYTES,
+): number[] {
     const { bytesPerRow, height, data } = raster;
-    // Split into horizontal bands so a tall label fits the printer's small raster
-    // buffer. Each GS v 0 command prints contiguously below the previous one, so a
-    // single big bitmap that would otherwise be truncated mid-label prints in full.
-    const maxBandBytes = 4000;
-    const bandHeight = Math.max(1, Math.min(height, Math.floor(maxBandBytes / Math.max(1, bytesPerRow)) || 1));
+    if (!Number.isInteger(bytesPerRow) || bytesPerRow <= 0 || !Number.isInteger(height) || height <= 0) {
+        throw new Error('The label raster dimensions are invalid');
+    }
+    if (data.length < bytesPerRow * height) {
+        throw new Error('The label raster data is incomplete');
+    }
+
+    // Common 80 x 30 mm ESC/POS labels fit in one command. This is important
+    // for printers such as the XP-E200M, whose firmware can leave later image
+    // blocks unprinted. Only genuinely large images are split into bounded bands.
+    const safeBandBytes = Math.max(bytesPerRow, Math.floor(maxBandBytes) || ESC_POS_RASTER_BAND_BYTES);
+    const bandHeight = Math.max(1, Math.min(height, Math.floor(safeBandBytes / bytesPerRow) || 1));
     const bytes: number[] = [];
     for (let top = 0; top < height; top += bandHeight) {
         const rows = Math.min(bandHeight, height - top);
@@ -1479,25 +1549,33 @@ function canvasToEscposRaster(canvas: HTMLCanvasElement): number[] {
             (bytesPerRow >> 8) & 0xff,
             rows & 0xff,
             (rows >> 8) & 0xff,
-            ...data.slice(start, end),
         );
+        appendBytes(bytes, data.subarray(start, end));
     }
     return bytes;
 }
 
-function bytesToHex(bytes: number[]): string {
-    return bytes.map((byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join('');
+async function canvasToEscposRaster(canvas: HTMLCanvasElement): Promise<number[]> {
+    return encodeEscposRaster(await canvasToMonoRaster(canvas));
 }
 
-function buildEscposRasterProductLabels(
+function bytesToHex(bytes: ArrayLike<number>): string {
+    let result = '';
+    for (let index = 0; index < bytes.length; index += 1) {
+        result += bytes[index].toString(16).padStart(2, '0').toUpperCase();
+    }
+    return result;
+}
+
+async function buildEscposRasterProductLabels(
     payload: ProductLabelPayload,
     cutPaper: boolean,
     gapLines: number,
     dotsPerMm: number,
     maxWidthDots: number
-): number[] {
+): Promise<number[]> {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm, maxWidthDots);
-    const image = canvasToEscposRaster(canvas);
+    const image = await canvasToEscposRaster(canvas);
     const bytes: number[] = [
         0x1b, 0x40,
         0x1d, 0x4c, 0x00, 0x00,
@@ -1506,8 +1584,8 @@ function buildEscposRasterProductLabels(
     ];
     const copies = labelCopies(payload.quantity);
     for (let copy = 0; copy < copies; copy += 1) {
-        bytes.push(...image);
-        if (copy < copies - 1) bytes.push(...feedLines(gapLines));
+        appendBytes(bytes, image);
+        if (gapLines > 0) bytes.push(...feedLines(gapLines));
     }
     bytes.push(0x1b, 0x61, 0x00, ...escposCut(cutPaper));
     return bytes;
@@ -1517,14 +1595,14 @@ function starAsciiNumber(value: number): number[] {
     return Array.from(new TextEncoder().encode(String(Math.max(0, Math.floor(value)))));
 }
 
-function buildStarRasterProductLabels(
+async function buildStarRasterProductLabels(
     payload: ProductLabelPayload,
     cutPaper: boolean,
     dotsPerMm: number,
     maxWidthDots: number
-): number[] {
+): Promise<number[]> {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm, maxWidthDots);
-    const raster = canvasToMonoRaster(canvas);
+    const raster = await canvasToMonoRaster(canvas);
     const pageLength = Math.max(200, raster.height);
     const endMode = cutPaper ? 13 : 1;
     const bytes: number[] = [];
@@ -1542,8 +1620,8 @@ function buildStarRasterProductLabels(
                 0x62,
                 raster.bytesPerRow & 0xff,
                 (raster.bytesPerRow >> 8) & 0xff,
-                ...raster.data.slice(start, start + raster.bytesPerRow),
             );
+            appendBytes(bytes, raster.data.subarray(start, start + raster.bytesPerRow));
         }
         bytes.push(
             0x1b, 0x0c, 0x04,       // ESC FF EOT: print exactly this raster page
@@ -1553,9 +1631,9 @@ function buildStarRasterProductLabels(
     return bytes;
 }
 
-function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number, cutPaper = false): number[] {
+async function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: number, cutPaper = false): Promise<number[]> {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
-    const raster = canvasToMonoRaster(canvas);
+    const raster = await canvasToMonoRaster(canvas);
     const totalBytes = raster.data.length;
     const lines = [
         '^XA',
@@ -1572,9 +1650,9 @@ function buildZplRasterProductLabel(payload: ProductLabelPayload, dotsPerMm: num
     return Array.from(new TextEncoder().encode(lines.join('\n')));
 }
 
-function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number, cutPaper = false): number[] {
+async function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: number, dotsPerMm: number, cutPaper = false): Promise<number[]> {
     const canvas = renderEscposLabelCanvas(payload, dotsPerMm);
-    const raster = canvasToMonoRaster(canvas);
+    const raster = await canvasToMonoRaster(canvas);
     const widthMm = labelWidthMm(payload.design);
     const heightMm = labelHeightMm(payload.design);
     const prefix = [
@@ -1588,14 +1666,13 @@ function buildTsplRasterProductLabel(payload: ProductLabelPayload, gapLines: num
         `BITMAP 0,0,${raster.bytesPerRow},${raster.height},0,`,
     ].join('\r\n');
     const suffix = `\r\nPRINT ${labelCopies(payload.quantity)}\r\n`;
-    return [
-        ...Array.from(new TextEncoder().encode(prefix)),
-        ...raster.data,
-        ...Array.from(new TextEncoder().encode(suffix)),
-    ];
+    const bytes = Array.from(new TextEncoder().encode(prefix));
+    appendBytes(bytes, raster.data);
+    appendBytes(bytes, new TextEncoder().encode(suffix));
+    return bytes;
 }
 
-function buildRasterProductLabel(payload: ProductLabelPayload, config: LabelPrinterConfig): number[] {
+async function buildRasterProductLabel(payload: ProductLabelPayload, config: LabelPrinterConfig): Promise<number[]> {
     const dotsPerMm = labelDotsPerMm(config.dpi);
     if (config.protocol === 'zpl') return buildZplRasterProductLabel(payload, dotsPerMm, config.cutPaper);
     if (config.protocol === 'tspl') return buildTsplRasterProductLabel(payload, config.gapLines, dotsPerMm, config.cutPaper);
@@ -1687,33 +1764,64 @@ export function buildProductLabel(payload: ProductLabelPayload, config = getLabe
     return buildEscposProductLabels(payload, config.cutPaper, config.gapLines);
 }
 
-async function sendProductLabelsJob(payload: ProductLabelPayload, config: LabelPrinterConfig): Promise<void> {
-    const data = typeof document !== 'undefined'
-        ? buildRasterProductLabel(payload, config)
-        : buildProductLabel(payload, config);
+async function sendProductLabelsData(
+    payload: ProductLabelPayload,
+    config: LabelPrinterConfig,
+    data: number[],
+): Promise<void> {
     await sendDirectPrinterData({
         connection: config.connection,
         host: config.host,
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
+        moduleId: config.moduleId,
+        moduleDeviceId: config.moduleDeviceId,
+        baudRate: config.baudRate,
+        protocol: config.protocol,
         data,
         documentName: `Label ${labelText(payload.product.name, 24)}`.trim(),
     });
 }
 
-export async function printProductLabels(payload: ProductLabelPayload, config = getLabelPrinterConfig()): Promise<void> {
+async function sendProductLabelsJob(payload: ProductLabelPayload, config: LabelPrinterConfig): Promise<void> {
+    const data = typeof document !== 'undefined'
+        ? await buildRasterProductLabel(payload, config)
+        : buildProductLabel(payload, config);
+    await sendProductLabelsData(payload, config, data);
+}
+
+export async function printProductLabels(
+    payload: ProductLabelPayload,
+    config = getLabelPrinterConfig(),
+    options: ProductLabelPrintOptions = {},
+): Promise<void> {
     if (!config.enabled) throw new Error('Label printer is disabled');
     if (!isDirectConnection(config.connection)) throw new Error('Choose USB raw, Network, Serial, or Bluetooth for thermal label printing');
     if (config.protocol === 'system') throw new Error('Choose Star Graphic, ESC/POS, TSPL, or ZPL for direct label printing');
     const copies = labelCopies(payload.quantity);
-    if (config.cutPaper && copies > 1) {
-        for (let copy = 0; copy < copies; copy += 1) {
-            await sendProductLabelsJob({ ...payload, quantity: 1 }, config);
+    if (options.signal?.cancelled) throw new Error('Label printing stopped');
+    const needsBoundedRasterBatches = typeof document !== 'undefined'
+        && copies > 1
+        && (config.protocol === 'star' || config.protocol === 'escpos');
+    if (needsBoundedRasterBatches) {
+        const singlePayload = { ...payload, quantity: 1 };
+        const singleLabel = await buildRasterProductLabel(singlePayload, config);
+        const copiesPerBatch = Math.max(1, Math.floor(1_000_000 / Math.max(1, singleLabel.length)));
+        for (let printed = 0; printed < copies;) {
+            if (options.signal?.cancelled) throw new Error('Label printing stopped');
+            const batchCopies = Math.min(copiesPerBatch, copies - printed);
+            const batch: number[] = [];
+            for (let copy = 0; copy < batchCopies; copy += 1) appendBytes(batch, singleLabel);
+            await sendProductLabelsData(singlePayload, config, batch);
+            printed += batchCopies;
+            options.onCopiesSent?.(batchCopies);
         }
         return;
     }
+    if (options.signal?.cancelled) throw new Error('Label printing stopped');
     await sendProductLabelsJob({ ...payload, quantity: copies }, config);
+    options.onCopiesSent?.(copies);
 }
 
 function labelTestPayload(): ProductLabelPayload {
@@ -1816,7 +1924,7 @@ export async function sendLabelPrinterTest(config = getLabelPrinterConfig()): Pr
     if (!isDirectConnection(config.connection)) throw new Error('Choose Network, USB raw, Serial, or Bluetooth for direct label test printing');
     if (config.protocol === 'system') throw new Error('Choose Star Graphic, ESC/POS, ZPL, or TSPL for direct label test printing');
     const data = typeof document !== 'undefined'
-        ? buildRasterProductLabel(labelTestPayload(), config)
+        ? await buildRasterProductLabel(labelTestPayload(), config)
         : buildLabelTest(config);
     await sendDirectPrinterData({
         connection: config.connection,
@@ -1824,6 +1932,10 @@ export async function sendLabelPrinterTest(config = getLabelPrinterConfig()): Pr
         port: config.port,
         printerName: config.printerName,
         devicePath: config.devicePath,
+        moduleId: config.moduleId,
+        moduleDeviceId: config.moduleDeviceId,
+        baudRate: config.baudRate,
+        protocol: config.protocol,
         data,
         documentName: 'L&Bj POS label test',
     });

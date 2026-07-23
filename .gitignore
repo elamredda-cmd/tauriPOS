@@ -17,3 +17,9 @@ check_results*.txt
 
 # Private licence issuer application lives outside this repository.
 /license-issuer-app/
+
+# Locally built, signed printer-module artifacts.
+/.printer-module-build/
+/artifacts/printer-modules/
+/printer-modules/*/bin/
+/printer-modules/*/obj/

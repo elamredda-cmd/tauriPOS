@@ -7,6 +7,29 @@
     import { toast } from '$lib/stores/toast';
     import { parseRolePermissions, permissionLabels, type PermissionKey } from '$lib/permissions';
     import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import {
+        BadgePercent,
+        CalendarClock,
+        ChartNoAxesCombined,
+        ChevronRight,
+        ClipboardList,
+        ContactRound,
+        Info,
+        LayoutGrid,
+        LockKeyhole,
+        LogOut,
+        Maximize2,
+        Minimize2,
+        PackagePlus,
+        PackageSearch,
+        PanelsTopLeft,
+        Percent,
+        ReceiptText,
+        RefreshCcw,
+        Settings as SettingsIcon,
+        Truck,
+        UsersRound,
+    } from '@lucide/svelte';
 
     type AdminEntry = {
         title: string;
@@ -16,23 +39,7 @@
         permission?: PermissionKey;
         alternativePermission?: PermissionKey;
         accent: string;
-        icon:
-            | 'design'
-            | 'items'
-            | 'categories'
-            | 'customers'
-            | 'employees'
-            | 'suppliers'
-            | 'discounts'
-            | 'tax'
-            | 'orders'
-            | 'shifts'
-            | 'stock'
-            | 'reports'
-            | 'sync'
-            | 'audit'
-            | 'settings'
-            | 'about';
+        icon: typeof PanelsTopLeft;
     };
 
     type AdminViewEntry = AdminEntry & {
@@ -41,29 +48,28 @@
     };
 
     const adminEntries: AdminEntry[] = [
-        { title: 'Design Studio', group: 'POS layout', description: 'Edit till pages and selling layout.', path: '/design', permission: 'open_design', accent: '#0ea5e9', icon: 'design' },
-        { title: 'Items', group: 'Catalogue', description: 'Products, PLU, barcode, stock setup.', path: '/items', permission: 'open_items', accent: '#22c55e', icon: 'items' },
-        { title: 'Categories', group: 'Catalogue', description: 'Group products for faster selling.', path: '/categories', permission: 'open_items', accent: '#14b8a6', icon: 'categories' },
-        { title: 'Customers', group: 'Catalogue', description: 'Loyalty customers and contact details.', path: '/customers', permission: 'open_items', accent: '#6366f1', icon: 'customers' },
-        { title: 'Employees', group: 'Staff', description: 'Staff, PINs, roles, and access.', path: '/employees', permission: 'open_employees', accent: '#a855f7', icon: 'employees' },
-        { title: 'Suppliers', group: 'Stock', description: 'Supplier records for receiving stock.', path: '/suppliers', permission: 'open_items', accent: '#f59e0b', icon: 'suppliers' },
-        { title: 'Discounts', group: 'Promotions', description: 'Offers, bundles, and manual discounts.', path: '/discounts', permission: 'open_discounts', accent: '#ec4899', icon: 'discounts' },
-        { title: 'Tax Rates', group: 'Catalogue', description: 'VAT and tax configuration.', path: '/tax-rates', permission: 'open_items', accent: '#64748b', icon: 'tax' },
-        { title: 'Orders', group: 'Sales', description: 'Receipts, returns, and past orders.', path: '/orders', permission: 'open_reports', accent: '#3b82f6', icon: 'orders' },
-        { title: 'Till Sessions', group: 'Till', description: 'Open sessions and cash-up history.', path: '/shifts', permission: 'open_reports', accent: '#10b981', icon: 'shifts' },
-        { title: 'Stock Receiving', group: 'Stock', description: 'Receive stock and update quantities.', path: '/stock-receiving', permission: 'open_stock_receiving', accent: '#f97316', icon: 'stock' },
-        { title: 'Reports', group: 'Sales', description: 'Sales, close reports, and totals.', path: '/reports', permission: 'open_reports', alternativePermission: 'end_day_close', accent: '#06b6d4', icon: 'reports' },
-        { title: 'Sync Dashboard', group: 'System', description: 'Database sync and connection status.', path: '/sync', permission: 'open_sync', accent: '#8b5cf6', icon: 'sync' },
-        { title: 'Audit Log', group: 'System', description: 'Review key changes and staff actions.', path: '/audit', permission: 'open_audit', accent: '#ef4444', icon: 'audit' },
-        { title: 'Settings', group: 'System', description: 'Printers, receipt, labels, and devices.', path: '/settings', permission: 'open_settings', accent: '#0f766e', icon: 'settings' },
-        { title: 'About', group: 'L&Bj POS', description: 'Application details and contact information.', path: '/about', accent: '#2563eb', icon: 'about' },
+        { title: 'Items', group: 'Catalogue', description: 'Products, barcodes, prices and stock.', path: '/items', permission: 'open_items', accent: '#16a34a', icon: PackageSearch },
+        { title: 'Categories', group: 'Catalogue', description: 'Organise products for faster selling.', path: '/categories', permission: 'open_items', accent: '#16a34a', icon: LayoutGrid },
+        { title: 'Design Studio', group: 'POS layout', description: 'Arrange till pages and product tiles.', path: '/design', permission: 'open_design', accent: '#0891b2', icon: PanelsTopLeft },
+        { title: 'Discounts', group: 'Promotions', description: 'Offers, bundles and manual discounts.', path: '/discounts', permission: 'open_discounts', accent: '#db2777', icon: BadgePercent },
+        { title: 'Customers', group: 'Customers', description: 'Loyalty balances and contact details.', path: '/customers', permission: 'open_customers', accent: '#4f46e5', icon: ContactRound },
+        { title: 'Orders', group: 'Sales', description: 'Receipts, payments, returns and reprints.', path: '/orders', permission: 'open_reports', accent: '#2563eb', icon: ReceiptText },
+        { title: 'Reports', group: 'Sales', description: 'Sales performance, close and till totals.', path: '/reports', permission: 'open_reports', alternativePermission: 'end_day_close', accent: '#2563eb', icon: ChartNoAxesCombined },
+        { title: 'Till Sessions', group: 'Sales', description: 'Open sessions and cash-up history.', path: '/shifts', permission: 'open_reports', accent: '#2563eb', icon: CalendarClock },
+        { title: 'Stock Receiving', group: 'Stock', description: 'Receive deliveries and update quantities.', path: '/stock-receiving', permission: 'open_stock_receiving', accent: '#d97706', icon: PackagePlus },
+        { title: 'Suppliers', group: 'Stock', description: 'Supplier details for stock receiving.', path: '/suppliers', permission: 'open_items', accent: '#d97706', icon: Truck },
+        { title: 'Employees', group: 'Staff', description: 'Staff, PINs, roles and permissions.', path: '/employees', permission: 'open_employees', accent: '#7c3aed', icon: UsersRound },
+        { title: 'Tax Rates', group: 'Business', description: 'VAT rates and tax configuration.', path: '/tax-rates', permission: 'open_items', accent: '#ca8a04', icon: Percent },
+        { title: 'Sync Dashboard', group: 'System', description: 'Till connections and database sync.', path: '/sync', permission: 'open_sync', accent: '#0f766e', icon: RefreshCcw },
+        { title: 'Audit Log', group: 'System', description: 'Review important staff and data changes.', path: '/audit', permission: 'open_audit', accent: '#0f766e', icon: ClipboardList },
+        { title: 'Settings', group: 'System', description: 'Printers, payments, devices and appearance.', path: '/settings', permission: 'open_settings', accent: '#0f766e', icon: SettingsIcon },
     ];
 
     let isFullscreen = false;
     let fullscreenBusy = false;
 
     $: employeeName = $currentEmployee?.name || 'Signed out';
-    $: employeeRole = $currentEmployee?.role || '';
+    $: employeeRole = $currentEmployee?.isSupportSession ? 'Support access' : $currentEmployee?.role || '';
     $: employeeInitials = employeeName
         .split(/\s+/)
         .filter(Boolean)
@@ -161,10 +167,38 @@
             </div>
         </div>
         <div class="admin-header-actions">
-            <button type="button" class="admin-header-btn" disabled={fullscreenBusy} on:click={toggleFullscreen}>
-                {isFullscreen ? 'Exit Full Screen' : 'Full Screen'}
+            <button
+                type="button"
+                class="admin-header-btn"
+                title="About L&Bj POS"
+                aria-label="About L&Bj POS"
+                on:click={() => goto('/about')}
+            >
+                <Info size={22} strokeWidth={2.35} />
             </button>
-            <button type="button" class="admin-header-btn danger" on:click={signOut}>Logout</button>
+            <button
+                type="button"
+                class="admin-header-btn"
+                disabled={fullscreenBusy}
+                title={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+                aria-label={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+                on:click={toggleFullscreen}
+            >
+                {#if isFullscreen}
+                    <Minimize2 size={22} strokeWidth={2.35} />
+                {:else}
+                    <Maximize2 size={22} strokeWidth={2.35} />
+                {/if}
+            </button>
+            <button
+                type="button"
+                class="admin-header-btn danger"
+                title="Log out"
+                aria-label="Log out"
+                on:click={signOut}
+            >
+                <LogOut size={22} strokeWidth={2.35} />
+            </button>
         </div>
     </header>
 
@@ -175,107 +209,28 @@
                 class="admin-tile"
                 class:locked={!entry.allowed}
                 style="--tile-accent: {entry.accent}"
-                disabled={!entry.allowed}
-                title={entry.description}
+                aria-disabled={!entry.allowed}
+                title={entry.allowed ? entry.description : `Permission required: ${entry.lockedLabel}`}
                 aria-label={`${entry.title}. ${entry.description}`}
                 on:click={() => openEntry(entry)}
             >
                 <span class="admin-tile-mark" aria-hidden="true"></span>
-                <span class="admin-tile-icon" aria-hidden="true">
-                    <svg class="admin-tile-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round">
-                        {#if entry.icon === 'design'}
-                            <rect x="3" y="4" width="18" height="13" rx="2"></rect>
-                            <path d="M8 21h8"></path>
-                            <path d="M12 17v4"></path>
-                            <path d="M7 12l3-3 3 3 4-5"></path>
-                        {:else if entry.icon === 'items'}
-                            <path d="M20 12l-8 8-8-8V4h8l8 8z"></path>
-                            <circle cx="8" cy="8" r="1.3"></circle>
-                            <path d="M10.5 13.5h5"></path>
-                        {:else if entry.icon === 'categories'}
-                            <rect x="4" y="4" width="7" height="7" rx="1.4"></rect>
-                            <rect x="13" y="4" width="7" height="7" rx="1.4"></rect>
-                            <rect x="4" y="13" width="7" height="7" rx="1.4"></rect>
-                            <path d="M15 16.5h4"></path>
-                            <path d="M17 14.5v4"></path>
-                        {:else if entry.icon === 'customers'}
-                            <rect x="3" y="5" width="18" height="14" rx="2"></rect>
-                            <circle cx="9" cy="11" r="2.5"></circle>
-                            <path d="M6 17c.7-2 2-3 3-3s2.3 1 3 3"></path>
-                            <path d="M14 10h4"></path>
-                            <path d="M14 14h3"></path>
-                        {:else if entry.icon === 'employees'}
-                            <path d="M12 3l7 3v5c0 4.5-2.8 8-7 10-4.2-2-7-5.5-7-10V6l7-3z"></path>
-                            <circle cx="12" cy="10" r="2.3"></circle>
-                            <path d="M8.8 16c.8-1.7 2-2.5 3.2-2.5s2.4.8 3.2 2.5"></path>
-                        {:else if entry.icon === 'suppliers'}
-                            <path d="M3 8h10v8H3z"></path>
-                            <path d="M13 11h4l4 4v1h-8"></path>
-                            <path d="M5 19a2 2 0 1 0 4 0"></path>
-                            <path d="M16 19a2 2 0 1 0 4 0"></path>
-                            <path d="M6 5h4"></path>
-                        {:else if entry.icon === 'discounts'}
-                            <path d="M4 7h16v10H4z"></path>
-                            <path d="M8 9.5h.01"></path>
-                            <path d="M16 14.5h.01"></path>
-                            <path d="M9 15l6-6"></path>
-                            <path d="M4 11a2 2 0 0 0 0 4"></path>
-                            <path d="M20 11a2 2 0 0 1 0 4"></path>
-                        {:else if entry.icon === 'tax'}
-                            <circle cx="12" cy="12" r="8"></circle>
-                            <path d="M8.5 15.5l7-7"></path>
-                            <circle cx="9" cy="9" r="1.2"></circle>
-                            <circle cx="15" cy="15" r="1.2"></circle>
-                        {:else if entry.icon === 'orders'}
-                            <path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3z"></path>
-                            <path d="M9 8h6"></path>
-                            <path d="M9 12h6"></path>
-                            <path d="M9 16h3"></path>
-                        {:else if entry.icon === 'shifts'}
-                            <rect x="4" y="5" width="16" height="15" rx="2"></rect>
-                            <path d="M8 3v4"></path>
-                            <path d="M16 3v4"></path>
-                            <path d="M4 10h16"></path>
-                            <path d="M12 13v3l2 1"></path>
-                        {:else if entry.icon === 'stock'}
-                            <path d="M4 9l8-5 8 5-8 5-8-5z"></path>
-                            <path d="M6 12v5l6 3 6-3v-5"></path>
-                            <path d="M12 14v6"></path>
-                            <path d="M9 7l8 5"></path>
-                        {:else if entry.icon === 'reports'}
-                            <path d="M4 19V5"></path>
-                            <path d="M4 19h16"></path>
-                            <path d="M8 16v-4"></path>
-                            <path d="M12 16V8"></path>
-                            <path d="M16 16v-7"></path>
-                            <path d="M7 7l3 2 3-4 4 2"></path>
-                        {:else if entry.icon === 'sync'}
-                            <path d="M7 18h10a4 4 0 0 0 .5-8 5.5 5.5 0 0 0-10.7-1.7A4.5 4.5 0 0 0 7 18z"></path>
-                            <path d="M9 13l3-3 3 3"></path>
-                            <path d="M12 10v7"></path>
-                        {:else if entry.icon === 'audit'}
-                            <path d="M8 4h8l2 3v13H6V7l2-3z"></path>
-                            <path d="M9 4v4h6V4"></path>
-                            <path d="M9 13h6"></path>
-                            <path d="M9 17h4"></path>
-                            <path d="M16 6h2"></path>
-                        {:else if entry.icon === 'settings'}
-                            <path d="M5 6h14"></path>
-                            <path d="M5 12h14"></path>
-                            <path d="M5 18h14"></path>
-                            <circle cx="9" cy="6" r="2"></circle>
-                            <circle cx="15" cy="12" r="2"></circle>
-                            <circle cx="11" cy="18" r="2"></circle>
-                        {:else if entry.icon === 'about'}
-                            <circle cx="12" cy="12" r="9"></circle>
-                            <path d="M12 11v6"></path>
-                            <path d="M12 7h.01"></path>
-                        {/if}
-                    </svg>
+                <span class="admin-tile-topline">
+                    <span class="admin-tile-icon" aria-hidden="true">
+                        <svelte:component this={entry.icon} size={28} strokeWidth={2.25} />
+                    </span>
+                    <span class="admin-tile-group">{entry.group}</span>
                 </span>
                 <span class="admin-tile-text">
                     <strong>{entry.title}</strong>
-                    <span class="admin-tile-group">{entry.group}</span>
+                    <span class="admin-tile-description">{entry.description}</span>
+                </span>
+                <span class="admin-tile-status" aria-hidden="true">
+                    {#if entry.allowed}
+                        <ChevronRight size={18} strokeWidth={2.5} />
+                    {:else}
+                        <LockKeyhole size={17} strokeWidth={2.5} />
+                    {/if}
                 </span>
             </button>
         {/each}
@@ -284,7 +239,7 @@
 
 <style>
     .admin-page {
-        height: 100vh;
+        height: 100dvh;
         width: 100vw;
         overflow: hidden;
         display: flex;
@@ -298,31 +253,40 @@
 
     .admin-header {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto auto;
+        grid-template-columns: auto minmax(150px, 1fr) minmax(160px, auto) auto;
         align-items: center;
-        gap: 0.5rem;
+        gap: 0.65rem;
         min-height: 56px;
     }
 
     .admin-header-btn {
+        width: 46px;
         height: 46px;
         border-radius: 0.45rem;
         border: 1px solid var(--border-flat);
         background: var(--bg-card);
         color: var(--text-main);
-        font-weight: 900;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        gap: 0.5rem;
-        padding: 0 0.9rem;
+        padding: 0;
         transition: none;
     }
 
-    .admin-header-btn:hover {
+    .admin-header-btn:hover:not(:disabled) {
         background: var(--bg-card-hover);
         border-color: var(--accent-primary);
-        transform: none;
+    }
+
+    .admin-header-btn:focus-visible,
+    .admin-tile:focus-visible {
+        outline: 3px solid var(--accent-primary);
+        outline-offset: -3px;
+    }
+
+    .admin-header-btn:disabled {
+        cursor: wait;
+        opacity: 0.55;
     }
 
     .admin-title {
@@ -347,7 +311,7 @@
         color: var(--text-muted);
         font-size: 0.72rem;
         font-weight: 900;
-        letter-spacing: 0.12em;
+        letter-spacing: 0;
         text-transform: uppercase;
     }
 
@@ -359,8 +323,7 @@
     }
 
     .admin-header-actions {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(132px, 1fr));
+        display: flex;
         gap: 0.5rem;
     }
 
@@ -401,6 +364,15 @@
         flex: 0 0 auto;
     }
 
+    .admin-user .admin-user-avatar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        letter-spacing: 0;
+        text-transform: none;
+    }
+
     .admin-user strong {
         display: block;
         max-width: 130px;
@@ -417,17 +389,19 @@
         color: var(--text-muted);
         font-weight: 900;
         font-size: 0.68rem;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
     }
 
     .admin-grid {
         flex: 1;
+        width: calc(100% - 0.75rem);
         min-height: 0;
+        align-self: center;
         display: grid;
         grid-template-columns: repeat(5, minmax(0, 1fr));
-        grid-template-rows: repeat(4, minmax(0, 1fr));
-        gap: 0.5rem;
-        align-content: stretch;
+        grid-template-rows: repeat(3, clamp(132px, 23vh, 178px));
+        gap: 0.65rem;
+        align-content: center;
     }
 
     .admin-tile {
@@ -441,37 +415,44 @@
         border-radius: 0.45rem;
         background: var(--bg-card);
         color: var(--text-main);
-        padding: 0.55rem;
-        text-align: center;
+        padding: 0.8rem;
+        text-align: left;
         display: flex;
         flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 0.28rem;
+        align-items: stretch;
+        justify-content: flex-start;
+        gap: 0.65rem;
         transition: none;
     }
 
-    .admin-tile:hover:not(:disabled) {
+    .admin-tile:hover:not(.locked) {
         background: var(--bg-card-hover);
         border-color: var(--tile-accent);
-        transform: none;
     }
 
-    .admin-tile:disabled {
+    .admin-tile.locked {
         cursor: not-allowed;
-        opacity: 0.48;
+        opacity: 0.58;
     }
 
     .admin-tile-mark {
         position: absolute;
-        inset: 0 auto 0 0;
-        width: 0.28rem;
+        inset: 0 0 auto;
+        height: 0.26rem;
         background: var(--tile-accent);
     }
 
+    .admin-tile-topline {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.55rem;
+    }
+
     .admin-tile-icon {
-        width: 44px;
-        height: 44px;
+        width: 46px;
+        height: 46px;
         border-radius: 0.45rem;
         background: var(--bg-panel);
         border: 1px solid var(--border-flat);
@@ -482,18 +463,13 @@
         flex: 0 0 auto;
     }
 
-    .admin-tile-svg {
-        width: 26px;
-        height: 26px;
-    }
-
     .admin-tile-text {
         min-width: 0;
         width: 100%;
         display: flex;
         flex-direction: column;
-        align-items: center;
-        gap: 0.18rem;
+        align-items: flex-start;
+        gap: 0.35rem;
     }
 
     .admin-tile strong {
@@ -504,70 +480,101 @@
         text-overflow: ellipsis;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
-        font-size: 1.05rem;
-        line-height: 1.08;
+        line-clamp: 2;
+        font-size: 1.08rem;
+        line-height: 1.12;
         letter-spacing: 0;
         overflow-wrap: anywhere;
     }
 
     .admin-tile-group {
-        font-size: 0.78rem;
+        min-width: 0;
+        max-width: calc(100% - 54px);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.68rem;
         line-height: 1;
+        color: var(--tile-accent);
+    }
+
+    .admin-tile-description {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        color: var(--text-muted);
+        font-size: 0.76rem;
+        font-weight: 650;
+        line-height: 1.28;
+        letter-spacing: 0;
+        overflow-wrap: anywhere;
+    }
+
+    .admin-tile-status {
+        position: absolute;
+        right: 0.65rem;
+        bottom: 0.55rem;
+        display: flex;
+        color: var(--tile-accent);
+    }
+
+    .admin-tile.locked .admin-tile-status {
+        color: var(--text-muted);
     }
 
     @media (max-width: 1100px) {
-        .admin-page {
-            gap: 0.5rem;
-        }
-
+        .admin-page,
         .admin-grid {
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            grid-template-rows: repeat(4, minmax(0, 1fr));
             gap: 0.5rem;
         }
 
         .admin-tile {
-            gap: 0.25rem;
-            padding: 0.4rem;
+            padding: 0.65rem;
+            gap: 0.45rem;
         }
 
         .admin-tile-icon {
-            width: 40px;
-            height: 40px;
-        }
-
-        .admin-tile-svg {
-            width: 24px;
-            height: 24px;
+            width: 42px;
+            height: 42px;
         }
 
         .admin-tile strong {
             font-size: 0.98rem;
         }
 
-        .admin-tile-group {
-            font-size: 0.72rem;
+        .admin-tile-description {
+            font-size: 0.7rem;
         }
     }
 
-    @media (min-width: 821px) and (max-height: 680px) {
+    @media (min-width: 701px) and (max-height: 680px) {
+        .admin-page {
+            gap: 0.5rem;
+        }
+
         .admin-header {
-            min-height: 48px;
+            min-height: 46px;
         }
 
         .admin-header-btn {
+            width: 42px;
             height: 42px;
-            padding: 0 0.7rem;
         }
 
         .admin-title span,
         .admin-user span,
         .admin-tile-group {
-            font-size: 0.64rem;
+            font-size: 0.62rem;
+        }
+
+        .admin-tile-group {
+            font-size: 0.6rem;
         }
 
         .admin-title h1 {
-            font-size: 1.55rem;
+            font-size: 1.5rem;
         }
 
         .admin-brand-logo {
@@ -575,14 +582,9 @@
             height: 40px;
         }
 
-        .admin-header-actions {
-            grid-template-columns: repeat(2, minmax(112px, 1fr));
-            gap: 0.5rem;
-        }
-
         .admin-user {
             min-height: 42px;
-            padding: 0.25rem 0.55rem;
+            padding: 0.25rem 0.5rem;
         }
 
         .admin-user-avatar {
@@ -600,53 +602,66 @@
         }
 
         .admin-tile {
-            padding: 0.35rem;
-            gap: 0.18rem;
+            padding: 0.55rem;
+            gap: 0.38rem;
         }
 
         .admin-tile-icon {
-            width: 34px;
-            height: 34px;
-        }
-
-        .admin-tile-svg {
-            width: 20px;
-            height: 20px;
+            width: 38px;
+            height: 38px;
         }
 
         .admin-tile strong {
-            font-size: 0.9rem;
+            font-size: 0.92rem;
         }
 
-        .admin-tile-group {
-            font-size: 0.64rem;
+        .admin-tile-description {
+            font-size: 0.66rem;
+            line-height: 1.2;
         }
     }
 
-    @media (max-width: 820px) {
+    @media (max-width: 700px) {
         .admin-page {
+            height: auto;
+            min-height: 100dvh;
             overflow-y: auto;
         }
 
         .admin-header {
-            grid-template-columns: minmax(0, 1fr);
+            grid-template-columns: auto minmax(0, 1fr) auto;
         }
 
-        .admin-header-actions {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+        .admin-user {
+            display: none;
         }
 
         .admin-grid {
-            grid-template-columns: repeat(auto-fill, minmax(94px, 1fr));
+            flex: none;
+            width: 100%;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             grid-template-rows: none;
-            grid-auto-rows: auto;
-            gap: 0.5rem;
+            grid-auto-rows: minmax(150px, auto);
             overflow: visible;
         }
+    }
 
-        .admin-tile {
-            aspect-ratio: 1 / 1;
+    @media (max-width: 440px) {
+        .admin-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
+        .admin-title span {
+            display: none;
+        }
+
+        .admin-header-actions {
+            gap: 0.3rem;
+        }
+
+        .admin-header-btn {
+            width: 40px;
+            height: 40px;
+        }
     }
 </style>

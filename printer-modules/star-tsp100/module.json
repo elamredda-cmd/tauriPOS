@@ -1,0 +1,10 @@
+{
+  "id": "star-tsp100",
+  "name": "Star TSP100 USB",
+  "vendor": "L&Bj",
+  "version": "1.0.1",
+  "executable": "lbj-star-tsp100.exe",
+  "supportedOs": ["windows"],
+  "supportedArch": ["x86_64"],
+  "capabilities": ["discoverDevices", "printRaw", "openDrawer", "getStatus", "healthCheck"]
+}

@@ -5,8 +5,27 @@
     import { employeesDB, type AuditLog } from '$lib/stores/db';
     import { getAuditLogPage, getRecentManagerApprovals } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import {
+        auditActionLabel,
+        auditEntityLabel,
+        auditRecordName,
+        buildAuditChanges,
+        parseAuditJson,
+        prettyAuditJson,
+        shortAuditReference,
+        type AuditFieldChange,
+    } from '$lib/auditDisplay';
 
-    let logs: AuditLog[] = [];
+    interface AuditLogRow extends AuditLog {
+        employeeName?: string;
+        relatedOrderNumber?: number | null;
+        relatedOrderTotal?: number | null;
+        relatedPaymentMethod?: string;
+        relatedTillName?: string;
+        relatedCustomerName?: string;
+    }
+
+    let logs: AuditLogRow[] = [];
     let loading = true;
     let loadError = '';
     let approvalsLoading = true;
@@ -28,8 +47,8 @@
     let loadTimer: ReturnType<typeof setTimeout> | null = null;
     let loadRun = 0;
 
-    $: actionOptions = [{ label: 'All actions', value: '' }, ...actions.map((action) => ({ label: humanize(action), value: action }))];
-    $: entityOptions = [{ label: 'All record types', value: '' }, ...entities.map((entity) => ({ label: humanize(entity), value: entity }))];
+    $: actionOptions = [{ label: 'All actions', value: '' }, ...actions.map((action) => ({ label: auditActionLabel(action), value: action }))];
+    $: entityOptions = [{ label: 'All record types', value: '' }, ...entities.map((entity) => ({ label: auditEntityLabel(entity), value: entity }))];
     $: employeeById = new Map($employeesDB.map((employee) => [employee.id, employee.name]));
     $: totalPages = Math.max(1, Math.ceil(total / pageSize));
     $: showingFrom = total === 0 ? 0 : (page - 1) * pageSize + 1;
@@ -118,26 +137,76 @@
         runSearch();
     }
 
-    function prettyJson(value: string) {
-        if (!value) return '';
-        try { return JSON.stringify(JSON.parse(value), null, 2); }
-        catch { return value; }
-    }
-
     function humanize(value: string) {
         return String(value || 'record')
             .replace(/[_-]+/g, ' ')
             .replace(/\b\w/g, (letter) => letter.toUpperCase());
     }
 
-    function employeeName(employeeId: string) {
+    function employeeName(employeeId: string, recordedName = '') {
         if (!employeeId) return 'System';
-        return employeeById.get(employeeId) || 'Unknown employee';
+        if (employeeId.startsWith('lbj-support-')) return 'L&Bj Support';
+        return recordedName || employeeById.get(employeeId) || 'Former staff member';
     }
 
     function formatDate(value: string) {
         const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString('en-GB');
+        return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString('en-GB', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+        });
+    }
+
+    function formatMoney(value: unknown) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount)) return '';
+        return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(amount / 100);
+    }
+
+    function auditPayload(log: AuditLogRow) {
+        const next = parseAuditJson(log.newData);
+        return next && typeof next === 'object' ? next : {};
+    }
+
+    function receiptNumber(log: AuditLogRow): number | null {
+        const payloadNumber = Number(auditPayload(log).orderNumber || 0);
+        const number = Number(log.relatedOrderNumber || payloadNumber || 0);
+        return Number.isFinite(number) && number > 0 ? number : null;
+    }
+
+    function recordSubject(log: AuditLogRow) {
+        const receipt = receiptNumber(log);
+        if (receipt) return `Receipt #${receipt}`;
+        return auditRecordName(log) || shortAuditReference(log.entityId);
+    }
+
+    function eventContext(log: AuditLogRow) {
+        const payload = auditPayload(log);
+        const parts: string[] = [recordSubject(log)];
+        const amount = Number(payload.refundAmount ?? payload.total ?? log.relatedOrderTotal);
+        if (Number.isFinite(amount) && amount !== 0) parts.push(formatMoney(amount));
+        const paymentMethod = String(payload.paymentMethod || log.relatedPaymentMethod || '').trim();
+        if (paymentMethod) parts.push(humanize(paymentMethod.replace(/\+/g, ' + ')));
+        return parts.filter(Boolean).join(' · ');
+    }
+
+    function resolveAuditReference(log: AuditLogRow, kind: string, value: string): string | undefined {
+        if (kind === 'employee') return employeeById.get(value);
+        if (kind === 'order') {
+            const receipt = receiptNumber(log);
+            if (receipt && value === log.entityId) return `Receipt #${receipt}`;
+        }
+        if (kind === 'customer' && log.relatedCustomerName) return log.relatedCustomerName;
+        if (kind === 'till' && log.relatedTillName) return log.relatedTillName;
+        return undefined;
+    }
+
+    function changesFor(log: AuditLogRow): AuditFieldChange[] {
+        return buildAuditChanges(log, (kind, value) => resolveAuditReference(log, kind, value));
     }
 
     function actionTone(action: string) {
@@ -235,26 +304,96 @@
                             >
                                 <span class="audit-action-dot audit-action-{actionTone(log.action)}"></span>
                                 <span class="audit-event-main">
-                                    <strong>{humanize(log.action)}</strong>
+                                    <strong>{auditActionLabel(log.action)}</strong>
                                     <small>
-                                        {humanize(log.entityType || 'record')}
-                                        <span title={log.entityId || ''}>{log.entityId || 'No record ID'}</span>
+                                        {auditEntityLabel(log.entityType || 'record')}
+                                        <span>{eventContext(log)}</span>
                                     </small>
                                 </span>
-                                <span class="audit-event-person">{employeeName(log.employeeId)}</span>
+                                <span class="audit-event-person">{employeeName(log.employeeId, log.employeeName)}</span>
                                 <time datetime={log.createdAt}>{formatDate(log.createdAt)}</time>
                                 <svg class="audit-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
                             </button>
                             {#if expandedId === log.id}
+                                {@const changes = changesFor(log)}
                                 <div class="audit-details">
-                                    <div>
-                                        <span>Before</span>
-                                        <pre>{prettyJson(log.oldData) || 'No previous data'}</pre>
+                                    <div class="audit-detail-context">
+                                        <div>
+                                            <span>Recorded by</span>
+                                            <strong>{employeeName(log.employeeId, log.employeeName)}</strong>
+                                        </div>
+                                        <div>
+                                            <span>When</span>
+                                            <strong>{formatDate(log.createdAt)}</strong>
+                                        </div>
+                                        <div>
+                                            <span>Record</span>
+                                            <strong>{recordSubject(log)}</strong>
+                                        </div>
+                                        {#if log.relatedTillName}
+                                            <div>
+                                                <span>Till</span>
+                                                <strong>{log.relatedTillName}</strong>
+                                            </div>
+                                        {/if}
+                                        {#if log.relatedCustomerName}
+                                            <div>
+                                                <span>Customer</span>
+                                                <strong>{log.relatedCustomerName}</strong>
+                                            </div>
+                                        {/if}
+                                        <div title={log.entityId}>
+                                            <span>Reference</span>
+                                            <strong>{shortAuditReference(log.entityId)}</strong>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <span>After</span>
-                                        <pre>{prettyJson(log.newData) || 'No new data'}</pre>
+
+                                    <div class="audit-change-section">
+                                        <div class="audit-change-heading">
+                                            <strong>{log.oldData && log.newData ? 'What changed' : 'Recorded information'}</strong>
+                                            <span>{changes.length} visible {changes.length === 1 ? 'field' : 'fields'}</span>
+                                        </div>
+                                        {#if changes.length === 0}
+                                            <p class="audit-no-visible-change">No user-visible field changes were recorded.</p>
+                                        {:else}
+                                            <div class="audit-change-list">
+                                                {#each changes as change}
+                                                    <article class="audit-change-row audit-change-{change.kind}">
+                                                        <span class="audit-change-label">{change.label}</span>
+                                                        {#if change.kind === 'changed'}
+                                                            <div class="audit-change-values">
+                                                                <span class="audit-value-before"><small>Before</small><strong>{change.before}</strong></span>
+                                                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+                                                                <span class="audit-value-after"><small>After</small><strong>{change.after}</strong></span>
+                                                            </div>
+                                                        {:else if change.kind === 'added'}
+                                                            <div class="audit-change-values single">
+                                                                <span class="audit-value-after"><small>Recorded as</small><strong>{change.after}</strong></span>
+                                                            </div>
+                                                        {:else}
+                                                            <div class="audit-change-values single">
+                                                                <span class="audit-value-before"><small>Removed value</small><strong>{change.before}</strong></span>
+                                                            </div>
+                                                        {/if}
+                                                    </article>
+                                                {/each}
+                                            </div>
+                                        {/if}
                                     </div>
+
+                                    <details class="audit-technical-details">
+                                        <summary>Technical details</summary>
+                                        <div>
+                                            <section>
+                                                <span>Before</span>
+                                                <pre>{prettyAuditJson(log.oldData) || 'No previous data'}</pre>
+                                            </section>
+                                            <section>
+                                                <span>After</span>
+                                                <pre>{prettyAuditJson(log.newData) || 'No new data'}</pre>
+                                            </section>
+                                        </div>
+                                    </details>
                                 </div>
                             {/if}
                         </article>
@@ -290,7 +429,7 @@
                         <article>
                             <span class="audit-action-dot audit-action-success"></span>
                             <div>
-                                <strong>{humanize(approval.action)}</strong>
+                                <strong>{auditActionLabel(approval.action)}</strong>
                                 <p>{approval.notes || humanize(approval.entityType || 'Approval')}</p>
                                 <small>Requested by {employeeName(approval.requestedByEmployeeId)} · Approved by {employeeName(approval.approvedByEmployeeId)}</small>
                             </div>
@@ -341,9 +480,33 @@
     .audit-event-toggle time, .audit-approval-list time { color: var(--text-muted); font-size: .7rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .audit-chevron { width: 18px; height: 18px; color: var(--text-muted); transform: rotate(0deg); }
     .audit-event.expanded .audit-chevron { transform: rotate(90deg); }
-    .audit-details { padding: 0 .8rem .8rem 1.75rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
-    .audit-details > div > span { color: var(--text-muted); font-size: .65rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase; }
-    .audit-details pre { min-height: 84px; max-height: 260px; margin: .35rem 0 0; padding: .65rem; overflow: auto; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); font-family: ui-monospace, monospace; font-size: .69rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .audit-details { padding: .8rem; display: flex; flex-direction: column; gap: .75rem; border-top: 1px solid var(--border-flat); }
+    .audit-detail-context { padding: .6rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: .45rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); }
+    .audit-detail-context > div { min-width: 0; padding: .35rem .45rem; display: flex; flex-direction: column; gap: .14rem; }
+    .audit-detail-context span, .audit-change-heading span { color: var(--text-muted); font-size: .64rem; font-weight: 800; text-transform: uppercase; }
+    .audit-detail-context strong { overflow: hidden; color: var(--text-main); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+    .audit-change-section { min-width: 0; }
+    .audit-change-heading { min-height: 30px; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+    .audit-change-heading > strong { font-size: .82rem; }
+    .audit-change-list { overflow: hidden; border: 1px solid var(--border-flat); border-radius: .4rem; }
+    .audit-change-row { min-height: 58px; display: grid; grid-template-columns: minmax(135px, .38fr) minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
+    .audit-change-row:last-child { border-bottom: 0; }
+    .audit-change-label { padding: .65rem .75rem; display: flex; align-items: center; color: var(--text-main); border-right: 1px solid var(--border-flat); font-size: .74rem; font-weight: 800; overflow-wrap: anywhere; }
+    .audit-change-values { min-width: 0; padding: .45rem .55rem; display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: center; gap: .4rem; }
+    .audit-change-values.single { grid-template-columns: minmax(0, 1fr); }
+    .audit-change-values > svg { width: 16px; height: 16px; color: var(--text-muted); justify-self: center; }
+    .audit-value-before, .audit-value-after { min-width: 0; min-height: 42px; padding: .35rem .45rem; display: flex; flex-direction: column; justify-content: center; gap: .08rem; border-radius: .35rem; }
+    .audit-value-before { background: rgba(239, 68, 68, .08); }
+    .audit-value-after { background: rgba(34, 197, 94, .09); }
+    .audit-value-before small, .audit-value-after small { color: var(--text-muted); font-size: .61rem; font-weight: 800; text-transform: uppercase; }
+    .audit-value-before strong, .audit-value-after strong { color: var(--text-main); font-size: .76rem; line-height: 1.25; overflow-wrap: anywhere; }
+    .audit-no-visible-change { margin: 0; padding: .75rem; color: var(--text-muted); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); font-size: .75rem; }
+    .audit-technical-details { border-top: 1px solid var(--border-flat); }
+    .audit-technical-details summary { width: fit-content; padding: .6rem 0 0; color: var(--text-muted); cursor: pointer; font-size: .7rem; font-weight: 800; }
+    .audit-technical-details > div { margin-top: .55rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; }
+    .audit-technical-details section { min-width: 0; }
+    .audit-technical-details section > span { color: var(--text-muted); font-size: .62rem; font-weight: 800; text-transform: uppercase; }
+    .audit-technical-details pre { min-height: 84px; max-height: 260px; margin: .3rem 0 0; padding: .65rem; overflow: auto; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); font-family: ui-monospace, monospace; font-size: .69rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
     .audit-bottom-pager { padding: .75rem; display: flex; align-items: center; justify-content: flex-end; gap: .65rem; border-top: 1px solid var(--border-flat); }
     .audit-bottom-pager span { color: var(--text-muted); font-size: .75rem; font-weight: 800; }
     .audit-error { margin: .75rem; padding: .65rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--danger); border: 1px solid rgba(239, 68, 68, .45); border-radius: .4rem; background: rgba(239, 68, 68, .10); font-size: .78rem; }
@@ -370,6 +533,9 @@
         .audit-event-person { grid-column: 2; }
         .audit-event-toggle time { grid-column: 2; }
         .audit-chevron { grid-column: 3; grid-row: 1 / span 3; }
-        .audit-details { grid-template-columns: 1fr; padding-left: .8rem; }
+        .audit-detail-context { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .audit-change-row { grid-template-columns: 1fr; }
+        .audit-change-label { padding-bottom: .4rem; border-right: 0; border-bottom: 1px solid var(--border-flat); }
+        .audit-technical-details > div { grid-template-columns: 1fr; }
     }
 </style>

@@ -1212,6 +1212,63 @@ pub async fn commit_online_reversal(
 }
 
 #[tauri::command]
+pub async fn commit_online_loyalty_sale(
+    app: AppHandle,
+    mysql_uri: String,
+    bundle: SaleBundle,
+) -> Result<CommitSaleResult, String> {
+    crate::licensing::require_sale_access(&app).await?;
+    let has_redemption = bundle
+        .loyalty_changes
+        .iter()
+        .any(|change| change.reason == "redeemed" && change.points_change < 0);
+    let invalid_change = bundle.loyalty_changes.iter().any(|change| {
+        change.order_id != bundle.order.id
+            || change.customer_id != bundle.order.customer_id
+            || !matches!(change.reason.as_str(), "redeemed" | "earned")
+    });
+    if bundle.order.order_type != "sale"
+        || bundle.order.customer_id.trim().is_empty()
+        || !has_redemption
+        || invalid_change
+    {
+        return Err("Invalid loyalty redemption sale".into());
+    }
+
+    let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let local_pool = SqlitePool::connect(&local_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Reserve one receipt identity without writing locally. MariaDB must accept
+    // the shared points balance before this till can report the sale as complete.
+    let mut local_tx = local_pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut committed = bundle.clone();
+    allocate_local_receipt(&mut local_tx, &mut committed.order)
+        .await
+        .map_err(|e| e.to_string())?;
+    local_tx.rollback().await.map_err(|e| e.to_string())?;
+
+    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    insert_mysql_bundle(&mysql_pool, &committed)
+        .await
+        .map_err(|e| e.to_string())?;
+    let committed = match insert_sqlite_bundle(&local_pool, &committed).await {
+        Ok(local) => local,
+        Err(error) => {
+            eprintln!("MariaDB accepted loyalty sale but local cache insert failed; background sync will repair it: {error}");
+            committed
+        }
+    };
+    Ok(CommitSaleResult { bundle: committed })
+}
+
+#[tauri::command]
 pub async fn allocate_mysql_till_sequence(mysql_uri: String) -> Result<i64, String> {
     let pool = connect_mysql_for_pos(&mysql_uri)
         .await
@@ -1988,11 +2045,16 @@ async fn restore_preserved_local_setup(
         copy_preserved_table(&pool, "settings", None).await?;
         copy_preserved_table(&pool, "app_identity", None).await?;
     } else {
-        // A first-machine restore has no target identity to preserve. Remove
-        // the source machine's identity and let normal startup create a new one.
+        // A first-machine restore has no target hardware to preserve. Remove
+        // source till identity and printer/scale targets so another machine
+        // never inherits COM ports, USB queues, IPs, or installed-module IDs.
         sqlx::query(
             "DELETE FROM settings
-             WHERE key IN ('till_id', 'till_name', 'till_name_manual', 'till_seq')",
+             WHERE key IN ('till_id', 'till_name', 'till_name_manual', 'till_seq')
+                OR key LIKE 'receipt_printer_%'
+                OR key LIKE 'label_printer_%'
+                OR key LIKE 'cash_drawer_%'
+                OR key LIKE 'scale_hardware_%'",
         )
         .execute(&pool)
         .await
@@ -2459,6 +2521,10 @@ mod tests {
                 "INSERT INTO settings VALUES ('till_id', 'source-till', '')",
                 "INSERT INTO settings VALUES ('till_name', 'Source Till', '')",
                 "INSERT INTO settings VALUES ('till_seq', '4', '')",
+                "INSERT INTO settings VALUES ('receipt_printer_name', 'Source Star Printer', '')",
+                "INSERT INTO settings VALUES ('receipt_printer_module_id', 'source-sdk', '')",
+                "INSERT INTO settings VALUES ('label_printer_device_path', 'COM9', '')",
+                "INSERT INTO settings VALUES ('receipt_design', '{\"paperWidth\":\"80mm\"}', '')",
                 "INSERT INTO registers VALUES ('source-till', 'Source Till')",
                 "INSERT INTO registers VALUES ('legacy-till', 'Main Register')",
             ] {
@@ -2483,8 +2549,25 @@ mod tests {
             .fetch_one(&restored_pool)
             .await
             .unwrap();
+            let hardware_setting_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM settings
+                 WHERE key LIKE 'receipt_printer_%'
+                    OR key LIKE 'label_printer_%'
+                    OR key LIKE 'cash_drawer_%'
+                    OR key LIKE 'scale_hardware_%'",
+            )
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
+            let design_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE key = 'receipt_design'")
+                    .fetch_one(&restored_pool)
+                    .await
+                    .unwrap();
             assert_eq!(register_count, 0);
             assert_eq!(identity_count, 0);
+            assert_eq!(hardware_setting_count, 0);
+            assert_eq!(design_count, 1);
             restored_pool.close().await;
 
             fs::remove_dir_all(dir).unwrap();
@@ -3061,6 +3144,49 @@ mod tests {
                 .unwrap();
             assert_eq!(points, 51);
             assert_eq!(logs, 2);
+        });
+    }
+
+    #[test]
+    fn insufficient_loyalty_balance_rolls_back_the_entire_sale() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let mut sale = bundle(
+                "order-loyalty-rejected",
+                "till-1:1000001",
+                "payment-loyalty-rejected",
+            );
+            sale.loyalty_changes = vec![LoyaltyChange {
+                id: "loyalty-overdraw".into(),
+                customer_id: "customer-1".into(),
+                order_id: sale.order.id.clone(),
+                points_change: -151,
+                reason: "redeemed".into(),
+                created_at: sale.order.created_at.clone(),
+            }];
+
+            let result = insert_sqlite_bundle(&pool, &sale).await;
+            assert!(result.is_err());
+            let points: i64 =
+                sqlx::query_scalar("SELECT loyaltyPoints FROM customers WHERE id = 'customer-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let orders: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM orders WHERE id = 'order-loyalty-rejected'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let logs: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM loyalty_logs WHERE orderId = 'order-loyalty-rejected'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(points, 150);
+            assert_eq!(orders, 0);
+            assert_eq!(logs, 0);
         });
     }
 

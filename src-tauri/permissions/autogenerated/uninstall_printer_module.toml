@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-uninstall-printer-module"
+description = "Enables the uninstall_printer_module command without any pre-configured scope."
+commands.allow = ["uninstall_printer_module"]
+
+[[permission]]
+identifier = "deny-uninstall-printer-module"
+description = "Denies the uninstall_printer_module command without any pre-configured scope."
+commands.deny = ["uninstall_printer_module"]

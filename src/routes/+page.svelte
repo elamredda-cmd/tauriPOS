@@ -3,6 +3,8 @@
     import { get } from "svelte/store";
     import { goto } from "$app/navigation";
     import { isTauri } from "@tauri-apps/api/core";
+    import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { ChevronRight, LockKeyhole, Maximize2, Minimize2, ShieldCheck, UsersRound } from "@lucide/svelte";
     import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
     import {
         productsDB,
@@ -37,6 +39,7 @@
         weighableProductById,
         weighableProducts,
         type Customer,
+        type AuditLog,
         type Discount,
         type Employee,
         type Order,
@@ -61,10 +64,12 @@
         retireOpenShiftsBefore,
         ensureTillReceiptSequence,
         recordManagerApproval,
+        recordAuditEvent,
         getPosHeldOrders,
         getPosRecentReceipts,
         getLatestTillReceipt,
         getProductsByIds,
+        getPaymentCustomer,
         getOrderDetails,
         getOrderReversalContext,
         claimHeldOrder,
@@ -78,20 +83,24 @@
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
     import { getReceiptDesign } from "$lib/receipt";
-    import { authenticateEmployeePin, currentEmployee, currentShiftId, logout, restoreRememberedEmployeeSession, verifyEmployeePin } from "$lib/stores/session";
+    import { authenticateEmployeePin, currentEmployee, currentShiftId, isSupportEmployee, logout, restoreRememberedEmployeeSession, startSupportSession, verifyEmployeePin } from "$lib/stores/session";
     import { connectionState } from "$lib/stores/connection";
     import { getBarcodeRules, parseScaleBarcode } from "$lib/barcodeRules";
     import { getScaleSaleDisplay } from "$lib/scaleSale";
     import { getLoyaltyConfig, loyaltyCredit, pointsForCredit, pointsForSpend } from "$lib/loyalty";
     import TouchDigitPad from "$lib/components/TouchDigitPad.svelte";
+    import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
+    import SupportAccessPanel from "$lib/components/SupportAccessPanel.svelte";
+    import type { SupportSessionGrant } from "$lib/supportAccess";
     import { broadcastCustomerDisplay, type CustomerDisplayState } from "$lib/customerDisplay";
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
-    import { sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
+    import { sendCctvAction, sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
     import { getLabelPrinterConfig, getReceiptPrinterConfig, printEscposReceipt, printProductLabels, sendEscposReceipt } from "$lib/printers";
     import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
-    import { canAccessPath, hasPermission, permissionForPath, permissionLabels, type PermissionKey } from "$lib/permissions";
+    import { requireManualSaleAccess } from "$lib/licensing";
+    import { canAccessPath, hasPermission, permissionForPath, permissionLabels, roleLabels, type PermissionKey } from "$lib/permissions";
     import {
         acquireSumupLock,
         createSumupCheckout,
@@ -198,6 +207,7 @@
     let customerSearch = "";
     let selectedCustomerId = "";
     let useLoyaltyCredit = false;
+    let loyaltyCreditBusy = false;
     let customerSearchInput: HTMLInputElement;
     $: loyaltyConfig = getLoyaltyConfig($settingsDB);
     $: selectedCustomer = $customersDB.find((customer) => customer.id === selectedCustomerId) || null;
@@ -268,6 +278,12 @@
     let selectedLoginEmployeeId = "";
     let loginPin = "";
     let loginError = "";
+    let loginErrorPin = "";
+    let loginBusy = false;
+    let loginFullscreen = false;
+    let loginFullscreenBusy = false;
+    let showSupportAccess = false;
+    let loginDialog: HTMLElement;
     let showManagerApprovalModal = false;
     let managerApprovalPermission: PermissionKey = "price_override";
     let managerApprovalTitle = "";
@@ -287,6 +303,8 @@
         .filter((employee) => employee.isActive)
         .sort((a, b) => a.name.localeCompare(b.name));
     $: selectedLoginEmployee = activeLoginEmployees.find((employee) => employee.id === selectedLoginEmployeeId) || null;
+    $: if (loginError && loginPin && loginPin !== loginErrorPin) loginError = "";
+    $: if (!$currentEmployee && loginDialog) void tick().then(() => loginDialog?.focus({ preventScroll: true }));
     $: managerApprovers = $employeesDB
         .filter((employee) => employee.isActive && hasPermission(employee, managerApprovalPermission, $settingsDB))
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -296,16 +314,20 @@
     $: {
         const sessionEmployee = $currentEmployee;
         if (sessionEmployee) {
-            const latestEmployee = $employeesDB.find((employee) => employee.id === sessionEmployee.id);
-            if (!latestEmployee?.isActive) {
-                if (lastRevokedEmployeeId !== sessionEmployee.id) {
-                    lastRevokedEmployeeId = sessionEmployee.id;
-                    toast("Your staff account is no longer active. Sign in with an active user.", "error");
-                }
-                logout();
-            } else {
+            if (isSupportEmployee(sessionEmployee)) {
                 lastRevokedEmployeeId = "";
-                if (latestEmployee !== sessionEmployee) currentEmployee.set(latestEmployee);
+            } else {
+                const latestEmployee = $employeesDB.find((employee) => employee.id === sessionEmployee.id);
+                if (!latestEmployee?.isActive) {
+                    if (lastRevokedEmployeeId !== sessionEmployee.id) {
+                        lastRevokedEmployeeId = sessionEmployee.id;
+                        toast("Your staff account is no longer active. Sign in with an active user.", "error");
+                    }
+                    logout();
+                } else {
+                    lastRevokedEmployeeId = "";
+                    if (latestEmployee !== sessionEmployee) currentEmployee.set(latestEmployee);
+                }
             }
         }
     }
@@ -433,6 +455,7 @@
             showScaleModal ||
             showClearConfirm ||
             showReversalConfirm ||
+            showManagerApprovalModal ||
             showPartialRefundPad ||
             showRecentTransactions ||
             isHoldingOrder ||
@@ -560,13 +583,22 @@
     function rememberProductInPosCache(product: any) {
         if (!product?.id) return;
         const normalized = normalizeProductForCache(product);
-        productsDB.update((items) => {
-            const index = items.findIndex((item) => item.id === normalized.id);
-            if (index === -1) return [...items, normalized];
-            const next = items.slice();
-            next[index] = { ...items[index], ...normalized };
-            return next;
-        });
+        const items = get(productsDB);
+        const index = items.findIndex((item) => item.id === normalized.id);
+        if (index === -1) {
+            productsDB.set([...items, normalized]);
+            return;
+        }
+
+        const current = items[index];
+        const changed = Object.entries(normalized).some(([key, value]) =>
+            (current as any)[key] !== value
+        );
+        if (!changed) return;
+
+        const next = items.slice();
+        next[index] = { ...current, ...normalized };
+        productsDB.set(next);
     }
 
     $: totalPages = Math.max(
@@ -806,9 +838,18 @@
         await action?.();
     }
 
-    function selectManualDiscount(id: string) {
+    async function selectManualDiscount(id: string) {
+        const previousSavings = promoSavings;
+        const previousDiscount = $discountsDB.find((discount) => discount.id === selectedManualDiscountId);
         selectedManualDiscountId = id;
         showDiscountModal = false;
+        await tick();
+        const selectedDiscount = $discountsDB.find((discount) => discount.id === id);
+        sendCctvAction({
+            action: id ? "DISCOUNT" : "DISCOUNT REMOVED",
+            name: selectedDiscount?.name || previousDiscount?.name || "Manual discount",
+            amount: id ? promoSavings : previousSavings,
+        });
         toast(id ? "Discount applied" : "Manual discount removed", "success");
     }
 
@@ -846,6 +887,11 @@
             promoClock = new Date().toISOString();
         }, 60000);
 
+        const handleFullscreenChange = () => {
+            if (!isTauri()) loginFullscreen = Boolean(document.fullscreenElement);
+        };
+        void refreshLoginFullscreenState();
+
         // Auto-generate and cache till identity for this machine
         if (isTauri()) {
             void Promise.allSettled([loadSumupConfig(), loadDojoConfig()])
@@ -863,6 +909,7 @@
         }
         document.addEventListener("pointerup", handlePosPointerUp);
         document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+        document.addEventListener("fullscreenchange", handleFullscreenChange);
         const handleHeldOrdersChanged = () => void refreshHeldOrderSummaries();
         window.addEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
         focusScannerSoon();
@@ -873,6 +920,7 @@
             clearScannerBuffer();
             document.removeEventListener("pointerup", handlePosPointerUp);
             document.removeEventListener("keydown", handleGlobalScannerKeydown, true);
+            document.removeEventListener("fullscreenchange", handleFullscreenChange);
             window.removeEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
         };
     });
@@ -889,14 +937,56 @@
     let tillId = '';
     let tillName = 'Till 1';
 
+    async function refreshLoginFullscreenState() {
+        try {
+            loginFullscreen = isTauri()
+                ? await getCurrentWindow().isFullscreen()
+                : Boolean(document.fullscreenElement);
+        } catch {
+            loginFullscreen = Boolean(document.fullscreenElement);
+        }
+    }
+
+    async function toggleLoginFullscreen() {
+        if (loginFullscreenBusy) return;
+        loginFullscreenBusy = true;
+        try {
+            if (isTauri()) {
+                const appWindow = getCurrentWindow();
+                const next = !(await appWindow.isFullscreen());
+                await appWindow.setFullscreen(next);
+                loginFullscreen = next;
+            } else if (document.fullscreenElement) {
+                await document.exitFullscreen();
+                await refreshLoginFullscreenState();
+            } else {
+                await document.documentElement.requestFullscreen();
+                await refreshLoginFullscreenState();
+            }
+        } catch (error) {
+            console.error("Could not change fullscreen mode:", error);
+            toast("Could not change full screen mode", "error");
+        } finally {
+            loginFullscreenBusy = false;
+        }
+    }
+
     async function login() {
+        if (loginBusy) return;
         if (!selectedLoginEmployeeId) {
             loginError = "Choose your user first";
             return;
         }
+        if (!/^\d{4,8}$/.test(loginPin)) {
+            loginErrorPin = loginPin;
+            loginError = "Enter a 4 to 8 digit PIN";
+            return;
+        }
+        loginBusy = true;
         try {
             const employee = await authenticateEmployeePin(selectedLoginEmployeeId, loginPin);
             if (!employee) {
+                loginErrorPin = loginPin;
                 loginError = "Incorrect PIN for this user";
                 loginPin = "";
                 return;
@@ -907,12 +997,19 @@
         } catch (error) {
             console.error("Could not sign in:", error);
             logout();
+            loginErrorPin = loginPin;
             loginPin = "";
             loginError = "Could not open this till shift. Check the database connection and try again.";
+        } finally {
+            loginBusy = false;
         }
     }
 
     async function prepareEmployeeSession(employee: Employee) {
+        if (!isTauri()) {
+            currentShiftId.set(get(currentShiftId) || "browser-preview-shift");
+            return;
+        }
         const registerId = tillId || await getOrCreateTillId();
         tillId = registerId;
         const cashUpActivationTime = $settingsDB.find((s) => s.key === "cash_up_activation_time")?.value || "";
@@ -974,9 +1071,62 @@
     }
 
     function chooseLoginEmployee(employeeId: string) {
+        if (loginBusy) return;
         selectedLoginEmployeeId = employeeId;
         loginPin = "";
         loginError = "";
+        loginErrorPin = "";
+        void tick().then(() => loginDialog?.focus({ preventScroll: true }));
+    }
+
+    function openSupportAccess() {
+        if (loginBusy) return;
+        chooseLoginEmployee("");
+        showSupportAccess = true;
+    }
+
+    async function activateSupportSession(grant: SupportSessionGrant) {
+        startSupportSession(grant);
+        showSupportAccess = false;
+        const expiry = new Date(grant.expiresAt).toLocaleTimeString("en-GB", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+        }).toUpperCase();
+        toast(`L&Bj Support access active until ${expiry}`, "success");
+        await goto("/admin");
+    }
+
+    function employeeInitials(name: string) {
+        const parts = String(name || "Staff").trim().split(/\s+/).filter(Boolean);
+        return (parts.length > 1 ? `${parts[0][0]}${parts.at(-1)?.[0] || ""}` : parts[0]?.slice(0, 2) || "ST").toUpperCase();
+    }
+
+    function handleLoginKeydown(event: KeyboardEvent): boolean {
+        if ($currentEmployee || !selectedLoginEmployee || pendingShiftEmployee || loginBusy) return false;
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return false;
+
+        if (/^\d$/.test(event.key)) {
+            event.preventDefault();
+            if (loginPin.length < 8) loginPin += event.key;
+            return true;
+        }
+        if (event.key === "Backspace") {
+            event.preventDefault();
+            loginPin = loginPin.slice(0, -1);
+            return true;
+        }
+        if (event.key === "Escape") {
+            event.preventDefault();
+            chooseLoginEmployee("");
+            return true;
+        }
+        if (event.key === "Enter") {
+            event.preventDefault();
+            void login();
+            return true;
+        }
+        return false;
     }
 
     function logoutEmployee() {
@@ -1011,6 +1161,47 @@
             quantity: item.quantity || 1,
             tillName,
             cashierName: $currentEmployee?.name || "",
+        });
+    }
+
+    function sendCctvCartAction(
+        action: string,
+        item: { name: string; price: number; quantity?: number } | undefined,
+    ) {
+        if (!item) return;
+        const quantity = item.quantity || 1;
+        sendCctvAction({
+            action,
+            name: item.name,
+            quantity,
+            amount: item.price * quantity,
+        });
+    }
+
+    function sendCompletedBundleToCctv(bundle: SaleBundle, reversalAction = "") {
+        if (bundle.order.type === "return" || reversalAction) {
+            sendCctvAction({
+                action: reversalAction || (String(bundle.order.notes || "").toUpperCase().startsWith("VOID") ? "VOID" : "REFUND"),
+                name: bundle.order.notes || `Receipt ${bundle.order.orderNumber || ""}`.trim(),
+                amount: Math.abs(Number(bundle.order.total || 0)),
+            }, "receipt");
+            return;
+        }
+        sendCctvReceipt({
+            storeName: $storeDB.name,
+            tillName,
+            cashierName: $currentEmployee?.name || "",
+            paymentMethod: bundle.order.paymentMethod || bundle.payment.method || "",
+            subtotal: Math.max(0, Number(bundle.order.subtotal || 0)),
+            discount: Math.max(0, Number(bundle.order.discountAmount || 0)),
+            total: Math.max(0, Number(bundle.order.total || 0)),
+            lines: bundle.lines.map((line) => ({
+                name: line.productName,
+                quantity: Math.abs(Number(line.quantity || 0)),
+                unitPrice: Math.abs(Number(line.unitPrice || 0)),
+                lineTotal: Math.abs(Number(line.lineTotal || 0)),
+                discount: Math.abs(Number(line.discountAmount || 0)),
+            })),
         });
     }
 
@@ -1064,6 +1255,7 @@
 
     function deleteSelected() {
         if (cart.length === 0) return;
+        sendCctvCartAction("REMOVE", cart[selectedCartIndex]);
         cart.splice(selectedCartIndex, 1);
         cart = [...cart];
         if (selectedCartIndex >= cart.length)
@@ -1072,6 +1264,7 @@
 
     function deleteItem(index: number) {
         if (!cart[index]) return;
+        sendCctvCartAction("REMOVE", cart[index]);
         cart.splice(index, 1);
         if (selectedCartIndex > index) selectedCartIndex--;
         cart = [...cart];
@@ -1238,11 +1431,12 @@
         searchQuery = "";
 
         try {
-            const found = $productByBarcode.get(normalizeLookupCode(query)) || await searchProduct(query);
+            const cachedProduct = $productByBarcode.get(normalizeLookupCode(query));
+            const found = cachedProduct || await searchProduct(query);
 
             if (found) {
                 const product = normalizeProductForCache(found);
-                rememberProductInPosCache(product);
+                if (!cachedProduct) rememberProductInPosCache(product);
                 if (product.isWeighable) {
                     openScaleForProduct(product.id);
                     return;
@@ -1256,14 +1450,15 @@
             }
             const parsed = parseScaleBarcode(query, getBarcodeRules($settingsDB));
             if (parsed) {
-                const scaleProduct = $scaleProductByPlu.get(normalizeLookupCode(parsed.scalePlu)) || await searchProductByScalePlu(parsed.scalePlu);
+                const cachedScaleProduct = $scaleProductByPlu.get(normalizeLookupCode(parsed.scalePlu));
+                const scaleProduct = cachedScaleProduct || await searchProductByScalePlu(parsed.scalePlu);
                 if (!scaleProduct) {
                     toast(`No active product has Scale PLU ${parsed.scalePlu}`, "error");
                     playErrorSound();
                     return;
                 }
                 const product = normalizeProductForCache(scaleProduct);
-                rememberProductInPosCache(product);
+                if (!cachedScaleProduct) rememberProductInPosCache(product);
                 if (parsed.rule.valueType === "weight") {
                     const linePrice = Math.round(product.price * parsed.value);
                     if (linePrice <= 0) {
@@ -1403,14 +1598,14 @@
         if (e.key === "Enter") handleSearch();
     }
 
-    function handlePosBackgroundClick(event: MouseEvent) {
-        const element = event.target as Element | null;
-        if (!element || scannerFocusBlocked()) return;
-        if (element.closest("button, input, textarea, select, a, [role='button'], [contenteditable='true'], .cursor-pointer")) return;
-        focusScannerSoon(true);
-    }
-
     function confirmClear() {
+        if (cart.length > 0) {
+            sendCctvAction({
+                action: "CLEAR TROLLEY",
+                name: `${cart.length} ${cart.length === 1 ? "line" : "lines"}`,
+                amount: total,
+            });
+        }
         cart = [];
         selectedCartIndex = 0;
         showClearConfirm = false;
@@ -1500,6 +1695,11 @@
                 heldOrdersForTill = [enrichOrderSummary(newOrder as Order), ...heldOrdersForTill];
                 heldOrderLinesByOrder = new Map(heldOrderLinesByOrder).set(orderId, lines as OrderLine[]);
             }
+            sendCctvAction({
+                action: "HOLD TROLLEY",
+                name: `${cart.length} ${cart.length === 1 ? "line" : "lines"}`,
+                amount: total,
+            });
             cart = [];
             selectedCartIndex = 0;
             toast(
@@ -1582,6 +1782,11 @@
             retrievingHeldOrderId = "";
         }
         cart = restoredCart;
+        sendCctvAction({
+            action: "RETRIEVE TROLLEY",
+            name: `${restoredCart.length} ${restoredCart.length === 1 ? "line" : "lines"}`,
+            amount: Math.max(0, Number(heldOrder?.total || 0)),
+        });
         selectedManualDiscountId = $discountsDB.some((discount) =>
             discount.id === heldOrder?.discountId && discount.kind === "manual_percent" && discount.isActive
         ) ? heldOrder!.discountId : "";
@@ -1657,6 +1862,7 @@
                 price: newPence,
             };
             cart = [...cart];
+            sendCctvCartAction("PRICE", cart[selectedCartIndex]);
         }
         showChangePricePad = false;
         changePriceString = "";
@@ -1708,6 +1914,7 @@
                 }
                 cart[cartIndex] = updatedItem;
                 cart = [...cart];
+                sendCctvCartAction("PRICE", cart[cartIndex]);
                 toast("Price updated permanently");
             } catch (error) {
                 toast(`Could not update price: ${String(error).replace(/^Error:\s*/, "")}`, "error");
@@ -1788,6 +1995,12 @@
 
     async function refreshHeldOrderSummaries() {
         if (!tillId) return;
+        if (!isTauri()) {
+            heldOrdersForTill = [];
+            heldOrderLinesByOrder = new Map();
+            heldOrdersLoading = false;
+            return;
+        }
         const token = ++heldOrderLoadToken;
         heldOrdersLoading = true;
         try {
@@ -1804,6 +2017,10 @@
 
     async function refreshLatestTillReceipt() {
         if (!tillId) return;
+        if (!isTauri()) {
+            latestTillReceiptOrder = null;
+            return;
+        }
         const token = ++latestReceiptLoadToken;
         try {
             const latestReceipt = await getLatestTillReceipt(tillId);
@@ -1871,6 +2088,7 @@
         showScaleModal ||
         showClearConfirm ||
         showReversalConfirm ||
+        showManagerApprovalModal ||
         showPartialRefundPad ||
         showRecentTransactions ||
         isHoldingOrder ||
@@ -1925,10 +2143,6 @@
     }
 
     async function printStoredReceipt(selectedOrder: any, successMessage = "Receipt sent to printer") {
-        if (receiptPrinterConfig.connection === "system") {
-            toast("Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first", "error");
-            return;
-        }
         try {
             const receiptLines = await getReceiptLines(selectedOrder.id);
             await printEscposReceipt({
@@ -1977,10 +2191,6 @@
     }
 
     async function printCompletedSaleReceipt(bundle: SaleBundle) {
-        if (receiptPrinterConfig.connection === "system") {
-            toast("Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first", "error");
-            return;
-        }
         try {
             await printEscposReceipt({
                 store: $storeDB,
@@ -1999,8 +2209,19 @@
         }
     }
 
-    async function handleOpenCashDrawer() {
+    async function handleOpenCashDrawer(authorized = false) {
         if (drawerBusy) return;
+        if (!authorized) {
+            await requirePermission(
+                "open_cash_drawer",
+                "Open cash drawer",
+                () => handleOpenCashDrawer(true),
+                "cash_drawer",
+                tillId || "local",
+                `Manual drawer opening on ${tillName || tillId || "this till"}`,
+            );
+            return;
+        }
         if (!cashDrawerTarget) {
             toast("Set the receipt printer in Settings first", "error");
             return;
@@ -2009,6 +2230,18 @@
         try {
             await openCashDrawer(cashDrawerConfig);
             toast("Drawer opened");
+            try {
+                await recordAuditEvent(
+                    "cash_drawer_opened",
+                    "cash_drawer",
+                    tillId || "local",
+                    null,
+                    { tillName, target: cashDrawerTarget, source: "manual" },
+                );
+            } catch (auditError) {
+                console.warn("Drawer opened, but its audit entry could not be saved:", auditError);
+                toast("Drawer opened, but the audit entry could not be saved", "error");
+            }
         } catch (error) {
             toast(`Drawer failed: ${error}`, "error");
         } finally {
@@ -2016,8 +2249,8 @@
         }
     }
 
-    async function openDrawerAfterSuccessfulPayment(transactionLabel = "Sale") {
-        if (!receiptPrinterConfig.openDrawerAfterPayment) return;
+    async function openDrawerAfterSuccessfulPayment(cashAmount: number, transactionLabel = "Sale") {
+        if (!receiptPrinterConfig.openDrawerAfterPayment || cashAmount <= 0) return;
         try {
             await openCashDrawer(cashDrawerConfig);
         } catch (error) {
@@ -2230,6 +2463,9 @@
         let managedRefundApproved: "sumup" | "dojo" | null = null;
         try {
             isReversingOrder = true;
+            if (sumupRefundAmount > 0 || dojoRefundAmount > 0) {
+                await requireManualSaleAccess();
+            }
             if (sumupRefundAmount > 0) {
                 const activeSumupConfig = get(sumupConfigStore);
                 if (!activeSumupConfig.enabled || !activeSumupConfig.ready) {
@@ -2273,9 +2509,13 @@
             }
             applyCompletedSaleToStores(committedReversal);
             if (paymentAllocation.cashAmount > 0) {
-                void openDrawerAfterSuccessfulPayment(voiding ? "Void" : "Refund");
+                void openDrawerAfterSuccessfulPayment(paymentAllocation.cashAmount, voiding ? "Void" : "Refund");
             }
             void printReceiptAfterSuccessfulPayment(committedReversal, voiding ? "Void" : "Refund");
+            sendCompletedBundleToCctv(
+                committedReversal,
+                voiding ? "VOID" : partial ? "PARTIAL REFUND" : "REFUND",
+            );
             await refreshPosOrderSummaries();
             toast(voiding ? "Order voided and reversed" : "Refund recorded", "success");
             await openRecentTransactions();
@@ -2385,6 +2625,90 @@
         showPaymentModal = false;
     }
 
+    function cancelManagerApproval() {
+        showManagerApprovalModal = false;
+        managerApprovalPin = "";
+        managerApprovalError = "";
+        managerApprovalAction = null;
+    }
+
+    function cancelPartialRefund() {
+        if (isReversingOrder) return;
+        showPartialRefundPad = false;
+        pendingReversal = null;
+        partialRefundInput = "";
+    }
+
+    function closeTopPosModal(): boolean {
+        if (showManagerApprovalModal) {
+            cancelManagerApproval();
+            return true;
+        }
+        if (showPartialRefundPad) {
+            if (isReversingOrder) return false;
+            cancelPartialRefund();
+            return true;
+        }
+        if (showQuickAddModal) {
+            if (quickAddBusy) return false;
+            showQuickAddModal = false;
+            return true;
+        }
+        if (showNotFoundModal) {
+            showNotFoundModal = false;
+            return true;
+        }
+        if (showPaymentModal) {
+            if (isCompletingSale) return false;
+            closePayment();
+            return true;
+        }
+        if (showRecentTransactions) {
+            if (isReversingOrder) return false;
+            showRecentTransactions = false;
+            return true;
+        }
+        if (showHeldOrders) {
+            showHeldOrders = false;
+            return true;
+        }
+        if (showGoodsModal) {
+            showGoodsModal = false;
+            return true;
+        }
+        if (showChangePricePad) {
+            showChangePricePad = false;
+            return true;
+        }
+        if (showNumpad) {
+            showNumpad = false;
+            return true;
+        }
+        if (showScaleModal) {
+            closeScaleModal();
+            return true;
+        }
+        if (showDiscountModal) {
+            showDiscountModal = false;
+            return true;
+        }
+        return false;
+    }
+
+    function handleModalKeydown(event: KeyboardEvent) {
+        if (handleLoginKeydown(event)) return;
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        if (!closeTopPosModal()) return;
+        event.preventDefault();
+        event.stopPropagation();
+    }
+
+    function handleModalBackdropPointerDown(event: PointerEvent) {
+        const target = event.target as HTMLElement | null;
+        if (!target?.matches(".modal-overlay, [data-pos-modal-overlay]")) return;
+        if (closeTopPosModal()) event.preventDefault();
+    }
+
     function selectPaymentCustomer(customer: Customer) {
         selectedCustomerId = customer.id;
         customerSearch = "";
@@ -2397,18 +2721,46 @@
 
     function handleCustomerSearchKeydown(event: KeyboardEvent) {
         if (event.key !== "Enter") return;
+        event.preventDefault();
+        event.stopPropagation();
+        const input = event.currentTarget as HTMLInputElement;
+        const loyaltyCode = input.value.trim().toLowerCase();
         const exact = $customersDB.find((customer) =>
-            customer.loyaltyCode?.toLowerCase() === customerSearch.trim().toLowerCase(),
+            customer.loyaltyCode?.toLowerCase() === loyaltyCode,
         );
-        if (exact) selectPaymentCustomer(exact);
+        if (exact) {
+            selectPaymentCustomer(exact);
+            input.value = "";
+        }
     }
 
-    function toggleLoyaltyCredit() {
-        if (!loyaltyRedemptionAvailable) {
-            toast("Loyalty credit can only be redeemed while the shared database is online", "error");
+    async function toggleLoyaltyCredit() {
+        if (loyaltyCreditBusy || !selectedCustomer) return;
+        const enabling = !useLoyaltyCredit;
+        if (enabling && $connectionState.mode === "multi") {
+            loyaltyCreditBusy = true;
+            try {
+                const refreshed = await getPaymentCustomer(selectedCustomer.id);
+                if (!refreshed) {
+                    toast("This customer no longer exists in the shared database", "error");
+                    removePaymentCustomer();
+                    return;
+                }
+                customersDB.update((customers) => customers.map((customer) =>
+                    customer.id === refreshed.id ? refreshed as Customer : customer
+                ));
+                await tick();
+            } catch (error) {
+                toast(`Could not check loyalty credit: ${error}`, "error");
+                return;
+            } finally {
+                loyaltyCreditBusy = false;
+            }
+        }
+        if (enabling && availableLoyaltyCredit <= 0) {
+            toast("This customer has no loyalty credit available", "info");
             return;
         }
-        const enabling = !useLoyaltyCredit;
         useLoyaltyCredit = enabling;
         amountTenderedString = "0";
         hasTypedPayment = false;
@@ -3176,9 +3528,10 @@
                     const recoveryLabel = isRefund ? "SumUp refund" : "SumUp sale";
                     toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
                     if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
-                        void openDrawerAfterSuccessfulPayment("Recovered refund");
+                        void openDrawerAfterSuccessfulPayment(Math.abs(Number(recovered.payment.cashAmount || 0)), "Recovered refund");
                     }
                     void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
+                    sendCompletedBundleToCctv(recovered, isRefund ? "RECOVERED REFUND" : "");
                 } catch (error) {
                     await updateSumupAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
                     toast("An approved SumUp payment still needs to be saved. Keep this till open and check the database connection.", "error");
@@ -3208,9 +3561,10 @@
                     const recoveryLabel = isRefund ? "Dojo refund" : "Dojo sale";
                     toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
                     if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
-                        void openDrawerAfterSuccessfulPayment("Recovered refund");
+                        void openDrawerAfterSuccessfulPayment(Math.abs(Number(recovered.payment.cashAmount || 0)), "Recovered refund");
                     }
                     void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
+                    sendCompletedBundleToCctv(recovered, isRefund ? "RECOVERED REFUND" : "");
                 } catch (error) {
                     await updateDojoAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
                     toast("An approved Dojo payment still needs to be saved. Keep this till open and check the database connection.", "error");
@@ -3254,7 +3608,7 @@
         let approvedManagedBundle: SaleBundle | null = null;
         let approvedManagedProvider: "sumup" | "dojo" | null = null;
         try {
-            await ensureTillReceiptSequence();
+            if (isTauri()) await ensureTillReceiptSequence();
             const activeSumupConfig = get(sumupConfigStore);
             const activeDojoConfig = get(dojoConfigStore);
 
@@ -3400,7 +3754,21 @@
                 entityType: "order",
                 entityId: orderId,
                 oldData: "",
-                newData: JSON.stringify({ total, customerId: selectedCustomerId, loyaltyCreditUsed, loyaltyPointsEarned }),
+                newData: JSON.stringify({
+                    total,
+                    paymentMethod: recordedPaymentMethod,
+                    tillNumber: tillId,
+                    itemLines: cart.length,
+                    itemQuantity: cart.reduce((sum, item) => sum + item.quantity, 0),
+                    customerId: selectedCustomerId,
+                    customerName: selectedCustomer?.name || "",
+                    loyaltyCreditUsed,
+                    loyaltyPointsRedeemed,
+                    loyaltyPointsEarned,
+                    cashAmount,
+                    cardAmount,
+                    changeGiven: paymentMethod === "cash" ? Math.max(0, change) : 0,
+                }),
                 createdAt: timestamp,
             };
 
@@ -3424,7 +3792,10 @@
                 audit,
             };
 
-            if (trainingModeEnabled) {
+            if (trainingModeEnabled || !isTauri()) {
+                if (!isTauri()) {
+                    auditLogDB.update((entries) => [saleBundle.audit as AuditLog, ...entries]);
+                }
                 cart = [];
                 selectedCartIndex = 0;
                 showPaymentModal = false;
@@ -3437,8 +3808,17 @@
                 selectedCustomerId = "";
                 useLoyaltyCredit = false;
                 playSuccessSound();
-                toast("Training sale completed. Nothing was saved.", "success");
+                toast(
+                    trainingModeEnabled
+                        ? "Training sale completed. Nothing was saved."
+                        : "Preview sale completed. Nothing was saved.",
+                    "success",
+                );
                 return;
+            }
+
+            if (usesManagedSumup || usesManagedDojo) {
+                await requireManualSaleAccess();
             }
 
             if (usesManagedSumup) {
@@ -3466,24 +3846,9 @@
                 approvedManagedProvider = null;
             }
             applyCompletedSaleToStores(committedSale);
-            void openDrawerAfterSuccessfulPayment();
+            void openDrawerAfterSuccessfulPayment(cashAmount);
             void printReceiptAfterSuccessfulPayment(committedSale);
-            sendCctvReceipt({
-                storeName: $storeDB.name,
-                tillName,
-                cashierName: $currentEmployee?.name || "",
-                paymentMethod: recordedPaymentMethod,
-                subtotal,
-                discount: promoSavings,
-                total,
-                lines: cart.map((item, index) => ({
-                    name: item.name,
-                    quantity: item.quantity,
-                    unitPrice: item.price,
-                    lineTotal: lines[index]?.lineTotal ?? Math.max(0, item.price * item.quantity - (cartEval.lines[index]?.savings || 0)),
-                    discount: cartEval.lines[index]?.savings || 0,
-                })),
-            });
+            sendCompletedBundleToCctv(committedSale);
 
             cart = [];
             selectedCartIndex = 0;
@@ -3533,53 +3898,109 @@
     }
 </script>
 
+<svelte:window
+    on:keydown={handleModalKeydown}
+    on:pointerdown={handleModalBackdropPointerDown}
+/>
+
 {#if !$currentEmployee && $employeesDB.length > 0}
-    <div class="fixed inset-0 z-[1000] bg-bg-base flex items-center justify-center p-3 md:p-5">
-        <form class="login-form w-full max-w-[780px] max-h-[96vh] overflow-hidden bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]" on:submit|preventDefault={login}>
-            <div>
-                <h1 class="text-2xl font-bold">Staff Sign In</h1>
-                <p class="text-text-muted mt-1">{selectedLoginEmployee ? `Enter the PIN for ${selectedLoginEmployee.name}.` : "Choose your user to open this till."}</p>
+    <div
+        class="login-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={showSupportAccess ? "support-access-title" : "staff-sign-in-title"}
+        tabindex="-1"
+        bind:this={loginDialog}
+    >
+        <form class="login-form" class:login-form-picker={!selectedLoginEmployee && !showSupportAccess} aria-busy={loginBusy} on:submit|preventDefault={() => !showSupportAccess && login()}>
+            <div class="login-brand-row">
+                <span class="login-brand-mark"><img src="/lbj-pos-logo.png" alt="" /></span>
+                <span class="login-brand-copy">
+                    <strong>{$storeDB.name}</strong>
+                    <small>{tillName}</small>
+                </span>
+                <span class="login-brand-actions">
+                    <button
+                        type="button"
+                        class="login-fullscreen-button"
+                        disabled={loginFullscreenBusy}
+                        aria-label={loginFullscreen ? "Exit full screen" : "Enter full screen"}
+                        aria-pressed={loginFullscreen}
+                        title={loginFullscreen ? "Exit full screen" : "Enter full screen"}
+                        on:click={toggleLoginFullscreen}
+                    >
+                        {#if loginFullscreen}
+                            <Minimize2 size={20} strokeWidth={2.35} aria-hidden="true" />
+                        {:else}
+                            <Maximize2 size={20} strokeWidth={2.35} aria-hidden="true" />
+                        {/if}
+                    </button>
+                    <LockKeyhole class="login-lock-icon" size={22} aria-hidden="true" />
+                </span>
             </div>
-            {#if !selectedLoginEmployee}
-                {#if activeLoginEmployees.length > 0}
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto">
-                        {#each activeLoginEmployees as employee}
-                            <button
-                                type="button"
-                                class="flat-card p-4 text-left hover:!border-accent-primary transition-colors"
-                                on:click={() => chooseLoginEmployee(employee.id)}
-                            >
-                                <strong class="block text-text-main">{employee.name}</strong>
-                                <span class="text-sm text-text-muted capitalize">{employee.role}</span>
-                            </button>
-                        {/each}
-                    </div>
+            {#if showSupportAccess}
+                <SupportAccessPanel onClose={() => (showSupportAccess = false)} onActivate={activateSupportSession} />
+            {:else}
+                <div class="login-heading">
+                    <h1 id="staff-sign-in-title">Staff Sign In</h1>
+                    <p>{selectedLoginEmployee ? `Enter the PIN for ${selectedLoginEmployee.name}.` : "Choose your user to open this till."}</p>
+                </div>
+                {#if !selectedLoginEmployee}
+                    {#if activeLoginEmployees.length > 0}
+                        <div class="login-staff-list" aria-label="Active staff">
+                            {#each activeLoginEmployees as employee}
+                                <button
+                                    type="button"
+                                    class="login-staff-button"
+                                    on:click={() => chooseLoginEmployee(employee.id)}
+                                >
+                                    <span class="login-staff-avatar" aria-hidden="true">{employeeInitials(employee.name)}</span>
+                                    <span class="login-staff-copy">
+                                        <strong>{employee.name}</strong>
+                                        <small>{roleLabels[employee.role]}</small>
+                                    </span>
+                                    <ChevronRight size={20} aria-hidden="true" />
+                                </button>
+                            {/each}
+                        </div>
+                    {:else}
+                        <div class="login-empty-state">
+                            <strong class="block text-danger">No active staff accounts</strong>
+                            <p class="text-sm text-text-muted my-3">All staff accounts are deactivated. Open setup to recover access.</p>
+                            <button type="button" class="btn btn-primary" on:click={() => goto('/setup')}>Open Setup</button>
+                        </div>
+                    {/if}
+                    <button type="button" class="login-support-button" on:click={openSupportAccess}>
+                        <span class="login-support-icon" aria-hidden="true"><ShieldCheck size={22} strokeWidth={2.3} /></span>
+                        <span><strong>L&amp;Bj Support</strong><small>Use a temporary signed support code</small></span>
+                        <ChevronRight size={20} aria-hidden="true" />
+                    </button>
                 {:else}
-                    <div class="flat-card p-5 text-center">
-                        <strong class="block text-danger">No active staff accounts</strong>
-                        <p class="text-sm text-text-muted my-3">All staff accounts are deactivated. Open setup to recover access.</p>
-                        <button type="button" class="btn btn-primary" on:click={() => goto('/setup')}>Open Setup</button>
+                    <div class="login-pin-layout">
+                        <section class="login-person">
+                            <span class="login-person-avatar" aria-hidden="true">{employeeInitials(selectedLoginEmployee.name)}</span>
+                            <span class="login-person-label">Signing in as</span>
+                            <strong>{selectedLoginEmployee.name}</strong>
+                            <small>{roleLabels[selectedLoginEmployee.role]}</small>
+                            <p>Enter your 4 to 8 digit PIN.</p>
+                            <p class="login-error" class:visible={Boolean(loginError)} aria-live="polite">{loginError || "\u00A0"}</p>
+                            <button type="button" class="btn btn-secondary login-change-user" disabled={loginBusy} on:click={() => chooseLoginEmployee("")}>
+                                <UsersRound size={18} aria-hidden="true" />
+                                Change user
+                            </button>
+                        </section>
+                        <TouchDigitPad
+                            bind:value={loginPin}
+                            masked={true}
+                            maxLength={8}
+                            placeholder="Enter PIN"
+                            submitLabel={loginBusy ? "Signing In..." : "Sign In"}
+                            submitDisabled={loginPin.length < 4 || loginBusy}
+                            disabled={loginBusy}
+                            onSubmit={login}
+                        />
                     </div>
                 {/if}
-            {:else}
-                <div class="login-pin-layout">
-                    <section class="login-person">
-                        <span>Selected employee</span>
-                        <strong>{selectedLoginEmployee.name}</strong>
-                        <small class="capitalize">{selectedLoginEmployee.role}</small>
-                        <p>Use the touch digit pad to enter your secure PIN.</p>
-                        <p class="login-error text-danger font-semibold" aria-live="polite">{loginError || "\u00A0"}</p>
-                        <button type="button" class="btn btn-secondary mt-auto" on:click={() => chooseLoginEmployee("")}>Change user</button>
-                    </section>
-                    <TouchDigitPad
-                        bind:value={loginPin}
-                        masked={true}
-                        maxLength={8}
-                        submitLabel="Sign In"
-                        submitDisabled={loginPin.length < 4}
-                        onSubmit={login}
-                    />
-                </div>
             {/if}
         </form>
     </div>
@@ -3619,7 +4040,8 @@
 
 <div
     class="pos-checkout-shell flex h-screen w-screen overflow-hidden"
-    on:click={handlePosBackgroundClick}
+    inert={!$currentEmployee || restoringRememberedSession || Boolean(pendingShiftEmployee)}
+    aria-hidden={!$currentEmployee || restoringRememberedSession || Boolean(pendingShiftEmployee)}
 >
     <!-- Main Content (Products) -->
     <main class="pos-products flex-1 flex flex-col p-2 md:p-3 lg:p-5 overflow-hidden">
@@ -3779,7 +4201,7 @@
                     class="h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
                     title="Open cash drawer"
                     disabled={drawerBusy}
-                    on:click={handleOpenCashDrawer}
+                    on:click={() => handleOpenCashDrawer()}
                 >
                     {#if drawerBusy}
                         <span class="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin"></span>
@@ -4063,6 +4485,8 @@
             </div>
             <button
                 disabled={selectedCartIndex <= 0}
+                aria-label="Select previous trolley item"
+                title="Select previous trolley item"
                 class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
                 on:click={moveSelectionUp}
             >
@@ -4079,6 +4503,8 @@
             </button>
             <button
                 disabled={!hasSelectedCartItem || selectedCartIndex >= cart.length - 1}
+                aria-label="Select next trolley item"
+                title="Select next trolley item"
                 class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
                 on:click={moveSelectionDown}
             >
@@ -4225,14 +4651,14 @@
 </div>
 
 {#if showDiscountModal}
-    <div class="modal-overlay" on:click={() => (showDiscountModal = false)}>
-        <div class="flat-panel modal-box" on:click|stopPropagation>
+    <div class="modal-overlay">
+        <div class="flat-panel modal-box" role="dialog" aria-modal="true" aria-labelledby="discount-dialog-title">
             <div class="modal-header">
                 <div>
-                    <h3>Apply Discount</h3>
+                    <h3 id="discount-dialog-title">Apply Discount</h3>
                     <p class="m-0 text-sm text-text-muted">Choose one manual percentage discount for this sale.</p>
                 </div>
-                <button class="modal-close" on:click={() => (showDiscountModal = false)}>✕</button>
+                <button class="modal-close" aria-label="Close discount dialog" on:click={() => (showDiscountModal = false)}>✕</button>
             </div>
             <div class="modal-body grid grid-cols-2 gap-3">
                 <button
@@ -4260,15 +4686,15 @@
 {/if}
 
 {#if showScaleModal}
-    <div class="modal-overlay" on:click={closeScaleModal}>
-        <div class="scale-workspace" on:click|stopPropagation>
+    <div class="modal-overlay">
+        <div class="scale-workspace" role="dialog" aria-modal="true" aria-labelledby="scale-dialog-title">
             <header class="scale-header">
                 <div>
                     <span class="scale-kicker">Manual weighing</span>
-                    <h2>Scale</h2>
+                    <h2 id="scale-dialog-title">Scale</h2>
                     <p>Select a product, enter its weight, then add the calculated total.</p>
                 </div>
-                <button class="modal-close scale-close" on:click={closeScaleModal}>✕</button>
+                <button class="modal-close scale-close" aria-label="Close scale dialog" on:click={closeScaleModal}>✕</button>
             </header>
 
             <div class="scale-layout">
@@ -4385,16 +4811,19 @@
 {#if showNumpad}
     <div
         class="fixed inset-0 bg-[var(--overlay)] z-[100] flex items-center justify-center p-5"
-        on:click={() => (showNumpad = false)}
+        data-pos-modal-overlay
     >
         <div
             class="w-80 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quantity-dialog-title"
         >
             <div class="flex justify-between items-center">
-                <h3 class="m-0 text-lg font-semibold">Enter Quantity</h3>
+                <h3 id="quantity-dialog-title" class="m-0 text-lg font-semibold">Enter Quantity</h3>
                 <button
                     class="text-text-muted text-xl hover:text-text-main transition-colors"
+                    aria-label="Close quantity dialog"
                     on:click={() => (showNumpad = false)}>✕</button
                 >
             </div>
@@ -4426,16 +4855,19 @@
 {#if showChangePricePad}
     <div
         class="fixed inset-0 bg-[var(--overlay)] z-[100] flex items-center justify-center p-5"
-        on:click={() => (showChangePricePad = false)}
+        data-pos-modal-overlay
     >
         <div
             class="w-96 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="change-price-dialog-title"
         >
             <div class="flex justify-between items-center">
-                <h3 class="m-0 text-lg font-semibold">Change Price</h3>
+                <h3 id="change-price-dialog-title" class="m-0 text-lg font-semibold">Change Price</h3>
                 <button
                     class="text-text-muted text-xl hover:text-text-main transition-colors"
+                    aria-label="Close price dialog"
                     on:click={() => (showChangePricePad = false)}>✕</button
                 >
             </div>
@@ -4474,10 +4906,12 @@
 
 <!-- Goods / Open Price Modal -->
 {#if showGoodsModal}
-    <div class="modal-overlay" on:click={() => (showGoodsModal = false)}>
+    <div class="modal-overlay">
         <div
             class="w-[700px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] flex flex-col md:flex-row p-0 overflow-y-auto md:overflow-hidden bg-bg-card border border-border-flat rounded-md"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-label="Goods and open price"
         >
             <!-- Left Side: Open Departments -->
             <div
@@ -4561,15 +4995,17 @@
 
 <!-- Payment Modal -->
 {#if showPaymentModal}
-    <div class="modal-overlay" on:click={closePayment}>
+    <div class="modal-overlay">
         <div
             class="payment-modal w-[1040px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="payment-dialog-title"
         >
             <div
                 class="payment-modal-header flex justify-between items-center border-b border-border-flat pb-3"
             >
-                <h2 class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
+                <h2 id="payment-dialog-title" class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
                 <button
                     class="modal-close payment-close"
                     aria-label="Close payment"
@@ -4586,11 +5022,16 @@
                         <input
                             id="payment-customer-search"
                             bind:this={customerSearchInput}
-                            class="flat-input payment-customer-input w-full"
+                            class="flat-input payment-customer-input w-full !pr-12"
                             bind:value={customerSearch}
                             on:keydown={handleCustomerSearchKeydown}
-                            data-touch-keyboard="manual"
+                            data-touch-keyboard="button"
                             placeholder="Name, loyalty code, phone, or postcode"
+                        />
+                        <TouchKeyboardButton
+                            targetId="payment-customer-search"
+                            label="Open customer search keyboard"
+                            embedded
                         />
                         {#if customerMatches.length > 0}
                             <div class="absolute z-20 left-0 right-0 mt-1 p-1 bg-bg-card border border-border-flat rounded-md shadow-lg">
@@ -4617,8 +5058,14 @@
                                 </div>
                             </div>
                             <div class="payment-customer-actions">
-                                <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={availableLoyaltyCredit <= 0 || !loyaltyRedemptionAvailable} on:click={toggleLoyaltyCredit}>
-                                    {useLoyaltyCredit ? `Using ${formatMoney(loyaltyCreditUsed)}` : loyaltyRedemptionAvailable ? 'Use Credit' : 'Credit Offline'}
+                                <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale} on:click={toggleLoyaltyCredit}>
+                                    {loyaltyCreditBusy
+                                        ? 'Checking...'
+                                        : useLoyaltyCredit
+                                            ? `Using ${formatMoney(loyaltyCreditUsed)}`
+                                            : availableLoyaltyCredit > 0
+                                                ? loyaltyRedemptionAvailable ? 'Use Credit' : 'Reconnect & Use'
+                                                : 'Check Credit'}
                                 </button>
                                 <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" on:click={removePaymentCustomer}>
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -4876,15 +5323,18 @@
 
 <!-- Held Orders Modal -->
 {#if showHeldOrders}
-    <div class="modal-overlay" on:click={() => (showHeldOrders = false)}>
+    <div class="modal-overlay">
         <div
             class="w-[420px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="held-orders-dialog-title"
         >
             <div class="modal-header">
-                <h3>Retrieve Trolleys ({heldOrdersForTill.length})</h3>
+                <h3 id="held-orders-dialog-title">Retrieve Trolleys ({heldOrdersForTill.length})</h3>
                 <button
                     class="modal-close"
+                    aria-label="Close held trolleys dialog"
                     on:click={() => (showHeldOrders = false)}>✕</button
                 >
             </div>
@@ -4962,22 +5412,22 @@
 
 <!-- Recent Transactions Modal -->
 {#if showRecentTransactions}
-    <div
-        class="modal-overlay"
-        on:click={() => (showRecentTransactions = false)}
-    >
+    <div class="modal-overlay">
         <div
             class="w-[900px] max-w-[95vw] max-h-[85vh] md:max-h-[95vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="recent-transactions-dialog-title"
         >
             <div
                 class="flex justify-between items-center border-b border-border-flat pb-4"
             >
-                <h2 class="m-0 text-text-main text-[1.5rem]">
+                <h2 id="recent-transactions-dialog-title" class="m-0 text-text-main text-[1.5rem]">
                     Recent Transactions
                 </h2>
                 <button
                     class="modal-close"
+                    aria-label="Close recent transactions dialog"
                     on:click={() => (showRecentTransactions = false)}>✕</button
                 >
             </div>
@@ -5111,15 +5561,18 @@
 {/if}
 
 {#if showNotFoundModal}
-    <div class="modal-overlay" on:click={() => (showNotFoundModal = false)}>
+    <div class="modal-overlay">
         <div
             class="w-[320px] max-w-[95vw] max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card border-2 border-danger flex flex-col gap-4"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="not-found-dialog-title"
         >
             <div class="modal-header">
-                <h3 class="text-danger">Product Not Found</h3>
+                <h3 id="not-found-dialog-title" class="text-danger">Product Not Found</h3>
                 <button
                     class="modal-close text-danger hover:text-white hover:bg-danger"
+                    aria-label="Close product not found dialog"
                     on:click={() => (showNotFoundModal = false)}>✕</button
                 >
             </div>
@@ -5167,15 +5620,18 @@
 {/if}
 
 {#if showQuickAddModal}
-    <div class="modal-overlay" on:click={() => (showQuickAddModal = false)}>
+    <div class="modal-overlay">
         <div
             class="w-[920px] max-w-[97vw] max-h-[calc(100vh-1rem)] p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="quick-add-dialog-title"
         >
             <div class="modal-header">
-                <h3>Quick Add Product</h3>
+                <h3 id="quick-add-dialog-title">Quick Add Product</h3>
                 <button
                     class="modal-close"
+                    aria-label="Close quick add product dialog"
                     on:click={() => (showQuickAddModal = false)}>✕</button
                 >
             </div>
@@ -5190,7 +5646,6 @@
                             bind:value={quickAddName}
                             placeholder="Enter name..."
                             class="flat-input !py-3.5 !text-lg"
-                            autofocus
                         />
                     </div>
 
@@ -5229,7 +5684,7 @@
                 </div>
 
                 <div class="flex flex-col gap-2">
-                    <label class="text-[0.9rem] font-semibold text-text-muted">Price *</label>
+                    <span class="text-[0.9rem] font-semibold text-text-muted">Price *</span>
                     <div class="h-16 flex items-center justify-end px-5 text-[2rem] font-bold font-serif bg-bg-panel border border-border-flat rounded-sm">
                         {formatMoney(parseInt(quickAddPrice) || 0)}
                     </div>
@@ -5270,10 +5725,12 @@
     <div class="modal-overlay">
         <div
             class="w-[520px] max-w-[95vw] max-h-[95vh] overflow-y-auto rounded-md border border-border-flat bg-bg-card p-5 flex flex-col gap-4"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="manager-approval-dialog-title"
         >
             <div>
-                <h2 class="m-0 text-xl">Approval Required</h2>
+                <h2 id="manager-approval-dialog-title" class="m-0 text-xl">Approval Required</h2>
                 <p class="mt-1 text-sm text-text-muted">
                     {managerApprovalTitle || permissionLabels[managerApprovalPermission]} needs approval before continuing.
                 </p>
@@ -5300,12 +5757,7 @@
             {/if}
             <button
                 class="btn btn-secondary"
-                on:click={() => {
-                    showManagerApprovalModal = false;
-                    managerApprovalPin = "";
-                    managerApprovalError = "";
-                    managerApprovalAction = null;
-                }}
+                on:click={cancelManagerApproval}
             >
                 Cancel
             </button>
@@ -5317,10 +5769,12 @@
     <div class="modal-overlay">
         <div
             class="w-[430px] max-w-[95vw] max-h-[95vh] overflow-y-auto p-5 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="partial-refund-dialog-title"
         >
             <div>
-                <h2 class="m-0 text-xl">Amount Refund</h2>
+                <h2 id="partial-refund-dialog-title" class="m-0 text-xl">Amount Refund</h2>
                 <p class="text-text-muted mt-1">
                     Enter the amount in pounds. This is a price adjustment and does not return item quantities to stock.
                 </p>
@@ -5337,11 +5791,7 @@
             <button
                 class="btn btn-secondary"
                 disabled={isReversingOrder}
-                on:click={() => {
-                    showPartialRefundPad = false;
-                    pendingReversal = null;
-                    partialRefundInput = "";
-                }}>Cancel</button
+                on:click={cancelPartialRefund}>Cancel</button
             >
         </div>
     </div>
@@ -5373,19 +5823,64 @@
 />
 
 <style>
-    .login-form { min-height: 560px; }
-    .login-pin-layout { min-height: 430px; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr); align-items: stretch; gap: 1rem; }
-    .login-person { min-height: 430px; padding: 1.25rem; display: flex; flex-direction: column; gap: .35rem; border: 1px solid var(--border-flat); border-radius: .8rem; background: var(--bg-panel); }
-    .login-person > span { color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
-    .login-person > strong { font-size: 1.6rem; }
-    .login-person > small, .login-person > p { color: var(--text-muted); }
-    .login-error { min-height: 2.75rem; color: var(--danger) !important; }
-    .login-pin-layout :global(.digit-pad) { min-height: 430px; }
+    .login-overlay { position: fixed; z-index: 1000; inset: 0; padding: 1rem; display: grid; place-items: center; overflow: auto; background: var(--bg-base); }
+    .login-form { width: min(780px, 100%); max-height: calc(100vh - 2rem); padding: 1.25rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); box-shadow: var(--shadow); }
+    .login-form-picker { width: min(680px, 100%); }
+    .login-brand-row { min-height: 48px; padding-bottom: .85rem; display: flex; align-items: center; gap: .65rem; border-bottom: 1px solid var(--border-flat); }
+    .login-brand-mark { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-panel); }
+    .login-brand-mark img { width: 32px; height: 32px; object-fit: contain; }
+    .login-brand-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
+    .login-brand-copy strong { overflow: hidden; color: var(--text-main); font-size: .9rem; text-overflow: ellipsis; white-space: nowrap; }
+    .login-brand-copy small { margin-top: .16rem; color: var(--text-muted); font-size: .7rem; }
+    .login-brand-actions { margin-left: auto; display: flex; align-items: center; gap: .55rem; }
+    .login-fullscreen-button { width: 40px; height: 40px; display: grid; place-items: center; flex: 0 0 auto; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); }
+    .login-fullscreen-button:hover, .login-fullscreen-button:focus-visible { color: var(--accent-primary); border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .login-fullscreen-button:disabled { opacity: .55; cursor: wait; }
+    .login-lock-icon { flex: 0 0 auto; color: var(--accent-primary); }
+    .login-heading h1 { margin: 0; color: var(--text-main); font-size: 1.55rem; }
+    .login-heading p { margin: .2rem 0 0; color: var(--text-muted); font-size: .85rem; }
+    .login-staff-list { max-height: min(48vh, 420px); display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1px; overflow-y: auto; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--border-flat); }
+    .login-staff-button { min-width: 0; min-height: 78px; padding: .7rem .8rem; display: grid; grid-template-columns: 46px minmax(0, 1fr) 22px; align-items: center; gap: .7rem; color: var(--text-main); text-align: left; background: var(--bg-panel); }
+    .login-staff-button:hover, .login-staff-button:focus-visible { z-index: 1; background: var(--bg-card-hover); box-shadow: inset 3px 0 0 var(--accent-primary); }
+    .login-staff-avatar, .login-person-avatar { display: grid; place-items: center; color: white; font-weight: 900; border-radius: .4rem; background: var(--accent-primary); }
+    .login-staff-avatar { width: 46px; height: 46px; font-size: .9rem; }
+    .login-staff-copy { min-width: 0; display: flex; flex-direction: column; gap: .12rem; }
+    .login-staff-copy strong { overflow: hidden; font-size: .9rem; text-overflow: ellipsis; white-space: nowrap; }
+    .login-staff-copy small { color: var(--text-muted); font-size: .72rem; }
+    .login-support-button { min-width: 0; min-height: 62px; padding: .55rem .7rem; display: grid; grid-template-columns: 40px minmax(0, 1fr) 22px; align-items: center; gap: .65rem; color: var(--text-main); text-align: left; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-panel); }
+    .login-support-button:hover, .login-support-button:focus-visible { color: var(--accent-primary); border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .login-support-icon { width: 40px; height: 40px; display: grid; place-items: center; color: var(--success); border-radius: .4rem; background: color-mix(in srgb, var(--success) 12%, var(--bg-card)); }
+    .login-support-button > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
+    .login-support-button strong { font-size: .82rem; }
+    .login-support-button small { overflow: hidden; color: var(--text-muted); font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+    .login-empty-state { padding: 1rem; text-align: center; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel); }
+    .login-pin-layout { min-height: 410px; display: grid; grid-template-columns: minmax(210px, .72fr) minmax(300px, 1fr); align-items: stretch; gap: 1rem; }
+    .login-person { min-height: 410px; padding: 1rem; display: flex; flex-direction: column; align-items: flex-start; gap: .3rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel); }
+    .login-person-avatar { width: 54px; height: 54px; margin-bottom: .55rem; font-size: 1rem; }
+    .login-person-label { color: var(--accent-primary); font-size: .66rem; font-weight: 900; text-transform: uppercase; }
+    .login-person > strong { max-width: 100%; overflow: hidden; color: var(--text-main); font-size: 1.45rem; text-overflow: ellipsis; white-space: nowrap; }
+    .login-person > small { color: var(--text-muted); font-size: .75rem; }
+    .login-person > p:not(.login-error) { margin: .65rem 0 0; color: var(--text-muted); font-size: .78rem; }
+    .login-error { min-height: 2.2rem; margin: .45rem 0 0; color: var(--text-muted); font-size: .75rem; font-weight: 700; line-height: 1.25; }
+    .login-error.visible { color: var(--danger); }
+    .login-change-user { width: 100%; margin-top: auto; }
+    .login-pin-layout :global(.digit-pad) { min-height: 410px; }
+    @media (max-height: 700px) and (min-width: 651px) {
+        .login-form { gap: .7rem; padding: .85rem; }
+        .login-brand-row { min-height: 40px; padding-bottom: .55rem; }
+        .login-brand-mark { width: 36px; height: 36px; }
+        .login-brand-mark img { width: 28px; height: 28px; }
+        .login-heading h1 { font-size: 1.3rem; }
+        .login-pin-layout, .login-person, .login-pin-layout :global(.digit-pad) { min-height: 330px; }
+    }
     @media (max-width: 650px) {
-        .login-form { min-height: auto; }
+        .login-overlay { place-items: start center; padding: .6rem; }
+        .login-form { max-height: none; padding: .85rem; }
         .login-pin-layout { min-height: 0; grid-template-columns: 1fr; }
         .login-person { min-height: 0; }
         .login-person p:not(.login-error) { display: none; }
+        .login-error { min-height: 1.2rem; }
+        .login-pin-layout :global(.digit-pad) { min-height: 0; }
     }
     .scale-workspace { width: 98vw; max-width: 1180px; height: calc(100vh - .75rem); max-height: 760px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
     .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: var(--bg-card); }
@@ -5398,14 +5893,14 @@
     .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 38px; padding-bottom: .1rem; }
     .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
-    .scale-products .flat-input, .scale-products .search-input { padding-top: .65rem; padding-bottom: .65rem; }
+    .scale-products .search-input { padding-top: .65rem; padding-bottom: .65rem; }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
     .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
     .scale-product-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #fff; }
     .scale-product-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgba(15, 23, 42, .82), rgba(15, 23, 42, .25), rgba(15, 23, 42, .05)); }
     .scale-product-content { position: relative; z-index: 1; display: flex; min-width: 0; flex-direction: column; gap: .12rem; }
-    .scale-product strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .scale-product strong { max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
     .scale-product span, .scale-product small { color: var(--text-muted); font-size: .75rem; }
     .scale-product.with-image strong, .scale-product.with-image span, .scale-product.with-image small { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, .45); }
     .scale-product.selected { border-color: var(--success); box-shadow: inset 0 0 0 1px var(--success), 0 0 0 2px color-mix(in srgb, var(--success) 22%, transparent); }
@@ -5464,7 +5959,7 @@
         .scale-entry { padding: .5rem; grid-template-rows: 48px 38px 50px 50px minmax(160px, 1fr) 42px 44px; gap: .3rem; }
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
-        .scale-products .flat-input, .scale-products .search-input { padding-top: .45rem; padding-bottom: .45rem; }
+        .scale-products .search-input { padding-top: .45rem; padding-bottom: .45rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
         .scale-numpad button { min-height: 38px; font-size: 1.05rem; }
         .scale-add { min-height: 42px; }

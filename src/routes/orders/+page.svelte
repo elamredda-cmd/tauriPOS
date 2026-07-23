@@ -288,11 +288,6 @@
     async function printSelectedOrder(): Promise<void> {
         const order = selectedOrder;
         if (!order || !canPrintOrder(order) || receiptPrinting) return;
-        if (receiptPrinterConfig.connection === 'system') {
-            toast('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
-            return;
-        }
-
         receiptPrinting = true;
         try {
             const lines = getLines(order.id);

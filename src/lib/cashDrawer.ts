@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
 import { getReceiptPrinterConfig, type PrinterConnectionType, type ReceiptPrinterModel } from '$lib/printers';
+import { executePrinterModule } from '$lib/printerModules';
 
 export interface CashDrawerConfig {
     enabled: boolean;
@@ -10,6 +11,9 @@ export interface CashDrawerConfig {
     port: number;
     printerName: string;
     devicePath: string;
+    moduleId: string;
+    moduleDeviceId: string;
+    baudRate: number;
     model: ReceiptPrinterModel;
     pin: 0 | 1;
     pulseOnMs: number;
@@ -34,8 +38,11 @@ export function getCashDrawerConfig(settings: Setting[] = get(settingsDB)): Cash
     const drawerHost = setting(settings, 'cash_drawer_printer_host');
     const drawerPrinterName = setting(settings, 'cash_drawer_printer_name');
     const drawerDevicePath = setting(settings, 'cash_drawer_printer_device_path');
+    const drawerModuleId = setting(settings, 'cash_drawer_module_id');
     const receiptPrinter = getReceiptPrinterConfig(settings);
-    const connection: PrinterConnectionType = drawerHost.trim()
+    const connection: PrinterConnectionType = drawerModuleId.trim()
+        ? 'module'
+        : drawerHost.trim()
         ? 'network_escpos'
         : drawerPrinterName.trim()
             ? 'usb_raw'
@@ -48,7 +55,15 @@ export function getCashDrawerConfig(settings: Setting[] = get(settingsDB)): Cash
         ? numberSetting(settings, 'cash_drawer_printer_port', 9100)
         : receiptPrinter.port;
     const pin = Number(setting(settings, 'cash_drawer_pin', '0')) === 1 ? 1 : 0;
-    const hasDrawerTarget = Boolean(host.trim() || drawerPrinterName.trim() || drawerDevicePath.trim() || receiptPrinter.printerName.trim() || receiptPrinter.devicePath.trim());
+    const moduleId = drawerModuleId.trim() || receiptPrinter.moduleId.trim();
+    const hasDrawerTarget = Boolean(
+        host.trim()
+        || drawerPrinterName.trim()
+        || drawerDevicePath.trim()
+        || moduleId
+        || receiptPrinter.printerName.trim()
+        || receiptPrinter.devicePath.trim()
+    );
     return {
         enabled: boolSetting(settings, 'cash_drawer_enabled', hasDrawerTarget),
         connection,
@@ -56,6 +71,9 @@ export function getCashDrawerConfig(settings: Setting[] = get(settingsDB)): Cash
         port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : 9100,
         printerName: drawerPrinterName.trim() || receiptPrinter.printerName,
         devicePath: drawerDevicePath.trim() || receiptPrinter.devicePath,
+        moduleId,
+        moduleDeviceId: setting(settings, 'cash_drawer_module_device_id').trim() || receiptPrinter.moduleDeviceId,
+        baudRate: numberSetting(settings, 'cash_drawer_baud_rate', receiptPrinter.baudRate || 9600),
         model: receiptPrinter.model,
         pin,
         pulseOnMs: Math.min(510, Math.max(2, numberSetting(settings, 'cash_drawer_pulse_on_ms', 50))),
@@ -67,6 +85,7 @@ export function cashDrawerTargetLabel(config = getCashDrawerConfig()): string {
     if (config.connection === 'network_escpos' && config.host.trim()) return `${config.host.trim()}:${config.port}`;
     if (config.connection === 'usb_raw' && config.printerName.trim()) return config.printerName.trim();
     if ((config.connection === 'serial' || config.connection === 'bluetooth') && config.devicePath.trim()) return config.devicePath.trim();
+    if (config.connection === 'module' && config.moduleId.trim()) return `Module: ${config.moduleId.trim()}`;
     return '';
 }
 
@@ -109,6 +128,19 @@ export async function openCashDrawer(config = getCashDrawerConfig()): Promise<vo
         await invoke('send_device_printer_data', {
             devicePath: config.devicePath.trim(),
             data,
+            baudRate: config.baudRate,
+            timeoutMs: 2000,
+        });
+        return;
+    }
+    if (config.connection === 'module') {
+        if (!config.moduleId.trim()) throw new Error('Choose an installed printer module first');
+        await executePrinterModule(config.moduleId.trim(), 'openDrawer', {
+            deviceId: config.moduleDeviceId.trim(),
+            model: config.model,
+            pin: config.pin,
+            pulseOnMs: config.pulseOnMs,
+            pulseOffMs: config.pulseOffMs,
         });
         return;
     }

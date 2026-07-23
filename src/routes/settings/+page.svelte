@@ -7,6 +7,61 @@
     import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { appFontOptions, appFontSizeOptions, normalizeAppFontChoice } from '$lib/typography';
+    import {
+        BadgePercent,
+        Banknote,
+        Barcode,
+        Cctv,
+        ChevronRight,
+        CreditCard,
+        Database,
+        GraduationCap,
+        HardDrive,
+        KeyRound,
+        Monitor,
+        MonitorCog,
+        PackageCheck,
+        Palette,
+        PanelsTopLeft,
+        Printer,
+        ReceiptText,
+        Save,
+        Scale,
+        Smartphone,
+        Store as StoreIcon,
+        Tags,
+        Type,
+        Volume2,
+        Wrench,
+    } from '@lucide/svelte';
+
+    type SettingsShortcut = {
+        title: string;
+        group: string;
+        description: string;
+        path: string;
+        accent: string;
+        icon: typeof Palette;
+        adminOnly?: boolean;
+    };
+
+    const settingsShortcuts: SettingsShortcut[] = [
+        { title: 'Colour theme', group: 'Appearance', description: 'Colours and contrast', path: '/settings/themes', accent: '#2563eb', icon: Palette },
+        { title: 'Fonts & text', group: 'Appearance', description: 'Writing style and sizes', path: '/settings/fonts', accent: '#db2777', icon: Type },
+        { title: 'POS layout', group: 'Selling screen', description: 'Cart and toolbar positions', path: '/settings/layout', accent: '#0891b2', icon: PanelsTopLeft },
+        { title: 'Printers & drawer', group: 'Hardware', description: 'Receipts, labels and drawer', path: '/settings/printers', accent: '#16a34a', icon: Printer },
+        { title: 'Scale', group: 'Hardware', description: 'Port and weighing setup', path: '/settings/scale', accent: '#0f766e', icon: Scale },
+        { title: 'Receipt design', group: 'Printing', description: 'Paper, content and footer', path: '/settings/receipt', accent: '#d97706', icon: ReceiptText },
+        { title: 'Label design', group: 'Printing', description: 'Shelf and barcode labels', path: '/settings/labels', accent: '#ca8a04', icon: Tags },
+        { title: 'Scale barcodes', group: 'Barcodes', description: 'Embedded price rules', path: '/settings/barcodes', accent: '#16a34a', icon: Barcode },
+        { title: 'Customer display', group: 'Checkout', description: 'Second-screen basket', path: '/settings/customer-display', accent: '#2563eb', icon: Monitor },
+        { title: 'Card terminals', group: 'Checkout', description: 'SumUp, Dojo and providers', path: '/settings/payments', accent: '#059669', icon: CreditCard },
+        { title: 'Sound & haptics', group: 'Till feedback', description: 'Scan and button feedback', path: '/settings/feedback', accent: '#7c3aed', icon: Volume2 },
+        { title: 'CCTV overlay', group: 'Integrations', description: 'DVR and NVR sale text', path: '/settings/integrations', accent: '#0f766e', icon: Cctv },
+        { title: 'Shop licence', group: 'Administration', description: 'Activation and till seats', path: '/settings/licence', accent: '#16a34a', icon: KeyRound, adminOnly: true },
+        { title: 'Owner app', group: 'Administration', description: 'Pair the live dashboard', path: '/settings/owner-app', accent: '#2563eb', icon: Smartphone, adminOnly: true },
+        { title: 'Maintenance', group: 'Administration', description: 'Backup, restore and repair', path: '/settings/advanced', accent: '#dc2626', icon: Wrench, adminOnly: true },
+    ];
 
     let store = { ...$storeDB };
     let editTillName = '';
@@ -25,21 +80,12 @@
     $: loyaltyPointsPerPound = loyaltyNumber('loyalty_points_per_pound', 0, 1);
     $: loyaltyPointsRequired = loyaltyNumber('loyalty_points_to_redeem', 1, 100);
     $: loyaltyCreditValue = loyaltyNumber('loyalty_redemption_value', 1, 100);
+    $: visibleSettingsShortcuts = settingsShortcuts.filter((entry) => !entry.adminOnly || $currentEmployee?.role === 'admin');
 
     onMount(async () => {
         editTillName = await getTillName();
         tillId = await getOrCreateTillId();
     });
-
-    function switchCardClass(active: boolean): string {
-        return [
-            'relative min-h-[88px] rounded-xl border p-4 pr-16 text-left transition-all duration-150',
-            'disabled:cursor-not-allowed disabled:opacity-45',
-            active
-                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_var(--shadow)]'
-                : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
-        ].join(' ');
-    }
 
     async function updateSetting(key: string, value: string) {
         const row = { key, value, updatedAt: now() };
@@ -96,262 +142,833 @@
     }
 </script>
 
-<MgmtPage title="Settings">
-    <button slot="actions" class="btn btn-primary" on:click={saveStore}>Save Store Information</button>
+<svelte:head>
+    <title>Settings</title>
+</svelte:head>
 
-    <div class="settings-page-shell">
-        <section class="settings-hero">
-            <div class="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+<MgmtPage title="Settings">
+    <button slot="actions" class="btn btn-primary settings-save-button" on:click={saveStore}>
+        <Save size={19} strokeWidth={2.4} aria-hidden="true" />
+        <span>Save shop</span>
+    </button>
+
+    <div class="settings-overview">
+        <section class="settings-summary" aria-label="Current shop status">
+            <div class="settings-summary-item settings-summary-shop">
+                <span class="settings-summary-icon"><StoreIcon size={23} strokeWidth={2.25} /></span>
+                <span class="settings-summary-copy"><small>Shop</small><strong>{store.name || 'Store information'}</strong></span>
+            </div>
+            <div class="settings-summary-item">
+                <span class="settings-summary-icon"><Database size={22} strokeWidth={2.25} /></span>
+                <span class="settings-summary-copy">
+                    <small>Database</small>
+                    <strong class="settings-summary-state">
+                        <span class="settings-status-dot" class:online={$connectionState.mode !== 'multi' || $connectionState.mysqlOnline}></span>
+                        <span>{$connectionState.mode === 'multi' ? ($connectionState.mysqlOnline ? 'MariaDB online' : 'MariaDB offline') : 'Standalone'}</span>
+                    </strong>
+                </span>
+            </div>
+            <div class="settings-summary-item">
+                <span class="settings-summary-icon"><MonitorCog size={22} strokeWidth={2.25} /></span>
+                <span class="settings-summary-copy"><small>This till</small><strong>{editTillName || 'Loading...'}</strong></span>
+            </div>
+            <div class="settings-summary-item">
+                <span class="settings-summary-icon"><PackageCheck size={22} strokeWidth={2.25} /></span>
+                <span class="settings-summary-copy"><small>Stock</small><strong>{stockTrackingEnabled ? 'Tracking on' : 'Tracking off'}</strong></span>
+            </div>
+        </section>
+
+        {#if $connectionState.syncError}
+            <div class="settings-sync-error" role="alert">{$connectionState.syncError}</div>
+        {/if}
+
+        <section class="settings-shortcuts-section">
+            <div class="settings-section-heading">
                 <div>
-                    <p class="settings-hero-kicker">Shop control centre</p>
-                    <h2 class="settings-hero-title">Make L&amp;Bj POS work your way</h2>
-                    <p class="settings-hero-copy">
-                        Daily shop behaviour stays here. Hardware, backups, CCTV, and deeper tools now live in their own pages.
-                    </p>
+                    <span>Setup</span>
+                    <h2>Devices and appearance</h2>
                 </div>
-                <div class="grid gap-3 sm:grid-cols-2 xl:min-w-[430px]">
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
-                        <div class="flex items-center gap-3">
-                            <span class="h-3 w-3 rounded-full {$connectionState.mysqlOnline ? 'bg-success shadow-[0_0_12px_var(--success)]' : 'bg-warning shadow-[0_0_12px_var(--warning)]'}"></span>
-                            <div>
-                                <strong class="block text-text-main">{$connectionState.mysqlOnline ? 'Multi-till online' : 'Local mode'}</strong>
-                                <small class="text-text-muted">{$connectionState.mode === 'multi' ? ($connectionState.mysqlConfig?.host || 'MariaDB configured') : 'SQLite only'}</small>
+                <small>{visibleSettingsShortcuts.length} sections</small>
+            </div>
+            <nav class="settings-shortcut-grid" aria-label="Settings sections">
+                {#each visibleSettingsShortcuts as entry (entry.path)}
+                    <a
+                        href={entry.path}
+                        class="settings-shortcut"
+                        class:admin-shortcut={entry.adminOnly}
+                        style="--setting-accent: {entry.accent}"
+                        aria-label={`${entry.title}. ${entry.description}`}
+                    >
+                        <span class="settings-shortcut-mark" aria-hidden="true"></span>
+                        <span class="settings-shortcut-icon" aria-hidden="true">
+                            <svelte:component this={entry.icon} size={23} strokeWidth={2.25} />
+                        </span>
+                        <span class="settings-shortcut-copy">
+                            <small>{entry.group}</small>
+                            <strong>{entry.title}</strong>
+                            <span>
+                                {entry.path === '/settings/fonts'
+                                    ? `${selectedFontOption.label}; POS ${selectedSizeLabel(selectedPosFontSize)}, settings ${selectedSizeLabel(selectedSettingsFontSize)}`
+                                    : entry.description}
+                            </span>
+                        </span>
+                        <span class="settings-shortcut-arrow" aria-hidden="true"><ChevronRight size={19} strokeWidth={2.5} /></span>
+                    </a>
+                {/each}
+            </nav>
+        </section>
+
+        <section class="settings-section-heading settings-controls-heading">
+            <div>
+                <span>Shop controls</span>
+                <h2>Business and till settings</h2>
+            </div>
+        </section>
+
+        <div class="settings-config-columns">
+            <div class="settings-config-column">
+                <section class="settings-config-panel">
+                    <header class="settings-panel-header">
+                        <span class="settings-panel-icon"><StoreIcon size={22} strokeWidth={2.25} /></span>
+                        <div><h3>Store information</h3><p>Printed on receipts and customer documents.</p></div>
+                    </header>
+                    <div class="form-grid settings-form-grid">
+                        <div class="field span-2"><label for="settings-store-name">Store name</label><input id="settings-store-name" bind:value={store.name} /></div>
+                        <div class="field span-2"><label for="settings-store-address">Address</label><input id="settings-store-address" bind:value={store.address} /></div>
+                        <div class="field"><label for="settings-store-phone">Phone</label><input id="settings-store-phone" bind:value={store.phone} /></div>
+                        <div class="field"><label for="settings-store-email">Email</label><input id="settings-store-email" type="email" bind:value={store.email} /></div>
+                    </div>
+                </section>
+
+                <section class="settings-config-panel">
+                    <header class="settings-panel-header">
+                        <span class="settings-panel-icon"><MonitorCog size={22} strokeWidth={2.25} /></span>
+                        <div><h3>Till identity</h3><p>The ID stays fixed when the display name changes.</p></div>
+                    </header>
+                    <div class="settings-till-fields">
+                        <div class="field">
+                            <label for="settings-till-name">Till display name</label>
+                            <div class="settings-inline-field">
+                                <input id="settings-till-name" bind:value={editTillName} placeholder="e.g. Till 1" />
+                                <button class="btn btn-primary" on:click={saveTillName}>Save name</button>
                             </div>
                         </div>
+                        <div class="field">
+                            <label for="settings-till-id">Till ID</label>
+                            <input id="settings-till-id" value={tillId} readonly class="settings-readonly-input" />
+                        </div>
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
-                        <strong class="block text-text-main">{stockTrackingEnabled ? 'Stock tracking active' : 'Stock tracking off'}</strong>
-                        <small class="text-text-muted">Till: {editTillName || 'Loading...'}</small>
+                </section>
+
+                <section class="settings-config-panel settings-database-panel">
+                    <header class="settings-panel-header">
+                        <span class="settings-panel-icon"><HardDrive size={22} strokeWidth={2.25} /></span>
+                        <div>
+                            <h3>Database</h3>
+                            <p>{$connectionState.mysqlOnline ? 'Connected to the central MariaDB server.' : 'Working from this till’s local SQLite database.'}</p>
+                        </div>
+                    </header>
+                    {#if $currentEmployee?.role === 'admin'}
+                        <a href="/settings/advanced" class="btn btn-secondary settings-panel-action">Maintenance <ChevronRight size={18} /></a>
+                    {/if}
+                </section>
+            </div>
+
+            <div class="settings-config-column">
+                <section class="settings-config-panel">
+                    <header class="settings-panel-header settings-panel-header-action">
+                        <span class="settings-panel-icon"><BadgePercent size={22} strokeWidth={2.25} /></span>
+                        <div><h3>Loyalty programme</h3><p>Points earned and their spendable value.</p></div>
+                        <button
+                            type="button"
+                            class="settings-switch-control"
+                            class:enabled={loyaltyEnabled}
+                            role="switch"
+                            aria-checked={loyaltyEnabled}
+                            aria-label="Loyalty programme"
+                            on:click={() => updateSetting('loyalty_enabled', loyaltyEnabled ? 'false' : 'true')}
+                        ><span>{loyaltyEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                    </header>
+                    <div class="settings-loyalty-grid" class:disabled-settings={!loyaltyEnabled}>
+                        <div class="field"><label for="loyalty-points-per-pound">Points per £1</label>
+                            <input id="loyalty-points-per-pound" disabled={!loyaltyEnabled} type="number" inputmode="numeric" min="0" step="1" value={loyaltyPointsPerPound} on:change={(e) => updateLoyaltyNumber('loyalty_points_per_pound', e.currentTarget.value, 0, 1)} />
+                        </div>
+                        <div class="field"><label for="loyalty-points-required">Points for credit</label>
+                            <input id="loyalty-points-required" disabled={!loyaltyEnabled} type="number" inputmode="numeric" min="1" step="1" value={loyaltyPointsRequired} on:change={(e) => updateLoyaltyNumber('loyalty_points_to_redeem', e.currentTarget.value, 1, 100)} />
+                        </div>
+                        <div class="field"><label for="loyalty-credit-value">Credit (pence)</label>
+                            <input id="loyalty-credit-value" disabled={!loyaltyEnabled} type="number" inputmode="numeric" min="1" step="1" value={loyaltyCreditValue} on:change={(e) => updateLoyaltyNumber('loyalty_redemption_value', e.currentTarget.value, 1, 100)} />
+                        </div>
                     </div>
-                </div>
-            </div>
-            {#if $connectionState.syncError}
-                <p class="mt-4 rounded-xl border border-danger/50 bg-danger/10 p-3 text-sm text-danger">{$connectionState.syncError}</p>
-            {/if}
-        </section>
+                    <div class="settings-example">{loyaltyPointsRequired.toLocaleString()} points = {formatMoney(loyaltyCreditValue)} credit</div>
+                </section>
 
-        <nav class="settings-card-grid" aria-label="Settings shortcuts">
-            <a href="/settings/themes" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Appearance</span>
-                <b class="mt-2 block text-xl">Colour Theme</b>
-                <p class="mt-2 text-sm text-text-muted">Choose the visual style used across the app.</p>
-                <strong class="mt-4 block text-sm text-accent-primary">Change theme &rarr;</strong>
-            </a>
-            <a href="/settings/fonts" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Appearance</span>
-                <b class="mt-2 block text-xl">Fonts &amp; Text Size</b>
-                <p class="mt-2 text-sm text-text-muted">{selectedFontOption.label}. POS {selectedSizeLabel(selectedPosFontSize)}, settings {selectedSizeLabel(selectedSettingsFontSize)}.</p>
-                <strong class="mt-4 block text-sm text-accent-primary">Set writing &rarr;</strong>
-            </a>
-            <a href="/settings/layout" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">POS screen</span>
-                <b class="mt-2 block text-xl">Layout</b>
-                <p class="mt-2 text-sm text-text-muted">Tune cart placement, toolbar controls, and the main selling screen.</p>
-                <strong class="mt-4 block text-sm text-accent-primary">Open layout &rarr;</strong>
-            </a>
-            <a href="/settings/printers" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Hardware</span>
-                <b class="mt-2 block text-xl">Printer Setup</b>
-                <p class="mt-2 text-sm text-text-muted">Receipt printers, label printers, and cash drawer pulse.</p>
-                <strong class="mt-4 block text-sm text-success">Set printers &rarr;</strong>
-            </a>
-            <a href="/settings/scale" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Hardware</span>
-                <b class="mt-2 block text-xl">Scale Setup</b>
-                <p class="mt-2 text-sm text-text-muted">Find the scale port and connect the live weighing scale.</p>
-                <strong class="mt-4 block text-sm text-success">Connect scale &rarr;</strong>
-            </a>
-            <a href="/settings/receipt" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-warning hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-warning">Printing</span>
-                <b class="mt-2 block text-xl">Receipt Designer</b>
-                <p class="mt-2 text-sm text-text-muted">Control receipt size, content, and footer messages.</p>
-                <strong class="mt-4 block text-sm text-warning">Design receipt &rarr;</strong>
-            </a>
-            <a href="/settings/labels" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-warning hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-warning">Labels</span>
-                <b class="mt-2 block text-xl">Label Designer</b>
-                <p class="mt-2 text-sm text-text-muted">Create shelf labels and barcode label layouts.</p>
-                <strong class="mt-4 block text-sm text-warning">Design labels &rarr;</strong>
-            </a>
-            <a href="/settings/barcodes" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Scales</span>
-                <b class="mt-2 block text-xl">Scale Barcode Rules</b>
-                <p class="mt-2 text-sm text-text-muted">Show the POS how your scale builds embedded-price barcodes.</p>
-                <strong class="mt-4 block text-sm text-success">Configure rules &rarr;</strong>
-            </a>
-            <a href="/settings/customer-display" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Checkout</span>
-                <b class="mt-2 block text-xl">Customer Screen</b>
-                <p class="mt-2 text-sm text-text-muted">Open the live basket and total on a second monitor.</p>
-                <strong class="mt-4 block text-sm text-accent-primary">Configure display &rarr;</strong>
-            </a>
-            <a href="/settings/payments" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Checkout</span>
-                <b class="mt-2 block text-xl">Card Payments</b>
-                <p class="mt-2 text-sm text-text-muted">Connect and manage card terminal providers separately for this till.</p>
-                <strong class="mt-4 block text-sm text-success">Choose provider &rarr;</strong>
-            </a>
-            <a href="/settings/feedback" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Operator feedback</span>
-                <b class="mt-2 block text-xl">Sound &amp; Haptics</b>
-                <p class="mt-2 text-sm text-text-muted">Button clicks, item sounds, vibration, and barcode alerts.</p>
-                <strong class="mt-4 block text-sm text-accent-primary">Open feedback &rarr;</strong>
-            </a>
-            <a href="/settings/integrations" class="group rounded-2xl border border-border-flat bg-bg-card p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-bg-card-hover">
-                <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Integrations</span>
-                <b class="mt-2 block text-xl">CCTV POS Overlay</b>
-                <p class="mt-2 text-sm text-text-muted">Send product and receipt text to supported DVR/NVR systems.</p>
-                <strong class="mt-4 block text-sm text-success">Open integrations &rarr;</strong>
-            </a>
-            {#if $currentEmployee?.role === 'admin'}
-                <a href="/settings/licence" class="group rounded-2xl border border-success/60 bg-success/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-success hover:bg-success/15">
-                    <span class="text-xs font-black uppercase tracking-[0.16em] text-success">Admin only</span>
-                    <b class="mt-2 block text-xl">Shop Licence</b>
-                    <p class="mt-2 text-sm text-text-muted">Create this shop's request and install its signed annual licence.</p>
-                    <strong class="mt-4 block text-sm text-success">Manage licence &rarr;</strong>
-                </a>
-                <a href="/settings/owner-app" class="group rounded-2xl border border-accent-primary/60 bg-accent-primary/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-accent-primary hover:bg-accent-primary/15">
-                    <span class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Admin only</span>
-                    <b class="mt-2 block text-xl">Owner App Pairing</b>
-                    <p class="mt-2 text-sm text-text-muted">Show this shop's shared QR for the live owner dashboard.</p>
-                    <strong class="mt-4 block text-sm text-accent-primary">Show shop QR &rarr;</strong>
-                </a>
-                <a href="/settings/advanced" class="group rounded-2xl border border-danger/60 bg-danger/10 p-5 text-text-main no-underline transition hover:-translate-y-0.5 hover:border-danger hover:bg-danger/15">
-                    <span class="text-xs font-black uppercase tracking-[0.16em] text-danger">Admin only</span>
-                    <b class="mt-2 block text-xl">Advanced Maintenance</b>
-                    <p class="mt-2 text-sm text-text-muted">Backups, database repair, migration, restore, and risky shop controls.</p>
-                    <strong class="mt-4 block text-sm text-danger">Open carefully &rarr;</strong>
-                </a>
-            {/if}
-        </nav>
+                <section class="settings-config-panel">
+                    <header class="settings-panel-header">
+                        <span class="settings-panel-icon"><PackageCheck size={22} strokeWidth={2.25} /></span>
+                        <div><h3>Shop operation</h3><p>Daily behaviour for selling and cash-up.</p></div>
+                    </header>
 
-        <section class="settings-section">
-            <h3 class="settings-section-title">Store Information</h3>
-            <div class="form-grid">
-                <div class="field span-2"><label>Store Name</label><input bind:value={store.name} /></div>
-                <div class="field span-2"><label>Address</label><input bind:value={store.address} /></div>
-                <div class="field"><label>Phone</label><input bind:value={store.phone} /></div>
-                <div class="field"><label>Email</label><input type="email" bind:value={store.email} /></div>
-            </div>
-        </section>
+                    <div class="settings-operation-list">
+                        <div class="settings-operation-row">
+                            <span class="settings-operation-icon"><PackageCheck size={20} /></span>
+                            <div><strong>Stock tracking</strong><span>Updates quantities after sales and refunds. Shop-wide.</span></div>
+                            <button
+                                type="button"
+                                class="settings-switch-control"
+                                class:enabled={stockTrackingEnabled}
+                                role="switch"
+                                aria-checked={stockTrackingEnabled}
+                                aria-label="Stock tracking"
+                                on:click={() => setStockTracking(!stockTrackingEnabled)}
+                            ><span>{stockTrackingEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                        </div>
 
-        <section class="settings-section">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                    <h3 class="settings-section-title">Loyalty Program</h3>
-                    <p class="mb-4 text-sm text-text-muted">Choose how customers earn points and how those points become spendable credit.</p>
-                </div>
-                <button class="btn {loyaltyEnabled ? 'btn-success' : 'btn-secondary'}" on:click={() => updateSetting('loyalty_enabled', loyaltyEnabled ? 'false' : 'true')}>
-                    Loyalty: {loyaltyEnabled ? 'Enabled' : 'Disabled'}
-                </button>
-            </div>
-            <div class="form-grid">
-                <div class="field"><label for="loyalty-points-per-pound">Points per £1 spent</label>
-                    <input id="loyalty-points-per-pound" type="number" inputmode="numeric" min="0" step="1" value={loyaltyPointsPerPound} on:change={(e) => updateLoyaltyNumber('loyalty_points_per_pound', e.currentTarget.value, 0, 1)} />
-                </div>
-                <div class="field"><label for="loyalty-points-required">Points required for credit</label>
-                    <input id="loyalty-points-required" type="number" inputmode="numeric" min="1" step="1" value={loyaltyPointsRequired} on:change={(e) => updateLoyaltyNumber('loyalty_points_to_redeem', e.currentTarget.value, 1, 100)} />
-                </div>
-                <div class="field"><label for="loyalty-credit-value">Credit value (pence)</label>
-                    <input id="loyalty-credit-value" type="number" inputmode="numeric" min="1" step="1" value={loyaltyCreditValue} on:change={(e) => updateLoyaltyNumber('loyalty_redemption_value', e.currentTarget.value, 1, 100)} />
-                </div>
-                <div class="field justify-end">
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-3 text-sm text-text-muted">
-                        Example: {loyaltyPointsRequired.toLocaleString()} points = {formatMoney(loyaltyCreditValue)} credit
+                        <div class="settings-operation-row">
+                            <span class="settings-operation-icon training"><GraduationCap size={20} /></span>
+                            <div><strong>Training mode</strong><span>Practice on this till without saving transactions.</span></div>
+                            <button
+                                type="button"
+                                class="settings-switch-control"
+                                class:enabled={trainingModeEnabled}
+                                class:danger-enabled={trainingModeEnabled}
+                                role="switch"
+                                aria-checked={trainingModeEnabled}
+                                aria-label="Training mode"
+                                on:click={() => updateSetting('training_mode_enabled', trainingModeEnabled ? 'false' : 'true')}
+                            ><span>{trainingModeEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                        </div>
+                        {#if trainingModeEnabled}
+                            <div class="settings-warning">Training is active on this till. Real sales are not being saved.</div>
+                        {/if}
+
+                        <div class="settings-operation-row">
+                            <span class="settings-operation-icon"><Banknote size={20} /></span>
+                            <div><strong>Till cash-up</strong><span>Open and reconcile cashier shifts. Shop-wide.</span></div>
+                            <button
+                                type="button"
+                                class="settings-switch-control"
+                                class:enabled={cashUpEnabled}
+                                role="switch"
+                                aria-checked={cashUpEnabled}
+                                aria-label="Till cash-up"
+                                on:click={() => setCashUpEnabled(!cashUpEnabled)}
+                            ><span>{cashUpEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                        </div>
+
+                        {#if cashUpEnabled}
+                            <div class="settings-sub-options">
+                                <div><span><strong>Opening float</strong><small>Ask for starting cash.</small></span>
+                                    <button type="button" class="settings-switch-control" class:enabled={openingFloatRequired} role="switch" aria-checked={openingFloatRequired} aria-label="Require opening float" on:click={() => updateSetting('cash_up_require_opening_float', openingFloatRequired ? 'false' : 'true')}><span>{openingFloatRequired ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                                </div>
+                                <div><span><strong>Card-machine total</strong><small>Reconcile terminal totals.</small></span>
+                                    <button type="button" class="settings-switch-control" class:enabled={cardReconciliationEnabled} role="switch" aria-checked={cardReconciliationEnabled} aria-label="Reconcile card-machine total" on:click={() => updateSetting('cash_up_reconcile_card', cardReconciliationEnabled ? 'false' : 'true')}><span>{cardReconciliationEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                                </div>
+                            </div>
+                        {/if}
                     </div>
-                </div>
+                </section>
             </div>
-        </section>
-
-        <section class="settings-section">
-            <h3 class="settings-section-title">Stock Tracking</h3>
-            <p class="mb-4 text-sm text-text-muted">
-                This shop-wide setting synchronizes to every till. Turning it off hides stock controls and stops sales and refunds from changing stock quantities.
-            </p>
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button class={switchCardClass(stockTrackingEnabled)} on:click={() => setStockTracking(true)}>
-                    <span class="font-extrabold">Track product stock</span>
-                    <small class="mt-1 block text-text-muted">Use stock levels and update them after transactions.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {stockTrackingEnabled ? 'text-success' : 'text-text-muted'}">{stockTrackingEnabled ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(!stockTrackingEnabled)} on:click={() => setStockTracking(false)}>
-                    <span class="font-extrabold">Do not track stock</span>
-                    <small class="mt-1 block text-text-muted">Disable stock tracking everywhere without deleting saved levels.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {!stockTrackingEnabled ? 'text-success' : 'text-text-muted'}">{!stockTrackingEnabled ? 'On' : 'Off'}</b>
-                </button>
-            </div>
-        </section>
-
-        <section class="settings-section">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                    <h3 class="settings-section-title">Training Mode</h3>
-                    <p class="mb-4 text-sm text-text-muted">Use this till for practice without saving sales, changing stock, loyalty points, reports, or CCTV/receipt output.</p>
-                </div>
-                <button class="btn {trainingModeEnabled ? 'btn-danger' : 'btn-secondary'}" on:click={() => updateSetting('training_mode_enabled', trainingModeEnabled ? 'false' : 'true')}>
-                    Training: {trainingModeEnabled ? 'On' : 'Off'}
-                </button>
-            </div>
-            <div class="rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-text-main">
-                This setting is saved only on this machine. It is useful for staff practice, but it should stay off during real trading.
-            </div>
-        </section>
-
-        <section class="settings-section">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                    <h3 class="settings-section-title">Till Cash-Up</h3>
-                    <p class="mb-4 text-sm text-text-muted">Optionally require each cashier to open and reconcile their shift on each till.</p>
-                </div>
-                <button class="btn {cashUpEnabled ? 'btn-success' : 'btn-secondary'}" on:click={() => setCashUpEnabled(!cashUpEnabled)}>
-                    Cash-Up: {cashUpEnabled ? 'Enabled' : 'Disabled'}
-                </button>
-            </div>
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <button class={switchCardClass(openingFloatRequired)} disabled={!cashUpEnabled} on:click={() => updateSetting('cash_up_require_opening_float', openingFloatRequired ? 'false' : 'true')}>
-                    <span class="font-extrabold">Opening float</span>
-                    <small class="mt-1 block text-text-muted">Ask how much cash is in the drawer when opening a new shift.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {openingFloatRequired ? 'text-success' : 'text-text-muted'}">{openingFloatRequired ? 'On' : 'Off'}</b>
-                </button>
-                <button class={switchCardClass(cardReconciliationEnabled)} disabled={!cashUpEnabled} on:click={() => updateSetting('cash_up_reconcile_card', cardReconciliationEnabled ? 'false' : 'true')}>
-                    <span class="font-extrabold">Card-machine total</span>
-                    <small class="mt-1 block text-text-muted">Ask for the card terminal total and show any difference when closing.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cardReconciliationEnabled ? 'text-success' : 'text-text-muted'}">{cardReconciliationEnabled ? 'On' : 'Off'}</b>
-                </button>
-            </div>
-            <p class="mt-3 text-sm text-text-muted">This is a shop-wide setting and synchronizes to every till.</p>
-        </section>
-
-        <section class="settings-section">
-            <h3 class="settings-section-title">Till Configuration</h3>
-            <p class="mb-4 text-sm text-text-muted">Each machine auto-generates a unique identity. Set a display name below.</p>
-            <div class="form-grid">
-                <div class="field">
-                    <label>Till Display Name</label>
-                    <div class="flex gap-3">
-                        <input bind:value={editTillName} placeholder="e.g. Till 1" />
-                        <button class="btn btn-primary" on:click={saveTillName}>Save</button>
-                    </div>
-                </div>
-                <div class="field">
-                    <label>Till ID (auto-generated)</label>
-                    <input value={tillId} disabled class="!opacity-60" />
-                </div>
-            </div>
-        </section>
-
-        <section class="settings-section">
-            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                    <h3 class="settings-section-title">Database Status</h3>
-                    <p class="mb-0 text-sm text-text-muted">
-                        {$connectionState.mysqlOnline ? 'Connected to the central MariaDB server.' : 'Working from the local SQLite database.'}
-                    </p>
-                </div>
-                {#if $currentEmployee?.role === 'admin'}
-                    <a href="/settings/advanced" class="btn btn-secondary">Advanced Maintenance</a>
-                {/if}
-            </div>
-        </section>
+        </div>
     </div>
 </MgmtPage>
+
+<style>
+    .settings-overview {
+        width: 100%;
+        max-width: 1540px;
+        margin: 0 auto;
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.9rem;
+        color: var(--text-main);
+        font-size: var(--font-size-settings);
+    }
+
+    .settings-summary {
+        display: grid;
+        grid-template-columns: minmax(220px, 1.2fr) repeat(3, minmax(150px, 0.8fr));
+        overflow: hidden;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.5rem;
+        background: var(--bg-card);
+    }
+
+    .settings-summary-item {
+        min-width: 0;
+        min-height: 72px;
+        padding: 0.7rem 0.8rem;
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        border-left: 1px solid var(--border-flat);
+    }
+
+    .settings-summary-item:first-child {
+        border-left: 0;
+    }
+
+    .settings-summary-icon,
+    .settings-panel-icon,
+    .settings-operation-icon {
+        width: 42px;
+        height: 42px;
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.45rem;
+        background: var(--bg-panel);
+        color: var(--accent-primary);
+    }
+
+    .settings-summary-copy {
+        min-width: 0;
+        display: block;
+    }
+
+    .settings-summary-copy small,
+    .settings-section-heading span,
+    .settings-shortcut-copy small {
+        display: block;
+        color: var(--text-muted);
+        font-size: 0.68em;
+        font-weight: 900;
+        letter-spacing: 0;
+        line-height: 1.1;
+        text-transform: uppercase;
+    }
+
+    .settings-summary-copy strong {
+        display: block;
+        margin-top: 0.2rem;
+        overflow: hidden;
+        font-size: 0.92em;
+        line-height: 1.15;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .settings-summary-copy .settings-summary-state {
+        display: flex;
+        align-items: center;
+        gap: 0.42rem;
+    }
+
+    .settings-status-dot {
+        width: 10px;
+        height: 10px;
+        margin-left: 0;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: var(--warning);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 15%, transparent);
+    }
+
+    .settings-status-dot.online {
+        background: var(--success);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 15%, transparent);
+    }
+
+    .settings-sync-error,
+    .settings-warning {
+        border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border-flat));
+        border-radius: 0.45rem;
+        background: color-mix(in srgb, var(--danger) 10%, var(--bg-card));
+        color: var(--danger);
+        padding: 0.7rem 0.85rem;
+        font-size: 0.82em;
+        font-weight: 700;
+    }
+
+    .settings-shortcuts-section {
+        min-width: 0;
+    }
+
+    .settings-section-heading {
+        min-height: 46px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0 0.15rem 0.45rem;
+    }
+
+    .settings-section-heading h2 {
+        margin: 0.2rem 0 0;
+        color: var(--text-main);
+        font-size: 1.16em;
+        line-height: 1.1;
+        letter-spacing: 0;
+    }
+
+    .settings-section-heading > small {
+        color: var(--text-muted);
+        font-size: 0.76em;
+        font-weight: 800;
+    }
+
+    .settings-controls-heading {
+        min-height: 40px;
+        margin-top: 0.15rem;
+        padding-bottom: 0;
+    }
+
+    .settings-shortcut-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.65rem;
+    }
+
+    .settings-shortcut {
+        --setting-accent: var(--accent-primary);
+        position: relative;
+        contain: layout paint;
+        min-width: 0;
+        min-height: 108px;
+        overflow: hidden;
+        display: grid;
+        grid-template-columns: 44px minmax(0, 1fr) 20px;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.75rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.5rem;
+        background: var(--bg-card);
+        color: var(--text-main);
+        text-decoration: none;
+        transition: none;
+    }
+
+    .settings-shortcut:hover {
+        border-color: var(--setting-accent);
+        background: var(--bg-card-hover);
+    }
+
+    .settings-shortcut:focus-visible,
+    .settings-switch-control:focus-visible {
+        outline: 3px solid var(--accent-primary);
+        outline-offset: -3px;
+    }
+
+    .settings-shortcut-mark {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 4px;
+        background: var(--setting-accent);
+    }
+
+    .settings-shortcut-icon {
+        width: 44px;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.45rem;
+        background: var(--bg-panel);
+        color: var(--setting-accent);
+    }
+
+    .settings-shortcut-copy {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.18rem;
+    }
+
+    .settings-shortcut-copy small {
+        color: var(--setting-accent);
+        font-size: 0.64em;
+    }
+
+    .settings-shortcut-copy strong {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 0.98em;
+        line-height: 1.12;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .settings-shortcut-copy > span {
+        display: -webkit-box;
+        overflow: hidden;
+        color: var(--text-muted);
+        font-size: 0.72em;
+        font-weight: 650;
+        line-height: 1.22;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+    }
+
+    .settings-shortcut-arrow {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--setting-accent);
+    }
+
+    .settings-shortcut.admin-shortcut {
+        border-style: dashed;
+    }
+
+    .settings-config-columns {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
+        gap: 0.75rem;
+    }
+
+    .settings-config-column {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+
+    .settings-config-panel {
+        min-width: 0;
+        padding: 1rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.5rem;
+        background: var(--bg-card);
+    }
+
+    .settings-panel-header {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        align-items: center;
+        gap: 0.7rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .settings-panel-header-action {
+        grid-template-columns: 42px minmax(0, 1fr) auto;
+    }
+
+    .settings-panel-header h3 {
+        margin: 0;
+        font-size: 1.04em;
+        line-height: 1.1;
+        letter-spacing: 0;
+    }
+
+    .settings-panel-header p {
+        margin: 0.2rem 0 0;
+        color: var(--text-muted);
+        font-size: 0.74em;
+        line-height: 1.25;
+    }
+
+    .settings-form-grid {
+        gap: 0.7rem;
+    }
+
+    .settings-till-fields {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+        gap: 0.7rem;
+    }
+
+    .settings-inline-field {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.5rem;
+    }
+
+    .settings-inline-field .btn {
+        min-width: 116px;
+        padding-inline: 1rem;
+    }
+
+    .settings-readonly-input {
+        overflow: hidden;
+        color: var(--text-muted) !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+        font-size: 0.72em !important;
+        text-overflow: ellipsis;
+    }
+
+    .settings-database-panel {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 0.7rem;
+    }
+
+    .settings-database-panel .settings-panel-header {
+        margin-bottom: 0;
+    }
+
+    .settings-panel-action {
+        min-height: 44px;
+        padding: 0.6rem 0.85rem;
+        font-size: 0.78em;
+    }
+
+    .settings-loyalty-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.65rem;
+        transition: opacity 0.15s;
+    }
+
+    .disabled-settings {
+        opacity: 0.5;
+    }
+
+    .settings-example {
+        margin-top: 0.75rem;
+        padding-top: 0.65rem;
+        border-top: 1px solid var(--border-flat);
+        color: var(--text-muted);
+        font-size: 0.76em;
+        font-weight: 700;
+        text-align: right;
+    }
+
+    .settings-operation-list {
+        overflow: hidden;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.5rem;
+        background: var(--bg-panel);
+    }
+
+    .settings-operation-row {
+        min-width: 0;
+        min-height: 76px;
+        display: grid;
+        grid-template-columns: 40px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.65rem 0.75rem;
+        border-bottom: 1px solid var(--border-flat);
+    }
+
+    .settings-operation-row:last-child {
+        border-bottom: 0;
+    }
+
+    .settings-operation-icon {
+        width: 40px;
+        height: 40px;
+        color: var(--success);
+    }
+
+    .settings-operation-icon.training {
+        color: var(--warning);
+    }
+
+    .settings-operation-row > div {
+        min-width: 0;
+    }
+
+    .settings-operation-row strong,
+    .settings-sub-options strong {
+        display: block;
+        font-size: 0.86em;
+        line-height: 1.15;
+    }
+
+    .settings-operation-row div > span,
+    .settings-sub-options small {
+        display: block;
+        margin-top: 0.18rem;
+        color: var(--text-muted);
+        font-size: 0.69em;
+        line-height: 1.25;
+    }
+
+    .settings-switch-control {
+        min-width: 94px;
+        min-height: 44px;
+        padding: 0.35rem 0.4rem 0.35rem 0.65rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.45rem;
+        background: var(--bg-card);
+        color: var(--text-muted);
+        box-shadow: none;
+        font-size: 0.72em;
+        font-weight: 900;
+    }
+
+    .settings-switch-control:hover {
+        border-color: var(--accent-primary);
+        background: var(--bg-card-hover);
+    }
+
+    .settings-switch-track {
+        position: relative;
+        width: 46px;
+        height: 26px;
+        flex: 0 0 auto;
+        border: 1px solid var(--border-flat);
+        border-radius: 999px;
+        background: var(--bg-panel);
+        transition: background 0.15s;
+    }
+
+    .settings-switch-track > span {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: var(--text-muted);
+        transition: transform 0.15s, background 0.15s;
+    }
+
+    .settings-switch-control.enabled {
+        color: var(--success);
+    }
+
+    .settings-switch-control.enabled .settings-switch-track {
+        border-color: var(--success);
+        background: var(--success);
+    }
+
+    .settings-switch-control.enabled .settings-switch-track > span {
+        transform: translateX(20px);
+        background: white;
+    }
+
+    .settings-switch-control.danger-enabled {
+        color: var(--danger);
+    }
+
+    .settings-switch-control.danger-enabled .settings-switch-track {
+        border-color: var(--danger);
+        background: var(--danger);
+    }
+
+    .settings-warning {
+        margin: 0.6rem 0.75rem;
+        color: var(--text-main);
+        font-size: 0.72em;
+    }
+
+    .settings-sub-options {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.5rem;
+        padding: 0.65rem;
+        border-bottom: 1px solid var(--border-flat);
+        background: var(--bg-card);
+    }
+
+    .settings-sub-options > div {
+        min-width: 0;
+        min-height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.55rem;
+        padding: 0.55rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.45rem;
+        background: var(--bg-panel);
+    }
+
+    @media (max-width: 1180px) {
+        .settings-shortcut-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .settings-summary {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .settings-summary-item:nth-child(3) {
+            border-left: 0;
+            border-top: 1px solid var(--border-flat);
+        }
+
+        .settings-summary-item:nth-child(4) {
+            border-top: 1px solid var(--border-flat);
+        }
+    }
+
+    @media (max-width: 940px) {
+        .settings-config-columns {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 760px) {
+        .settings-overview {
+            padding: 0.75rem;
+        }
+
+        .settings-shortcut-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .settings-till-fields,
+        .settings-loyalty-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    @media (max-width: 540px) {
+        .settings-summary,
+        .settings-shortcut-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .settings-summary-item,
+        .settings-summary-item:nth-child(2),
+        .settings-summary-item:nth-child(3),
+        .settings-summary-item:nth-child(4) {
+            border-top: 1px solid var(--border-flat);
+            border-left: 0;
+        }
+
+        .settings-summary-item:first-child {
+            border-top: 0;
+        }
+
+        .settings-save-button {
+            width: 48px;
+            padding-inline: 0;
+        }
+
+        .settings-save-button span {
+            display: none;
+        }
+
+        .settings-panel-header-action {
+            grid-template-columns: 42px minmax(0, 1fr);
+        }
+
+        .settings-panel-header-action .settings-switch-control {
+            grid-column: 1 / -1;
+            width: 100%;
+        }
+
+        .settings-inline-field,
+        .settings-database-panel,
+        .settings-sub-options {
+            grid-template-columns: 1fr;
+        }
+
+        .settings-operation-row {
+            grid-template-columns: 40px minmax(0, 1fr);
+        }
+
+        .settings-operation-row .settings-switch-control {
+            grid-column: 1 / -1;
+            width: 100%;
+        }
+    }
+</style>

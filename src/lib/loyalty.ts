@@ -1,4 +1,5 @@
 import type { Customer, Setting } from "$lib/stores/db";
+import { normalizeLoyaltyCode } from "$lib/customerLoyaltyCode";
 
 export interface LoyaltyConfig {
     enabled: boolean;
@@ -31,7 +32,7 @@ export function pointsForCredit(pence: number, config: LoyaltyConfig): number {
 }
 
 export function createLoyaltyCode(existing: Customer[]): string {
-    const used = new Set(existing.map((customer) => customer.loyaltyCode).filter(Boolean));
+    const used = new Set(existing.map((customer) => normalizeLoyaltyCode(customer.loyaltyCode)).filter(Boolean));
     let code = "";
     do {
         code = `LB${Math.floor(10000000 + Math.random() * 90000000)}`;

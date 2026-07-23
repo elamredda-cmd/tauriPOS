@@ -1,28 +1,36 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { now, settingsDB } from '$lib/stores/db';
+    import { now, settingsDB, type Setting } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import {
         cctvConnectionState,
         formatCctvItemText,
         getCctvPosConfig,
+        resetCctvAutomaticQueue,
         sendCctvPosText,
+        suggestedCctvPort,
     } from '$lib/cctvPos';
 
+    let statusClock = Date.now();
+
     $: cctvConfig = getCctvPosConfig($settingsDB);
+    $: suggestedPort = suggestedCctvPort($settingsDB);
+    $: tillName = settingValue($settingsDB, 'till_name', 'This till');
     $: cctvPreview = formatCctvItemText({
         name: 'Example scanned product',
         price: 249,
         quantity: 2,
-        tillName: cctvConfig.posName,
+        tillName,
         cashierName: 'Cashier',
     }, cctvConfig);
+    $: retrySeconds = Math.max(0, Math.ceil(($cctvConnectionState.retryAt - statusClock) / 1000));
 
-    const cctvEncodingOptions = [
-        { label: 'Latin-1 / ISO-8859-1', value: 'latin1' },
-        { label: 'UTF-8', value: 'utf8' },
+    const cctvFramingOptions = [
+        { label: 'Hikvision Universal TCP', value: 'hikvision' },
+        { label: 'Custom TCP text', value: 'custom' },
     ];
 
     const cctvLineWidthOptions = [
@@ -31,23 +39,85 @@
         { label: '32 characters - wide', value: '32' },
     ];
 
+    $: cctvEncodingOptions = cctvConfig.framingPreset === 'hikvision'
+        ? [{ label: 'Latin-1 (required by Hikvision)', value: 'latin1' }]
+        : [
+            { label: 'Latin-1 / ISO-8859-1', value: 'latin1' },
+            { label: 'UTF-8', value: 'utf8' },
+        ];
+
+    onMount(() => {
+        const timer = setInterval(() => {
+            statusClock = Date.now();
+        }, 1_000);
+        return () => clearInterval(timer);
+    });
+
+    function settingValue(settings: Setting[], key: string, fallback = ''): string {
+        return settings.find((setting) => setting.key === key)?.value || fallback;
+    }
+
     function switchCardClass(active: boolean): string {
         return [
-            'relative min-h-[96px] rounded-md border p-4 pr-16 text-left',
+            'cctv-switch relative min-h-[78px] rounded-md border p-3 pr-14 text-left',
             active
-                ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_var(--shadow)]'
+                ? 'border-success bg-success/10 text-text-main'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
         ].join(' ');
     }
 
-    async function updateSetting(key: string, value: string) {
+    async function updateSetting(key: string, value: string, restartTransport = false): Promise<boolean> {
+        const previous = $settingsDB.find((setting) => setting.key === key);
         const row = { key, value, updatedAt: now() };
-        settingsDB.update(settings => {
-            const index = settings.findIndex(item => item.key === key);
-            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
+        settingsDB.update((settings) => {
+            const index = settings.findIndex((setting) => setting.key === key);
+            if (index >= 0) return settings.map((setting, itemIndex) => itemIndex === index ? row : setting);
             return [...settings, row];
         });
-        await upsert('settings', row, 'key');
+        try {
+            await upsert('settings', row, 'key');
+            if (restartTransport) {
+                resetCctvAutomaticQueue('CCTV connection changed. Run a TCP test before enabling automatic output.');
+            }
+            return true;
+        } catch (error) {
+            settingsDB.update((settings) => {
+                if (previous) {
+                    return settings.map((setting) => setting.key === key ? previous : setting);
+                }
+                return settings.filter((setting) => setting.key !== key);
+            });
+            toast(`Could not save CCTV setting: ${String(error).replace(/^Error:\s*/, '')}`, 'error');
+            return false;
+        }
+    }
+
+    async function toggleCctvOverlay() {
+        const enabled = !cctvConfig.enabled;
+        if (enabled && !cctvConfig.host.trim()) {
+            toast('Enter the DVR/NVR IP address before enabling automatic output', 'error');
+            return;
+        }
+        if (!await updateSetting('cctv_pos_enabled', enabled ? 'true' : 'false')) return;
+        if (!enabled) resetCctvAutomaticQueue();
+    }
+
+    async function saveCctvPort(input: HTMLInputElement) {
+        const port = Number(input.value);
+        if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+            input.value = String(cctvConfig.port);
+            toast('CCTV port must be between 1 and 65535', 'error');
+            return;
+        }
+        await updateSetting('cctv_pos_port', String(port), true);
+    }
+
+    async function selectFraming(value: string) {
+        const preset = value === 'custom' ? 'custom' : 'hikvision';
+        if (!await updateSetting('cctv_pos_framing', preset, true)) return;
+        if (preset === 'hikvision' && cctvConfig.encoding !== 'latin1') {
+            await updateSetting('cctv_pos_encoding', 'latin1', true);
+        }
     }
 
     async function testCctvPosOverlay() {
@@ -56,115 +126,106 @@
             toast('Enter the DVR/NVR IP address first', 'error');
             return;
         }
-        if (!config.enabled) {
-            toast('Turn CCTV Overlay on before testing automatic sends', 'error');
-            return;
-        }
         try {
-            await sendCctvPosText(formatCctvItemText({
-                name: 'CCTV test product',
+            const testTime = new Date().toLocaleTimeString('en-GB', {
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: true,
+            });
+            const result = await sendCctvPosText(formatCctvItemText({
+                name: `CCTV TEST ${testTime}`,
                 price: 123,
                 quantity: 1,
-                tillName: config.posName,
+                tillName,
                 cashierName: 'Test',
             }, config), config);
-            toast('CCTV POS test sent');
+            toast(`TCP test sent from ${result.localAddress}. Check the camera overlay.`, 'success');
         } catch (error) {
-            toast(`CCTV POS test failed: ${error}`, 'error');
+            toast(`CCTV TCP test failed: ${String(error).replace(/^Error:\s*/, '')}`, 'error');
         }
+    }
+
+    function formatLastSent(timestamp: number): string {
+        if (!timestamp) return 'Not sent yet';
+        return new Date(timestamp).toLocaleTimeString('en-GB', {
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+        });
+    }
+
+    function addressHost(address: string): string {
+        if (!address) return '';
+        if (address.startsWith('[')) return address.slice(1, address.indexOf(']'));
+        const separator = address.lastIndexOf(':');
+        return separator > 0 ? address.slice(0, separator) : address;
     }
 </script>
 
-<MgmtPage title="Hardware Integrations" backFallback="/settings">
-    <div slot="actions" class="flex flex-wrap gap-3">
-        <a class="btn btn-secondary" href="/settings/printers">Printer Setup</a>
-        <button
-            class="btn btn-primary"
-            disabled={$cctvConnectionState.status === 'sending'}
-            on:click={testCctvPosOverlay}
-        >
-            {$cctvConnectionState.status === 'sending' ? 'Testing...' : 'Send CCTV Test'}
-        </button>
-    </div>
-
-    <div class="settings-page-shell">
-        <section class="settings-hero">
-            <p class="settings-hero-kicker !text-success">Integrations</p>
-            <h2 class="settings-hero-title">CCTV POS overlay</h2>
-            <p class="settings-hero-copy">
-                Send product names and final receipt lines to a supported DVR/NVR POS input. These settings are saved on this till only.
-            </p>
-        </section>
-
-        <section class="settings-section">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div>
-                    <h3 class="settings-section-title">CCTV POS Overlay</h3>
-                    <p class="mb-4 text-sm text-text-muted">Use this when the recorder has a POS text input such as Hikvision Universal Protocol over TCP.</p>
+<MgmtPage title="CCTV Overlay" backFallback="/settings">
+    <div class="cctv-page settings-page-shell !gap-4 !p-3 md:!p-4">
+        <section class="settings-section !rounded-none !border-0 !bg-transparent !p-4 !shadow-none">
+            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                    <p class="m-0 text-xs font-black uppercase tracking-[0.12em] text-success">{tillName}</p>
+                    <h2 class="settings-section-title !mb-1">Recorder connection</h2>
+                    <p class="m-0 text-sm">Each till uses its own recorder port and local settings.</p>
                 </div>
-                <button
-                    class="btn {cctvConfig.enabled ? 'btn-success' : 'btn-secondary'}"
-                    on:click={() => updateSetting('cctv_pos_enabled', cctvConfig.enabled ? 'false' : 'true')}
-                >
-                    CCTV Overlay: {cctvConfig.enabled ? 'Enabled' : 'Disabled'}
-                </button>
+                <div class="flex shrink-0 flex-wrap gap-2">
+                    <button
+                        class="btn btn-primary !min-h-11 !px-4 !py-2 !text-sm"
+                        disabled={$cctvConnectionState.status === 'sending'}
+                        on:click={testCctvPosOverlay}
+                    >
+                        {$cctvConnectionState.status === 'sending' ? 'Sending...' : 'Send TCP Test'}
+                    </button>
+                    <button
+                        class="btn !min-h-11 !px-4 !py-2 !text-sm {cctvConfig.enabled ? 'btn-success' : 'btn-secondary'}"
+                        on:click={toggleCctvOverlay}
+                    >
+                        Automatic: {cctvConfig.enabled ? 'On' : 'Off'}
+                    </button>
+                </div>
             </div>
 
-            <div class="form-grid">
+            <div class="cctv-form-grid form-grid mt-4">
                 <div class="field">
                     <label for="cctv-host">DVR / NVR IP Address</label>
                     <input
                         id="cctv-host"
                         value={cctvConfig.host}
                         placeholder="e.g. 192.168.1.104"
-                        on:change={(e) => updateSetting('cctv_pos_host', e.currentTarget.value.trim())}
+                        on:change={(event) => updateSetting('cctv_pos_host', event.currentTarget.value.trim(), true)}
                     />
                 </div>
                 <div class="field">
-                    <label for="cctv-port">DVR / NVR POS Port</label>
+                    <label for="cctv-port">Unique POS Port for {tillName}</label>
                     <input
                         id="cctv-port"
                         type="number"
                         min="1"
                         max="65535"
                         value={cctvConfig.port}
-                        on:change={(e) => updateSetting('cctv_pos_port', e.currentTarget.value || '10010')}
+                        on:change={(event) => saveCctvPort(event.currentTarget)}
                     />
-                </div>
-                <div class="field">
-                    <label for="cctv-pos-number">POS Number on DVR</label>
-                    <input
-                        id="cctv-pos-number"
-                        value={cctvConfig.posNumber}
-                        placeholder="e.g. 1"
-                        on:change={(e) => updateSetting('cctv_pos_number', e.currentTarget.value.trim() || '1')}
-                    />
-                </div>
-                <div class="field">
-                    <label for="cctv-pos-name">POS Name on DVR</label>
-                    <input
-                        id="cctv-pos-name"
-                        value={cctvConfig.posName}
-                        placeholder="e.g. POS 1 / Till 1"
-                        on:change={(e) => updateSetting('cctv_pos_name', e.currentTarget.value.trim() || 'POS 1')}
-                    />
-                </div>
-                <div class="field">
-                    <label for="cctv-source-ip">This Till IP Address</label>
-                    <input
-                        id="cctv-source-ip"
-                        value={cctvConfig.sourceIp}
-                        placeholder="e.g. 192.168.1.186"
-                        on:change={(e) => updateSetting('cctv_pos_source_ip', e.currentTarget.value.trim())}
-                    />
-                    <small class="text-text-muted">Put this same IP in the recorder "Allowed Remote IP" field.</small>
+                    <div class="flex min-h-7 items-center justify-between gap-2 text-xs text-text-muted">
+                        <span>Suggested for this till: {suggestedPort}</span>
+                        {#if cctvConfig.port !== suggestedPort}
+                            <button
+                                class="font-bold text-accent-primary"
+                                on:click={() => updateSetting('cctv_pos_port', String(suggestedPort), true)}
+                            >Use {suggestedPort}</button>
+                        {/if}
+                    </div>
                 </div>
                 <div class="field">
                     <CustomSelect
-                        label="Character Encoding"
-                        value={cctvConfig.encoding}
-                        options={cctvEncodingOptions}
-                        on:change={(event) => updateSetting('cctv_pos_encoding', event.detail)}
+                        label="Recorder Protocol"
+                        value={cctvConfig.framingPreset}
+                        options={cctvFramingOptions}
+                        on:change={(event) => selectFraming(event.detail)}
                     />
                 </div>
                 <div class="field">
@@ -175,47 +236,126 @@
                         on:change={(event) => updateSetting('cctv_pos_line_width', event.detail)}
                     />
                 </div>
+                <div class="field">
+                    {#if cctvConfig.framingPreset === 'hikvision'}
+                        <span class="text-[0.8rem] font-black uppercase tracking-[0.045em] text-text-muted">Character Encoding</span>
+                        <div class="cctv-readonly-value font-sans">Latin-1 (required by Hikvision)</div>
+                    {:else}
+                        <CustomSelect
+                            label="Character Encoding"
+                            value={cctvConfig.encoding}
+                            options={cctvEncodingOptions}
+                            on:change={(event) => updateSetting('cctv_pos_encoding', event.detail, true)}
+                        />
+                    {/if}
+                </div>
+                <div class="field">
+                    <span class="text-[0.8rem] font-black uppercase tracking-[0.045em] text-text-muted">Allowed Remote IP on Recorder</span>
+                    <div class="cctv-readonly-value">
+                        {addressHost($cctvConnectionState.localAddress) || 'Run TCP test to detect'}
+                    </div>
+                </div>
             </div>
 
-            <div class="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.4fr)_minmax(240px,0.6fr)]">
-                <div class="rounded-md border border-border-flat bg-bg-panel p-4">
+            {#if cctvConfig.framingPreset === 'custom'}
+                <div class="mt-4 border-t border-border-flat pt-4">
+                    <h3 class="m-0 text-sm font-black uppercase text-text-muted">Custom message framing</h3>
+                    <div class="cctv-marker-grid form-grid mt-3">
+                        <div class="field">
+                            <label for="cctv-start-marker">Start Marker</label>
+                            <input
+                                id="cctv-start-marker"
+                                class="font-mono"
+                                value={cctvConfig.startMarker}
+                                placeholder="Optional, e.g. \\x02"
+                                on:change={(event) => updateSetting('cctv_pos_start_marker', event.currentTarget.value, true)}
+                            />
+                        </div>
+                        <div class="field">
+                            <label for="cctv-line-separator">Line Separator</label>
+                            <input
+                                id="cctv-line-separator"
+                                class="font-mono"
+                                value={cctvConfig.lineSeparator}
+                                placeholder="\\r\\n"
+                                on:change={(event) => updateSetting('cctv_pos_line_separator', event.currentTarget.value, true)}
+                            />
+                        </div>
+                        <div class="field">
+                            <label for="cctv-end-marker">End Marker</label>
+                            <input
+                                id="cctv-end-marker"
+                                class="font-mono"
+                                value={cctvConfig.endMarker}
+                                placeholder="\\r\\n\\r\\n"
+                                on:change={(event) => updateSetting('cctv_pos_end_marker', event.currentTarget.value, true)}
+                            />
+                        </div>
+                    </div>
+                </div>
+            {/if}
+
+            <div class="cctv-diagnostics mt-4 border-t border-border-flat pt-4">
+                <div class="min-w-0">
                     <span class="mb-2 block text-xs font-extrabold uppercase text-text-muted">Camera text preview</span>
                     <pre class="m-0 overflow-x-auto whitespace-pre rounded-sm bg-black px-3 py-3 font-mono text-sm font-bold text-white">{cctvPreview}</pre>
                 </div>
-                <div class="rounded-md border p-4 {$cctvConnectionState.status === 'online'
-                    ? 'border-success/50 bg-success/10'
-                    : $cctvConnectionState.status === 'offline'
-                        ? 'border-danger/50 bg-danger/10'
-                        : 'border-border-flat bg-bg-panel'}">
-                    <span class="mb-2 block text-xs font-extrabold uppercase text-text-muted">Connection status</span>
-                    <strong class="block text-base text-text-main">
-                        {$cctvConnectionState.status === 'online'
-                            ? 'Recorder online'
-                            : $cctvConnectionState.status === 'offline'
-                                ? 'Recorder offline'
-                                : $cctvConnectionState.status === 'sending'
-                                    ? 'Testing connection'
-                                    : 'Not tested'}
-                    </strong>
-                    <small class="mt-1 block text-text-muted">{$cctvConnectionState.message}</small>
-                    {#if $cctvConnectionState.status === 'offline'}
-                        <small class="mt-2 block font-semibold text-text-main">Automatic sends pause briefly after a failure, so an offline recorder cannot slow the till.</small>
+                <div class="min-w-0 border-border-flat md:border-l md:pl-4">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <span class="block text-xs font-extrabold uppercase text-text-muted">TCP status</span>
+                            <strong class="mt-1 block text-base text-text-main">
+                                {$cctvConnectionState.status === 'online'
+                                    ? 'TCP text sent'
+                                    : $cctvConnectionState.status === 'offline'
+                                        ? retrySeconds > 0 ? `Retry in ${retrySeconds}s` : 'Waiting to retry'
+                                        : $cctvConnectionState.status === 'sending'
+                                            ? 'Sending now'
+                                            : 'Not tested'}
+                            </strong>
+                        </div>
+                        <span class="rounded-sm border border-border-flat bg-bg-panel px-2 py-1 text-xs font-black">
+                            {$cctvConnectionState.pending} pending
+                        </span>
+                    </div>
+                    <p class="mt-2 text-sm">{$cctvConnectionState.message}</p>
+                    <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-text-muted">
+                        <span>Last send: {formatLastSent($cctvConnectionState.lastSentAt)}</span>
+                        <span>Target: {$cctvConnectionState.remoteAddress || (cctvConfig.host ? `${cctvConfig.host}:${cctvConfig.port}` : 'Not configured')}</span>
+                    </div>
+                    {#if $cctvConnectionState.dropped > 0}
+                        <p class="mt-2 font-bold text-warning">
+                            {$cctvConnectionState.dropped} older events were condensed. A CCTV GAP marker will be sent first.
+                        </p>
                     {/if}
                 </div>
             </div>
 
-            <div class="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div class="mt-4 grid grid-cols-2 gap-3 border-t border-border-flat pt-4">
                 <button class={switchCardClass(cctvConfig.sendItems)} on:click={() => updateSetting('cctv_pos_send_items', cctvConfig.sendItems ? 'false' : 'true')}>
-                    <span class="font-extrabold">Send item scans</span>
-                    <small class="mt-1 block text-text-muted">Show each product name as it is added to the cart.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendItems ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendItems ? 'On' : 'Off'}</b>
+                    <span class="font-extrabold">Trolley activity</span>
+                    <small class="mt-1 block text-text-muted">Items, quantities, removals, price changes, holds and clears.</small>
+                    <b class="absolute right-3 top-1/2 -translate-y-1/2 text-xs uppercase {cctvConfig.sendItems ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendItems ? 'On' : 'Off'}</b>
                 </button>
                 <button class={switchCardClass(cctvConfig.sendReceipts)} on:click={() => updateSetting('cctv_pos_send_receipts', cctvConfig.sendReceipts ? 'false' : 'true')}>
-                    <span class="font-extrabold">Send final receipt</span>
-                    <small class="mt-1 block text-text-muted">Show quantity, item name, line total, and sale total after payment.</small>
-                    <b class="absolute right-4 top-1/2 -translate-y-1/2 text-xs uppercase tracking-[0.12em] {cctvConfig.sendReceipts ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendReceipts ? 'On' : 'Off'}</b>
+                    <span class="font-extrabold">Completed transactions</span>
+                    <small class="mt-1 block text-text-muted">Sales, full receipts, refunds and voids.</small>
+                    <b class="absolute right-3 top-1/2 -translate-y-1/2 text-xs uppercase {cctvConfig.sendReceipts ? 'text-success' : 'text-text-muted'}">{cctvConfig.sendReceipts ? 'On' : 'Off'}</b>
                 </button>
             </div>
         </section>
     </div>
 </MgmtPage>
+
+<style>
+    .cctv-form-grid.form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+    .cctv-marker-grid.form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
+    .cctv-readonly-value { min-height: 44px; display: flex; align-items: center; padding: .65rem 1rem; overflow: hidden; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel); font-family: var(--app-font-mono); text-overflow: ellipsis; white-space: nowrap; }
+    .cctv-diagnostics { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; }
+
+    @media (max-width: 620px) {
+        .cctv-form-grid.form-grid,
+        .cctv-marker-grid.form-grid,
+        .cctv-diagnostics { grid-template-columns: minmax(0, 1fr); }
+    }
+</style>

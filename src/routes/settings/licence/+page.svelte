@@ -3,6 +3,8 @@
     import { isTauri } from '@tauri-apps/api/core';
     import { open } from '@tauri-apps/plugin-dialog';
     import QRCode from 'qrcode';
+    import { Monitor, PowerOff, Wifi, WifiOff } from '@lucide/svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import {
@@ -14,6 +16,11 @@
         type ManualLicenseState,
         type ManualLicenseStatus,
     } from '$lib/licensing';
+    import {
+        getRegisteredLicenseTills,
+        retireRegisteredLicenseTill,
+        type RegisteredLicenseTill,
+    } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
 
     let status: ManualLicenseStatus | null = null;
@@ -24,6 +31,10 @@
     let activating = false;
     let errorMessage = '';
     let nativeRuntime = false;
+    let registeredTills: RegisteredLicenseTill[] = [];
+    let retireTarget: RegisteredLicenseTill | null = null;
+    let showRetireConfirm = false;
+    let retireBusy = false;
 
     onMount(() => {
         nativeRuntime = isTauri();
@@ -34,21 +45,27 @@
         loading = true;
         errorMessage = '';
         try {
+            registeredTills = nativeRuntime ? await getRegisteredLicenseTills() : [];
             [status, request] = await Promise.all([
                 refreshManualLicenseStatus(),
                 createManualLicenseRequest(),
             ]);
-            requestQr = await QRCode.toDataURL(request.code, {
-                width: 520,
-                margin: 2,
-                errorCorrectionLevel: 'M',
-                color: { dark: '#102a43', light: '#ffffff' },
-            });
+            requestQr = await buildRequestQr(request);
         } catch (error) {
             errorMessage = cleanError(error);
         } finally {
             loading = false;
         }
+    }
+
+    async function buildRequestQr(nextRequest: ManualLicenseRequest | null): Promise<string> {
+        if (!nextRequest?.code) return '';
+        return QRCode.toDataURL(nextRequest.code, {
+            width: 520,
+            margin: 2,
+            errorCorrectionLevel: 'M',
+            color: { dark: '#102a43', light: '#ffffff' },
+        });
     }
 
     function cleanError(error: unknown): string {
@@ -149,6 +166,38 @@
         }
     }
 
+    function shortTillId(id: string): string {
+        return id.length > 8 ? id.slice(-8).toUpperCase() : id.toUpperCase();
+    }
+
+    function askToRetireTill(till: RegisteredLicenseTill) {
+        if (retireBusy || till.isCurrent || till.isConnected || !till.isActive) return;
+        retireTarget = till;
+        showRetireConfirm = true;
+    }
+
+    async function confirmRetireTill() {
+        const target = retireTarget;
+        if (!target || retireBusy) return;
+        retireBusy = true;
+        errorMessage = '';
+        try {
+            registeredTills = await retireRegisteredLicenseTill(target.id);
+            [status, request] = await Promise.all([
+                refreshManualLicenseStatus(),
+                createManualLicenseRequest(),
+            ]);
+            requestQr = await buildRequestQr(request);
+            toast(`${target.name} retired from this shop`);
+        } catch (error) {
+            errorMessage = cleanError(error);
+            toast(errorMessage, 'error');
+        } finally {
+            retireBusy = false;
+            retireTarget = null;
+        }
+    }
+
 </script>
 
 <svelte:head>
@@ -193,6 +242,61 @@
                                 <strong>Setup mode is on.</strong> Sales are not blocked while the licensing workflow is being tested.
                             </div>
                         {/if}
+                    </section>
+                {/if}
+
+                {#if nativeRuntime && registeredTills.length > 0}
+                    <section class="rounded-md border border-border-flat bg-bg-panel p-4 sm:p-5">
+                        <div class="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                                <span class="text-xs font-black uppercase tracking-[0.14em] text-text-muted">Registered tills</span>
+                                <h2 class="mt-1 text-xl text-text-main">Licence seats</h2>
+                                <p class="mt-1 text-sm text-text-muted">Retire an unused till without removing its sales or reports.</p>
+                            </div>
+                            <span class="inline-flex min-h-9 items-center rounded-md border border-border-flat bg-bg-card px-3 text-sm font-bold text-text-main">
+                                {registeredTills.filter((till) => till.isActive).length} active
+                            </span>
+                        </div>
+
+                        <div class="mt-4 overflow-hidden rounded-md border border-border-flat">
+                            {#each registeredTills as till (till.id)}
+                                <div class="grid min-h-[72px] grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 border-b border-border-flat bg-bg-card px-3 py-2 last:border-b-0">
+                                    <span class="grid h-11 w-11 place-items-center rounded-md border border-border-flat bg-bg-panel text-accent-primary" aria-hidden="true">
+                                        <Monitor size={23} strokeWidth={2.2} />
+                                    </span>
+                                    <div class="min-w-0">
+                                        <div class="flex flex-wrap items-center gap-2">
+                                            <strong class="truncate text-base text-text-main">{till.name}</strong>
+                                            {#if till.isCurrent}
+                                                <span class="rounded-sm bg-accent-primary/15 px-2 py-0.5 text-[11px] font-black uppercase text-accent-primary">This till</span>
+                                            {:else if !till.isActive}
+                                                <span class="rounded-sm bg-text-muted/15 px-2 py-0.5 text-[11px] font-black uppercase text-text-muted">Retired</span>
+                                            {/if}
+                                        </div>
+                                        <div class="mt-1 flex items-center gap-1.5 text-xs text-text-muted">
+                                            {#if till.isConnected}
+                                                <Wifi size={14} aria-hidden="true" />
+                                                <span>Online now</span>
+                                            {:else}
+                                                <WifiOff size={14} aria-hidden="true" />
+                                                <span>{till.isCurrent ? 'Running here' : `ID ${shortTillId(till.id)}`}</span>
+                                            {/if}
+                                        </div>
+                                    </div>
+                                    {#if till.isActive && !till.isCurrent}
+                                        <button
+                                            class="btn btn-danger min-h-10 px-3"
+                                            disabled={retireBusy || till.isConnected}
+                                            title={till.isConnected ? 'Close this till before retiring it' : `Retire ${till.name}`}
+                                            on:click={() => askToRetireTill(till)}
+                                        >
+                                            <PowerOff size={18} aria-hidden="true" />
+                                            <span>Retire</span>
+                                        </button>
+                                    {/if}
+                                </div>
+                            {/each}
+                        </div>
                     </section>
                 {/if}
 
@@ -294,3 +398,13 @@
         </div>
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showRetireConfirm}
+    title="Retire till"
+    message={`Retire ${retireTarget?.name || 'this till'}? Its sales and reports are kept. Opening that till again will register it again.`}
+    confirmText="Retire till"
+    variant="danger"
+    on:confirm={confirmRetireTill}
+    on:cancel={() => { retireTarget = null; }}
+/>

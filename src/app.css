@@ -1980,6 +1980,108 @@
     .tiles-management-page > header { padding: var(--app-page-gutter) !important; gap: .65rem; flex-wrap: wrap; }
 }
 
+/* Compact checkout header and tile captions for older 800px-wide tills. */
+@media (max-width: 899px) {
+    .pos-main-header {
+        grid-template-columns: auto minmax(0, 1fr) auto !important;
+        gap: .35rem !important;
+    }
+
+    .pos-main-header > div:first-child {
+        gap: .25rem !important;
+    }
+
+    .pos-main-header > div:first-child > div:first-child button {
+        width: 46px;
+        min-width: 46px !important;
+        padding-inline: .35rem !important;
+    }
+
+    .pos-main-header > div:first-child > div:first-child button > span,
+    .pos-main-header button[title="Change user"] > span,
+    .pos-main-header button[title="Change user"] > svg {
+        display: none;
+    }
+
+    .pos-main-header button[title="Change user"] {
+        width: 42px;
+        min-width: 42px;
+        padding: .15rem !important;
+        justify-content: center;
+    }
+
+    .pos-main-header button[title="Change user"] > div {
+        width: 36px;
+        height: 36px;
+    }
+
+    .pos-shop-identity {
+        max-width: none;
+        gap: .3rem;
+    }
+
+    .pos-main-header h1 {
+        font-size: 1rem !important;
+    }
+
+    .pos-till-chip {
+        max-width: 112px;
+        min-height: 30px;
+        padding-inline: .4rem;
+    }
+
+    .pos-till-chip small {
+        display: none;
+    }
+
+    .pos-till-chip b {
+        font-size: .68rem;
+    }
+
+    .pos-header-status {
+        gap: .2rem;
+    }
+
+    .pos-clock {
+        min-height: 30px;
+        padding: .3rem .4rem;
+        font-size: .68rem;
+    }
+
+    .pos-clock svg {
+        display: none;
+    }
+
+    .pos-header-status .sync-pill {
+        width: 28px;
+        min-width: 28px;
+        padding-inline: 0;
+        justify-content: center;
+        font-size: 0;
+    }
+
+    .pos-tile-text-backdrop {
+        padding: .35rem !important;
+    }
+
+    .pos-tile-caption {
+        gap: .25rem !important;
+    }
+
+    .pos-tile-name {
+        font-size: .72rem !important;
+        line-height: 1.05;
+    }
+
+    .pos-tile-price {
+        max-width: none;
+        padding: .22rem .32rem !important;
+        font-size: .68rem !important;
+        overflow-wrap: normal;
+        white-space: nowrap;
+    }
+}
+
 .pos-cart-controls button {
     min-height: 40px !important;
 }

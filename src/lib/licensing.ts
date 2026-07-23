@@ -78,6 +78,14 @@ export async function refreshManualLicenseStatus(): Promise<ManualLicenseStatus>
     return status;
 }
 
+export async function requireManualSaleAccess(): Promise<ManualLicenseStatus> {
+    const status = await refreshManualLicenseStatus();
+    if (!status.accessAllowed) {
+        throw new Error(`SALE_LICENSE_REQUIRED: ${status.message}. Open Settings > Licence.`);
+    }
+    return status;
+}
+
 export async function createManualLicenseRequest(): Promise<ManualLicenseRequest> {
     if (!isTauri()) {
         return {

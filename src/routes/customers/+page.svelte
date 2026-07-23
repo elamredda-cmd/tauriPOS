@@ -1,18 +1,26 @@
 <script lang="ts">
+    import { onDestroy, onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import Code39Barcode from '$lib/components/Code39Barcode.svelte';
     import { customersDB, settingsDB, type Customer, uuid, now, formatMoney } from '$lib/stores/db';
     import {
         getCustomerLoyaltyHistory,
+        getCustomerById,
+        getCustomersPage,
         getCustomerUsage,
         isCustomerLoyaltyCodeInUse,
-        upsert,
-        remove as removeSql,
+        removeCustomerSafely,
+        saveCustomerProfile,
         type CustomerLoyaltyHistoryRow,
     } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { createLoyaltyCode, getLoyaltyConfig, loyaltyCredit } from '$lib/loyalty';
+    import {
+        LOYALTY_CODE_MAX_LENGTH,
+        loyaltyCodeValidationError,
+        normalizeLoyaltyCode,
+    } from '$lib/customerLoyaltyCode';
 
     const PAGE_SIZE = 40;
     let showForm = false;
@@ -20,31 +28,95 @@
     let saving = false;
     let deletingCustomerId = '';
     let cur: Partial<Customer> = {};
+    let editingCustomer: Customer | null = null;
     let searchQuery = '';
+    let appliedSearchQuery = '';
     let currentPage = 1;
+    let pageCustomers: Customer[] = [];
+    let totalCustomers = 0;
+    let allCustomerCount = 0;
+    let customersLoading = false;
+    let customersLoadError = '';
+    let customersMounted = false;
+    let customersLoadToken = 0;
     let showLoyalty = false;
+    let loyaltyCustomerId = '';
     let loyaltyCustomer: Customer | null = null;
+    let loyaltyCustomerSnapshot: Customer | null = null;
     let loyaltyHistory: CustomerLoyaltyHistoryRow[] = [];
     let loyaltyHistoryLoading = false;
 
     $: loyaltyConfig = getLoyaltyConfig($settingsDB);
-    $: filteredCustomers = $customersDB
-        .filter((customer) => {
-            const query = searchQuery.trim().toLowerCase();
-            if (!query) return true;
-            return [
-                customer.name,
-                customer.postcode,
-                customer.phone,
-                customer.email,
-                customer.loyaltyCode,
-            ].some((value) => String(value || '').toLowerCase().includes(query));
-        })
-        .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
-    $: pageCount = Math.max(1, Math.ceil(filteredCustomers.length / PAGE_SIZE));
+    $: loyaltyCustomer = $customersDB.find((customer) => customer.id === loyaltyCustomerId)
+        || pageCustomers.find((customer) => customer.id === loyaltyCustomerId)
+        || loyaltyCustomerSnapshot;
+    $: pageCount = Math.max(1, Math.ceil(totalCustomers / PAGE_SIZE));
     $: if (currentPage > pageCount) currentPage = pageCount;
     $: pageStart = (currentPage - 1) * PAGE_SIZE;
-    $: visibleCustomers = filteredCustomers.slice(pageStart, pageStart + PAGE_SIZE);
+
+    onMount(() => {
+        customersMounted = true;
+        void loadCustomerPage();
+    });
+
+    onDestroy(() => {
+        customersMounted = false;
+        customersLoadToken += 1;
+    });
+
+    async function loadCustomerPage() {
+        const token = ++customersLoadToken;
+        customersLoading = true;
+        customersLoadError = '';
+        try {
+            const result = await getCustomersPage({
+                query: appliedSearchQuery,
+                limit: PAGE_SIZE,
+                offset: (currentPage - 1) * PAGE_SIZE,
+            });
+            if (!customersMounted || token !== customersLoadToken) return;
+            totalCustomers = result.total;
+            if (!appliedSearchQuery) allCustomerCount = result.total;
+            const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
+            if (currentPage > lastPage) {
+                currentPage = lastPage;
+                await loadCustomerPage();
+                return;
+            }
+            pageCustomers = result.rows as Customer[];
+        } catch (error) {
+            if (token !== customersLoadToken) return;
+            customersLoadError = String(error).replace(/^Error:\s*/, '');
+        } finally {
+            if (token === customersLoadToken) customersLoading = false;
+        }
+    }
+
+    function runCustomerSearch() {
+        appliedSearchQuery = searchQuery.trim();
+        currentPage = 1;
+        void loadCustomerPage();
+    }
+
+    function clearCustomerSearch() {
+        searchQuery = '';
+        appliedSearchQuery = '';
+        currentPage = 1;
+        void loadCustomerPage();
+    }
+
+    function handleCustomerSearchKeydown(event: KeyboardEvent) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        runCustomerSearch();
+    }
+
+    function goToCustomerPage(page: number) {
+        const nextPage = Math.max(1, Math.min(pageCount, page));
+        if (nextPage === currentPage) return;
+        currentPage = nextPage;
+        void loadCustomerPage();
+    }
 
     function add() {
         const stamp = now();
@@ -61,12 +133,14 @@
             updatedAt: stamp,
         };
         editing = false;
+        editingCustomer = null;
         showForm = true;
     }
 
     function edit(customer: Customer) {
         cur = { ...customer };
         editing = true;
+        editingCustomer = customer;
         showForm = true;
     }
 
@@ -80,13 +154,18 @@
         saving = true;
         try {
             const id = String(cur.id || uuid());
-            const loyaltyCode = String(cur.loyaltyCode || createLoyaltyCode($customersDB)).trim().toUpperCase();
+            const loyaltyCode = normalizeLoyaltyCode(cur.loyaltyCode || createLoyaltyCode($customersDB));
+            const validationError = loyaltyCodeValidationError(loyaltyCode);
+            if (validationError) {
+                toast(validationError, 'error');
+                return;
+            }
             if (await isCustomerLoyaltyCodeInUse(loyaltyCode, id)) {
                 toast('Loyalty code is already used by another customer', 'error');
                 return;
             }
 
-            const existing = $customersDB.find((customer) => customer.id === id);
+            const existing = editingCustomer || $customersDB.find((customer) => customer.id === id);
             const stamp = now();
             const profile = {
                 id,
@@ -101,13 +180,15 @@
             };
             // Profile writes deliberately omit loyaltyPoints. Sales, refunds and
             // redemption transactions are the only owners of that balance.
-            await upsert('customers', profile);
+            await saveCustomerProfile(profile);
             customersDB.update((list) => existing
                 ? list.map((customer) => customer.id === id
                     ? { ...profile, loyaltyPoints: customer.loyaltyPoints }
                     : customer)
                 : [...list, { ...profile, loyaltyPoints: 0 }]);
             showForm = false;
+            editingCustomer = null;
+            await loadCustomerPage();
             toast(existing ? 'Customer updated' : 'Customer added');
         } catch (error) {
             toast(`Could not save customer: ${error}`, 'error');
@@ -120,6 +201,13 @@
         if (deletingCustomerId) return;
         try {
             const usage = await getCustomerUsage(customer.id);
+            if (usage.loyaltyPoints !== 0) {
+                toast(
+                    `${customer.name} still has ${usage.loyaltyPoints.toLocaleString()} loyalty points and cannot be deleted.`,
+                    'error',
+                );
+                return;
+            }
             if (usage.orders > 0 || usage.loyaltyEntries > 0) {
                 toast(
                     `${customer.name} has linked sales or loyalty history and cannot be deleted. Keep the customer record so the history remains accurate.`,
@@ -129,8 +217,9 @@
             }
             if (!confirm(`Delete ${customer.name}?`)) return;
             deletingCustomerId = customer.id;
-            await removeSql('customers', customer.id);
+            await removeCustomerSafely(customer.id);
             customersDB.update((list) => list.filter((item) => item.id !== customer.id));
+            await loadCustomerPage();
             toast('Customer deleted', 'info');
         } catch (error) {
             toast(`Could not delete customer: ${error}`, 'error');
@@ -140,12 +229,26 @@
     }
 
     async function openLoyalty(customer: Customer) {
-        loyaltyCustomer = customer;
-        loyaltyHistory = [];
-        loyaltyHistoryLoading = true;
+        loyaltyCustomerId = customer.id;
+        loyaltyCustomerSnapshot = customer;
         showLoyalty = true;
+        await refreshLoyaltyHistory();
+    }
+
+    async function refreshLoyaltyHistory() {
+        if (!loyaltyCustomerId || loyaltyHistoryLoading) return;
+        loyaltyHistoryLoading = true;
         try {
-            loyaltyHistory = await getCustomerLoyaltyHistory(customer.id);
+            const [customer, history] = await Promise.all([
+                getCustomerById(loyaltyCustomerId),
+                getCustomerLoyaltyHistory(loyaltyCustomerId),
+            ]);
+            if (customer) {
+                loyaltyCustomerSnapshot = customer as Customer;
+                pageCustomers = pageCustomers.map((item) => item.id === customer.id ? customer as Customer : item);
+                customersDB.update((list) => list.map((item) => item.id === customer.id ? customer as Customer : item));
+            }
+            loyaltyHistory = history;
         } catch (error) {
             toast(`Could not load loyalty history: ${error}`, 'error');
         } finally {
@@ -192,14 +295,15 @@
                     id="customer-search"
                     class="search-input"
                     bind:value={searchQuery}
-                    on:input={() => currentPage = 1}
+                    on:keydown={handleCustomerSearchKeydown}
                     placeholder="Search customers..."
                     aria-label="Search customers"
                 />
             </div>
-            <span class="customer-count">{filteredCustomers.length} / {$customersDB.length}</span>
-            {#if searchQuery}
-                <button class="btn btn-secondary customer-clear" on:click={() => { searchQuery = ''; currentPage = 1; }}>Clear</button>
+            <button class="btn btn-secondary customer-find" disabled={customersLoading} on:click={runCustomerSearch}>Find</button>
+            <span class="customer-count">{totalCustomers} / {allCustomerCount}</span>
+            {#if searchQuery || appliedSearchQuery}
+                <button class="btn btn-secondary customer-clear" on:click={clearCustomerSearch}>Clear</button>
             {/if}
         </div>
     </div>
@@ -210,7 +314,7 @@
                 <tr><th>Name</th><th>Postcode</th><th>Loyalty Code</th><th>Points</th><th>Credit</th><th>Actions</th></tr>
             </thead>
             <tbody>
-                {#each visibleCustomers as customer (customer.id)}
+                {#each pageCustomers as customer (customer.id)}
                     <tr>
                         <td class="font-semibold">{customer.name}</td>
                         <td class="mono">{customer.postcode || '-'}</td>
@@ -255,36 +359,40 @@
                         </td>
                     </tr>
                 {/each}
-                {#if $customersDB.length === 0}
+                {#if customersLoading && pageCustomers.length === 0}
+                    <tr class="empty-row"><td colspan="6">Loading customers...</td></tr>
+                {:else if customersLoadError}
+                    <tr class="empty-row"><td colspan="6">Could not load customers: {customersLoadError}</td></tr>
+                {:else if allCustomerCount === 0}
                     <tr class="empty-row"><td colspan="6">No customers yet.</td></tr>
-                {:else if filteredCustomers.length === 0}
+                {:else if totalCustomers === 0}
                     <tr class="empty-row"><td colspan="6">No customers match your search.</td></tr>
                 {/if}
             </tbody>
         </table>
     </div>
 
-    {#if filteredCustomers.length > PAGE_SIZE}
+    {#if totalCustomers > PAGE_SIZE}
         <nav class="customer-pagination" aria-label="Customer pages">
             <button
                 class="btn-icon"
                 disabled={currentPage === 1}
                 title="Previous customer page"
                 aria-label="Previous customer page"
-                on:click={() => currentPage = Math.max(1, currentPage - 1)}
+                on:click={() => goToCustomerPage(currentPage - 1)}
             >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
             </button>
             <div>
                 <strong>Page {currentPage} of {pageCount}</strong>
-                <span>{pageStart + 1}-{Math.min(pageStart + PAGE_SIZE, filteredCustomers.length)} of {filteredCustomers.length}</span>
+                <span>{pageStart + 1}-{Math.min(pageStart + PAGE_SIZE, totalCustomers)} of {totalCustomers}</span>
             </div>
             <button
                 class="btn-icon"
                 disabled={currentPage === pageCount}
                 title="Next customer page"
                 aria-label="Next customer page"
-                on:click={() => currentPage = Math.min(pageCount, currentPage + 1)}
+                on:click={() => goToCustomerPage(currentPage + 1)}
             >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
             </button>
@@ -298,7 +406,7 @@
         <div class="field"><label for="customer-phone">Phone</label><input id="customer-phone" type="tel" bind:value={cur.phone} placeholder="07..." /></div>
         <div class="field"><label for="customer-email">Email</label><input id="customer-email" type="email" bind:value={cur.email} /></div>
         <div class="field"><label for="customer-postcode">Postcode</label><input id="customer-postcode" bind:value={cur.postcode} placeholder="Postcode" /></div>
-        <div class="field"><label for="customer-loyalty-code">Loyalty Code</label><input id="customer-loyalty-code" bind:value={cur.loyaltyCode} /></div>
+        <div class="field"><label for="customer-loyalty-code">Loyalty Code</label><input id="customer-loyalty-code" maxlength={LOYALTY_CODE_MAX_LENGTH} spellcheck="false" bind:value={cur.loyaltyCode} /></div>
         <div class="field"><span class="field-label">Current Points</span><div class="flat-input readonly-value">{Number(cur.loyaltyPoints || 0).toLocaleString()}</div></div>
         <div class="field"><span class="field-label">Available Credit</span><div class="flat-input readonly-value money">{formatMoney(loyaltyCredit(cur.loyaltyPoints || 0, loyaltyConfig))}</div></div>
         <div class="field span-2"><span class="field-label">Loyalty Barcode</span><Code39Barcode value={cur.loyaltyCode || ''} /></div>
@@ -344,6 +452,7 @@
         {/if}
     {/if}
     <svelte:fragment slot="footer">
+        <button class="btn btn-secondary" disabled={loyaltyHistoryLoading} on:click={refreshLoyaltyHistory}>{loyaltyHistoryLoading ? 'Refreshing...' : 'Refresh'}</button>
         <button class="btn btn-primary" on:click={() => showLoyalty = false}>Close</button>
     </svelte:fragment>
 </Modal>
@@ -359,7 +468,7 @@
     .customer-search svg { position: absolute; z-index: 1; top: 50%; left: .9rem; color: var(--text-muted); transform: translateY(-50%); pointer-events: none; }
     .customer-search input { width: 100%; min-height: 52px; padding-left: 2.75rem; }
     .customer-count { flex: 0 0 auto; padding: .75rem .9rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-base); color: var(--text-muted); font-weight: 800; white-space: nowrap; }
-    .customer-clear { min-height: 52px; }
+    .customer-find, .customer-clear { min-height: 52px; }
     .customer-table-wrap { min-width: 0; overflow-x: auto; }
     .customer-table { min-width: 760px; }
     .customer-table tbody tr { height: 58px; }

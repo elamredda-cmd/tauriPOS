@@ -116,10 +116,6 @@
 
     async function testPrint() {
         const config = getReceiptPrinterConfig($settingsDB);
-        if (config.connection === 'system') {
-            toast('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
-            return;
-        }
         testPrintBusy = true;
         try {
             await printEscposReceipt({

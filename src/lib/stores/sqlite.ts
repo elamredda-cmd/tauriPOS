@@ -1,11 +1,31 @@
 import Database from '@tauri-apps/plugin-sql';
 import { isTauri } from '@tauri-apps/api/core';
 import { localDatabaseName } from './profile';
+import {
+    loyaltyCodeValidationError,
+    normalizeLoyaltyCode,
+    planCustomerLoyaltyCodeRepairs,
+} from '../customerLoyaltyCode';
 
 let db: Database | null = null;
 let productSearchIndexReady = false;
 const PRODUCT_SEARCH_COUNT_CAP = 1000;
 const PRODUCT_CONTAINS_SEARCH_MIN_LENGTH = 3;
+
+async function repairCustomerLoyaltyCodes(d: Database): Promise<void> {
+    const rows = await d.select<Array<{ id: string; loyaltyCode: string | null }>>(
+        `SELECT id, loyaltyCode FROM customers ORDER BY id`,
+    );
+    const repairs = planCustomerLoyaltyCodeRepairs(rows);
+    if (repairs.length === 0) return;
+    const stamp = new Date().toISOString();
+    for (const repair of repairs) {
+        await d.execute(
+            `UPDATE customers SET loyaltyCode = ?, updatedAt = ? WHERE id = ?`,
+            [repair.loyaltyCode, stamp, repair.id],
+        );
+    }
+}
 
 const UPDATED_AT_INDEX_TABLES = [
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
@@ -530,6 +550,8 @@ export async function initDb() {
         )
     `);
 
+    await repairCustomerLoyaltyCodes(d);
+
     // Create performance indexes
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_barcode_active ON products(barcode, isActive)`);
@@ -552,7 +574,9 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_number ON orders(orderNumber)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_loyalty_logs_customer ON loyalty_logs(customerId, createdAt DESC)`);
-    await d.execute(`CREATE INDEX IF NOT EXISTS idx_customers_loyalty_code ON customers(loyaltyCode COLLATE NOCASE)`);
+    await d.execute(`DROP INDEX IF EXISTS idx_customers_loyalty_code`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_customers_name_nocase ON customers(name COLLATE NOCASE, id)`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_loyalty_code ON customers(loyaltyCode COLLATE NOCASE) WHERE loyaltyCode IS NOT NULL AND TRIM(loyaltyCode) <> ''`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_history_sort ON orders(
         COALESCE(NULLIF(completedAt, ''), NULLIF(createdAt, ''), NULLIF(updatedAt, '')) DESC,
         orderNumber DESC
@@ -993,6 +1017,7 @@ function normalizeValue(v: any): any {
 export async function upsert(table: string, obj: any, idKey: string = 'id') {
     const d = await getDb();
     if (table === 'products') obj = normalizeProductIdentifiers(obj);
+    if (table === 'customers') obj = normalizeCustomerLoyaltyCode(obj);
     const validCols = await getTableColumns(table);
     const keys = Object.keys(obj).filter(k => validCols.includes(k));
     if (keys.length === 0) {
@@ -1015,6 +1040,7 @@ export async function upsert(table: string, obj: any, idKey: string = 'id') {
 export async function bulkUpsert(table: string, rows: any[], idKey: string = 'id') {
     if (rows.length === 0) return;
     if (table === 'products') rows = rows.map(normalizeProductIdentifiers);
+    if (table === 'customers') rows = rows.map(normalizeCustomerLoyaltyCode);
     const d = await getDb();
     const validCols = await getTableColumns(table);
 
@@ -1059,6 +1085,16 @@ function normalizeProductIdentifiers<T extends Record<string, any>>(product: T):
             ? { sku: String(product.sku || '').trim() || null }
             : {}),
     };
+}
+
+function normalizeCustomerLoyaltyCode<T extends Record<string, any>>(customer: T): T {
+    if (!Object.prototype.hasOwnProperty.call(customer, 'loyaltyCode')) return customer;
+    const loyaltyCode = normalizeLoyaltyCode(customer.loyaltyCode);
+    if (loyaltyCode) {
+        const validationError = loyaltyCodeValidationError(loyaltyCode);
+        if (validationError) throw new Error(validationError);
+    }
+    return { ...customer, loyaltyCode: loyaltyCode || null };
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id') {
@@ -1468,6 +1504,63 @@ export async function deleteTile(id: string) {
 export async function getAll(table: string): Promise<any[]> {
     const d = await getDb();
     return await d.select(`SELECT * FROM ${table}`);
+}
+
+export interface CustomerPageOptions {
+    query?: string;
+    limit?: number;
+    offset?: number;
+}
+
+export interface CustomerPageResult {
+    rows: any[];
+    total: number;
+}
+
+function customerPageWhere(query: string): { sql: string; params: string[] } {
+    const search = String(query || '').trim();
+    if (!search) return { sql: '', params: [] };
+    const escaped = search.replace(/[\\%_]/g, (character) => `\\${character}`);
+    const value = `%${escaped}%`;
+    return {
+        sql: `WHERE (
+            name LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR postcode LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR phone LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR email LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR loyaltyCode LIKE ? ESCAPE '\\' COLLATE NOCASE
+        )`,
+        params: [value, value, value, value, value],
+    };
+}
+
+/** Fetch one customer-management page without hydrating the full customer list. */
+export async function getCustomersPage(options: CustomerPageOptions = {}): Promise<CustomerPageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit || 40))));
+    const offset = Math.max(0, Math.floor(Number(options.offset || 0)));
+    const filter = customerPageWhere(String(options.query || ''));
+    const rows: any[] = await d.select(
+        `SELECT * FROM customers
+         ${filter.sql}
+         ORDER BY name COLLATE NOCASE ASC, id ASC
+         LIMIT ? OFFSET ?`,
+        [...filter.params, limit, offset],
+    );
+    const countRows: any[] = await d.select(
+        `SELECT COUNT(*) AS count FROM customers ${filter.sql}`,
+        filter.params,
+    );
+    return { rows, total: Number(countRows[0]?.count || 0) };
+}
+
+export async function getCustomerById(customerId: string): Promise<any | null> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT * FROM customers WHERE id = ? LIMIT 1`,
+        [customerId],
+    );
+    return rows[0] || null;
 }
 
 export interface CategoryUsageSummary {

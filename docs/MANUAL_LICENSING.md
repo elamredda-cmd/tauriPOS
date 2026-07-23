@@ -86,9 +86,15 @@ npm run license:inspect -- --license ~/Desktop/Example-Shop-2027.lbjlic
 
 Return the `.lbjlic` file to the shop. Open **Settings > Shop Licence** and press **Import licence file**. Pasting the signed `LBJ1...` code is also supported.
 
-For renewal, create a fresh request and issue another licence for the same shop ID with a later expiry date. Importing it replaces the old signed token. It does not replace products, settings, orders, receipt numbers, or the SQLite database.
+For renewal, create a fresh request and issue another licence for the same shop ID with a later issue timestamp and expiry date. Importing it replaces the old signed token. A differently identified licence cannot replace a newer installed entitlement, while importing the same licence again remains safe. Activation does not replace products, settings, orders, receipt numbers, or the SQLite database.
 
 In multi-till mode, activation is written to the shared shop identity and synchronizes to the other tills. In standalone mode, it remains in that till's `pos.db`.
+
+## Registered tills
+
+**Settings > Shop Licence** lists every real register counted by the licence. An administrator can retire an unused non-current till. Retirement marks the register inactive and preserves its sales, reports, sessions, and audit history.
+
+The till currently running the app cannot retire itself. In multi-till mode, MariaDB must be connected and a till reported as online must be closed before it can be retired. If a retired till is opened again, it automatically registers itself as active and counts toward the allowance again.
 
 ## Updates, restore, and reinstall
 
@@ -112,4 +118,4 @@ Never use the disabled setting for a customer build.
 
 ## Offline limitations
 
-Because there is no vendor server, an offline licence cannot be revoked immediately and cannot automatically collect or confirm yearly payment. Expiry relies on the machine's date, so determined clock tampering is not fully preventable. The next commercial stage can add a small vendor API for renewal, revocation, recovery, and bounded offline grace while retaining signed local verification.
+Because there is no vendor server, an offline licence cannot be revoked immediately and cannot automatically collect or confirm yearly payment. Marking an issue cancelled in Licence Studio or the CRM is an administrative record; a token already installed at a shop remains valid until its signed expiry date. Expiry relies on the machine's date, so determined clock tampering is not fully preventable. The next commercial stage can add a small vendor API for renewal, revocation, recovery, and bounded offline grace while retaining signed local verification.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-support-access-request"
+description = "Enables the create_support_access_request command without any pre-configured scope."
+commands.allow = ["create_support_access_request"]
+
+[[permission]]
+identifier = "deny-create-support-access-request"
+description = "Denies the create_support_access_request command without any pre-configured scope."
+commands.deny = ["create_support_access_request"]

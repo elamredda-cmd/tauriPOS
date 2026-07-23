@@ -1,16 +1,62 @@
 mod commerce;
 mod dojo;
 mod licensing;
+mod printer_modules;
 mod sumup;
 
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs::OpenOptions,
     io::Write,
     net::{TcpStream, ToSocketAddrs},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::Manager;
+use tauri::{Manager, State};
+
+const MAX_PRINTER_JOB_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct PrinterJobQueues {
+    targets: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl PrinterJobQueues {
+    fn queue_for(&self, target: String) -> Result<Arc<Mutex<()>>, String> {
+        let mut queues = self
+            .targets
+            .lock()
+            .map_err(|_| "The printer queue is unavailable".to_string())?;
+        Ok(queues
+            .entry(target)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrinterWriteResult {
+    transport: String,
+    bytes_sent: usize,
+    job_id: Option<u32>,
+}
+
+async fn run_queued_printer_job<T, F>(queue: Arc<Mutex<()>>, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = queue
+            .lock()
+            .map_err(|_| "The printer queue is unavailable".to_string())?;
+        task()
+    })
+    .await
+    .map_err(|error| format!("Printer task failed: {error}"))?
+}
 
 #[cfg(target_os = "windows")]
 struct WindowsKeepAwake;
@@ -82,7 +128,7 @@ fn wide_ptr_to_string(ptr: *const u16) -> String {
 #[cfg(target_os = "windows")]
 fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
     use windows_sys::Win32::Graphics::Printing::{
-        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_5W,
+        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_2W,
     };
 
     let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
@@ -93,7 +139,7 @@ fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
         EnumPrintersW(
             flags,
             std::ptr::null_mut(),
-            5,
+            2,
             std::ptr::null_mut(),
             0,
             &mut needed,
@@ -110,7 +156,7 @@ fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
         EnumPrintersW(
             flags,
             std::ptr::null_mut(),
-            5,
+            2,
             buffer.as_mut_ptr(),
             needed,
             &mut needed,
@@ -122,7 +168,7 @@ fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
     }
 
     let rows = unsafe {
-        std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_5W, returned as usize)
+        std::slice::from_raw_parts(buffer.as_ptr() as *const PRINTER_INFO_2W, returned as usize)
     };
     let mut printers: Vec<SystemPrinterInfo> = rows
         .iter()
@@ -133,7 +179,7 @@ fn platform_printers() -> Result<Vec<SystemPrinterInfo>, String> {
             }
             Some(SystemPrinterInfo {
                 name,
-                driver_name: String::new(),
+                driver_name: wide_ptr_to_string(row.pDriverName),
                 port_name: wide_ptr_to_string(row.pPortName),
             })
         })
@@ -884,13 +930,21 @@ fn encode_pos_text(text: &str, encoding: &str) -> Vec<u8> {
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CctvSendResult {
+    local_address: String,
+    remote_address: String,
+    bytes_sent: usize,
+}
+
 fn send_cctv_pos_text_blocking(
     host: String,
     port: u16,
     text: String,
     timeout_ms: Option<u64>,
     encoding: Option<String>,
-) -> Result<(), String> {
+) -> Result<CctvSendResult, String> {
     let host = host.trim();
     if host.is_empty() {
         return Err("CCTV host is required".into());
@@ -915,14 +969,27 @@ fn send_cctv_pos_text_blocking(
     let mut stream = TcpStream::connect_timeout(&address, timeout)
         .map_err(|error| format!("Could not connect to CCTV POS port: {error}"))?;
     let _ = stream.set_write_timeout(Some(timeout));
+    let local_address = stream
+        .local_addr()
+        .map_err(|error| format!("Could not read the CCTV source address: {error}"))?
+        .to_string();
+    let remote_address = stream
+        .peer_addr()
+        .map_err(|error| format!("Could not read the CCTV recorder address: {error}"))?
+        .to_string();
     let payload = encode_pos_text(&text, encoding.as_deref().unwrap_or("latin1"));
+    let bytes_sent = payload.len();
     stream
         .write_all(&payload)
         .map_err(|error| format!("Could not send CCTV POS text: {error}"))?;
     stream
         .flush()
         .map_err(|error| format!("Could not flush CCTV POS text: {error}"))?;
-    Ok(())
+    Ok(CctvSendResult {
+        local_address,
+        remote_address,
+        bytes_sent,
+    })
 }
 
 #[cfg(test)]
@@ -951,7 +1018,7 @@ mod cctv_tests {
             bytes
         });
 
-        send_cctv_pos_text_blocking(
+        let result = send_cctv_pos_text_blocking(
             "127.0.0.1".into(),
             port,
             "TEST £1.23\r\n\r\n".into(),
@@ -959,6 +1026,10 @@ mod cctv_tests {
             Some("latin1".into()),
         )
         .expect("overlay should send");
+
+        assert_eq!(result.bytes_sent, b"TEST \xa31.23\r\n\r\n".len());
+        assert!(result.local_address.starts_with("127.0.0.1:"));
+        assert_eq!(result.remote_address, format!("127.0.0.1:{port}"));
 
         assert_eq!(
             receiver.join().expect("receiver thread should finish"),
@@ -974,7 +1045,7 @@ async fn send_cctv_pos_text(
     text: String,
     timeout_ms: Option<u64>,
     encoding: Option<String>,
-) -> Result<(), String> {
+) -> Result<CctvSendResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         send_cctv_pos_text_blocking(host, port, text, timeout_ms, encoding)
     })
@@ -982,13 +1053,12 @@ async fn send_cctv_pos_text(
     .map_err(|error| format!("CCTV network task failed: {error}"))?
 }
 
-#[tauri::command]
-fn send_raw_printer_data(
+fn send_raw_printer_data_blocking(
     host: String,
     port: u16,
     data: Vec<u8>,
     timeout_ms: Option<u64>,
-) -> Result<(), String> {
+) -> Result<PrinterWriteResult, String> {
     let host = host.trim();
     if host.is_empty() {
         return Err("Printer IP address is required".into());
@@ -999,8 +1069,11 @@ fn send_raw_printer_data(
     if data.is_empty() {
         return Err("Printer data is empty".into());
     }
-    if data.len() > 256_000 {
-        return Err("Printer data is too large".into());
+    if data.len() > MAX_PRINTER_JOB_BYTES {
+        return Err(format!(
+            "Printer data is too large (maximum {} MB)",
+            MAX_PRINTER_JOB_BYTES / 1024 / 1024
+        ));
     }
 
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(1_500).clamp(100, 10_000));
@@ -1019,11 +1092,35 @@ fn send_raw_printer_data(
     stream
         .flush()
         .map_err(|error| format!("Could not flush printer data: {error}"))?;
-    Ok(())
+    Ok(PrinterWriteResult {
+        transport: "network".into(),
+        bytes_sent: data.len(),
+        job_id: None,
+    })
 }
 
 #[tauri::command]
-fn send_device_printer_data(device_path: String, data: Vec<u8>) -> Result<(), String> {
+async fn send_raw_printer_data(
+    queues: State<'_, PrinterJobQueues>,
+    host: String,
+    port: u16,
+    data: Vec<u8>,
+    timeout_ms: Option<u64>,
+) -> Result<PrinterWriteResult, String> {
+    let target = format!("network:{}:{port}", host.trim().to_ascii_lowercase());
+    let queue = queues.queue_for(target)?;
+    run_queued_printer_job(queue, move || {
+        send_raw_printer_data_blocking(host, port, data, timeout_ms)
+    })
+    .await
+}
+
+fn send_device_printer_data_blocking(
+    device_path: String,
+    data: Vec<u8>,
+    baud_rate: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<PrinterWriteResult, String> {
     let device_path = device_path.trim();
     if device_path.is_empty() {
         return Err("Printer device path is required".into());
@@ -1031,31 +1128,45 @@ fn send_device_printer_data(device_path: String, data: Vec<u8>) -> Result<(), St
     if data.is_empty() {
         return Err("Printer data is empty".into());
     }
-    if data.len() > 256_000 {
-        return Err("Printer data is too large".into());
+    if data.len() > MAX_PRINTER_JOB_BYTES {
+        return Err(format!(
+            "Printer data is too large (maximum {} MB)",
+            MAX_PRINTER_JOB_BYTES / 1024 / 1024
+        ));
     }
-
-    #[cfg(target_os = "windows")]
-    let path = {
-        let upper = device_path.to_ascii_uppercase();
-        if upper.starts_with("COM") && !device_path.starts_with(r"\\.\") {
-            format!(r"\\.\{device_path}")
-        } else {
-            device_path.to_string()
-        }
-    };
-    #[cfg(not(target_os = "windows"))]
-    let path = device_path.to_string();
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(|error| format!("Could not open printer device {device_path}: {error}"))?;
-    file.write_all(&data)
+    let baud_rate = baud_rate.unwrap_or(9_600).clamp(300, 921_600);
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(2_000).clamp(100, 15_000));
+    let mut port = serialport::new(device_path, baud_rate)
+        .timeout(timeout)
+        .open()
+        .map_err(|error| {
+            format!("Could not open printer device {device_path} at {baud_rate} baud: {error}")
+        })?;
+    port.write_all(&data)
         .map_err(|error| format!("Could not write printer data: {error}"))?;
-    file.flush()
+    port.flush()
         .map_err(|error| format!("Could not flush printer data: {error}"))?;
-    Ok(())
+    Ok(PrinterWriteResult {
+        transport: "serial".into(),
+        bytes_sent: data.len(),
+        job_id: None,
+    })
+}
+
+#[tauri::command]
+async fn send_device_printer_data(
+    queues: State<'_, PrinterJobQueues>,
+    device_path: String,
+    data: Vec<u8>,
+    baud_rate: Option<u32>,
+    timeout_ms: Option<u64>,
+) -> Result<PrinterWriteResult, String> {
+    let target = format!("device:{}", device_path.trim().to_ascii_lowercase());
+    let queue = queues.queue_for(target)?;
+    run_queued_printer_job(queue, move || {
+        send_device_printer_data_blocking(device_path, data, baud_rate, timeout_ms)
+    })
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -1070,13 +1181,12 @@ fn last_windows_error(context: &str) -> String {
     format!("{context} (Windows error {code})")
 }
 
-#[tauri::command]
 #[cfg(target_os = "windows")]
-fn send_system_printer_data(
+fn send_system_printer_data_blocking(
     printer_name: String,
     data: Vec<u8>,
     document_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<PrinterWriteResult, String> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Graphics::Printing::{
@@ -1091,8 +1201,11 @@ fn send_system_printer_data(
     if data.is_empty() {
         return Err("Printer data is empty".into());
     }
-    if data.len() > 256_000 {
-        return Err("Printer data is too large".into());
+    if data.len() > MAX_PRINTER_JOB_BYTES {
+        return Err(format!(
+            "Printer data is too large (maximum {} MB)",
+            MAX_PRINTER_JOB_BYTES / 1024 / 1024
+        ));
     }
 
     let mut printer_name_w = wide_null(printer_name);
@@ -1144,35 +1257,51 @@ fn send_system_printer_data(
         if wrote == 0 || written as usize != data.len() {
             return Err(last_windows_error("Could not write raw printer data"));
         }
-        Ok(())
+        Ok(PrinterWriteResult {
+            transport: "windows-spooler".into(),
+            bytes_sent: data.len(),
+            job_id: Some(job),
+        })
     })();
 
     unsafe { ClosePrinter(printer) };
     result
 }
 
-#[tauri::command]
 #[cfg(target_os = "macos")]
-fn send_system_printer_data(
+fn send_system_printer_data_blocking(
     _printer_name: String,
     _data: Vec<u8>,
     _document_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<PrinterWriteResult, String> {
     Err("Raw USB/system printer mode uses the Windows print spooler and is not available on macOS. Use network ESC/POS or a macOS device path instead.".into())
 }
 
-#[tauri::command]
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn send_system_printer_data(
+fn send_system_printer_data_blocking(
     _printer_name: String,
     _data: Vec<u8>,
     _document_name: Option<String>,
-) -> Result<(), String> {
+) -> Result<PrinterWriteResult, String> {
     Err("Raw USB/system printer mode is currently available on Windows only. Use network ESC/POS or serial device path on this machine.".into())
 }
 
 #[tauri::command]
-fn open_cash_drawer(
+async fn send_system_printer_data(
+    queues: State<'_, PrinterJobQueues>,
+    printer_name: String,
+    data: Vec<u8>,
+    document_name: Option<String>,
+) -> Result<PrinterWriteResult, String> {
+    let target = format!("system:{}", printer_name.trim().to_ascii_lowercase());
+    let queue = queues.queue_for(target)?;
+    run_queued_printer_job(queue, move || {
+        send_system_printer_data_blocking(printer_name, data, document_name)
+    })
+    .await
+}
+
+fn open_cash_drawer_blocking(
     host: String,
     port: u16,
     pin: Option<u8>,
@@ -1215,6 +1344,24 @@ fn open_cash_drawer(
     Ok(())
 }
 
+#[tauri::command]
+async fn open_cash_drawer(
+    queues: State<'_, PrinterJobQueues>,
+    host: String,
+    port: u16,
+    pin: Option<u8>,
+    pulse_on_ms: Option<u16>,
+    pulse_off_ms: Option<u16>,
+    timeout_ms: Option<u64>,
+) -> Result<(), String> {
+    let target = format!("network:{}:{port}", host.trim().to_ascii_lowercase());
+    let queue = queues.queue_for(target)?;
+    run_queued_printer_job(queue, move || {
+        open_cash_drawer_blocking(host, port, pin, pulse_on_ms, pulse_off_ms, timeout_ms)
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1222,6 +1369,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            app.manage(PrinterJobQueues::default());
             if let Err(error) = commerce::apply_pending_restore_on_startup(app.handle()) {
                 eprintln!("Could not apply pending database restore: {error}");
             }
@@ -1258,9 +1406,15 @@ pub fn run() {
             select_restore_database_file,
             read_scale_weight,
             open_cash_drawer,
+            printer_modules::list_printer_modules,
+            printer_modules::install_printer_module,
+            printer_modules::set_printer_module_enabled,
+            printer_modules::uninstall_printer_module,
+            printer_modules::execute_printer_module,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,
             commerce::commit_online_reversal,
+            commerce::commit_online_loyalty_sale,
             commerce::allocate_mysql_till_sequence,
             commerce::create_local_backup,
             commerce::latest_local_backup,
@@ -1273,6 +1427,8 @@ pub fn run() {
             licensing::create_manual_license_request,
             licensing::activate_manual_license,
             licensing::activate_manual_license_file,
+            licensing::create_support_access_request,
+            licensing::activate_support_access,
             dojo::dojo_get_config,
             dojo::dojo_save_config,
             dojo::dojo_clear_secret,

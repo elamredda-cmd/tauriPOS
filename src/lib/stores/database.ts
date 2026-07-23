@@ -44,8 +44,6 @@ const POS_LIGHT_ROUTE_TABLES = [
     'discounts',
     'promo_groups',
     'promo_group_items',
-    'shifts',
-    'cash_movements',
 ] as const;
 const ITEM_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -89,7 +87,6 @@ const CATEGORY_LIGHT_ROUTE_TABLES = [
     'settings',
 ] as const;
 const CUSTOMER_LIGHT_ROUTE_TABLES = [
-    'customers',
     'employees',
     'settings',
 ] as const;
@@ -463,15 +460,29 @@ function auditJson(value: any): string {
     return JSON.stringify(sanitizeAuditValue(value));
 }
 
-function comparableAuditValue(value: any): any {
-    if (value === undefined) return undefined;
-    if (value === null) return null;
+const AUDIT_BOOLEAN_FIELDS = new Set([
+    'autoApply',
+    'isActive',
+    'isDefault',
+    'isPriceOverride',
+    'isWeighable',
+    'showInGoods',
+    'trackStock',
+]);
+
+function comparableAuditValue(value: any, key = ''): any {
+    // SQLite and form controls can represent the same empty/boolean value differently.
+    if (value === undefined || value === null || value === '') return '';
+    if (AUDIT_BOOLEAN_FIELDS.has(key)) {
+        if (value === true || value === 1 || value === '1' || String(value).toLowerCase() === 'true') return true;
+        if (value === false || value === 0 || value === '0' || String(value).toLowerCase() === 'false') return false;
+    }
     if (Array.isArray(value)) return value.map(item => comparableAuditValue(item));
     if (typeof value === 'object') {
         const result: Record<string, any> = {};
-        for (const [key, childValue] of Object.entries(value)) {
-            if (key === 'updatedAt') continue;
-            result[key] = comparableAuditValue(childValue);
+        for (const [childKey, childValue] of Object.entries(value)) {
+            if (childKey === 'updatedAt') continue;
+            result[childKey] = comparableAuditValue(childValue, childKey);
         }
         return result;
     }
@@ -488,6 +499,10 @@ function currentAuditEmployeeId(): string {
 }
 
 async function persistAuditLog(row: any): Promise<void> {
+    if (!isTauri()) {
+        auditLogDB.update((logs) => [row, ...logs.filter((log) => log.id !== row.id)]);
+        return;
+    }
     await sqlite.upsert('audit_logs', row, 'id');
     if (!isMultiMode()) return;
     await queueOffline('audit_logs', 'upsert', row, 'id');
@@ -1086,11 +1101,15 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'cctv_pos_enabled', 'cctv_pos_host', 'cctv_pos_port', 'cctv_pos_number',
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
     'cctv_pos_line_width', 'cctv_pos_send_items', 'cctv_pos_send_receipts',
+    'cctv_pos_framing', 'cctv_pos_start_marker', 'cctv_pos_line_separator',
+    'cctv_pos_end_marker',
     'cash_drawer_enabled', 'cash_drawer_printer_host', 'cash_drawer_printer_port',
     'cash_drawer_printer_name', 'cash_drawer_printer_device_path',
+    'cash_drawer_module_id', 'cash_drawer_module_device_id', 'cash_drawer_baud_rate',
     'cash_drawer_pin', 'cash_drawer_pulse_on_ms', 'cash_drawer_pulse_off_ms',
     'receipt_printer_enabled', 'receipt_printer_connection', 'receipt_printer_host',
     'receipt_printer_port', 'receipt_printer_name', 'receipt_printer_device_path',
+    'receipt_printer_module_id', 'receipt_printer_module_device_id',
     'receipt_printer_baud_rate', 'receipt_printer_paper_width', 'receipt_printer_model',
     'receipt_printer_auto_print_after_payment', 'receipt_printer_cut_paper',
     'receipt_printer_cut_feed_lines',
@@ -1098,7 +1117,8 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'receipt_printer_encoding',
     'label_printer_enabled', 'label_printer_connection', 'label_printer_protocol',
     'label_printer_host', 'label_printer_port', 'label_printer_name',
-    'label_printer_device_path', 'label_printer_baud_rate', 'label_printer_cut_paper',
+    'label_printer_device_path', 'label_printer_module_id', 'label_printer_module_device_id',
+    'label_printer_baud_rate', 'label_printer_cut_paper',
     'label_printer_gap_lines', 'label_printer_dpi',
     'scale_hardware_enabled', 'scale_hardware_device_path', 'scale_hardware_baud_rate',
     'scale_hardware_poll_ms', 'scale_hardware_request_mode',
@@ -2048,6 +2068,32 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
     );
 }
 
+/** Save customer profiles server-first so a duplicate loyalty code cannot win on two tills. */
+export async function saveCustomerProfile(customer: any): Promise<void> {
+    if (!customer?.id) throw new Error('Customer ID is required');
+    const auditBefore = await getAuditBefore('customers', customer, 'id');
+
+    if (isMultiMode()) {
+        const state = get(connectionState);
+        if (!state.mysqlOnline) {
+            throw new Error('Customer changes require the shared MariaDB database to be online');
+        }
+        await mysql.mysqlSaveCustomerStrict(customer);
+    }
+
+    await sqlite.upsert('customers', customer, 'id');
+    if (shouldAuditTableMutation('customers', customer)) {
+        const auditAfter = await getLocalRow('customers', 'id', customer.id);
+        await recordTableAudit(
+            'customers',
+            auditBefore ? 'updated' : 'created',
+            'id',
+            auditBefore,
+            auditAfter || customer,
+        );
+    }
+}
+
 export async function remove(table: string, id: string, idKey: string = 'id'): Promise<void> {
     const auditBefore = AUDITED_TABLES.has(table) ? await getLocalRow(table, idKey, id) : null;
     await sqlite.remove(table, id, idKey);
@@ -2386,6 +2432,8 @@ export async function ensureSharedSettingValue(key: string, candidate: string): 
 export interface CustomerUsage {
     orders: number;
     loyaltyEntries: number;
+    loyaltyPoints: number;
+    sharedVerified: boolean;
 }
 
 export interface CustomerLoyaltyHistoryRow {
@@ -2412,7 +2460,19 @@ export async function isCustomerLoyaltyCodeInUse(
          LIMIT 1`,
         [normalized, excludeCustomerId],
     );
-    return rows.length > 0;
+    if (rows.length > 0) return true;
+    if (!isMultiMode() || !get(connectionState).mysqlOnline) return false;
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('Could not verify the loyalty code against MariaDB');
+    const remoteRows: any[] = await remote.select(
+        `SELECT 1
+         FROM customers
+         WHERE loyaltyCode = ?
+           AND id <> ?
+         LIMIT 1`,
+        [normalized, excludeCustomerId],
+    );
+    return remoteRows.length > 0;
 }
 
 export async function getCustomerUsage(customerId: string): Promise<CustomerUsage> {
@@ -2420,19 +2480,101 @@ export async function getCustomerUsage(customerId: string): Promise<CustomerUsag
     const rows: any[] = await d.select(
         `SELECT
             (SELECT COUNT(*) FROM orders WHERE customerId = ?) AS orders,
-            (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries`,
-        [customerId, customerId],
+            (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries,
+            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints`,
+        [customerId, customerId, customerId],
     );
-    return {
+    const localUsage: CustomerUsage = {
         orders: Number(rows[0]?.orders || 0),
         loyaltyEntries: Number(rows[0]?.loyaltyEntries || 0),
+        loyaltyPoints: Number(rows[0]?.loyaltyPoints || 0),
+        sharedVerified: false,
     };
+
+    if (!isMultiMode()) return localUsage;
+    const state = get(connectionState);
+    if (!state.mysqlOnline) {
+        throw new Error('Customer deletion requires the shared MariaDB database to be online');
+    }
+    if (await pendingReportWriteCount() > 0) await flushOfflineQueue();
+    if (await pendingReportWriteCount() > 0) {
+        throw new Error('Pending sales must synchronize before a customer can be deleted');
+    }
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('The shared MariaDB database is unavailable');
+    const remoteRows: any[] = await remote.select(
+        `SELECT
+            (SELECT COUNT(*) FROM orders WHERE customerId = ?) AS orders,
+            (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries,
+            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints`,
+        [customerId, customerId, customerId],
+    );
+    const remotePoints = Number(remoteRows[0]?.loyaltyPoints || 0);
+    return {
+        orders: Math.max(localUsage.orders, Number(remoteRows[0]?.orders || 0)),
+        loyaltyEntries: Math.max(localUsage.loyaltyEntries, Number(remoteRows[0]?.loyaltyEntries || 0)),
+        loyaltyPoints: remotePoints !== 0 ? remotePoints : localUsage.loyaltyPoints,
+        sharedVerified: true,
+    };
+}
+
+export async function removeCustomerSafely(customerId: string): Promise<void> {
+    const usage = await getCustomerUsage(customerId);
+    if (usage.loyaltyPoints !== 0) {
+        throw new Error('This customer still has a loyalty-points balance and cannot be deleted');
+    }
+    if (usage.orders > 0 || usage.loyaltyEntries > 0) {
+        throw new Error('This customer has linked sales or loyalty history and cannot be deleted');
+    }
+
+    if (isMultiMode()) {
+        const remote = await getMysqlDb();
+        if (!remote) throw new Error('The shared MariaDB database is unavailable');
+        const result: any = await remote.execute(
+            `DELETE FROM customers
+             WHERE id = ?
+               AND COALESCE(loyaltyPoints, 0) = 0
+               AND NOT EXISTS (SELECT 1 FROM orders WHERE customerId = ? LIMIT 1)
+               AND NOT EXISTS (SELECT 1 FROM loyalty_logs WHERE customerId = ? LIMIT 1)`,
+            [customerId, customerId, customerId],
+        );
+        if (Number(result?.rowsAffected || 0) === 0) {
+            const existing: any[] = await remote.select(
+                `SELECT id FROM customers WHERE id = ? LIMIT 1`,
+                [customerId],
+            );
+            if (existing.length > 0) {
+                throw new Error('This customer changed on another till and was not deleted');
+            }
+        }
+    }
+
+    await remove('customers', customerId);
 }
 
 export async function getCustomerLoyaltyHistory(
     customerId: string,
     limit = 50,
 ): Promise<CustomerLoyaltyHistoryRow[]> {
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)));
+    if (!isTauri()) {
+        const orderNumbers = new Map(get(ordersDB).map((order) => [order.id, order.orderNumber]));
+        return get(loyaltyLogDB)
+            .filter((entry) => entry.customerId === customerId)
+            .sort((left, right) =>
+                String(right.createdAt || '').localeCompare(String(left.createdAt || ''))
+                || String(right.id || '').localeCompare(String(left.id || ''))
+            )
+            .slice(0, safeLimit)
+            .map((entry) => ({
+                id: String(entry.id || ''),
+                orderId: String(entry.orderId || ''),
+                orderNumber: orderNumbers.get(entry.orderId) ?? null,
+                pointsChange: Number(entry.pointsChange || 0),
+                reason: String(entry.reason || ''),
+                createdAt: String(entry.createdAt || ''),
+            }));
+    }
     const d = await sqlite.getDb();
     const rows: any[] = await d.select(
         `SELECT l.id, l.orderId, o.orderNumber, l.pointsChange, l.reason, l.createdAt
@@ -2441,7 +2583,7 @@ export async function getCustomerLoyaltyHistory(
          WHERE l.customerId = ?
          ORDER BY COALESCE(l.createdAt, '') DESC, l.id DESC
          LIMIT ?`,
-        [customerId, Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)))],
+        [customerId, safeLimit],
     );
     return rows.map((row) => ({
         id: String(row.id || ''),
@@ -2469,9 +2611,38 @@ export async function getAuditLogPage(options: {
     limit?: number;
     offset?: number;
 } = {}): Promise<AuditLogPage> {
-    const d = await sqlite.getDb();
     const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
     const offset = Math.max(0, Number(options.offset || 0));
+    const search = String(options.query || '').trim().toLowerCase();
+
+    if (!isTauri()) {
+        const employeeNames = new Map(get(employeesDB).map((employee) => [employee.id, employee.name]));
+        const allRows = get(auditLogDB)
+            .map((row) => ({ ...row, employeeName: employeeNames.get(row.employeeId) || '' }))
+            .filter((row) => !options.action || row.action === options.action)
+            .filter((row) => !options.entityType || row.entityType === options.entityType)
+            .filter((row) => !search || [
+                row.action,
+                row.entityType,
+                row.entityId,
+                row.oldData,
+                row.newData,
+                row.employeeName,
+            ].some((value) => String(value || '').toLowerCase().includes(search)))
+            .sort((left, right) =>
+                String(right.createdAt || '').localeCompare(String(left.createdAt || ''))
+                || String(right.id || '').localeCompare(String(left.id || ''))
+            );
+        const sourceRows = get(auditLogDB);
+        return {
+            rows: allRows.slice(offset, offset + limit),
+            total: allRows.length,
+            actions: [...new Set(sourceRows.map((row) => row.action).filter(Boolean))].sort(),
+            entities: [...new Set(sourceRows.map((row) => row.entityType).filter(Boolean))].sort(),
+        };
+    }
+
+    const d = await sqlite.getDb();
     const where: string[] = [];
     const params: any[] = [];
 
@@ -2483,7 +2654,6 @@ export async function getAuditLogPage(options: {
         where.push(`a.entityType = ?`);
         params.push(options.entityType);
     }
-    const search = String(options.query || '').trim().toLowerCase();
     if (search) {
         where.push(`(
             LOWER(COALESCE(a.action, '')) LIKE ?
@@ -2492,24 +2662,38 @@ export async function getAuditLogPage(options: {
             OR LOWER(COALESCE(a.oldData, '')) LIKE ?
             OR LOWER(COALESCE(a.newData, '')) LIKE ?
             OR LOWER(COALESCE(e.name, '')) LIKE ?
+            OR CAST(COALESCE(o.orderNumber, '') AS TEXT) LIKE ?
+            OR LOWER(COALESCE(o.paymentMethod, '')) LIKE ?
+            OR LOWER(COALESCE(order_till.name, '')) LIKE ?
+            OR LOWER(COALESCE(order_customer.name, '')) LIKE ?
         )`);
         const like = `%${search}%`;
-        params.push(like, like, like, like, like, like);
+        params.push(like, like, like, like, like, like, like, like, like, like);
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const rows: any[] = await d.select(
-        `SELECT a.*
+    const joinsSql = `
          FROM audit_logs a
          LEFT JOIN employees e ON e.id = a.employeeId
+         LEFT JOIN orders o ON a.entityType = 'order' AND o.id = a.entityId
+         LEFT JOIN registers order_till ON order_till.id = o.tillNumber
+         LEFT JOIN customers order_customer ON order_customer.id = o.customerId`;
+    const rows: any[] = await d.select(
+        `SELECT a.*,
+                e.name AS employeeName,
+                o.orderNumber AS relatedOrderNumber,
+                o.total AS relatedOrderTotal,
+                o.paymentMethod AS relatedPaymentMethod,
+                order_till.name AS relatedTillName,
+                order_customer.name AS relatedCustomerName
+         ${joinsSql}
          ${whereSql}
-         ORDER BY a.createdAt DESC, a.id ASC
+         ORDER BY a.createdAt DESC, a.id DESC
          LIMIT ? OFFSET ?`,
         [...params, limit, offset],
     );
     const countRows: any[] = await d.select(
         `SELECT COUNT(*) AS count
-         FROM audit_logs a
-         LEFT JOIN employees e ON e.id = a.employeeId
+         ${joinsSql}
          ${whereSql}`,
         params,
     );
@@ -2526,6 +2710,7 @@ export async function getAuditLogPage(options: {
 }
 
 export async function getRecentManagerApprovals(limit = 25): Promise<any[]> {
+    if (!isTauri()) return [];
     const d = await sqlite.getDb();
     return d.select(
         `SELECT *
@@ -2591,6 +2776,49 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
         total: result.total,
         totalIsCapped: result.totalIsCapped,
     };
+}
+
+export async function getCustomersPage(options: sqlite.CustomerPageOptions = {}): Promise<sqlite.CustomerPageResult> {
+    if (!isTauri()) {
+        const query = String(options.query || '').trim().toLowerCase();
+        const limit = Math.max(1, Math.min(100, Number(options.limit || 40)));
+        const offset = Math.max(0, Number(options.offset || 0));
+        const rows = get(customersDB)
+            .filter((customer) => !query || [
+                customer.name,
+                customer.postcode,
+                customer.phone,
+                customer.email,
+                customer.loyaltyCode,
+            ].some((value) => String(value || '').toLowerCase().includes(query)))
+            .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
+        return { rows: rows.slice(offset, offset + limit), total: rows.length };
+    }
+    return sqlite.getCustomersPage(options);
+}
+
+export async function getCustomerById(customerId: string): Promise<any | null> {
+    if (!isTauri()) return get(customersDB).find((customer) => customer.id === customerId) || null;
+    return sqlite.getCustomerById(customerId);
+}
+
+/** Refresh the balance used at checkout from the shared source of truth. */
+export async function getPaymentCustomer(customerId: string): Promise<any | null> {
+    if (!customerId) return null;
+    if (!isMultiMode()) return getCustomerById(customerId);
+
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('The shared MariaDB database is unavailable');
+    const rows: any[] = await remote.select(
+        `SELECT * FROM customers WHERE id = ? LIMIT 1`,
+        [customerId],
+    );
+    connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
+    if (rows.length === 0) return null;
+
+    const customer = rows[0];
+    await sqlite.upsert('customers', customer, 'id');
+    return customer;
 }
 
 export async function getProductsByIds(ids: string[], activeOnly = true, compact = false): Promise<any[]> {
@@ -2920,27 +3148,47 @@ interface CommitSaleResult {
  * as one unit if the server is unavailable. This prevents half-written sales.
  */
 export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
-    if (isMultiMode() && bundle.order?.type === 'return') {
-        const state = get(connectionState);
+    const requiresSharedLoyaltyBalance = bundle.order?.type === 'sale'
+        && Boolean(bundle.loyaltyChanges?.some((change) => change.reason === 'redeemed' && change.pointsChange < 0));
+    if (isMultiMode() && (bundle.order?.type === 'return' || requiresSharedLoyaltyBalance)) {
+        let state = get(connectionState);
         if (!state.mysqlOnline) {
-            throw new Error('Refunds and voids require the main MariaDB database to be online');
+            await pingMysql();
+            state = get(connectionState);
+        }
+        if (!state.mysqlOnline) {
+            throw new Error(requiresSharedLoyaltyBalance
+                ? 'Loyalty credit requires the main MariaDB database to be online'
+                : 'Refunds and voids require the main MariaDB database to be online');
         }
         if (state.mysqlOnline) {
             if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
             try {
-                const pendingBeforeReversal = await pendingReportWriteCount();
-                if (pendingBeforeReversal > 0) await flushOfflineQueue();
+                const pendingBeforeAuthoritativeSale = await pendingReportWriteCount();
+                if (pendingBeforeAuthoritativeSale > 0) await flushOfflineQueue();
                 if (await pendingReportWriteCount() > 0) {
-                    throw new Error('Pending sales or report closes must synchronize before a refund or void');
+                    throw new Error(requiresSharedLoyaltyBalance
+                        ? 'Pending sales must synchronize before loyalty credit can be used'
+                        : 'Pending sales or report closes must synchronize before a refund or void');
                 }
-                const committed = await invoke<CommitSaleResult>('commit_online_reversal', {
+                const command = requiresSharedLoyaltyBalance
+                    ? 'commit_online_loyalty_sale'
+                    : 'commit_online_reversal';
+                // tauri-invoke: commit_online_loyalty_sale, commit_online_reversal
+                const committed = await invoke<CommitSaleResult>(command, {
                     mysqlUri: buildMysqlUri(state.mysqlConfig),
                     bundle,
                 });
                 notifyOwnerCloudDataChanged();
                 return committed.bundle;
             } catch (e) {
-                connectionState.update(s => ({ ...s, syncError: String(e) }));
+                if (isTransientSyncError(e)) {
+                    connectionState.update((state) => ({
+                        ...state,
+                        mysqlOnline: false,
+                        syncError: String(e),
+                    }));
+                }
                 throw e;
             }
         }
@@ -3475,7 +3723,8 @@ export async function getTillName(): Promise<string> {
     const id = await sqlite.getOrCreateTillId();
     const d = await sqlite.getDb();
     const existing: any[] = await d.select(`SELECT * FROM registers WHERE id = ? LIMIT 1`, [id]);
-    if (!existing[0] || existing[0].name !== name) {
+    const existingIsActive = existing[0] && Number(existing[0].isActive ?? 1) !== 0;
+    if (!existing[0] || existing[0].name !== name || !existingIsActive) {
         const stamp = new Date().toISOString();
         await upsert('registers', {
             id,
@@ -4514,13 +4763,25 @@ export interface ConnectedTill {
     isCurrent: boolean;
 }
 
+export interface RegisteredLicenseTill {
+    id: string;
+    name: string;
+    isActive: boolean;
+    isCurrent: boolean;
+    isConnected: boolean;
+    lastSeenAt: string;
+    secondsAgo: number | null;
+}
+
+const LEGACY_LICENSE_REGISTER_IDS = new Set(['register-main', 'legacy-till']);
+
 async function publishTillPresence(force = false): Promise<void> {
     if (!isMultiMode() || isPresenceRunning) return;
     if (!force && !get(connectionState).mysqlOnline) return;
     isPresenceRunning = true;
     try {
         const tillId = await sqlite.getOrCreateTillId();
-        const tillName = await sqlite.getTillName();
+        const tillName = await getTillName();
         await mysql.mysqlTouchTillPresence(tillId, tillName);
     } finally {
         isPresenceRunning = false;
@@ -4542,6 +4803,86 @@ export async function getConnectedTills(): Promise<ConnectedTill[]> {
     await publishTillPresence(true);
     const tills = await mysql.mysqlGetConnectedTills(TILL_ONLINE_WINDOW_SECONDS);
     return tills.map((till) => ({ ...till, isCurrent: till.tillId === tillId }));
+}
+
+export async function getRegisteredLicenseTills(): Promise<RegisteredLicenseTill[]> {
+    await getTillName();
+    const currentTillId = await sqlite.getOrCreateTillId();
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT id, name, isActive, updatedAt
+         FROM registers
+         WHERE id NOT IN ('register-main', 'legacy-till')
+         ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END,
+                  CASE WHEN COALESCE(isActive, 1) <> 0 THEN 0 ELSE 1 END,
+                  name COLLATE NOCASE`,
+        [currentTillId],
+    );
+
+    let connected: ConnectedTill[] = [];
+    if (!isMultiMode() || get(connectionState).mysqlOnline) {
+        try {
+            connected = await getConnectedTills();
+        } catch (error) {
+            console.warn('database: could not read live tills for the licence page:', error);
+        }
+    }
+    const connectedById = new Map(connected.map((till) => [till.tillId, till]));
+
+    return rows.map((row) => {
+        const live = connectedById.get(String(row.id));
+        return {
+            id: String(row.id),
+            name: String(row.name || 'Till'),
+            isActive: Number(row.isActive ?? 1) !== 0,
+            isCurrent: String(row.id) === currentTillId,
+            isConnected: Boolean(live),
+            lastSeenAt: live?.lastSeenAt || String(row.updatedAt || ''),
+            secondsAgo: live ? Number(live.secondsAgo) : null,
+        };
+    });
+}
+
+export async function retireRegisteredLicenseTill(tillId: string): Promise<RegisteredLicenseTill[]> {
+    const cleanTillId = tillId.trim();
+    if (!cleanTillId || LEGACY_LICENSE_REGISTER_IDS.has(cleanTillId)) {
+        throw new Error('This till cannot be retired');
+    }
+    const currentTillId = await sqlite.getOrCreateTillId();
+    if (cleanTillId === currentTillId) {
+        throw new Error('The till currently running this app cannot be retired');
+    }
+
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(`SELECT * FROM registers WHERE id = ? LIMIT 1`, [cleanTillId]);
+    const existing = rows[0];
+    if (!existing) throw new Error('That registered till no longer exists');
+    if (Number(existing.isActive ?? 1) === 0) return getRegisteredLicenseTills();
+
+    if (isMultiMode()) {
+        if (!get(connectionState).mysqlOnline) {
+            throw new Error('Connect to MariaDB before retiring a till');
+        }
+        let connected: ConnectedTill[];
+        try {
+            connected = await getConnectedTills();
+        } catch {
+            throw new Error('The app could not confirm which tills are online. Try again when sync is connected.');
+        }
+        if (connected.some((till) => till.tillId === cleanTillId)) {
+            throw new Error('That till is currently connected. Close it before retiring it.');
+        }
+    }
+
+    await upsert('registers', {
+        ...existing,
+        id: cleanTillId,
+        isActive: false,
+        updatedAt: new Date().toISOString(),
+    });
+    if (isMultiMode()) await flushOfflineQueue();
+    await hydrateSvelteStores(['registers']);
+    return getRegisteredLicenseTills();
 }
 
 /**

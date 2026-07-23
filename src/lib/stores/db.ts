@@ -52,6 +52,7 @@ export interface Register {
     name: string;
     isActive: boolean;
     createdAt: string;
+    updatedAt?: string;
 }
 
 // 3. Employee
@@ -66,6 +67,9 @@ export interface Employee {
     isActive: boolean;
     createdAt: string;
     updatedAt?: string;
+    isSupportSession?: boolean;
+    supportSessionId?: string;
+    supportExpiresAt?: string;
 }
 
 // 4. Customer

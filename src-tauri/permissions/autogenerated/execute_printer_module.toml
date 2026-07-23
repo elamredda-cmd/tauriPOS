@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-printer-module"
+description = "Enables the execute_printer_module command without any pre-configured scope."
+commands.allow = ["execute_printer_module"]
+
+[[permission]]
+identifier = "deny-execute-printer-module"
+description = "Denies the execute_printer_module command without any pre-configured scope."
+commands.deny = ["execute_printer_module"]

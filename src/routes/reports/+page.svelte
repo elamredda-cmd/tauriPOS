@@ -290,10 +290,6 @@
     async function printThermalReport(text: string, documentName: string, busyTarget: 'main' | 'close') {
         if ((busyTarget === 'main' && reportPrintBusy) || (busyTarget === 'close' && closeReportPrintBusy)) return;
         const config = getReceiptPrinterConfig($settingsDB);
-        if (config.connection === 'system') {
-            toast('Set Receipt Printer to USB raw, Network, Serial, or Bluetooth first', 'error');
-            return;
-        }
         if (busyTarget === 'main') reportPrintBusy = true;
         else closeReportPrintBusy = true;
         try {

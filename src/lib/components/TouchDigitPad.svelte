@@ -4,6 +4,7 @@
     export let masked = false;
     export let submitLabel = "Enter";
     export let submitDisabled = false;
+    export let disabled = false;
     export let allowDecimal = false;
     export let placeholder = "Enter number";
     export let max: number | null = null;
@@ -36,10 +37,11 @@
     }
 </script>
 
-<div class="digit-pad flex flex-col gap-[.55rem]">
+<div class="digit-pad flex flex-col gap-[.55rem]" aria-busy={disabled}>
     <div
         class="digit-display flex h-[58px] min-h-[58px] items-center justify-center overflow-hidden whitespace-nowrap rounded-[.65rem] border border-border-flat bg-bg-panel px-4 py-[.7rem] text-[1.65rem] font-black leading-none tracking-[.35em] text-text-main [@media(max-height:700px)]:h-[46px] [@media(max-height:700px)]:min-h-[46px] [@media(max-height:700px)]:text-[1.3rem]"
-        aria-label="Entered digits"
+        aria-label={value ? `${value.length} digits entered` : placeholder}
+        aria-live="polite"
     >
         {#if value}
             {masked ? "●".repeat(value.length) : value}
@@ -52,34 +54,44 @@
             <button
                 type="button"
                 class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                disabled={disabled}
                 on:click={() => press(key)}
             >{key}</button>
         {/each}
         <button
             type="button"
             class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[.8rem] font-black text-danger shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+            disabled={disabled}
             on:click={() => press("clear")}
         >Clear</button>
         <button
             type="button"
             class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+            disabled={disabled}
             on:click={() => press("0")}
         >0</button>
         {#if allowDecimal}
             <button
                 type="button"
                 class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                disabled={disabled}
                 on:click={() => press(".")}
             >.</button>
             <button
                 type="button"
                 class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                disabled={disabled}
+                aria-label="Delete last digit"
+                title="Delete last digit"
                 on:click={() => press("backspace")}
             >⌫</button>
         {:else}
             <button
                 type="button"
                 class="min-h-[62px] rounded-[.65rem] border border-border-flat bg-bg-panel text-[1.35rem] font-black text-text-main shadow-[0_2px_0_var(--border-flat)] active:translate-y-px active:shadow-none [@media(max-height:700px)]:min-h-12"
+                disabled={disabled}
+                aria-label="Delete last digit"
+                title="Delete last digit"
                 on:click={() => press("backspace")}
             >⌫</button>
         {/if}
@@ -87,7 +99,7 @@
     <button
         type="button"
         class="min-h-[54px] rounded-[.65rem] border-0 bg-accent-primary text-base font-black text-white disabled:opacity-35 [@media(max-height:700px)]:min-h-[46px]"
-        disabled={submitDisabled}
+        disabled={submitDisabled || disabled}
         on:click={onSubmit}
     >{submitLabel}</button>
 </div>

@@ -20,7 +20,7 @@
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
         settingsDB, customersDB, storeDB, registersDB, discountsDB,
-        promoGroupsDB, promoGroupItemsDB
+        promoGroupsDB, promoGroupItemsDB, auditLogDB
     } from '$lib/stores/db';
     import { get } from 'svelte/store';
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
@@ -30,8 +30,10 @@
     import { canAccessPath } from '$lib/permissions';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
+    import SystemPrintHost from '$lib/components/SystemPrintHost.svelte';
     import LicenseNoticeDialog from '$lib/components/LicenseNoticeDialog.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
+    import { markAppNavigation } from '$lib/navigation';
 
     let dbReady = false;
     let dbError = '';
@@ -156,9 +158,81 @@
         }));
         hydrateTheme(get(settingsDB));
 
+        if (get(customersDB).length === 0) {
+            const timestamp = new Date().toISOString();
+            customersDB.set([{
+                id: 'browser-preview-customer',
+                name: 'Preview Customer',
+                phone: '07123 456789',
+                email: 'preview@example.com',
+                postcode: 'LU1 1AA',
+                loyaltyCode: '90000001',
+                loyaltyPoints: 150,
+                notes: 'In-memory browser preview customer',
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            }]);
+        }
+
         const previewEmployee = get(employeesDB).find((employee) =>
             employee.isActive && employee.role === 'admin'
         ) || get(employeesDB).find((employee) => employee.isActive) || null;
+        if (get(auditLogDB).length === 0 && previewEmployee) {
+            const previewProduct = get(productsDB).find((product) => product.isActive) || get(productsDB)[0];
+            const productId = previewProduct?.id || 'browser-preview-product';
+            const productName = previewProduct?.name || 'Preview Item';
+            const baseTime = Date.now();
+            const auditTime = (minutesAgo: number) => new Date(baseTime - minutesAgo * 60_000).toISOString();
+            auditLogDB.set([
+                {
+                    id: 'browser-preview-audit-sale',
+                    employeeId: previewEmployee.id,
+                    action: 'sale_completed',
+                    entityType: 'order',
+                    entityId: 'browser-preview-order',
+                    oldData: '',
+                    newData: JSON.stringify({
+                        orderNumber: 1000042,
+                        total: 625,
+                        paymentMethod: 'cash+loyalty',
+                        loyaltyCreditUsed: 125,
+                        itemLines: 2,
+                        itemQuantity: 3,
+                    }),
+                    createdAt: auditTime(2),
+                },
+                {
+                    id: 'browser-preview-audit-product',
+                    employeeId: previewEmployee.id,
+                    action: 'product_updated',
+                    entityType: 'product',
+                    entityId: productId,
+                    oldData: JSON.stringify({ id: productId, name: productName, price: 250, isActive: 1 }),
+                    newData: JSON.stringify({ id: productId, name: productName, price: 275, isActive: 1 }),
+                    createdAt: auditTime(5),
+                },
+                {
+                    id: 'browser-preview-audit-setting',
+                    employeeId: previewEmployee.id,
+                    action: 'setting_updated',
+                    entityType: 'setting',
+                    entityId: 'cctv_pos_enabled',
+                    oldData: JSON.stringify({ key: 'cctv_pos_enabled', value: 'false' }),
+                    newData: JSON.stringify({ key: 'cctv_pos_enabled', value: 'true' }),
+                    createdAt: auditTime(8),
+                },
+                {
+                    id: 'browser-preview-audit-login',
+                    employeeId: previewEmployee.id,
+                    action: 'employee_login',
+                    entityType: 'employee',
+                    entityId: previewEmployee.id,
+                    oldData: '',
+                    newData: JSON.stringify({ id: previewEmployee.id, name: previewEmployee.name, role: previewEmployee.role }),
+                    createdAt: auditTime(12),
+                },
+            ]);
+        }
         if (!get(currentEmployee) && previewEmployee) {
             currentEmployee.set(previewEmployee);
         }
@@ -325,6 +399,10 @@
     $: applyTypography($settingsDB);
 
     $: if (dbReady && typeof window !== 'undefined') {
+        markAppNavigation($page.url.pathname);
+    }
+
+    $: if (dbReady && typeof window !== 'undefined') {
         const pathname = $page.url.pathname;
         const hasActiveAdmin = get(employeesDB).some((employee) =>
             employee.isActive && employee.role === 'admin'
@@ -356,6 +434,7 @@
 
     $: if (
         dbReady &&
+        isTauri() &&
         typeof window !== 'undefined' &&
         isLightStorePath($page.url.pathname) &&
         $page.url.pathname !== lastLightHydrationPath
@@ -398,6 +477,7 @@
     </div>
 {/if}
 {#if $page.url.pathname !== '/customer-display'}
+<SystemPrintHost />
 <LicenseNoticeDialog enabled={dbReady} />
 <Toast />
 <GlobalTouchInput />

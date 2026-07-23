@@ -19,6 +19,7 @@
     let productLoadToken = 0;
     let mounted = false;
     let printingLabels = false;
+    let printCancellation: { cancelled: boolean } | null = null;
     let printSheetProducts: Product[] = [];
     let showLargePrintConfirm = false;
     const LARGE_PRINT_THRESHOLD = 50;
@@ -31,6 +32,8 @@
     $: printPageHeight = Math.max(15, Math.min(297, Number(design.heightMm) || 30));
     $: printerModeLabel = systemPrintMode
         ? 'System print dialog'
+        : labelPrinter.connection === 'module'
+            ? 'Installed printer module'
         : labelPrinter.protocol === 'star'
             ? 'Star Graphic'
             : labelPrinter.protocol === 'tspl'
@@ -44,11 +47,14 @@
             ? `${labelPrinter.host || 'No IP address'}:${labelPrinter.port}`
             : labelPrinter.connection === 'usb_raw'
                 ? labelPrinter.printerName || 'No Windows printer selected'
+                : labelPrinter.connection === 'module'
+                    ? labelPrinter.moduleDeviceId || labelPrinter.moduleId || 'No printer module selected'
                 : labelPrinter.devicePath || 'No printer port selected';
     $: printerReady = labelPrinter.enabled && (
         systemPrintMode
         || (labelPrinter.connection === 'network_escpos' && Boolean(labelPrinter.host.trim()))
         || (labelPrinter.connection === 'usb_raw' && Boolean(labelPrinter.printerName.trim()))
+        || (labelPrinter.connection === 'module' && Boolean(labelPrinter.moduleId.trim()))
         || ((labelPrinter.connection === 'serial' || labelPrinter.connection === 'bluetooth') && Boolean(labelPrinter.devicePath.trim()))
     );
 
@@ -153,6 +159,12 @@
         void printLabels();
     }
 
+    function stopPrintingLabels() {
+        if (!printCancellation) return;
+        printCancellation.cancelled = true;
+        toast('Stopping after the current printer batch', 'info');
+    }
+
     async function printLabels() {
         if (totalLabels === 0) { toast('Select at least one item', 'error'); return; }
         if (printingLabels) return;
@@ -180,17 +192,30 @@
             return;
         }
         printingLabels = true;
+        const cancellation = { cancelled: false };
+        printCancellation = cancellation;
         let printedCount = 0;
         try {
             for (const item of jobs) {
-                await printProductLabels({
-                    product: item.product,
-                    store: $storeDB,
-                    design,
-                    quantity: item.quantity,
-                }, labelPrinter);
-                printedCount += item.quantity;
-                deselectPrintedProduct(item.product.id);
+                let itemPrinted = 0;
+                try {
+                    await printProductLabels({
+                        product: item.product,
+                        store: $storeDB,
+                        design,
+                        quantity: item.quantity,
+                    }, labelPrinter, {
+                        signal: cancellation,
+                        onCopiesSent: (copies) => {
+                            itemPrinted += copies;
+                            printedCount += copies;
+                        },
+                    });
+                } finally {
+                    const remaining = Math.max(0, item.quantity - itemPrinted);
+                    if (remaining === 0) deselectPrintedProduct(item.product.id);
+                    else if (itemPrinted > 0) setQuantity(item.product.id, remaining);
+                }
             }
             toast(`${requestedTotal} label${requestedTotal === 1 ? '' : 's'} sent to printer`, 'success');
         } catch (error) {
@@ -198,6 +223,7 @@
             toast(`${prefix}Labels did not finish printing: ${error}`, 'error');
         } finally {
             printingLabels = false;
+            printCancellation = null;
             void tick().then(() => searchInput?.focus({ preventScroll: true }));
         }
     }
@@ -210,6 +236,9 @@
 <MgmtPage title="Quick Label Print">
     <div slot="actions" class="flex gap-3">
         <button class="btn btn-danger" disabled={selected.size === 0 || printingLabels} on:click={clearSelected}>Clear</button>
+        {#if printingLabels && !systemPrintMode}
+            <button class="btn btn-danger" on:click={stopPrintingLabels}>Stop Printing</button>
+        {/if}
         <button class="btn btn-primary" disabled={totalLabels === 0 || printingLabels || !printerReady} on:click={requestPrintLabels}>{printingLabels ? 'Printing...' : `Print ${totalLabels} Label${totalLabels === 1 ? '' : 's'}`}</button>
     </div>
     <div class="flex h-full min-h-0 flex-col">

@@ -18,6 +18,7 @@ export const roleDescriptions: Record<Employee['role'], string> = {
 
 export type PermissionKey =
     | 'open_items'
+    | 'open_customers'
     | 'open_discounts'
     | 'open_reports'
     | 'open_settings'
@@ -29,10 +30,12 @@ export type PermissionKey =
     | 'price_override'
     | 'refund_void'
     | 'manual_discount'
+    | 'open_cash_drawer'
     | 'end_day_close';
 
 export const permissionLabels: Record<PermissionKey, string> = {
     open_items: 'Open Items',
+    open_customers: 'Open Customers',
     open_discounts: 'Open Discounts',
     open_reports: 'Open Reports',
     open_settings: 'Open Settings',
@@ -44,6 +47,7 @@ export const permissionLabels: Record<PermissionKey, string> = {
     price_override: 'Override Prices',
     refund_void: 'Refund / Void Sales',
     manual_discount: 'Apply Manual Discounts',
+    open_cash_drawer: 'Open Cash Drawer',
     end_day_close: 'End Day / Z Report',
 };
 
@@ -52,13 +56,13 @@ export type RolePermissionMatrix = Record<Employee['role'], PermissionKey[]>;
 export const defaultRolePermissions: RolePermissionMatrix = {
     admin: Object.keys(permissionLabels) as PermissionKey[],
     manager: [
-        'open_items', 'open_discounts', 'open_reports', 'open_settings',
+        'open_items', 'open_customers', 'open_discounts', 'open_reports', 'open_settings',
         'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
-        'price_override', 'refund_void', 'manual_discount', 'end_day_close',
+        'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ],
     supervisor: [
         'open_reports', 'open_stock_receiving',
-        'price_override', 'refund_void', 'manual_discount', 'end_day_close',
+        'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ],
     cashier: ['manual_discount'],
 };
@@ -67,13 +71,25 @@ export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix 
     const raw = settings.find((setting) => setting.key === 'role_permissions')?.value || '';
     if (!raw.trim()) return defaultRolePermissions;
     try {
-        const parsed = JSON.parse(raw) as Partial<RolePermissionMatrix>;
+        const parsed = JSON.parse(raw) as Partial<RolePermissionMatrix> & {
+            version?: number;
+            roles?: Partial<RolePermissionMatrix>;
+        };
+        const storedRoles = parsed.roles || parsed;
+        const legacy = !parsed.roles;
+        const role = (value: unknown, fallback: PermissionKey[]) => {
+            const normalized = normalizeRole(value, fallback);
+            if (legacy && normalized.includes('open_items') && !normalized.includes('open_customers')) {
+                normalized.push('open_customers');
+            }
+            return normalized;
+        };
         return {
             // Administrators are the recovery role and must never be locked out.
             admin: [...defaultRolePermissions.admin],
-            manager: normalizeRole(parsed.manager, defaultRolePermissions.manager),
-            supervisor: normalizeRole(parsed.supervisor, defaultRolePermissions.supervisor),
-            cashier: normalizeRole(parsed.cashier, defaultRolePermissions.cashier),
+            manager: role(storedRoles.manager, defaultRolePermissions.manager),
+            supervisor: role(storedRoles.supervisor, defaultRolePermissions.supervisor),
+            cashier: role(storedRoles.cashier, defaultRolePermissions.cashier),
         };
     } catch {
         return defaultRolePermissions;
@@ -97,7 +113,7 @@ export function hasPermission(
 }
 
 export function serializeRolePermissions(matrix: RolePermissionMatrix): string {
-    return JSON.stringify(matrix);
+    return JSON.stringify({ version: 2, roles: matrix });
 }
 
 const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
@@ -105,7 +121,7 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
     { path: '/tiles', permission: 'open_design' },
     { path: '/items', permission: 'open_items' },
     { path: '/categories', permission: 'open_items' },
-    { path: '/customers', permission: 'open_items' },
+    { path: '/customers', permission: 'open_customers' },
     { path: '/suppliers', permission: 'open_items' },
     { path: '/tax-rates', permission: 'open_items' },
     { path: '/employees', permission: 'open_employees' },
