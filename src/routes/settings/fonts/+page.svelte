@@ -83,7 +83,7 @@
 
     function fontCardClass(active: boolean): string {
         return [
-            'relative min-h-[148px] rounded-xl border p-4 pr-12 text-left transition-all duration-150',
+            'relative min-h-[148px] rounded-lg border p-4 pr-12 text-left transition-colors duration-150',
             active
                 ? 'border-accent-primary bg-accent-primary text-white shadow-[0_14px_34px_var(--shadow)] ring-2 ring-accent-primary/35'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
@@ -164,7 +164,7 @@
                         Choose the font used across the POS, cart, management screens, buttons, inputs, and popups.
                     </p>
                 </div>
-                <div class="rounded-xl border border-accent-primary bg-accent-primary/10 px-4 py-3 text-sm">
+                <div class="rounded-lg border border-accent-primary bg-accent-primary/10 px-4 py-3 text-sm">
                     <span class="block text-xs font-black uppercase tracking-[0.14em] text-accent-primary">Currently used</span>
                     <strong class="mt-1 block text-text-main">{selectedFontOption.label}</strong>
                     <span class="text-text-muted">The highlight follows this selected option.</span>
@@ -178,7 +178,7 @@
                     <h3 class="settings-section-title !mb-1">Font Family</h3>
                     <p class="m-0 text-sm text-text-muted">Tap one tile. The selected tile should move immediately.</p>
                 </div>
-                <div class="rounded-xl border border-border-flat bg-bg-panel px-4 py-3 text-right" style={fontPreviewStyle(selectedAppFont)}>
+                <div class="rounded-lg border border-border-flat bg-bg-panel px-4 py-3 text-right" style={fontPreviewStyle(selectedAppFont)}>
                     <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Preview</span>
                     <strong class="block text-2xl">Aa 123</strong>
                 </div>
@@ -280,7 +280,7 @@
 
             <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
                 {#each fontSizeSections as section}
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-4">
                         <div class="mb-3 flex items-start justify-between gap-3">
                             <div>
                                 <span class="block text-base font-black text-text-main">{section.label}</span>

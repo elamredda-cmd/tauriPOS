@@ -1,14 +1,14 @@
 <script lang="ts">
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import { Grid3X3, ListOrdered, ReceiptText, Scale, Tags } from '@lucide/svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
 
-    type StudioIcon = 'tiles' | 'scale' | 'layout' | 'label';
     type StudioTool = {
         href: string;
         eyebrow: string;
         title: string;
         description: string;
         accent: string;
-        icon: StudioIcon;
+        icon: typeof Grid3X3;
     };
 
     const tools: StudioTool[] = [
@@ -18,7 +18,7 @@
             title: 'POS Tiles',
             description: 'Arrange the product shortcuts shown on the main checkout screen.',
             accent: '#3b82f6',
-            icon: 'tiles',
+            icon: Grid3X3,
         },
         {
             href: '/design/scale',
@@ -26,7 +26,7 @@
             title: 'Scale Tiles',
             description: 'Choose and arrange the weighable products cashiers can select.',
             accent: '#10b981',
-            icon: 'scale',
+            icon: Scale,
         },
         {
             href: '/settings/layout',
@@ -34,7 +34,7 @@
             title: 'Button Layout',
             description: 'Change the order of checkout and toolbar action buttons.',
             accent: '#f59e0b',
-            icon: 'layout',
+            icon: ListOrdered,
         },
         {
             href: '/settings/labels',
@@ -42,7 +42,15 @@
             title: 'Label Designer',
             description: 'Create barcode, price, and shelf labels for products.',
             accent: '#a855f7',
-            icon: 'label',
+            icon: Tags,
+        },
+        {
+            href: '/settings/receipt',
+            eyebrow: 'Printing',
+            title: 'Receipt Designer',
+            description: 'Arrange receipt content, paper width, spacing, and footer text.',
+            accent: '#d97706',
+            icon: ReceiptText,
         },
     ];
 </script>
@@ -52,45 +60,19 @@
 </svelte:head>
 
 <div class="studio-shell">
-    <header class="studio-header">
-        <PageBackButton fallback="/admin" />
-        <div class="studio-heading">
-            <span class="studio-kicker">L&amp;Bj POS</span>
-            <h1>Design Studio</h1>
-            <p>Configure the checkout screens and controls used on every till.</p>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="Design Studio"
+        eyebrow="L&Bj POS"
+        description="Configure checkout screens, controls, labels, and receipt layouts."
+        backFallback="/admin"
+    />
 
     <main class="studio-main">
         <nav class="studio-grid" aria-label="Design Studio tools">
             {#each tools as tool}
                 <a href={tool.href} class="studio-tile" style="--tool-accent: {tool.accent}">
                     <span class="studio-icon" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                            {#if tool.icon === 'tiles'}
-                                <rect x="3" y="3" width="7" height="7" rx="1"></rect>
-                                <rect x="14" y="3" width="7" height="7" rx="1"></rect>
-                                <rect x="3" y="14" width="7" height="7" rx="1"></rect>
-                                <rect x="14" y="14" width="7" height="7" rx="1"></rect>
-                            {:else if tool.icon === 'scale'}
-                                <path d="M5 20h14"></path>
-                                <path d="M7 20l1-10h8l1 10"></path>
-                                <path d="M9 10a3 3 0 0 1 6 0"></path>
-                                <path d="M12 7v3l2 1"></path>
-                            {:else if tool.icon === 'layout'}
-                                <path d="M4 6h16"></path>
-                                <path d="M4 12h16"></path>
-                                <path d="M4 18h16"></path>
-                                <circle cx="8" cy="6" r="2"></circle>
-                                <circle cx="15" cy="12" r="2"></circle>
-                                <circle cx="11" cy="18" r="2"></circle>
-                            {:else}
-                                <path d="M5 4h12l2 2v14H5z"></path>
-                                <path d="M9 4v5h6V4"></path>
-                                <path d="M8 14h8"></path>
-                                <path d="M8 17h5"></path>
-                            {/if}
-                        </svg>
+                        <svelte:component this={tool.icon} size={23} strokeWidth={2.2} />
                     </span>
                     <span class="studio-copy">
                         <span class="studio-eyebrow">{tool.eyebrow}</span>
@@ -125,38 +107,12 @@
         overflow: hidden;
         display: flex;
         flex-direction: column;
-        gap: 0.8rem;
+        gap: 0;
         color: var(--text-main);
         background: var(--bg-base);
         font-size: var(--font-size-management);
     }
 
-    .studio-header {
-        min-height: 58px;
-        display: flex;
-        align-items: center;
-        gap: 1rem;
-        flex: 0 0 auto;
-    }
-
-    .studio-heading {
-        min-width: 0;
-    }
-
-    .studio-heading h1 {
-        margin: 0.08rem 0 0.18rem;
-        font-size: 2rem;
-        line-height: 1;
-        letter-spacing: 0;
-    }
-
-    .studio-heading p {
-        margin: 0;
-        color: var(--text-muted);
-        font-size: 0.86rem;
-    }
-
-    .studio-kicker,
     .studio-eyebrow {
         color: var(--accent-primary);
         font-size: 0.68rem;
@@ -166,20 +122,22 @@
     }
 
     .studio-main {
-        width: min(1100px, 100%);
+        width: 100%;
         flex: 1;
         min-height: 0;
-        margin: 0 auto;
+        margin: 0;
         display: grid;
-        grid-template-rows: minmax(0, 1fr) auto;
+        grid-template-rows: auto auto;
+        align-content: start;
         gap: 0.65rem;
+        overflow-y: auto;
     }
 
     .studio-grid {
         min-height: 0;
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        grid-template-rows: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-auto-rows: 122px;
         gap: 0.65rem;
     }
 
@@ -187,12 +145,12 @@
         position: relative;
         min-width: 0;
         min-height: 0;
-        padding: clamp(1rem, 2vw, 1.45rem);
+        padding: 0.8rem;
         overflow: hidden;
         display: grid;
-        grid-template-columns: 58px minmax(0, 1fr) 28px;
+        grid-template-columns: 48px minmax(0, 1fr) 20px;
         align-items: center;
-        gap: 1rem;
+        gap: 0.75rem;
         border: 1px solid var(--border-flat);
         border-left: 5px solid var(--tool-accent);
         border-radius: 0.5rem;
@@ -209,19 +167,14 @@
     }
 
     .studio-icon {
-        width: 58px;
-        height: 58px;
+        width: 48px;
+        height: 48px;
         display: grid;
         place-items: center;
         border: 1px solid var(--border-flat);
         border-radius: 0.45rem;
         background: var(--bg-panel);
         color: var(--tool-accent);
-    }
-
-    .studio-icon svg {
-        width: 31px;
-        height: 31px;
     }
 
     .studio-copy {
@@ -232,20 +185,25 @@
     }
 
     .studio-copy strong {
-        font-size: 1.3rem;
+        font-size: 1.05rem;
         line-height: 1.1;
         letter-spacing: 0;
     }
 
     .studio-copy > span:last-child {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
         color: var(--text-muted);
-        font-size: 0.84rem;
-        line-height: 1.35;
+        font-size: 0.75rem;
+        line-height: 1.3;
     }
 
     .studio-arrow {
-        width: 24px;
-        height: 24px;
+        width: 20px;
+        height: 20px;
         color: var(--text-muted);
     }
 
@@ -271,19 +229,17 @@
         color: var(--text-main);
     }
 
-    @media (max-width: 720px) {
-        .studio-shell {
-            overflow-y: auto;
-        }
-
-        .studio-main,
+    @media (max-width: 920px) {
         .studio-grid {
-            display: flex;
-            flex-direction: column;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            grid-auto-rows: 118px;
         }
+    }
 
-        .studio-tile {
-            min-height: 130px;
+    @media (max-width: 460px) {
+        .studio-grid {
+            grid-template-columns: minmax(0, 1fr);
+            grid-auto-rows: 112px;
         }
     }
 </style>

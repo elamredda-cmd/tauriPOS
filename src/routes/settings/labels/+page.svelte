@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount, tick } from 'svelte';
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import { Printer, RotateCcw, Save } from '@lucide/svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { formatMoney, now, settingsDB, storeDB, type Product } from '$lib/stores/db';
@@ -8,6 +9,7 @@
     import { toast } from '$lib/stores/toast';
     import {
         clampLabelSizePercent,
+        clampLabelNameCharacterLimit,
         defaultLabelDesign,
         getLabelDesign,
         labelSizePresets,
@@ -127,6 +129,10 @@
         };
     }
 
+    function setNameCharacterLimit(value: string) {
+        design = { ...design, nameCharacterLimit: clampLabelNameCharacterLimit(value) };
+    }
+
     function resetDesign() {
         design = { ...defaultLabelDesign };
     }
@@ -186,28 +192,26 @@
 </svelte:head>
 
 <div class="label-designer-page">
-    <header class="label-header">
-        <PageBackButton fallback="/design" />
-        <div class="label-heading">
-            <span>Design Studio</span>
-            <h1>Label Designer</h1>
-            <p>{design.widthMm} × {design.heightMm} mm{selectedProduct ? ` · ${selectedProduct.name}` : ''}</p>
-        </div>
-        <div class="header-actions">
-            <button type="button" class="secondary" disabled={savingDesign || printingLabels} on:click={resetDesign}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v6h6"></path></svg>
-                Reset
-            </button>
-            <button type="button" class="secondary" disabled={savingDesign || printingLabels} on:click={saveDesign}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path></svg>
-                {savingDesign ? 'Saving' : 'Save'}
-            </button>
-            <button type="button" class="primary" disabled={printingLabels || !selectedProduct} on:click={printLabels}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V2h12v7"></path><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
-                {printingLabels ? 'Printing' : 'Print'}
-            </button>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="Label Designer"
+        eyebrow="Design Studio"
+        description={`${design.widthMm} × ${design.heightMm} mm${selectedProduct ? ` · ${selectedProduct.name}` : ''}`}
+        backFallback="/design"
+        padded
+    >
+        <button type="button" class="btn btn-secondary" disabled={savingDesign || printingLabels} on:click={resetDesign}>
+            <RotateCcw size={18} strokeWidth={2.35} aria-hidden="true" />
+            Reset
+        </button>
+        <button type="button" class="btn btn-secondary" disabled={savingDesign || printingLabels} on:click={saveDesign}>
+            <Save size={18} strokeWidth={2.35} aria-hidden="true" />
+            {savingDesign ? 'Saving' : 'Save'}
+        </button>
+        <button type="button" class="btn btn-primary" disabled={printingLabels || !selectedProduct} on:click={printLabels}>
+            <Printer size={18} strokeWidth={2.35} aria-hidden="true" />
+            {printingLabels ? 'Printing' : 'Print'}
+        </button>
+    </AdminPageHeader>
 
     <main class="label-workspace">
         <section class="editor-panel">
@@ -283,6 +287,18 @@
 
                         <div class="select-grid font-select-grid">
                             <CustomSelect label="Font" bind:value={design.fontFamily} options={fontOptions} />
+                            <label class="character-limit-field" for="label-name-character-limit">
+                                <span>Name characters</span>
+                                <input
+                                    id="label-name-character-limit"
+                                    type="number"
+                                    min="5"
+                                    max="80"
+                                    step="1"
+                                    value={design.nameCharacterLimit}
+                                    on:input={(event) => setNameCharacterLimit(event.currentTarget.value)}
+                                />
+                            </label>
                         </div>
 
                         <div class="size-control-grid">
@@ -362,39 +378,32 @@
 
 <style>
     .label-designer-page { box-sizing: border-box; height: 100dvh; min-height: 580px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
-    .label-header { min-height: 82px; padding: .8rem 1rem; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: .85rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .label-heading { min-width: 0; }
-    .label-heading > span, .section-heading span, .preview-heading span { display: block; color: var(--accent-primary); font-size: .68rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
-    .label-heading h1 { margin: .22rem 0 .12rem; font-size: 1.42rem; line-height: 1.05; }
-    .label-heading p { max-width: 360px; margin: 0; overflow: hidden; color: var(--text-muted); font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
-    .header-actions { display: flex; gap: .5rem; }
-    .header-actions button { min-width: 88px; height: 44px; padding: 0 .72rem; display: inline-flex; align-items: center; justify-content: center; gap: .4rem; border: 1px solid var(--border-flat); border-radius: 6px; color: var(--text-main); font-weight: 900; }
-    .header-actions button svg { width: 18px; height: 18px; }
-    .header-actions .secondary { background: var(--bg-card); }
-    .header-actions .primary { border-color: var(--accent-primary); background: var(--accent-primary); color: #fff; }
+    .section-heading span, .preview-heading span { display: block; color: var(--accent-primary); font-size: .68rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
     button:disabled { cursor: not-allowed; opacity: .42; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
 
-    .label-workspace { flex: 1; min-height: 0; padding: .8rem; display: grid; grid-template-columns: minmax(470px, 1.08fr) minmax(350px, .92fr); gap: .8rem; }
+    .label-workspace { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-columns: minmax(430px, 1.08fr) minmax(320px, .92fr); gap: .65rem; }
     .editor-panel, .preview-panel { min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-flat); border-radius: 8px; background: var(--bg-panel); }
     .editor-panel { display: flex; flex-direction: column; }
-    .editor-tabs { flex: 0 0 58px; padding: .45rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: .4rem; border-bottom: 1px solid var(--border-flat); }
+    .editor-tabs { flex: 0 0 52px; padding: .35rem; display: grid; grid-template-columns: repeat(3, 1fr); gap: .35rem; border-bottom: 1px solid var(--border-flat); }
     .editor-tabs button { min-width: 0; display: flex; align-items: center; justify-content: center; gap: .45rem; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--text-muted); font-weight: 900; }
     .editor-tabs button svg { width: 18px; height: 18px; }
     .editor-tabs button.active { border-color: color-mix(in srgb, var(--accent-primary) 55%, var(--border-flat)); background: color-mix(in srgb, var(--accent-primary) 13%, var(--bg-card)); color: var(--accent-primary); }
     .editor-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 
-    .item-tools { padding: .65rem; display: flex; align-items: center; gap: .6rem; border-bottom: 1px solid var(--border-flat); }
-    .search-box { flex: 1; height: 44px; padding: 0 .65rem; display: flex; align-items: center; gap: .5rem; border: 1px solid var(--border-flat); border-radius: 6px; background: var(--bg-base); }
+    .item-tools { padding: .55rem; display: flex; align-items: center; gap: .55rem; border-bottom: 1px solid var(--border-flat); }
+    .search-box { flex: 1; height: 42px; padding: 0 .65rem; display: flex; align-items: center; gap: .5rem; border: 1px solid var(--border-flat); border-radius: 6px; background: var(--bg-base); }
     .search-box:focus-within { border-color: var(--accent-primary); }
     .search-box > svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--text-muted); }
     .search-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); font: inherit; }
     .search-box button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); }
     .search-box button svg { width: 16px; height: 16px; }
     .result-count { flex: 0 0 auto; color: var(--text-muted); font-size: .72rem; font-weight: 800; }
-    .product-results { flex: 1; min-height: 0; overflow-y: auto; padding: .5rem; scrollbar-color: var(--accent-primary) var(--bg-card); }
-    .product-results > button { width: 100%; min-height: 54px; padding: .45rem .65rem; display: grid; grid-template-columns: minmax(0, 1fr) auto 21px; align-items: center; gap: .6rem; border: 0; border-bottom: 1px solid var(--border-flat); background: transparent; color: var(--text-main); text-align: left; }
+    .product-results { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .45rem; scrollbar-color: var(--accent-primary) var(--bg-card); }
+    .product-results > button { width: 100%; min-height: 52px; padding: .4rem .6rem; display: grid; grid-template-columns: minmax(0, 1fr) auto 21px; align-items: center; gap: .55rem; border: 0; border-bottom: 1px solid var(--border-flat); background: transparent; color: var(--text-main); text-align: left; }
     .product-results > button:first-of-type { border-top: 1px solid var(--border-flat); }
-    .product-results > button.selected { background: color-mix(in srgb, var(--accent-primary) 13%, transparent); color: var(--accent-primary); }
+    .product-results > button:hover { background: color-mix(in srgb, var(--text-main) 5%, transparent); }
+    .product-results > button.selected { box-shadow: inset 3px 0 0 var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 13%, transparent); color: var(--accent-primary); }
     .product-results > button span { min-width: 0; }
     .product-results strong, .product-results small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .product-results strong { font-size: .86rem; }
@@ -404,40 +413,43 @@
     .empty-state { height: 100%; min-height: 160px; display: grid; place-items: center; color: var(--text-muted); font-weight: 800; }
     .empty-state.error { color: var(--danger); }
 
-    .section-heading { min-height: 58px; padding: .7rem .8rem; display: flex; align-items: center; border-bottom: 1px solid var(--border-flat); }
+    .section-heading { min-height: 52px; padding: .6rem .7rem; display: flex; align-items: center; border-bottom: 1px solid var(--border-flat); }
     .section-heading h2, .preview-heading h2 { margin: .22rem 0 0; overflow: hidden; font-size: 1rem; line-height: 1.05; text-overflow: ellipsis; white-space: nowrap; }
-    .preset-grid { flex: 1; min-height: 0; overflow-y: auto; padding: .65rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(48px, 1fr); gap: .4rem; }
+    .preset-grid { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .55rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(44px, 1fr); gap: .35rem; }
     .preset-grid button, .template-grid button { min-width: 0; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); font-weight: 850; }
     .preset-grid button.active, .template-grid button.active { border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 14%, var(--bg-card)); color: var(--accent-primary); }
-    .size-fields { padding: .65rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; border-top: 1px solid var(--border-flat); }
+    .size-fields { padding: .55rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; border-top: 1px solid var(--border-flat); }
     .size-fields label { min-width: 0; color: var(--text-muted); font-size: .7rem; font-weight: 900; }
-    .size-fields input { box-sizing: border-box; width: 100%; height: 42px; margin-top: .3rem; padding: 0 .6rem; border: 1px solid var(--border-flat); border-radius: 5px; outline: 0; background: var(--bg-base); color: var(--text-main); font: inherit; font-size: .88rem; }
+    .size-fields input { box-sizing: border-box; width: 100%; height: 40px; margin-top: .25rem; padding: 0 .6rem; border: 1px solid var(--border-flat); border-radius: 5px; outline: 0; background: var(--bg-base); color: var(--text-main); font: inherit; font-size: .88rem; }
     .size-fields input:focus { border-color: var(--accent-primary); }
 
-    .design-scroll { height: 100%; overflow-y: auto; }
-    .template-grid { padding: .65rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .4rem; }
-    .template-grid button { min-height: 58px; padding: .45rem; text-align: left; }
+    .design-scroll { height: 100%; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: var(--accent-primary) var(--bg-card); }
+    .template-grid { padding: .55rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .35rem; }
+    .template-grid button { min-height: 54px; padding: .4rem; text-align: left; }
     .template-grid strong, .template-grid small { display: block; }
     .template-grid strong { font-size: .82rem; }
     .template-grid small { margin-top: .16rem; color: var(--text-muted); font-size: .64rem; }
-    .select-grid { padding: .65rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; border-top: 1px solid var(--border-flat); }
-    .font-select-grid { grid-template-columns: minmax(0, 1fr); }
+    .select-grid { padding: .55rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; border-top: 1px solid var(--border-flat); }
+    .font-select-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
     .select-grid :global(button) { border-radius: 5px; box-shadow: none; }
-    .size-control-grid { padding: .65rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; border-top: 1px solid var(--border-flat); }
-    .size-control-grid label { min-width: 0; min-height: 68px; padding: .55rem .65rem; display: flex; flex-direction: column; justify-content: center; gap: .45rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); }
+    .character-limit-field { min-width: 0; display: flex; flex-direction: column; gap: .38rem; color: var(--text-muted); font-size: .8rem; font-weight: 900; text-transform: uppercase; }
+    .character-limit-field input { box-sizing: border-box; width: 100%; height: 48px; padding: 0 .75rem; border: 1px solid var(--border-flat); border-radius: 5px; outline: 0; background: var(--bg-panel); color: var(--text-main); font: inherit; font-size: 1rem; text-transform: none; }
+    .character-limit-field input:focus { border-color: var(--accent-primary); background: var(--bg-card); }
+    .size-control-grid { padding: .55rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem; border-top: 1px solid var(--border-flat); }
+    .size-control-grid label { min-width: 0; min-height: 62px; padding: .45rem .55rem; display: flex; flex-direction: column; justify-content: center; gap: .35rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); }
     .size-control-grid label > span { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
     .size-control-grid b { overflow: hidden; font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
     .size-control-grid output { color: var(--accent-primary); font-size: .72rem; font-weight: 900; }
     .size-control-grid input { width: 100%; height: 22px; margin: 0; accent-color: var(--accent-primary); cursor: pointer; }
-    .visibility-grid { padding: .65rem; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem; border-top: 1px solid var(--border-flat); }
-    .visibility-grid button { min-height: 46px; padding: .45rem .6rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); font-weight: 800; text-align: left; }
+    .visibility-grid { padding: .55rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; border-top: 1px solid var(--border-flat); }
+    .visibility-grid button { min-height: 42px; padding: .38rem .5rem; display: flex; align-items: center; justify-content: space-between; gap: .4rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); font-size: .76rem; font-weight: 800; text-align: left; }
     .visibility-grid button.active { border-color: color-mix(in srgb, var(--success) 58%, var(--border-flat)); }
     .visibility-grid i { width: 36px; height: 21px; padding: 2px; flex: 0 0 auto; display: block; border-radius: 12px; background: var(--bg-card-hover); }
     .visibility-grid i b { width: 17px; height: 17px; display: block; border-radius: 50%; background: var(--text-muted); }
     .visibility-grid button.active i { background: var(--success); }
     .visibility-grid button.active i b { margin-left: 15px; background: #fff; }
-    .date-editor { padding: .65rem; border-top: 1px solid var(--border-flat); }
-    .date-editor > button { width: 100%; min-height: 52px; padding: .5rem .65rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); text-align: left; }
+    .date-editor { padding: .55rem; border-top: 1px solid var(--border-flat); }
+    .date-editor > button { width: 100%; min-height: 48px; padding: .45rem .55rem; display: flex; align-items: center; justify-content: space-between; gap: .65rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); text-align: left; }
     .date-editor > button.active { border-color: color-mix(in srgb, var(--success) 58%, var(--border-flat)); }
     .date-editor > button span { min-width: 0; }
     .date-editor > button strong, .date-editor > button small { display: block; }
@@ -448,7 +460,7 @@
     .date-editor > button.active > i { background: var(--success); }
     .date-editor > button.active > i b { margin-left: 15px; background: #fff; }
     .date-position-grid { margin-top: .5rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .4rem; }
-    .date-position-grid > button { min-width: 0; min-height: 54px; padding: .4rem; display: flex; align-items: center; justify-content: center; gap: .4rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); font-size: .68rem; font-weight: 850; }
+    .date-position-grid > button { min-width: 0; min-height: 50px; padding: .35rem; display: flex; align-items: center; justify-content: center; gap: .35rem; border: 1px solid var(--border-flat); border-radius: 5px; background: var(--bg-card); color: var(--text-main); font-size: .68rem; font-weight: 850; }
     .date-position-grid > button.active { border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 14%, var(--bg-card)); color: var(--accent-primary); }
     .position-icon { position: relative; width: 24px; height: 16px; flex: 0 0 auto; display: block; border: 1px solid currentColor; border-radius: 2px; opacity: .8; }
     .position-icon b { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
@@ -460,26 +472,28 @@
     .position-icon.bottom-right b { right: 2px; bottom: 2px; }
 
     .preview-panel { display: flex; flex-direction: column; }
-    .preview-heading { min-height: 62px; padding: .75rem .85rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; border-bottom: 1px solid var(--border-flat); }
+    .preview-heading { min-height: 56px; padding: .65rem .75rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; border-bottom: 1px solid var(--border-flat); }
     .preview-heading > div { min-width: 0; }
     .preview-heading > b { flex: 0 0 auto; color: var(--text-muted); font-size: .72rem; }
-    .preview-stage { flex: 1; min-height: 0; overflow: auto; display: grid; place-items: center; padding: 1rem; background-color: var(--bg-base); background-image: linear-gradient(var(--border-flat) 1px, transparent 1px), linear-gradient(90deg, var(--border-flat) 1px, transparent 1px); background-size: 24px 24px; }
+    .preview-stage { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; display: grid; place-items: center; padding: .75rem; background-color: var(--bg-base); background-image: linear-gradient(var(--border-flat) 1px, transparent 1px), linear-gradient(90deg, var(--border-flat) 1px, transparent 1px); background-size: 24px 24px; }
     .preview-empty { display: flex; flex-direction: column; align-items: center; gap: .65rem; color: var(--text-muted); font-weight: 800; }
     .preview-empty svg { width: 48px; height: 48px; }
-    .preview-footer { min-height: 44px; padding: 0 .85rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; border-top: 1px solid var(--border-flat); color: var(--text-muted); font-size: .72rem; font-weight: 800; }
+    .preview-footer { min-height: 40px; padding: 0 .75rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; border-top: 1px solid var(--border-flat); color: var(--text-muted); font-size: .72rem; font-weight: 800; }
     .label-print-sheet { display: none; }
 
-    @media (max-width: 820px) {
+    @media (max-width: 900px) and (min-width: 720px) {
+        .label-workspace { grid-template-columns: minmax(390px, 1.18fr) minmax(290px, .82fr); gap: .6rem; }
+        .template-grid, .visibility-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .preview-stage { padding: .55rem; }
+    }
+    @media (max-width: 719px) {
         .label-designer-page { min-height: 100dvh; height: auto; overflow: auto; }
         .label-workspace { grid-template-columns: 1fr; }
-        .editor-panel { min-height: 570px; }
-        .preview-panel { min-height: 430px; }
+        .editor-panel { height: 600px; min-height: 520px; }
+        .preview-panel { min-height: 380px; }
+        .visibility-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media (max-width: 660px) {
-        .label-header { grid-template-columns: 42px minmax(0, 1fr); }
-        .header-actions { grid-column: 1 / -1; }
-        .header-actions button { flex: 1; min-width: 0; }
-        .label-heading p { display: none; }
         .template-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     @media print {

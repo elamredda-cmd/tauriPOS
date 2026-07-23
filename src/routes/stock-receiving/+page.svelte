@@ -160,7 +160,7 @@
 
     <div class="h-full overflow-y-auto p-5">
         <div class="grid gap-5 xl:grid-cols-[1fr_420px]">
-            <section class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <section class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <div class="mb-4 grid gap-3 lg:grid-cols-3">
                     <div class="field">
                         <CustomSelect label="Supplier" bind:value={supplierId} options={supplierOptions} />
@@ -180,7 +180,7 @@
                         <label>Find Product</label>
                         <input class="search-input !min-h-11" bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
                     </div>
-                    <div class="rounded-xl border border-border-flat bg-bg-panel p-3 text-right">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3 text-right">
                         <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Receipt Total Cost</span>
                         <strong class="text-2xl text-success">{formatMoney(totalCost)}</strong>
                     </div>
@@ -190,7 +190,7 @@
                     {#each availableProducts as product}
                         <button
                             type="button"
-                            class="rounded-xl border border-border-flat bg-bg-panel p-3 text-left transition hover:border-accent-primary hover:bg-bg-card-hover"
+                            class="rounded-lg border border-border-flat bg-bg-panel p-3 text-left transition-colors hover:border-accent-primary hover:bg-bg-card-hover"
                             on:click={() => addProduct(product)}
                         >
                             <strong class="block truncate">{product.name}</strong>
@@ -199,7 +199,7 @@
                     {/each}
                 </div>
 
-                <div class="overflow-x-auto rounded-xl border border-border-flat">
+                <div class="overflow-x-auto rounded-lg border border-border-flat">
                     <table class="w-full min-w-[700px] text-left">
                         <thead class="bg-bg-panel text-sm text-text-muted">
                             <tr>
@@ -232,14 +232,14 @@
                 </div>
             </section>
 
-            <aside class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <aside class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <h2 class="m-0 mb-3 text-xl">Recent Receipts</h2>
                 {#if history.length === 0}
                     <p class="text-text-muted">No stock receipts yet.</p>
                 {:else}
                     <div class="grid gap-3">
                         {#each history as receipt}
-                            <article class="rounded-xl border border-border-flat bg-bg-panel p-3">
+                            <article class="rounded-lg border border-border-flat bg-bg-panel p-3">
                                 <strong>{receipt.reference || 'Stock receipt'}</strong>
                                 <p class="m-0 mt-1 text-sm text-text-muted">{new Date(receipt.createdAt).toLocaleString('en-GB')}</p>
                                 <p class="m-0 mt-1 text-sm font-bold text-success">{formatMoney(receipt.totalCost || 0)}</p>

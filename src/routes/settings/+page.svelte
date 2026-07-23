@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { currentEmployee } from '$lib/stores/session';
@@ -24,7 +25,6 @@
         Palette,
         PanelsTopLeft,
         Printer,
-        ReceiptText,
         Save,
         Scale,
         Smartphone,
@@ -51,7 +51,6 @@
         { title: 'POS layout', group: 'Selling screen', description: 'Cart and toolbar positions', path: '/settings/layout', accent: '#0891b2', icon: PanelsTopLeft },
         { title: 'Printers & drawer', group: 'Hardware', description: 'Receipts, labels and drawer', path: '/settings/printers', accent: '#16a34a', icon: Printer },
         { title: 'Scale', group: 'Hardware', description: 'Port and weighing setup', path: '/settings/scale', accent: '#0f766e', icon: Scale },
-        { title: 'Receipt design', group: 'Printing', description: 'Paper, content and footer', path: '/settings/receipt', accent: '#d97706', icon: ReceiptText },
         { title: 'Label design', group: 'Printing', description: 'Shelf and barcode labels', path: '/settings/labels', accent: '#ca8a04', icon: Tags },
         { title: 'Scale barcodes', group: 'Barcodes', description: 'Embedded price rules', path: '/settings/barcodes', accent: '#16a34a', icon: Barcode },
         { title: 'Customer display', group: 'Checkout', description: 'Second-screen basket', path: '/settings/customer-display', accent: '#2563eb', icon: Monitor },
@@ -83,6 +82,11 @@
     $: visibleSettingsShortcuts = settingsShortcuts.filter((entry) => !entry.adminOnly || $currentEmployee?.role === 'admin');
 
     onMount(async () => {
+        if (!isTauri()) {
+            editTillName = 'Preview Till';
+            tillId = 'preview-till';
+            return;
+        }
         editTillName = await getTillName();
         tillId = await getOrCreateTillId();
     });

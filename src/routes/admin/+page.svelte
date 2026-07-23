@@ -255,13 +255,14 @@
         display: grid;
         grid-template-columns: auto minmax(150px, 1fr) minmax(160px, auto) auto;
         align-items: center;
-        gap: 0.65rem;
-        min-height: 56px;
+        gap: 0.75rem;
+        height: 72px;
+        min-height: 72px;
     }
 
     .admin-header-btn {
-        width: 46px;
-        height: 46px;
+        width: 44px;
+        height: 44px;
         border-radius: 0.45rem;
         border: 1px solid var(--border-flat);
         background: var(--bg-card);
@@ -297,8 +298,8 @@
     }
 
     .admin-brand-logo {
-        width: 46px;
-        height: 46px;
+        width: 44px;
+        height: 44px;
         flex: 0 0 auto;
         border-radius: 0.42rem;
         object-fit: contain;
@@ -339,7 +340,7 @@
 
     .admin-user {
         min-width: 0;
-        min-height: 46px;
+        min-height: 44px;
         display: flex;
         align-items: center;
         gap: 0.55rem;
@@ -394,7 +395,7 @@
 
     .admin-grid {
         flex: 1;
-        width: calc(100% - 0.75rem);
+        width: 100%;
         min-height: 0;
         align-self: center;
         display: grid;
@@ -552,10 +553,6 @@
     @media (min-width: 701px) and (max-height: 680px) {
         .admin-page {
             gap: 0.5rem;
-        }
-
-        .admin-header {
-            min-height: 46px;
         }
 
         .admin-header-btn {

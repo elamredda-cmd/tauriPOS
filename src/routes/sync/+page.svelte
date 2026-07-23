@@ -98,24 +98,24 @@
 
     <div class="h-full overflow-y-auto p-5">
         <div class="mb-5 grid gap-4 md:grid-cols-4">
-            <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <div class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Mode</span>
                 <strong class="mt-2 block text-2xl capitalize">{$connectionState.mode}</strong>
                 <p class="m-0 mt-1 text-sm text-text-muted">{$connectionState.mysqlOnline ? 'MariaDB online' : 'Local / offline'}</p>
             </div>
-            <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <div class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Pending</span>
                 <strong class="mt-2 block text-2xl {stats.pending ? 'text-warning' : 'text-success'}">{stats.pending}</strong>
                 <p class="m-0 mt-1 text-sm text-text-muted">
                     {stats.retrying ? `${stats.retrying} waiting to retry` : 'Writes waiting to upload'}
                 </p>
             </div>
-            <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <div class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Conflicts</span>
                 <strong class="mt-2 block text-2xl {stats.conflicts ? 'text-danger' : 'text-success'}">{stats.conflicts}</strong>
                 <p class="m-0 mt-1 text-sm text-text-muted">Need review</p>
             </div>
-            <div class="rounded-2xl border border-border-flat bg-bg-card p-5">
+            <div class="rounded-lg border border-border-flat bg-bg-card p-5">
                 <span class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Schema</span>
                 <strong class="mt-2 block text-2xl {schema.ok ? 'text-success' : 'text-danger'}">{schema.ok ? 'Good' : 'Issues'}</strong>
                 <p class="m-0 mt-1 text-sm text-text-muted">SQLite and MariaDB shape</p>
@@ -123,7 +123,7 @@
         </div>
 
         {#if $connectionState.syncError}
-            <div class="mb-5 rounded-2xl border border-danger/40 bg-danger/10 p-4 text-danger">
+            <div class="mb-5 rounded-lg border border-danger/40 bg-danger/10 p-4 text-danger">
                 <strong>Sync message:</strong> {$connectionState.syncError}
             </div>
         {/if}
@@ -178,7 +178,7 @@
             {/if}
         </section>
 
-        <section class="mb-5 rounded-2xl border border-border-flat bg-bg-card p-5">
+        <section class="mb-5 rounded-lg border border-border-flat bg-bg-card p-5">
             <h2 class="m-0 mb-3 text-xl">Actions</h2>
             <div class="flex flex-wrap gap-3">
                 <button class="btn btn-primary" disabled={!!busy} on:click={() => runAction('Retry uploads', retryOfflineQueueNow)}>Retry Uploads</button>
@@ -188,20 +188,20 @@
             {#if busy}<p class="mt-3 text-sm text-text-muted">{busy} is running...</p>{/if}
         </section>
 
-        <section class="mb-5 rounded-2xl border border-border-flat bg-bg-card p-5">
+        <section class="mb-5 rounded-lg border border-border-flat bg-bg-card p-5">
             <h2 class="m-0 mb-3 text-xl">Schema Check</h2>
             {#if schema.ok}
                 <p class="m-0 text-success">All critical tables and columns are present.</p>
             {:else}
                 <div class="grid gap-2">
                     {#each schema.issues as issue}
-                        <div class="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{issue}</div>
+                        <div class="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{issue}</div>
                     {/each}
                 </div>
             {/if}
         </section>
 
-        <section class="rounded-2xl border border-border-flat bg-bg-card p-5">
+        <section class="rounded-lg border border-border-flat bg-bg-card p-5">
             <div class="mb-3 flex items-center justify-between gap-3">
                 <h2 class="m-0 text-xl">Sync Conflicts</h2>
                 <span class="text-sm text-text-muted">{conflicts.length} conflict{conflicts.length === 1 ? '' : 's'}</span>
@@ -211,7 +211,7 @@
             {:else}
                 <div class="grid gap-3">
                     {#each conflicts as conflict}
-                        <article class="rounded-xl border border-border-flat bg-bg-panel p-4">
+                        <article class="rounded-lg border border-border-flat bg-bg-panel p-4">
                             <div class="flex flex-wrap items-start justify-between gap-3">
                                 <div>
                                     <strong>{conflict.table_name} · {conflict.operation}</strong>

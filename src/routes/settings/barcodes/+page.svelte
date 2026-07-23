@@ -1,5 +1,6 @@
 <script lang="ts">
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import { PoundSterling, Save, Scale } from '@lucide/svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -235,28 +236,26 @@
 </svelte:head>
 
 <div class="barcode-page">
-    <header class="page-header">
-        <PageBackButton fallback="/settings" />
-        <div class="page-heading">
-            <span>Settings</span>
-            <h1>Scale Barcode Rules</h1>
-            <p>{rules.length} {rules.length === 1 ? 'rule' : 'rules'}{dirty ? ' · Unsaved changes' : ''}</p>
-        </div>
-        <div class="header-actions">
-            <button type="button" class="secondary" disabled={saving} on:click={() => addRule(PRICE_RULE_PRESET)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
-                Price Rule
-            </button>
-            <button type="button" class="secondary" disabled={saving} on:click={() => addRule(WEIGHT_RULE_PRESET)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
-                Weight Rule
-            </button>
-            <button type="button" class="primary" disabled={saving || !dirty || Boolean(ruleSetError) || externalUpdatePending} on:click={saveRules}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path></svg>
-                {saving ? 'Saving' : 'Save'}
-            </button>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="Scale Barcode Rules"
+        eyebrow="Settings"
+        description={`${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}${dirty ? ' · Unsaved changes' : ''}`}
+        backFallback="/settings"
+        padded
+    >
+        <button type="button" class="btn btn-secondary" disabled={saving} on:click={() => addRule(PRICE_RULE_PRESET)}>
+            <PoundSterling size={18} strokeWidth={2.35} aria-hidden="true" />
+            Price Rule
+        </button>
+        <button type="button" class="btn btn-secondary" disabled={saving} on:click={() => addRule(WEIGHT_RULE_PRESET)}>
+            <Scale size={18} strokeWidth={2.35} aria-hidden="true" />
+            Weight Rule
+        </button>
+        <button type="button" class="btn btn-primary" disabled={saving || !dirty || Boolean(ruleSetError) || externalUpdatePending} on:click={saveRules}>
+            <Save size={18} strokeWidth={2.35} aria-hidden="true" />
+            {saving ? 'Saving' : 'Save'}
+        </button>
+    </AdminPageHeader>
 
     <main class="barcode-main">
         <section class="rule-bar" aria-label="Barcode rules">
@@ -447,19 +446,10 @@
 
 <style>
     .barcode-page { box-sizing: border-box; width: 100vw; height: 100dvh; min-height: 600px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
-    .page-header { min-height: 82px; padding: .8rem 1rem; display: grid; grid-template-columns: 44px minmax(0,1fr) auto; align-items: center; gap: .85rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .page-heading { min-width: 0; }
-    .page-heading > span, .panel-header span { display: block; color: var(--accent-primary); font-size: .68rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
-    .page-heading h1 { margin: .22rem 0 .12rem; font-size: 1.42rem; line-height: 1.05; }
-    .page-heading p { margin: 0; color: var(--text-muted); font-size: .76rem; }
-    .header-actions { display: flex; gap: .45rem; }
-    .header-actions button { min-width: 108px; height: 44px; padding: 0 .72rem; display: inline-flex; align-items: center; justify-content: center; gap: .38rem; border: 1px solid var(--border-flat); border-radius: 6px; color: var(--text-main); font-weight: 900; }
-    .header-actions button svg { width: 17px; height: 17px; }
-    .header-actions .secondary { background: var(--bg-card); }
-    .header-actions .primary { border-color: var(--accent-primary); background: var(--accent-primary); color: #fff; }
+    .panel-header span { display: block; color: var(--accent-primary); font-size: .68rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
     button:disabled { cursor: not-allowed; opacity: .4; }
 
-    .barcode-main { flex: 1; min-height: 0; padding: .7rem; display: flex; flex-direction: column; gap: .55rem; }
+    .barcode-main { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: flex; flex-direction: column; gap: .55rem; }
     .rule-bar { min-height: 52px; display: flex; align-items: center; gap: .65rem; }
     .rule-tabs { min-width: 0; flex: 1; display: flex; gap: .4rem; overflow-x: auto; }
     .rule-tabs button { min-width: 150px; height: 48px; padding: .4rem .55rem; display: grid; grid-template-columns: 10px minmax(0,1fr); grid-template-rows: 1fr 1fr; column-gap: .45rem; align-items: center; border: 1px solid var(--border-flat); border-radius: 6px; background: var(--bg-card); color: var(--text-main); text-align: left; }
@@ -553,9 +543,6 @@
         .tester-panel { min-height: 320px; }
     }
     @media (max-width: 660px) {
-        .page-header { grid-template-columns: 42px minmax(0,1fr); }
-        .header-actions { grid-column: 1 / -1; }
-        .header-actions button { flex: 1; min-width: 0; }
         .primary-fields, .advanced-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
     }
 </style>

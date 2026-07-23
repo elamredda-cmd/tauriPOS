@@ -5,6 +5,7 @@ import type { ReceiptDesign } from '$lib/receipt';
 import {
     defaultLabelDesign,
     formatLabelPrintDate,
+    formatLabelProductName,
     labelSizeScale,
     type LabelDatePosition,
     type LabelDesign,
@@ -667,6 +668,10 @@ function labelBarcodeValue(product: Product): string {
     return cleanReceiptText(product.barcode || '', 48);
 }
 
+function labelProductName(product: Product, design: LabelDesign): string {
+    return formatLabelProductName(product.name, design.nameCharacterLimit);
+}
+
 function labelText(value: string, max = 36): string {
     return String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 }
@@ -906,7 +911,7 @@ function buildZplProductLabel(payload: ProductLabelPayload, dotsPerMm: number, c
     if (design.showName) {
         const nameLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
         const nameFont = widthMm >= 70 ? 30 : 26;
-        lines.push(`^FO${margin},${y}${zplFont(nameFont, design, labelNameScale(design))}^FB${width - margin * 2},${nameLines},2,C^FD${zplEscape(product.name)}^FS`);
+        lines.push(`^FO${margin},${y}${zplFont(nameFont, design, labelNameScale(design))}^FB${width - margin * 2},${nameLines},2,C^FD${zplEscape(labelProductName(product, design))}^FS`);
         y += Math.round((nameLines === 2 ? 62 : 38) * labelNameScale(design));
     }
     if (design.showPrice) {
@@ -980,7 +985,7 @@ function buildTsplProductLabel(payload: ProductLabelPayload, gapLines: number, d
         const nameScale = tsplSizeScale(design.nameSizePercent);
         const nameFont = tsplNameFont(design);
         const maxLines = widthMm >= 70 && heightMm >= 45 ? 2 : 1;
-        const nameLines = wrapLabelText(product.name, labelTextColumns(design, 'name'), maxLines);
+        const nameLines = wrapLabelText(labelProductName(product, design), labelTextColumns(design, 'name'), maxLines);
         for (const nameLine of nameLines) {
             lines.push(tsplCenteredText(width, margin, y, nameFont, nameScale, nameLine));
             y += Math.round((nameScale > 1 ? 32 : 24) * labelNameScale(design));
@@ -1399,7 +1404,7 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
             const fittedName = fitWrappedCanvasText(
                 ctx,
                 design,
-                product.name,
+                labelProductName(product, design),
                 leftWidth,
                 maxLines,
                 9,
@@ -1446,7 +1451,7 @@ function renderEscposLabelCanvas(payload: ProductLabelPayload, dotsPerMm: number
             const fittedName = fitWrappedCanvasText(
                 ctx,
                 design,
-                product.name,
+                labelProductName(product, design),
                 printableWidth,
                 maxLines,
                 9,
@@ -1730,7 +1735,7 @@ function buildEscposProductLabels(payload: ProductLabelPayload, cutPaper: boolea
         if (design.showStore && store.name) bytes.push(...boldOn, ...line(labelText(store.name, columns), 'latin1'), ...boldOff);
         if (design.showName) {
             bytes.push(...escposTextSize(design, 'name'));
-            const wrappedName = wrapLabelText(product.name, nameColumns, nameLines);
+            const wrappedName = wrapLabelText(labelProductName(product, design), nameColumns, nameLines);
             for (const nameLine of wrappedName) bytes.push(...line(nameLine, 'latin1'));
             bytes.push(...normalSize, ...escposTextSize(design, 'normal'));
         }

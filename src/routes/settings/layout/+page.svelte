@@ -1,5 +1,6 @@
 <script lang="ts">
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import { RotateCcw, Save } from '@lucide/svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import { settingsDB, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import { upsert } from '$lib/stores/database';
@@ -92,28 +93,22 @@
 </svelte:head>
 
 <div class="layout-page">
-    <header class="layout-header">
-        <PageBackButton fallback="/design" />
-        <div class="layout-heading">
-            <span>Design Studio</span>
-            <h1>POS Button Setup</h1>
-            <p>Arrange the trolley and product-grid actions.</p>
-        </div>
-        <div class="header-actions">
-            <button type="button" class="secondary" disabled={saving} on:click={resetLayout}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v6h6"></path></svg>
-                Reset
-            </button>
-            <button type="button" class="primary" disabled={saving} on:click={save}>
-                {#if saving}
-                    Saving
-                {:else}
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path></svg>
-                    Save
-                {/if}
-            </button>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="POS Button Setup"
+        eyebrow="Design Studio"
+        description="Arrange the trolley and product-grid actions."
+        backFallback="/design"
+        padded
+    >
+        <button type="button" class="btn btn-secondary" disabled={saving} on:click={resetLayout}>
+            <RotateCcw size={18} strokeWidth={2.35} aria-hidden="true" />
+            Reset
+        </button>
+        <button type="button" class="btn btn-primary" disabled={saving} on:click={save}>
+            <Save size={18} strokeWidth={2.35} aria-hidden="true" />
+            {saving ? 'Saving' : 'Save'}
+        </button>
+    </AdminPageHeader>
 
     <main class="layout-workspace">
         <section class="order-panel" aria-labelledby="cart-title">
@@ -205,18 +200,9 @@
 
 <style>
     .layout-page { box-sizing: border-box; height: 100dvh; min-height: 560px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
-    .layout-header { min-height: 82px; padding: .85rem 1.1rem; display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: .9rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .layout-heading { min-width: 0; }
-    .layout-heading > span, .panel-heading span { display: block; color: var(--accent-primary); font-size: .7rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
-    .layout-heading h1 { margin: .25rem 0 .12rem; font-size: 1.45rem; line-height: 1.05; }
-    .layout-heading p { margin: 0; color: var(--text-muted); font-size: .82rem; }
-    .header-actions { display: flex; gap: .55rem; }
-    .header-actions button { min-width: 104px; height: 44px; padding: 0 .85rem; display: inline-flex; align-items: center; justify-content: center; gap: .45rem; border: 1px solid var(--border-flat); border-radius: 6px; color: var(--text-main); font-weight: 900; }
-    .header-actions button svg { width: 18px; height: 18px; }
-    .header-actions .secondary { background: var(--bg-card); }
-    .header-actions .primary { border-color: var(--accent-primary); background: var(--accent-primary); color: #fff; }
+    .panel-heading span { display: block; color: var(--accent-primary); font-size: .7rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
     button:disabled { cursor: not-allowed; opacity: .42; }
-    .layout-workspace { flex: 1; min-height: 0; padding: .8rem; display: grid; grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr) minmax(245px, .82fr); gap: .75rem; }
+    .layout-workspace { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr) minmax(245px, .82fr); gap: .75rem; }
     .order-panel, .preview-panel { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 8px; background: var(--bg-panel); }
     .panel-heading { min-height: 62px; padding: .8rem .9rem; display: flex; align-items: center; justify-content: space-between; gap: .65rem; border-bottom: 1px solid var(--border-flat); }
     .panel-heading h2 { margin: .25rem 0 0; font-size: 1.05rem; line-height: 1; }
@@ -247,11 +233,5 @@
         .layout-workspace { grid-template-columns: 1fr; }
         .order-panel { min-height: 390px; }
         .preview-panel { min-height: 320px; }
-    }
-    @media (max-width: 620px) {
-        .layout-header { grid-template-columns: 42px minmax(0, 1fr); }
-        .layout-heading p { display: none; }
-        .header-actions { grid-column: 1 / -1; }
-        .header-actions button { flex: 1; }
     }
 </style>

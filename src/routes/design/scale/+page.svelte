@@ -1,6 +1,6 @@
 <script lang="ts">
     import { onDestroy } from 'svelte';
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
     import { formatMoney, now, settingsDB, type Product, uuid } from '$lib/stores/db';
@@ -267,14 +267,13 @@
 <svelte:window on:keydown={(event) => event.key === 'Escape' && closePageDialog()} />
 
 <div class="scale-page">
-    <header class="scale-header">
-        <PageBackButton fallback="/design" />
-        <div>
-            <span>Design Studio</span>
-            <h1>Scale Tile Designer</h1>
-            <p>Choose and arrange the weighed products shown to cashiers.</p>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="Scale Tile Designer"
+        eyebrow="Design Studio"
+        description="Choose and arrange the weighed products shown to cashiers."
+        backFallback="/design"
+        padded
+    />
 
     <main class="scale-main">
         <section class="scale-page-bar">
@@ -408,12 +407,8 @@
 
 <style>
     .scale-page { width: 100vw; height: 100vh; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); font-size: var(--font-size-management); }
-    .scale-header { min-height: 78px; padding: .75rem var(--app-page-gutter, 1.5rem); display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); flex: 0 0 auto; }
-    .scale-header > div { min-width: 0; }
-    .scale-header span, .column-header span, .scale-dialog header span { display: block; color: var(--success); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
-    .scale-header h1 { margin: .08rem 0 .12rem; font-size: 1.55rem; line-height: 1; letter-spacing: 0; }
-    .scale-header p { margin: 0; color: var(--text-muted); font-size: .82rem; }
-    .scale-main { flex: 1; min-height: 0; padding: .75rem var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-rows: 58px minmax(0,1fr); gap: .65rem; }
+    .column-header span, .scale-dialog header span { display: block; color: var(--success); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+    .scale-main { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-rows: 58px minmax(0,1fr); gap: .65rem; }
     .scale-page-bar { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .65rem; border-bottom: 1px solid var(--border-flat); }
     .scale-tabs { min-width: 0; flex: 1; display: flex; gap: .45rem; overflow-x: auto; padding-bottom: .35rem; }
     .scale-tabs button { min-height: 44px; padding: 0 .7rem; display: flex; align-items: center; gap: .45rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); color: var(--text-muted); font-weight: 850; white-space: nowrap; }
@@ -470,6 +465,6 @@
     .scale-dialog footer { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .25rem; }
     .dialog-close { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
     .dialog-close svg { width: 20px; height: 20px; }
-    @media (max-height: 680px) and (min-width: 761px) { .scale-header { min-height: 66px; } .scale-main { grid-template-rows: 52px minmax(0,1fr); padding-top: .5rem; } .scale-page-actions button, .scale-tabs button { min-height: 40px; } .current-product { min-height: 58px; } .available-list { grid-auto-rows: 58px; } }
+    @media (max-height: 680px) and (min-width: 761px) { .scale-main { grid-template-rows: 52px minmax(0,1fr); } .scale-page-actions button, .scale-tabs button { min-height: 40px; } .current-product { min-height: 58px; } .available-list { grid-auto-rows: 58px; } }
     @media (max-width: 760px) { .scale-page { overflow-y: auto; } .scale-main { display: flex; flex-direction: column; } .scale-page-bar { align-items: stretch; flex-direction: column; } .scale-columns { display: flex; flex-direction: column; overflow: visible; } .scale-column { min-height: 430px; } .scale-column + .scale-column { border-top: 1px solid var(--border-flat); border-left: 0; } }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import PageBackButton from '$lib/components/PageBackButton.svelte';
+    import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
     import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
@@ -302,14 +302,13 @@
 <svelte:window on:keydown={(event) => event.key === 'Escape' && closeTopModal()} />
 
 <div class="tile-designer-page">
-    <header class="tile-designer-header">
-        <PageBackButton fallback="/design" extraClass="shrink-0" />
-        <div>
-            <span>Design Studio</span>
-            <h1>POS Tile Designer</h1>
-            <p>Arrange the product shortcuts shown on checkout.</p>
-        </div>
-    </header>
+    <AdminPageHeader
+        title="POS Tile Designer"
+        eyebrow="Design Studio"
+        description="Arrange the product shortcuts shown on checkout."
+        backFallback="/design"
+        padded
+    />
 
     <main class="tile-designer-main">
         <nav class="pos-page-tabs" aria-label="POS pages">
@@ -539,12 +538,8 @@
 
 <style>
     .tile-designer-page { width: 100vw; height: 100vh; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); font-size: var(--font-size-management); }
-    .tile-designer-header { min-height: 78px; padding: .75rem var(--app-page-gutter, 1.5rem); display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); flex: 0 0 auto; }
-    .tile-designer-header > div { min-width: 0; }
-    .tile-designer-header span, .designer-dialog header span { display: block; color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
-    .tile-designer-header h1 { margin: .08rem 0 .12rem; font-size: 1.55rem; line-height: 1; letter-spacing: 0; }
-    .tile-designer-header p { margin: 0; color: var(--text-muted); font-size: .82rem; }
-    .tile-designer-main { flex: 1; min-height: 0; padding: .75rem var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: flex; flex-direction: column; gap: .65rem; }
+    .designer-dialog header span { display: block; color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+    .tile-designer-main { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: flex; flex-direction: column; gap: .65rem; }
     .pos-page-tabs { min-height: 48px; display: flex; gap: .5rem; overflow-x: auto; flex: 0 0 auto; }
     .pos-page-tab { min-width: 0; height: 46px; display: flex; border: 1px solid var(--border-flat); border-radius: .45rem; overflow: hidden; background: var(--bg-card); }
     .pos-page-tab.active { border-color: var(--accent-primary); }
@@ -621,6 +616,6 @@
     .remove-product-summary i { width: 8px; height: 40px; border-radius: 2px; }
     .remove-product-summary div { min-width: 0; display: flex; flex-direction: column; }
     .remove-product-summary span { color: var(--text-muted); font-size: .78rem; }
-    @media (max-height: 680px) and (min-width: 721px) { .tile-designer-header { min-height: 66px; } .tile-designer-main { padding-top: .5rem; } .pos-page-tabs { min-height: 43px; } .pos-page-tab, .add-pos-page { height: 41px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 43px; } }
+    @media (max-height: 680px) and (min-width: 721px) { .pos-page-tabs { min-height: 43px; } .pos-page-tab, .add-pos-page { height: 41px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 43px; } }
     @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } .picker-search-row { grid-template-columns: minmax(0,1fr) 90px; } }
 </style>

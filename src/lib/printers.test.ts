@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Setting } from '$lib/stores/db';
+import { formatLabelProductName, getLabelDesign } from '$lib/labels';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -117,5 +118,21 @@ describe('ESC/POS label raster encoding', () => {
         });
 
         expect(countSequence(bytes, [0x1d, 0x76, 0x30, 0x00])).toBe(2);
+    });
+});
+
+describe('label name character limit', () => {
+    it('uses the saved character limit and clips the visible name exactly', () => {
+        const design = getLabelDesign(settings({
+            label_design: JSON.stringify({ nameCharacterLimit: 12 }),
+        }));
+
+        expect(design.nameCharacterLimit).toBe(12);
+        expect(formatLabelProductName('Premium Chocolate Biscuits', design.nameCharacterLimit)).toBe('Premium Choc');
+    });
+
+    it('gives older saved designs the safe default limit', () => {
+        const design = getLabelDesign(settings({ label_design: JSON.stringify({ template: 'standard' }) }));
+        expect(design.nameCharacterLimit).toBe(30);
     });
 });

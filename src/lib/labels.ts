@@ -23,6 +23,7 @@ export interface LabelDesign {
     nameSizePercent: number;
     priceSizePercent: number;
     barcodeSizePercent: number;
+    nameCharacterLimit: number;
     showBarcode: boolean;
     showStore: boolean;
     showName: boolean;
@@ -33,6 +34,8 @@ export interface LabelDesign {
     showPrintDate: boolean;
     printDatePosition: LabelDatePosition;
 }
+
+const defaultLabelNameCharacterLimit = 30;
 
 export const labelSizePresets = [
     { label: '25 x 25 mm', width: 25, height: 25 },
@@ -63,6 +66,7 @@ export const defaultLabelDesign: LabelDesign = {
     nameSizePercent: 100,
     priceSizePercent: 100,
     barcodeSizePercent: 100,
+    nameCharacterLimit: defaultLabelNameCharacterLimit,
     showBarcode: true,
     showStore: false,
     showName: true,
@@ -96,6 +100,18 @@ export function clampLabelSizePercent(value: unknown, minimum = 50, maximum = 20
 
 export function labelSizeScale(value: unknown): number {
     return clampLabelSizePercent(value) / 100;
+}
+
+export function clampLabelNameCharacterLimit(value: unknown): number {
+    const number = Number(value);
+    return Number.isFinite(number)
+        ? Math.max(5, Math.min(80, Math.round(number)))
+        : defaultLabelNameCharacterLimit;
+}
+
+export function formatLabelProductName(value: unknown, characterLimit: unknown): string {
+    const name = String(value || '').replace(/\s+/g, ' ').trim();
+    return Array.from(name).slice(0, clampLabelNameCharacterLimit(characterLimit)).join('').trimEnd();
 }
 
 export function formatLabelPrintDate(date = new Date()): string {
@@ -133,6 +149,7 @@ export function getLabelDesign(settings: Setting[]): LabelDesign {
                 200,
             ),
             barcodeSizePercent: clampLabelSizePercent(parsed.barcodeSizePercent, 50, 170),
+            nameCharacterLimit: clampLabelNameCharacterLimit(parsed.nameCharacterLimit),
             showPrintDate: parsed.showPrintDate === true,
             printDatePosition: labelDatePositions.has(parsed.printDatePosition)
                 ? parsed.printDatePosition

@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { Pencil, Plus, Trash2 } from '@lucide/svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -78,7 +79,7 @@
 </script>
 
 <MgmtPage title="Tax Rates">
-    <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Tax Rate</button>
+    <button slot="actions" class="btn btn-primary" on:click={add}><Plus size={19} strokeWidth={2.5} />Add Tax Rate</button>
     <table class="tbl">
         <thead><tr><th>Name</th><th>Rate</th><th>Default</th><th>Actions</th></tr></thead>
         <tbody>
@@ -88,8 +89,8 @@
                 <td>{(t.rate * 100).toFixed(1)}%</td>
                 <td>{t.isDefault ? '✓ Yes' : '-'}</td>
                 <td><div class="act-row">
-                    <button class="btn-icon act-btn" on:click={() => edit(t)}>✎</button>
-                    <button class="btn-icon act-btn danger" on:click={() => confirmDel(t.id)}>✕</button>
+                    <button class="btn-icon act-btn" title={`Edit ${t.name}`} aria-label={`Edit ${t.name}`} on:click={() => edit(t)}><Pencil size={16} /></button>
+                    <button class="btn-icon act-btn danger" title={`Delete ${t.name}`} aria-label={`Delete ${t.name}`} on:click={() => confirmDel(t.id)}><Trash2 size={16} /></button>
                 </div></td>
             </tr>
             {/each}
@@ -105,7 +106,7 @@
         <div class="span-2"><TouchToggle bind:checked={cur.isDefault} label="Default Rate" /></div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" on:click={() => show=false}>Cancel</button>
+        <button class="btn btn-secondary" on:click={() => show=false}>Cancel</button>
         <button class="btn btn-primary" on:click={save}>Save</button>
     </svelte:fragment>
 </Modal>

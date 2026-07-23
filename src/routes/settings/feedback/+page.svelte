@@ -34,7 +34,7 @@
 
     function switchCardClass(active: boolean): string {
         return [
-            'relative min-h-[96px] rounded-xl border p-4 pr-16 text-left transition-all duration-150',
+            'relative min-h-[96px] rounded-lg border p-4 pr-16 text-left transition-colors duration-150',
             active
                 ? 'border-success bg-success/10 text-text-main shadow-[0_12px_30px_var(--shadow)]'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',
@@ -43,7 +43,7 @@
 
     function alertCardClass(active: boolean): string {
         return [
-            'min-h-[86px] rounded-xl border p-4 text-left transition-all duration-150',
+            'min-h-[86px] rounded-lg border p-4 text-left transition-colors duration-150',
             active
                 ? 'border-accent-primary bg-accent-primary/10 text-accent-primary shadow-[0_12px_30px_var(--shadow)]'
                 : 'border-border-flat bg-bg-panel text-text-main hover:border-accent-primary hover:bg-bg-card-hover',

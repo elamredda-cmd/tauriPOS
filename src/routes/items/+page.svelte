@@ -28,7 +28,8 @@
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import TouchToggle from "$lib/components/TouchToggle.svelte";
     import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
-    import PageBackButton from "$lib/components/PageBackButton.svelte";
+    import AdminPageHeader from "$lib/components/AdminPageHeader.svelte";
+    import { Grid3X3, Plus } from "@lucide/svelte";
     import { getBarcodeRules } from "$lib/barcodeRules";
 
     let showModal = false;
@@ -608,58 +609,58 @@
 </script>
 
 <div class="items-management-page p-6 h-screen flex flex-col overflow-hidden">
-    <header class="items-management-header flex justify-between items-center mb-6 gap-5">
-        <div class="items-title flex min-w-0 items-center gap-4">
-            <PageBackButton fallback="/" />
-            <h1 class="m-0 truncate text-[1.8rem]">Item Management</h1>
+    <AdminPageHeader
+        title="Item Management"
+        description={itemsLoading ? 'Loading items' : `${totalItemsCapped ? `${totalItems}+` : totalItems} items`}
+        backFallback="/"
+    >
+        <button class="btn btn-secondary" on:click={openGoodsMenu}>
+            <Grid3X3 size={19} strokeWidth={2.35} aria-hidden="true" />
+            <span>Goods Menu ({goodsMenuCount}/10)</span>
+        </button>
+        <button class="btn btn-primary" on:click={openAddModal}>
+            <Plus size={20} strokeWidth={2.5} aria-hidden="true" />
+            <span>Add Item</span>
+        </button>
+    </AdminPageHeader>
+
+    <div class="items-filter-toolbar" aria-label="Item filters">
+        <div class="items-search relative min-w-0">
+            <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
+                ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input
+                id="items-search"
+                class="search-input !pl-10 !pr-12"
+                type="text"
+                data-touch-keyboard="button"
+                value={searchQuery}
+                on:input={handleItemsSearchInput}
+                on:keydown={handleItemsSearchKeydown}
+                placeholder="Search name, SKU, barcode, PLU..."
+            />
+            <TouchKeyboardButton targetId="items-search" label="Open item search keyboard" embedded />
         </div>
-        <div class="items-header-controls flex min-w-0 flex-1 items-center justify-end gap-4">
-            <div class="items-filter-row flex min-w-0 flex-1 gap-3 max-w-[820px]">
-                <div class="items-search relative min-w-0 flex-1">
-                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
-                        ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                    <input
-                        id="items-search"
-                        class="search-input !pl-10 !pr-12"
-                        type="text"
-                        data-touch-keyboard="button"
-                        value={searchQuery}
-                        on:input={handleItemsSearchInput}
-                        on:keydown={handleItemsSearchKeydown}
-                        placeholder="Search name, SKU, barcode, PLU..."
-                    />
-                    <TouchKeyboardButton targetId="items-search" label="Open item search keyboard" embedded />
-                </div>
-                <button class="btn btn-secondary items-command-btn" on:click={runItemsSearch}>Find</button>
-                <button class="btn btn-secondary items-command-btn" disabled={!searchQuery && !appliedSearchQuery} on:click={clearItemsSearch}>Clear</button>
-                <div class="items-category-filter min-w-[200px]">
-                    <CustomSelect
-                        bind:value={selectedCategoryId}
-                        options={[{label: 'All Categories', value: 'all'}, ...activeCategoryOptions]}
-                        menuMinWidth="min(340px, calc(100vw - 2rem))"
-                        largeOptions
-                    />
-                </div>
-                <div class="items-status-filter min-w-[170px]">
-                    <CustomSelect
-                        bind:value={selectedStatus}
-                        options={[
-                            { label: 'Active Items', value: 'active' },
-                            { label: 'Deactivated Items', value: 'deactivated' },
-                            { label: 'All Items', value: 'all' },
-                        ]}
-                    />
-                </div>
-            </div>
-            <div class="items-header-actions flex items-center gap-3">
-                <button class="btn btn-primary items-command-btn" on:click={openAddModal}>+ Add Item</button>
-                <button class="btn btn-secondary items-command-btn goods-menu-command" on:click={openGoodsMenu}>
-                    <span>Goods Menu</span>
-                    <span class="goods-menu-count">({goodsMenuCount}/10)</span>
-                </button>
-            </div>
+        <div class="items-category-filter">
+            <CustomSelect
+                bind:value={selectedCategoryId}
+                options={[{label: 'All Categories', value: 'all'}, ...activeCategoryOptions]}
+                menuMinWidth="min(340px, calc(100vw - 2rem))"
+                largeOptions
+            />
         </div>
-    </header>
+        <div class="items-status-filter">
+            <CustomSelect
+                bind:value={selectedStatus}
+                options={[
+                    { label: 'Active Items', value: 'active' },
+                    { label: 'Deactivated Items', value: 'deactivated' },
+                    { label: 'All Items', value: 'all' },
+                ]}
+            />
+        </div>
+        <button class="btn btn-primary items-command-btn" on:click={runItemsSearch}>Find</button>
+        <button class="btn btn-secondary items-command-btn" disabled={!searchQuery && !appliedSearchQuery} on:click={clearItemsSearch}>Clear</button>
+    </div>
 
     <div class="items-table-panel flat-panel flex-1 overflow-auto rounded-md p-px">
         <table class="items-table tbl">
@@ -796,9 +797,9 @@
 
                 <div class="field span-2">
                     <span class="text-sm font-medium text-text-muted">Tile Image</span>
-                    <div class="item-image-editor grid gap-4 rounded-xl border border-border-flat bg-bg-panel p-4 md:grid-cols-[150px_1fr]">
+                    <div class="item-image-editor grid gap-4 rounded-lg border border-border-flat bg-bg-panel p-4 md:grid-cols-[150px_1fr]">
                         <div
-                            class="item-image-preview relative h-[150px] overflow-hidden rounded-xl border border-border-flat shadow-sm"
+                            class="item-image-preview relative h-[150px] overflow-hidden rounded-lg border border-border-flat shadow-sm"
                             style="background-color: {currentItem.color || '#3b82f6'}"
                         >
                             {#if currentItem.image}
@@ -953,7 +954,7 @@
             </div>
 
             <div class="item-modal-actions flex justify-end gap-3 p-4 border-t border-border-flat shrink-0 bg-bg-card">
-                <button class="btn btn-danger" on:click={() => (showModal = false)}>Cancel</button>
+                <button class="btn btn-secondary" on:click={() => (showModal = false)}>Cancel</button>
                 <button class="btn btn-primary" on:click={saveItem}>Save Item</button>
             </div>
         </div>
@@ -1069,7 +1070,7 @@
                 </div>
             </div>
             <div class="flex justify-end gap-3 pt-4 border-t border-border-flat shrink-0">
-                <button class="btn btn-danger" on:click={() => (showGoodsMenu = false)}>Cancel</button>
+                <button class="btn btn-secondary" on:click={() => (showGoodsMenu = false)}>Cancel</button>
                 <button class="btn btn-primary" on:click={saveGoodsMenu}>Save Goods Menu</button>
             </div>
         </div>
@@ -1091,10 +1092,7 @@
         color: var(--text-main);
     }
 
-    .items-management-header,
-    .items-title,
-    .items-header-controls,
-    .items-filter-row,
+    .items-filter-toolbar,
     .items-table-panel {
         min-width: 0;
     }
@@ -1103,36 +1101,31 @@
         overscroll-behavior: contain;
     }
 
-    .items-header-actions {
-        display: contents;
-    }
-
-    .items-header-controls {
+    .items-filter-toolbar {
         display: grid;
-        grid-template-columns: minmax(240px, 1.7fr) repeat(6, minmax(96px, .68fr));
+        grid-template-columns: minmax(280px, 1fr) minmax(190px, .46fr) minmax(170px, .42fr) 104px 104px;
         align-items: stretch;
         gap: 0.65rem;
-    }
-
-    .items-filter-row {
-        display: contents;
-        max-width: none;
+        margin-bottom: 0.75rem;
+        padding: 0.65rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.5rem;
+        background: var(--bg-panel);
     }
 
     .items-search,
     .items-category-filter,
     .items-status-filter,
-    .items-header-actions .btn,
     .items-pagination-nav .btn {
         min-width: 0;
     }
 
     .items-search .search-input,
-    .items-filter-row :global(button[aria-haspopup="listbox"]),
+    .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
     .items-command-btn {
         width: 100%;
-        height: 50px;
-        min-height: 50px;
+        height: 48px;
+        min-height: 48px;
         border-radius: 0.4rem;
         font-size: 0.96rem;
         letter-spacing: 0;
@@ -1145,7 +1138,7 @@
         font-weight: 700;
     }
 
-    .items-filter-row :global(button[aria-haspopup="listbox"]) {
+    .items-filter-toolbar :global(button[aria-haspopup="listbox"]) {
         background: var(--bg-card);
         padding-block: 0.65rem;
         font-weight: 900;
@@ -1157,34 +1150,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-    }
-
-    .items-header-actions .items-command-btn {
-        justify-content: center;
-    }
-
-    .goods-menu-command {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 0;
-        line-height: 1.05;
-        padding: 0.45rem 0.5rem;
-        text-align: center;
-        white-space: normal;
-    }
-
-    .goods-menu-command span {
-        display: block;
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .goods-menu-count {
-        font-size: 0.82em;
-        opacity: 0.85;
     }
 
     .items-pagination-nav {
@@ -1344,32 +1309,10 @@
             padding: var(--app-page-gutter, 1.5rem) !important;
         }
 
-        .items-management-header {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            align-items: stretch !important;
-            gap: 0.75rem !important;
-            margin-bottom: 0.75rem !important;
-        }
-
-        .items-title {
-            min-height: 44px;
-        }
-
-        .items-title h1 {
-            font-size: 1.35rem;
-        }
-
-        .items-header-controls {
-            display: grid;
-            grid-template-columns: minmax(0, 1.7fr) repeat(6, minmax(0, .68fr));
-            align-items: stretch;
-            gap: 0.6rem;
-        }
-
-        .items-filter-row {
-            display: contents;
-            max-width: none;
+        .items-filter-toolbar {
+            grid-template-columns: minmax(240px, 1fr) minmax(150px, .45fr) minmax(140px, .42fr) 88px 88px;
+            gap: 0.55rem;
+            padding: 0.55rem;
         }
 
         .items-category-filter,
@@ -1377,18 +1320,14 @@
             min-width: 0;
         }
 
-        .items-filter-row :global(button[aria-haspopup="listbox"]),
-        .items-filter-row .search-input {
+        .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
+        .items-filter-toolbar .search-input {
             min-height: 48px !important;
             height: 48px;
             font-size: 0.9rem;
         }
 
-        .items-header-actions {
-            display: contents;
-        }
-
-        .items-header-actions .items-command-btn,
+        .items-filter-toolbar .items-command-btn,
         .items-pagination-nav .items-command-btn {
             width: 100%;
             min-width: 0;
@@ -1540,33 +1479,19 @@
         }
     }
 
-    @media (max-width: 900px), (max-height: 679px) {
+    @media (max-width: 900px) {
         .items-management-page {
             padding: var(--app-page-gutter, 1.5rem) !important;
         }
 
-        .items-management-header {
-            flex-direction: column;
-            align-items: stretch !important;
-            gap: 0.65rem !important;
-            margin-bottom: 0.75rem !important;
-        }
-
-        .items-title h1 {
-            font-size: 1.25rem;
-        }
-
-        .items-header-controls {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            align-items: stretch;
+        .items-filter-toolbar {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 0.55rem;
+            padding: 0.55rem;
         }
 
-        .items-filter-row,
-        .items-header-actions {
-            display: contents;
-            max-width: none;
+        .items-search {
+            grid-column: 1 / -1;
         }
 
         .items-category-filter,
@@ -1574,14 +1499,14 @@
             min-width: 0;
         }
 
-        .items-filter-row :global(button[aria-haspopup="listbox"]),
-        .items-filter-row .search-input {
+        .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
+        .items-filter-toolbar .search-input {
             min-height: 46px !important;
             height: 46px;
             font-size: 0.9rem;
         }
 
-        .items-header-actions .items-command-btn,
+        .items-filter-toolbar .items-command-btn,
         .items-pagination-nav .items-command-btn {
             width: 100%;
             min-width: 0;

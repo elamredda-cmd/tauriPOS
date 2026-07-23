@@ -476,7 +476,6 @@
 
 <MgmtPage title="Printer Setup" backFallback="/settings">
     <div slot="actions" class="printer-header-links">
-        <a class="btn btn-secondary" href="/settings/receipt"><ReceiptText size={18} /> Receipt Design</a>
         <a class="btn btn-secondary" href="/settings/labels"><Tags size={18} /> Label Design</a>
         <a class="btn btn-secondary" href="/settings/scale"><Scale size={18} /> Scale Setup</a>
     </div>

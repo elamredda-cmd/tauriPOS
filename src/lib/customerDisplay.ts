@@ -13,6 +13,13 @@ export interface CustomerDisplayLine {
     unitPrice: number;
     total: number;
     discount: number;
+    promotion?: CustomerDisplayPromotion;
+}
+
+export interface CustomerDisplayPromotion {
+    status: 'applied' | 'eligible';
+    label: string;
+    text: string;
 }
 
 export interface CustomerDisplayState {

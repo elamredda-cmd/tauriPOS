@@ -1,12 +1,17 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import Code39Barcode from './Code39Barcode.svelte';
     import { formatMoney, type Product, type Store } from '$lib/stores/db';
-    import { formatLabelPrintDate, labelSizeScale, type LabelDesign } from '$lib/labels';
+    import { formatLabelPrintDate, formatLabelProductName, labelSizeScale, type LabelDesign } from '$lib/labels';
 
     export let product: Product;
     export let store: Store;
     export let design: LabelDesign;
     export let preview = false;
+
+    let labelElement: HTMLElement;
+    let previewWidth = 360;
+    let previewHeight = 420;
 
     $: labelWidth = Math.max(15, Number(design.widthMm) || 50);
     $: labelHeight = Math.max(15, Number(design.heightMm) || 30);
@@ -23,10 +28,11 @@
     );
     $: showPrintDate = design.showPrintDate === true;
     $: printDate = formatLabelPrintDate();
+    $: productName = formatLabelProductName(product.name, design.nameCharacterLimit);
     $: datePosition = design.printDatePosition || 'bottom-right';
     $: dateAtTop = datePosition.startsWith('top-');
     $: previewScale = preview
-        ? Math.min(1.6, Math.max(0.35, Math.min(360 / (labelWidth * 3.78), 420 / (labelHeight * 3.78))))
+        ? Math.min(1.6, Math.max(0.25, Math.min(previewWidth / (labelWidth * 3.78), previewHeight / (labelHeight * 3.78))))
         : 1;
     $: labelFont = design.fontFamily === 'serif'
         ? 'Georgia, Times New Roman, serif'
@@ -37,9 +43,26 @@
     $: nameScale = labelSizeScale(design.nameSizePercent);
     $: priceScale = labelSizeScale(design.priceSizePercent);
     $: dateReserve = showPrintDate ? Math.max(1.8, 2.25 * textScale) : 0;
+
+    onMount(() => {
+        if (!preview || !labelElement?.parentElement) return;
+        const container = labelElement.parentElement;
+        const updatePreviewBounds = () => {
+            const style = getComputedStyle(container);
+            const horizontalPadding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+            const verticalPadding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+            previewWidth = Math.min(360, Math.max(80, container.clientWidth - horizontalPadding - 4));
+            previewHeight = Math.min(420, Math.max(80, container.clientHeight - verticalPadding - 4));
+        };
+        updatePreviewBounds();
+        const observer = new ResizeObserver(updatePreviewBounds);
+        observer.observe(container);
+        return () => observer.disconnect();
+    });
 </script>
 
 <article
+    bind:this={labelElement}
     class="product-label template-{design.template}"
     class:wide={isWideLabel}
     class:tall={isTallLabel}
@@ -49,7 +72,7 @@
 >
     {#if showPrintDate}<time class="print-date {datePosition}">{printDate}</time>{/if}
     {#if design.showStore}<small class="store">{store.name}</small>{/if}
-    {#if design.showName}<h2>{product.name}</h2>{/if}
+    {#if design.showName}<h2>{productName}</h2>{/if}
     {#if design.showPrice}<strong class="price">{formatMoney(product.price)}</strong>{/if}
     {#if showBarcode}<div class="barcode"><Code39Barcode value={barcodeValue} height={barcodeHeight} /></div>{/if}
     <footer>

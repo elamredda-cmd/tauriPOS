@@ -825,7 +825,7 @@
             </div>
             <button
                 type="button"
-                class="mb-4 flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition {purgeResponsibilityAccepted ? 'border-danger bg-danger/10 text-danger' : 'border-border-flat bg-bg-panel text-text-main hover:border-danger hover:bg-danger/5'}"
+                class="mb-4 flex w-full items-center justify-between gap-4 rounded-lg border p-4 text-left transition-colors {purgeResponsibilityAccepted ? 'border-danger bg-danger/10 text-danger' : 'border-border-flat bg-bg-panel text-text-main hover:border-danger hover:bg-danger/5'}"
                 role="switch"
                 aria-checked={purgeResponsibilityAccepted}
                 on:click={() => {

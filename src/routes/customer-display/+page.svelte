@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
     import { listen } from '@tauri-apps/api/event';
     import { formatMoney } from '$lib/stores/db';
     import type { CustomerDisplayState } from '$lib/customerDisplay';
@@ -19,7 +20,7 @@
     let previousLinesKey = '';
 
     $: linesKey = state.lines
-        .map((line) => `${line.name}|${line.quantity}|${line.unitPrice}|${line.total}|${line.discount}`)
+        .map((line) => `${line.name}|${line.quantity}|${line.unitPrice}|${line.total}|${line.discount}|${line.promotion?.status || ''}|${line.promotion?.label || ''}|${line.promotion?.text || ''}`)
         .join('¬');
     $: if (linesEl && state.status !== 'complete' && linesKey !== previousLinesKey) {
         previousLinesKey = linesKey;
@@ -33,6 +34,7 @@
     }
 
     onMount(() => {
+        if (!isTauri()) return;
         let unlisten: (() => void) | undefined;
         listen<CustomerDisplayState>('customer-display-state', (event) => {
             state = event.payload;
@@ -62,10 +64,22 @@
                     <div class="display-empty"><h2>Ready for your items</h2><p>Your shopping will appear here.</p></div>
                 {:else}
                     {#each state.lines as line}
-                        <article>
-                            <div class="line-description"><h3 title={line.name}>{line.name}</h3><span>{line.quantity} × {formatMoney(line.unitPrice)}</span></div>
-                            <strong>{formatMoney(line.total - line.discount)}</strong>
-                            {#if line.discount > 0}<small>Saving {formatMoney(line.discount)}</small>{/if}
+                        <article class:has-promotion={Boolean(line.promotion)}>
+                            <div class="line-description">
+                                <h3 title={line.name}>{line.name}</h3>
+                                <span>{line.quantity} × {formatMoney(line.unitPrice)}</span>
+                                {#if line.promotion}
+                                    <div class="line-promotion {line.promotion.status}" title={line.promotion.text}>
+                                        <b>{line.promotion.label}</b>
+                                        <span>{line.promotion.text}</span>
+                                    </div>
+                                {/if}
+                            </div>
+                            <div class="line-total">
+                                {#if line.discount > 0}<span>{formatMoney(line.total)}</span>{/if}
+                                <strong>{formatMoney(line.total - line.discount)}</strong>
+                                {#if line.discount > 0}<small>Saving {formatMoney(line.discount)}</small>{/if}
+                            </div>
                         </article>
                     {/each}
                 {/if}
@@ -93,8 +107,15 @@
     .line-description { min-width: 0; flex: 1; }
     article h3 { margin: 0 0 .25rem; overflow: hidden; font-size: clamp(.95rem, 2.2vmin, 1.6rem); white-space: nowrap; text-overflow: ellipsis; }
     article span { color: var(--text-muted); }
-    article > strong { flex: 0 0 auto; font-size: clamp(1.1rem, 2.6vmin, 2rem); }
-    article small { position: absolute; right: 1.2rem; bottom: .45rem; color: var(--success); font-weight: 800; }
+    article.has-promotion { min-height: clamp(5rem, 12vh, 7.2rem); }
+    .line-promotion { min-width: 0; margin-top: .4rem; display: flex; align-items: center; gap: .45rem; color: var(--accent-primary); }
+    .line-promotion.applied { color: var(--success); }
+    .line-promotion b { flex: 0 0 auto; padding: .18rem .42rem; border: 1px solid currentColor; border-radius: 4px; font-size: clamp(.62rem, 1.35vmin, .82rem); line-height: 1; text-transform: uppercase; }
+    .line-promotion span { min-width: 0; overflow: hidden; color: currentColor; font-size: clamp(.72rem, 1.55vmin, .95rem); font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+    .line-total { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; }
+    .line-total > span { color: var(--text-muted); font-size: clamp(.72rem, 1.45vmin, .9rem); text-decoration: line-through; }
+    .line-total > strong { font-size: clamp(1.1rem, 2.6vmin, 2rem); }
+    .line-total small { color: var(--success); font-weight: 800; }
     aside { min-width: 0; align-self: end; padding: clamp(.8rem, 2vmin, 2rem); display: flex; flex-direction: column; gap: clamp(.6rem, 1.4vmin, 1rem); border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-panel); }
     aside div { min-width: 0; display: flex; justify-content: space-between; gap: 1rem; font-size: clamp(.95rem, 2.2vmin, 1.5rem); }
     aside strong { white-space: nowrap; }
@@ -121,7 +142,11 @@
         article { min-height: 3.35rem; padding: .45rem .7rem; border-radius: .55rem; }
         article h3 { margin-bottom: .1rem; font-size: clamp(.8rem, 2.8vh, 1.15rem); }
         article span, article small { font-size: .68rem; }
-        article > strong { font-size: clamp(.95rem, 3.4vh, 1.35rem); }
+        article.has-promotion { min-height: 4.15rem; }
+        .line-promotion { margin-top: .18rem; gap: .3rem; }
+        .line-promotion b { padding: .12rem .3rem; font-size: .58rem; }
+        .line-promotion span { font-size: .62rem; }
+        .line-total > strong { font-size: clamp(.95rem, 3.4vh, 1.35rem); }
         aside { padding: .65rem; gap: .4rem; border-radius: .7rem; }
         aside div { font-size: clamp(.8rem, 2.8vh, 1.05rem); }
         .display-total { padding-top: .45rem; }

@@ -4,7 +4,7 @@
     import { goto } from "$app/navigation";
     import { isTauri } from "@tauri-apps/api/core";
     import { getCurrentWindow } from "@tauri-apps/api/window";
-    import { ChevronRight, LockKeyhole, Maximize2, Minimize2, ShieldCheck, UsersRound } from "@lucide/svelte";
+    import { ChevronRight, LockKeyhole, Maximize2, Minimize2, ScanLine, Search, ShieldCheck, UsersRound, X } from "@lucide/svelte";
     import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
     import {
         productsDB,
@@ -92,7 +92,7 @@
     import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
     import SupportAccessPanel from "$lib/components/SupportAccessPanel.svelte";
     import type { SupportSessionGrant } from "$lib/supportAccess";
-    import { broadcastCustomerDisplay, type CustomerDisplayState } from "$lib/customerDisplay";
+    import { broadcastCustomerDisplay, type CustomerDisplayPromotion, type CustomerDisplayState } from "$lib/customerDisplay";
     import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
     import { sendCctvAction, sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
@@ -670,13 +670,17 @@
     $: customerDisplayState = ({
         storeName: $storeDB.name,
         tillName: tillName || tillId,
-        lines: cart.map((item, index) => ({
-            name: item.name,
-            quantity: item.quantity,
-            unitPrice: item.price,
-            total: item.price * item.quantity,
-            discount: cartEval.lines[index]?.savings || 0,
-        })),
+        lines: cart.map((item, index) => {
+            const lineEvaluation = cartEval.lines[index];
+            return {
+                name: item.name,
+                quantity: item.quantity,
+                unitPrice: item.price,
+                total: item.price * item.quantity,
+                discount: lineEvaluation?.savings || 0,
+                promotion: getCustomerDisplayPromotion(lineEvaluation),
+            };
+        }),
         subtotal,
         discount: promoSavings,
         total,
@@ -773,6 +777,50 @@
             };
         }
         return null;
+    }
+
+    function getCustomerDisplayPromotion(
+        line: CartEvaluation["lines"][number] | undefined,
+    ): CustomerDisplayPromotion | undefined {
+        if (!line) return undefined;
+        const promotions = line.applied.length > 0 ? line.applied : line.eligibleFor;
+        if (promotions.length === 0) return undefined;
+
+        const status = line.applied.length > 0 ? "applied" : "eligible";
+        const discountKinds = new Set(
+            promotions
+                .map((promotion) => $discountsDB.find((discount) => discount.id === promotion.discountId)?.kind)
+                .filter(Boolean),
+        );
+        const onlyKind = discountKinds.size === 1 ? [...discountKinds][0] : "";
+        const label = onlyKind === "bundle_fixed_price"
+            ? "Bundle"
+            : onlyKind === "bogo_fixed_price"
+                ? "BOGO"
+                : onlyKind?.startsWith("manual_")
+                    ? "Discount"
+                    : "Promotion";
+        const name = promoNameSummary(promotions.map((promotion) => promotion.discountName));
+
+        if (status === "eligible") {
+            return { status, label, text: `${name} · ${eligiblePromotionDetail(line)}` };
+        }
+
+        const saving = line.applied.reduce((sum, promotion) => sum + promotion.savings, 0);
+        const dealText = line.applied
+            .map((promotion) => discountDealText($discountsDB.find((discount) => discount.id === promotion.discountId)))
+            .filter(Boolean);
+        const deal = dealText.length === 0
+            ? ""
+            : dealText.length === 1
+                ? dealText[0]
+                : `${dealText[0]} +${dealText.length - 1}`;
+        const savingText = `${formatMoney(saving)} saved`;
+        return {
+            status,
+            label,
+            text: `${name} · ${deal ? `${deal} · ` : ""}${savingText}`,
+        };
     }
 
     function openDiscounts() {
@@ -5017,45 +5065,55 @@
 
             {#if loyaltyConfig.enabled}
                 <section class="payment-loyalty p-2.5 rounded-md border border-border-flat bg-bg-panel">
-                    <div class="relative">
-                        <label for="payment-customer-search" class="block text-xs font-bold text-text-muted mb-1">Scan loyalty barcode or search customer</label>
-                        <input
-                            id="payment-customer-search"
-                            bind:this={customerSearchInput}
-                            class="flat-input payment-customer-input w-full !pr-12"
-                            bind:value={customerSearch}
-                            on:keydown={handleCustomerSearchKeydown}
-                            data-touch-keyboard="button"
-                            placeholder="Name, loyalty code, phone, or postcode"
-                        />
-                        <TouchKeyboardButton
-                            targetId="payment-customer-search"
-                            label="Open customer search keyboard"
-                            embedded
-                        />
-                        {#if customerMatches.length > 0}
-                            <div class="absolute z-20 left-0 right-0 mt-1 p-1 bg-bg-card border border-border-flat rounded-md shadow-lg">
-                                {#each customerMatches as customer}
-                                    <button class="w-full p-2 text-left rounded-sm hover:bg-bg-card-hover" on:click={() => selectPaymentCustomer(customer)}>
-                                        <strong>{customer.name}</strong>
-                                        <small class="block text-text-muted">{customer.loyaltyCode || 'No loyalty code'} · {customer.postcode || 'No postcode'}</small>
-                                    </button>
-                                {/each}
+                    <div class="payment-loyalty-search">
+                        <div class="payment-loyalty-heading">
+                            <ScanLine size={18} strokeWidth={2.3} aria-hidden="true" />
+                            <label for="payment-customer-search">Customer &amp; loyalty</label>
+                            <span class="payment-loyalty-subtitle">Scan card or find customer</span>
+                        </div>
+                        <div class="payment-customer-search-row">
+                            <div class="payment-customer-search-field">
+                                <Search size={18} strokeWidth={2.3} aria-hidden="true" />
+                                <input
+                                    id="payment-customer-search"
+                                    bind:this={customerSearchInput}
+                                    class="flat-input payment-customer-input w-full"
+                                    bind:value={customerSearch}
+                                    on:keydown={handleCustomerSearchKeydown}
+                                    data-touch-keyboard="button"
+                                    placeholder="Name, loyalty code, phone or postcode"
+                                />
+                                {#if customerMatches.length > 0}
+                                    <div class="payment-customer-results">
+                                        {#each customerMatches as customer}
+                                            <button on:click={() => selectPaymentCustomer(customer)}>
+                                                <strong>{customer.name}</strong>
+                                                <small>{customer.loyaltyCode || 'No loyalty code'} · {customer.postcode || 'No postcode'}</small>
+                                            </button>
+                                        {/each}
+                                    </div>
+                                {/if}
                             </div>
-                        {/if}
+                            <TouchKeyboardButton
+                                targetId="payment-customer-search"
+                                label="Open customer search keyboard"
+                                className="payment-customer-keyboard"
+                            />
+                        </div>
                     </div>
                     {#if selectedCustomer}
-                        <div class="payment-customer-card">
+                        <div class="payment-customer-card" aria-live="polite">
                             <div class="payment-customer-details">
+                                <span class="payment-customer-avatar" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
                                 <div class="payment-customer-identity">
                                     <strong>{selectedCustomer.name}</strong>
-                                    <span>{selectedCustomer.loyaltyCode}</span>
+                                    <span>{selectedCustomer.loyaltyCode || 'No loyalty code'}</span>
                                 </div>
-                                <div class="payment-customer-balance">
-                                    <b>{Number(selectedCustomer.loyaltyPoints || 0).toLocaleString()} points</b>
-                                    <span>{formatMoney(availableLoyaltyCredit)} credit</span>
-                                    <small>+{loyaltyPointsEarned} this sale</small>
-                                </div>
+                            </div>
+                            <div class="payment-customer-balance">
+                                <span><small>Points</small><b>{Number(selectedCustomer.loyaltyPoints || 0).toLocaleString()}</b></span>
+                                <span><small>Credit</small><b>{formatMoney(availableLoyaltyCredit)}</b></span>
+                                <span><small>This sale</small><b class="is-earned">+{loyaltyPointsEarned}</b></span>
                             </div>
                             <div class="payment-customer-actions">
                                 <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale} on:click={toggleLoyaltyCredit}>
@@ -5068,14 +5126,18 @@
                                                 : 'Check Credit'}
                                 </button>
                                 <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" on:click={removePaymentCustomer}>
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                                        <path d="M18 6 6 18M6 6l12 12"></path>
-                                    </svg>
+                                    <X size={18} strokeWidth={2.4} aria-hidden="true" />
                                 </button>
                             </div>
                         </div>
                     {:else}
-                        <div class="payment-customer-empty">No customer selected</div>
+                        <div class="payment-customer-empty">
+                            <span class="payment-customer-avatar is-empty" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
+                            <span>
+                                <strong>No customer selected</strong>
+                                <small>Scan or search to attach loyalty</small>
+                            </span>
+                        </div>
                     {/if}
                 </section>
             {/if}

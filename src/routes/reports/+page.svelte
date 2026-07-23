@@ -991,16 +991,16 @@
             </div>
             <div class="flex flex-col gap-3 p-3 md:p-4">
             {#if closeReportIncludesPreviousDays}
-                <div class="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                     This period started before today, so the total can include previous days.
                 </div>
             {/if}
             {#if closeReportCanEnd}
-                <div class="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                     This is only a preview. Press <strong>Close Period</strong> to close this report period and make the next report start from now.
                 </div>
                 {#if !hasPermission($currentEmployee, 'end_day_close', $settingsDB)}
-                    <div class="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                    <div class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
                         Your current role can preview this report, but manager permission is required to close the period.
                     </div>
                 {/if}
@@ -1056,13 +1056,13 @@
                 {/if}
             </div>
 
-            <div class="rounded-xl border border-border-flat bg-bg-panel p-3">
+            <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                 <div class="mb-1.5 text-[0.65rem] font-black uppercase tracking-[0.14em] text-text-muted">Receipt report text</div>
                 <pre class="whitespace-pre-wrap rounded-lg bg-bg-card p-2 font-mono text-xs leading-relaxed">{closeReportText}</pre>
             </div>
 
             {#if closeReportConfirming}
-                <div class="rounded-xl border border-danger/50 bg-danger/10 p-3">
+                <div class="rounded-lg border border-danger/50 bg-danger/10 p-3">
                     <div class="font-bold text-danger">Confirm end of period</div>
                     <p class="mt-1 text-sm text-text-muted">
                         This will close the current report period for {closeReportTillNumber ? tillName : 'the whole system'}.

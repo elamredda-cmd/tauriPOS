@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { Pencil, Plus, Trash2 } from '@lucide/svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -124,7 +125,7 @@
 </script>
 
 <MgmtPage title="Categories">
-    <button slot="actions" class="btn btn-primary" on:click={add}>+ Add Category</button>
+    <button slot="actions" class="btn btn-primary" on:click={add}><Plus size={19} strokeWidth={2.5} />Add Category</button>
     <div class="p-4 border-b border-border-flat bg-bg-panel">
         <div class="flex items-center gap-3">
             <div class="relative min-w-0 flex-1">
@@ -163,8 +164,8 @@
                     <span class="tag">{cat.isActive ? 'Active' : 'Inactive'}</span>
                 </td>
                 <td><div class="act-row">
-                    <button class="btn-icon act-btn" title="Edit category" aria-label={`Edit ${cat.name}`} on:click={() => edit(cat)}>✎</button>
-                    <button class="btn-icon act-btn danger" title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}>✕</button>
+                    <button class="btn-icon act-btn" title="Edit category" aria-label={`Edit ${cat.name}`} on:click={() => edit(cat)}><Pencil size={16} /></button>
+                    <button class="btn-icon act-btn danger" title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}><Trash2 size={16} /></button>
                 </div></td>
             </tr>
             {/each}
@@ -184,7 +185,7 @@
         <div class="span-2"><TouchToggle bind:checked={cur.isActive} label="Active Status" /></div>
     </div>
     <svelte:fragment slot="footer">
-        <button class="btn btn-danger" disabled={saving} on:click={() => show=false}>Cancel</button>
+        <button class="btn btn-secondary" disabled={saving} on:click={() => show=false}>Cancel</button>
         <button class="btn btn-primary" disabled={saving} on:click={save}>{saving ? 'Saving...' : 'Save'}</button>
     </svelte:fragment>
 </Modal>
