@@ -18,8 +18,11 @@ export const roleDescriptions: Record<Employee['role'], string> = {
 
 export type PermissionKey =
     | 'open_items'
+    | 'open_suppliers'
+    | 'open_tax_rates'
     | 'open_customers'
     | 'open_discounts'
+    | 'open_orders'
     | 'open_reports'
     | 'open_settings'
     | 'open_employees'
@@ -35,8 +38,11 @@ export type PermissionKey =
 
 export const permissionLabels: Record<PermissionKey, string> = {
     open_items: 'Open Items',
+    open_suppliers: 'Open Suppliers',
+    open_tax_rates: 'Open Tax Rates',
     open_customers: 'Open Customers',
     open_discounts: 'Open Discounts',
+    open_orders: 'Open Orders',
     open_reports: 'Open Reports',
     open_settings: 'Open Settings',
     open_employees: 'Open Employees',
@@ -56,12 +62,13 @@ export type RolePermissionMatrix = Record<Employee['role'], PermissionKey[]>;
 export const defaultRolePermissions: RolePermissionMatrix = {
     admin: Object.keys(permissionLabels) as PermissionKey[],
     manager: [
-        'open_items', 'open_customers', 'open_discounts', 'open_reports', 'open_settings',
+        'open_items', 'open_suppliers', 'open_tax_rates', 'open_customers', 'open_discounts',
+        'open_orders', 'open_reports', 'open_settings',
         'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ],
     supervisor: [
-        'open_reports', 'open_stock_receiving',
+        'open_orders', 'open_reports', 'open_stock_receiving',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ],
     cashier: ['manual_discount'],
@@ -77,10 +84,22 @@ export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix 
         };
         const storedRoles = parsed.roles || parsed;
         const legacy = !parsed.roles;
+        const version = Number(parsed.version || (legacy ? 1 : 2));
         const role = (value: unknown, fallback: PermissionKey[]) => {
             const normalized = normalizeRole(value, fallback);
             if (legacy && normalized.includes('open_items') && !normalized.includes('open_customers')) {
                 normalized.push('open_customers');
+            }
+            // Version 3 splits previously bundled page access. Preserve the access
+            // of existing custom roles until an administrator changes it explicitly.
+            if (version < 3) {
+                if (normalized.includes('open_items')) {
+                    if (!normalized.includes('open_suppliers')) normalized.push('open_suppliers');
+                    if (!normalized.includes('open_tax_rates')) normalized.push('open_tax_rates');
+                }
+                if (normalized.includes('open_reports') && !normalized.includes('open_orders')) {
+                    normalized.push('open_orders');
+                }
             }
             return normalized;
         };
@@ -113,7 +132,7 @@ export function hasPermission(
 }
 
 export function serializeRolePermissions(matrix: RolePermissionMatrix): string {
-    return JSON.stringify({ version: 2, roles: matrix });
+    return JSON.stringify({ version: 3, roles: matrix });
 }
 
 const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
@@ -122,17 +141,18 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
     { path: '/items', permission: 'open_items' },
     { path: '/categories', permission: 'open_items' },
     { path: '/customers', permission: 'open_customers' },
-    { path: '/suppliers', permission: 'open_items' },
-    { path: '/tax-rates', permission: 'open_items' },
+    { path: '/suppliers', permission: 'open_suppliers' },
+    { path: '/tax-rates', permission: 'open_tax_rates' },
     { path: '/employees', permission: 'open_employees' },
     { path: '/discounts', permission: 'open_discounts' },
-    { path: '/orders', permission: 'open_reports' },
+    { path: '/orders', permission: 'open_orders' },
     { path: '/reports', permission: 'open_reports' },
     { path: '/stock-receiving', permission: 'open_stock_receiving' },
     { path: '/sync', permission: 'open_sync' },
     { path: '/audit', permission: 'open_audit' },
     { path: '/settings/layout', permission: 'open_design' },
     { path: '/settings/labels', permission: 'open_design' },
+    { path: '/settings/receipt', permission: 'open_design' },
     { path: '/settings', permission: 'open_settings' },
 ];
 
@@ -141,8 +161,9 @@ const adminOnlyPaths = [
     '/settings/permissions',
     '/settings/advanced',
     '/settings/owner-app',
+    '/settings/licence',
 ];
-const signedInOperationalPaths = ['/shifts', '/label-print', '/about', '/settings/licence'];
+const signedInOperationalPaths = ['/shifts', '/label-print', '/about'];
 const publicPaths = ['/', '/customer-display'];
 
 function matchesPath(pathname: string, route: string): boolean {

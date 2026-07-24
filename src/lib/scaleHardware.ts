@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
 
@@ -59,6 +59,7 @@ export function formatScaleReading(reading: ScaleWeightReading): string {
 }
 
 export async function readScaleWeight(config = getScaleHardwareConfig()): Promise<ScaleWeightReading> {
+    if (!isTauri()) throw new Error('Scale hardware is available in the installed POS app');
     if (!config.enabled) throw new Error('Scale is disabled');
     const devicePath = config.devicePath.trim();
     if (!devicePath) throw new Error('Enter the scale port first');
@@ -78,6 +79,7 @@ export async function readScaleWeight(config = getScaleHardwareConfig()): Promis
 }
 
 export async function listScalePorts(): Promise<SerialPortInfo[]> {
+    if (!isTauri()) return [];
     const ports = await invoke<SerialPortInfo[]>('list_serial_ports');
     return ports.map((port) => ({
         path: port.path,

@@ -19,11 +19,16 @@ use tauri::{AppHandle, Manager};
 use wait_timeout::ChildExt;
 use zip::ZipArchive;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 const MODULE_API_VERSION: u32 = 1;
 const MODULE_SCHEMA_VERSION: u32 = 1;
 const MAX_PACKAGE_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"LBJ-PRINTER-MODULE-V1\n";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static MODULE_QUEUES: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
@@ -742,12 +747,17 @@ fn execute_module_blocking(
         return Err("The printer-module request is too large".into());
     }
 
-    let mut child = Command::new(&canonical_executable)
+    let mut command = Command::new(&canonical_executable);
+    command
         .arg("--lbj-printer-module")
         .current_dir(&directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start printer module {}: {error}", manifest.name))?;
     let stdout = child

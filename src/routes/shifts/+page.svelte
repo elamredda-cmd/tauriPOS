@@ -263,7 +263,7 @@
     }
 </script>
 
-<MgmtPage title="Till Sessions">
+<MgmtPage title="Cash-up Sessions">
     {#if cashUpEnabled && activeShift}
         <section class="cash-up-panel">
             <div class="cash-up-heading">
@@ -321,7 +321,7 @@
     {#if canViewShiftHistory}
         <section class="history-panel">
             <div class="history-heading">
-                <div class="history-title"><span class="eyebrow">Audit history</span><h2>Previous Sessions</h2></div>
+                <div class="history-title"><span class="eyebrow">Audit history</span><h2>Previous Cash-ups</h2></div>
                 <div class="history-controls">
                     <input
                         class="search-input"

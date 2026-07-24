@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, onMount } from 'svelte';
+    import { onDestroy, onMount, tick } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import {
@@ -54,10 +54,44 @@
     // Numpad for Bundle Price
     let showPricePad = false;
     let priceString = '0';
+    let pricePadOverlay: HTMLDivElement | null = null;
 
     // Numpad for Quantity
     let showQtyPad = false;
     let qtyString = '2';
+    let qtyPadOverlay: HTMLDivElement | null = null;
+
+    async function openPricePad() {
+        showPricePad = true;
+        await tick();
+        pricePadOverlay?.focus();
+    }
+
+    async function openQtyPad() {
+        showQtyPad = true;
+        await tick();
+        qtyPadOverlay?.focus();
+    }
+
+    function closePricePadFromBackdrop(event: MouseEvent) {
+        if (event.target === event.currentTarget) showPricePad = false;
+    }
+
+    function closeQtyPadFromBackdrop(event: MouseEvent) {
+        if (event.target === event.currentTarget) showQtyPad = false;
+    }
+
+    function closePricePadOnEscape(event: KeyboardEvent) {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        showPricePad = false;
+    }
+
+    function closeQtyPadOnEscape(event: KeyboardEvent) {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        showQtyPad = false;
+    }
 
     function discountKind(discount: Discount): string {
         if (discount.kind) return discount.kind;
@@ -1017,14 +1051,14 @@
         </div>
         <div class="field">
             <label for="bundle-quantity-button">Quantity *</label>
-            <button id="bundle-quantity-button" type="button" class="number-trigger" on:click={() => showQtyPad = true}>
+            <button id="bundle-quantity-button" type="button" class="number-trigger" on:click={openQtyPad}>
                 <span class="text-text-main font-semibold">{curQty} items</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
             </button>
         </div>
         <div class="field">
             <label for="bundle-price-button">Bundle Price (£) *</label>
-            <button id="bundle-price-button" type="button" class="number-trigger" on:click={() => showPricePad = true}>
+            <button id="bundle-price-button" type="button" class="number-trigger" on:click={openPricePad}>
                 <span class="font-semibold text-success">{formatMoney(curPrice)}</span>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
             </button>
@@ -1035,7 +1069,7 @@
 
         <div class="field span-2">
             <div class="flex items-center justify-between gap-3 mb-2">
-                <label>Selected Items ({selectedBundleProducts.length})</label>
+                <span class="text-sm font-medium text-text-muted">Selected Items ({selectedBundleProducts.length})</span>
                 <button class="btn btn-danger !py-1 !px-3 !text-xs !min-h-8" disabled={selectedBundleProducts.length === 0} on:click={() => curProductIds = new Set()}>Clear all</button>
             </div>
             <div class="flex flex-wrap content-start gap-2 h-[92px] overflow-y-auto p-2 border border-border-flat rounded-sm bg-bg-panel">
@@ -1061,7 +1095,7 @@
         </div>
 
         <div class="field span-2 mt-2">
-            <label>Find Products</label>
+            <label for="bundle-product-search">Find Products</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
                     <input id="bundle-product-search" data-touch-keyboard="button" bind:value={productSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bundle')} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-20" />
@@ -1118,18 +1152,18 @@
                 <TouchKeyboardButton targetId="bogo-name" label="Open promotion name keyboard" embedded />
             </div>
         </div>
-        <div class="field"><label>Full-price items to buy *</label><input type="number" min="1" step="1" bind:value={bogoBuyQty} /></div>
-        <div class="field"><label>Price of the next item (£) *</label><input type="number" min="0" step="0.01" bind:value={bogoSecondPricePounds} /></div>
+        <div class="field"><label for="bogo-buy-quantity">Full-price items to buy *</label><input id="bogo-buy-quantity" type="number" min="1" step="1" bind:value={bogoBuyQty} /></div>
+        <div class="field"><label for="bogo-next-price">Price of the next item (£) *</label><input id="bogo-next-price" type="number" min="0" step="0.01" bind:value={bogoSecondPricePounds} /></div>
         <div class="field">
-            <label>Maximum uses per sale</label>
-            <input type="number" min="1" step="1" bind:value={bogoMaxApplications} placeholder="Leave empty for unlimited" />
+            <label for="bogo-max-uses">Maximum uses per sale</label>
+            <input id="bogo-max-uses" type="number" min="1" step="1" bind:value={bogoMaxApplications} placeholder="Leave empty for unlimited" />
         </div>
         <div class="field flex items-end"><TouchToggle bind:checked={bogoActive} label="Active Status" /></div>
         <div class="field"><TouchDateTimePicker label="Start Time (optional)" bind:value={bogoStartAt} /></div>
         <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={bogoEndAt} /></div>
         <div class="field span-2">
             <div class="flex items-center justify-between gap-3 mb-2">
-                <label>Selected Items ({selectedBogoProducts.length})</label>
+                <span class="text-sm font-medium text-text-muted">Selected Items ({selectedBogoProducts.length})</span>
                 <button class="btn btn-danger !py-1 !px-3 !text-xs !min-h-8" disabled={selectedBogoProducts.length === 0} on:click={() => bogoProductIds = new Set()}>Clear all</button>
             </div>
             <div class="flex flex-wrap content-start gap-2 h-[92px] overflow-y-auto p-2 border border-border-flat rounded-sm bg-bg-panel">
@@ -1154,7 +1188,7 @@
             {/if}
         </div>
         <div class="field span-2 mt-2">
-            <label>Find Products</label>
+            <label for="bogo-product-search">Find Products</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
                     <input id="bogo-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={bogoProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bogo')} placeholder="Search name, SKU, barcode, or PLU..." />
@@ -1207,7 +1241,7 @@
                 <TouchKeyboardButton targetId="percent-name" label="Open discount name keyboard" embedded />
             </div>
         </div>
-        <div class="field"><label>Percentage Off *</label><input type="number" min="1" max="100" step="1" bind:value={percentValue} /></div>
+        <div class="field"><label for="percentage-value">Percentage Off *</label><input id="percentage-value" type="number" min="1" max="100" step="1" bind:value={percentValue} /></div>
         <div class="field flex items-end"><TouchToggle bind:checked={percentActive} label="Active Status" /></div>
         <div class="span-2 p-3 flat-card text-sm text-text-muted">This discount is selected manually by the cashier from the POS discount button.</div>
     </div>
@@ -1227,8 +1261,8 @@
             </div>
         </div>
         <div class="field">
-            <label>Discount Type *</label>
             <CustomSelect
+                label="Discount Type *"
                 bind:value={temporaryType}
                 options={[
                     { label: 'Percentage off', value: 'percentage' },
@@ -1237,8 +1271,9 @@
             />
         </div>
         <div class="field">
-            <label>{temporaryType === 'percentage' ? 'Percentage Off *' : 'Temporary Sale Price (£) *'}</label>
+            <label for="temporary-discount-value">{temporaryType === 'percentage' ? 'Percentage Off *' : 'Temporary Sale Price (£) *'}</label>
             <input
+                id="temporary-discount-value"
                 type="number"
                 min={temporaryType === 'percentage' ? 1 : 0.01}
                 max={temporaryType === 'percentage' ? 100 : undefined}
@@ -1250,7 +1285,7 @@
         <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={temporaryEndAt} /></div>
         <div class="span-2"><TouchToggle bind:checked={temporaryActive} label="Active Status" /></div>
         <div class="field span-2">
-            <label>Selected Item</label>
+            <span class="text-sm font-medium text-text-muted">Selected Item</span>
             <div class="flat-card p-3 h-[68px] flex items-center gap-3 {selectedTemporaryProduct ? '!border-accent-primary' : ''}">
                 {#if selectedTemporaryProduct}
                     <div class="w-4 h-10 rounded-sm" style="background:{selectedTemporaryProduct.color || '#3b82f6'}"></div>
@@ -1275,7 +1310,7 @@
             {/if}
         </div>
         <div class="field span-2">
-            <label>Find Item *</label>
+            <label for="temporary-product-search">Find Item *</label>
             <div class="flex gap-2">
                 <div class="relative min-w-0 flex-1">
                     <input id="temporary-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={temporaryProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'temporary')} placeholder="Search by item name, SKU, barcode or PLU..." />
@@ -1336,8 +1371,8 @@
 
 
 {#if showPricePad}
-    <div class="modal-overlay !z-[1100]" on:click={() => showPricePad = false}>
-        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" on:click|stopPropagation>
+    <div bind:this={pricePadOverlay} class="modal-overlay !z-[1100] outline-none" role="presentation" tabindex="-1" on:click={closePricePadFromBackdrop} on:keydown={closePricePadOnEscape}>
+        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" role="dialog" aria-modal="true" aria-label="Enter bundle price">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="m-0 text-base text-text-muted">Enter Bundle Price</h3>
                 <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close price keypad" aria-label="Close price keypad" on:click={() => showPricePad = false}>✕</button>
@@ -1363,8 +1398,8 @@
 {/if}
 
 {#if showQtyPad}
-    <div class="modal-overlay !z-[1100]" on:click={() => showQtyPad = false}>
-        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" on:click|stopPropagation>
+    <div bind:this={qtyPadOverlay} class="modal-overlay !z-[1100] outline-none" role="presentation" tabindex="-1" on:click={closeQtyPadFromBackdrop} on:keydown={closeQtyPadOnEscape}>
+        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" role="dialog" aria-modal="true" aria-label="Enter quantity">
             <div class="flex justify-between items-center mb-4">
                 <h3 class="m-0 text-base text-text-muted">Enter Quantity</h3>
                 <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close quantity keypad" aria-label="Close quantity keypad" on:click={() => showQtyPad = false}>✕</button>

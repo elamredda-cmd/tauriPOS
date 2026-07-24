@@ -80,7 +80,7 @@
 </script>
 
 <div class="flex flex-col gap-1.5 w-full">
-    {#if label}<label class="text-[0.85rem] text-text-muted font-medium">{label}</label>{/if}
+    {#if label}<span class="text-[0.85rem] text-text-muted font-medium">{label}</span>{/if}
     <button
         class="w-full h-12 px-4 flex items-center justify-between bg-bg-panel border border-border-flat rounded-sm text-text-main text-[0.95rem] cursor-pointer text-left hover:border-accent-primary transition-colors"
         on:click={() => showModal = true}

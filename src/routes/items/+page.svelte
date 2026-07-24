@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onDestroy, onMount } from "svelte";
+    import { onDestroy, onMount, tick } from "svelte";
     import {
         categoriesDB,
         taxRatesDB,
@@ -31,6 +31,8 @@
     import AdminPageHeader from "$lib/components/AdminPageHeader.svelte";
     import { Grid3X3, Plus } from "@lucide/svelte";
     import { getBarcodeRules } from "$lib/barcodeRules";
+    import { randomTileColor } from "$lib/tileColors";
+    import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
 
     let showModal = false;
     let isEditing = false;
@@ -85,8 +87,38 @@
     // Numpad for Price Input
     let showPricePad = false;
     let priceString = "";
+    let pricePadOverlay: HTMLDivElement | null = null;
     let productImageInput: HTMLInputElement | null = null;
     let imageUploadError = "";
+
+    function closeItemEditor() {
+        showModal = false;
+        showPricePad = false;
+    }
+
+    function closePricePad() {
+        showPricePad = false;
+    }
+
+    async function openPricePad() {
+        showPricePad = true;
+        await tick();
+        pricePadOverlay?.focus();
+    }
+
+    function closeGoodsMenu() {
+        showGoodsMenu = false;
+    }
+
+    function handleBackdropClick(event: MouseEvent, close: () => void) {
+        if (event.target === event.currentTarget) close();
+    }
+
+    function handleBackdropKeydown(event: KeyboardEvent, close: () => void) {
+        if (event.key !== "Escape") return;
+        event.stopPropagation();
+        close();
+    }
 
     $: itemPageCount = Math.max(1, Math.ceil(totalItems / ITEMS_PER_PAGE));
     $: {
@@ -225,7 +257,7 @@
             sku: "",
             barcode: "",
             scalePlu: "",
-            categoryId: cats.length > 0 ? cats[0].id : "",
+            categoryId: getDefaultProductCategoryId(cats, $settingsDB),
             taxRateId:
                 taxes.find((t) => t.isDefault)?.id ||
                 (taxes.length > 0 ? taxes[0].id : ""),
@@ -234,7 +266,7 @@
             showInGoods: false,
             goodsSortOrder: 0,
             isWeighable: false,
-            color: "#3b82f6",
+            color: randomTileColor(),
             image: "",
             isActive: true,
             createdAt: now(),
@@ -265,15 +297,6 @@
         } catch (error) {
             console.warn("Could not load product image:", error);
         }
-    }
-
-    const PALETTE = [
-        "#ef4444", "#f97316", "#f59e0b", "#22c55e",
-        "#0ea5e9", "#6366f1", "#a855f7", "#ec4899",
-    ];
-
-    function randomColor() {
-        return PALETTE[Math.floor(Math.random() * PALETTE.length)];
     }
 
     async function generateScalePlu() {
@@ -398,9 +421,6 @@
             currentItem.goodsSortOrder = 0;
         }
 
-        if (!isEditing) {
-            currentItem.color = randomColor();
-        }
         currentItem.updatedAt = now();
 
         try {
@@ -762,12 +782,11 @@
 {#if showModal}
     <div
         class="modal-overlay"
-        on:click={() => {
-            showModal = false;
-            showPricePad = false;
-        }}
+        role="presentation"
+        on:click={(event) => handleBackdropClick(event, closeItemEditor)}
+        on:keydown={(event) => handleBackdropKeydown(event, closeItemEditor)}
     >
-        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[98vh] overflow-hidden" on:click|stopPropagation>
+        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[98vh] overflow-hidden" role="dialog" aria-modal="true" aria-label={isEditing ? "Edit item" : "Add item"}>
             <div class="item-modal-header flex justify-between items-center border-b border-border-flat p-4 shrink-0">
                 <h2>{isEditing ? "Edit Item" : "Add New Item"}</h2>
                 <button
@@ -886,14 +905,16 @@
 
                 <div class="field">
                     <label for="price">{currentItem.isWeighable ? 'Price per kg (£) *' : 'Selling Price (£) *'}</label>
-                    <div
+                    <button
+                        id="price"
+                        type="button"
                         class="bg-bg-panel border border-border-flat rounded-sm px-3 py-2.5 flex justify-between items-center cursor-pointer text-[1.1rem] font-serif text-success hover:border-accent-primary"
-                        on:click={() => (showPricePad = true)}
+                        on:click={openPricePad}
                     >
                         <span>{formatMoney(currentItem.price || 0)}</span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
                             ><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-                    </div>
+                    </button>
                 </div>
 
                 <div class="field">
@@ -962,10 +983,14 @@
 
     {#if showPricePad}
         <div
+            bind:this={pricePadOverlay}
             class="modal-overlay !z-[110]"
-            on:click={() => (showPricePad = false)}
+            role="presentation"
+            tabindex="-1"
+            on:click={(event) => handleBackdropClick(event, closePricePad)}
+            on:keydown={(event) => handleBackdropKeydown(event, closePricePad)}
         >
-            <div class="flat-panel w-[320px] p-6 rounded-md flex flex-col gap-4 bg-bg-card" on:click|stopPropagation>
+            <div class="flat-panel w-[320px] p-6 rounded-md flex flex-col gap-4 bg-bg-card" role="dialog" aria-modal="true" aria-label="Enter item price">
                 <div class="modal-header">
                     <h3>Enter Price</h3>
                     <button class="modal-close" on:click={() => (showPricePad = false)}>✕</button>
@@ -989,10 +1014,12 @@
 {/if}
 
 {#if showGoodsMenu}
-    <div class="modal-overlay" on:click={() => (showGoodsMenu = false)}>
+    <div class="modal-overlay" role="presentation" on:click={(event) => handleBackdropClick(event, closeGoodsMenu)} on:keydown={(event) => handleBackdropKeydown(event, closeGoodsMenu)}>
         <div
             class="goods-menu-panel flat-panel w-full max-w-[800px] p-6 rounded-md flex flex-col gap-4 bg-bg-card max-h-[90vh] overflow-hidden"
-            on:click|stopPropagation
+            role="dialog"
+            aria-modal="true"
+            aria-label="Goods Menu Manager"
         >
             <div class="flex justify-between items-center border-b border-border-flat pb-4 shrink-0">
                 <h2>Goods Menu Manager</h2>

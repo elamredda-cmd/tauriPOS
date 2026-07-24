@@ -17,21 +17,25 @@
     } from '$lib/permissions';
 
     const pagePermissions: PermissionKey[] = [
-        'open_items', 'open_customers', 'open_discounts', 'open_reports', 'open_settings',
-        'open_employees', 'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
+        'open_items', 'open_suppliers', 'open_tax_rates', 'open_customers', 'open_discounts',
+        'open_orders', 'open_reports', 'open_settings', 'open_employees', 'open_design',
+        'open_sync', 'open_audit', 'open_stock_receiving',
     ];
     const actionPermissions: PermissionKey[] = [
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ];
     const permissionKeys = [...pagePermissions, ...actionPermissions];
     const permissionDescriptions: Record<PermissionKey, string> = {
-        open_items: 'Products, categories, suppliers, and tax rates',
+        open_items: 'Products, categories, barcodes, prices, and stock settings',
+        open_suppliers: 'Supplier records used by stock receiving',
+        open_tax_rates: 'VAT rates and tax configuration',
         open_customers: 'Customer profiles, contact details, and loyalty balances',
         open_discounts: 'Promotions, bundles, offers, and discounts',
-        open_reports: 'Orders, sales reports, and previous till sessions',
-        open_settings: 'Till appearance, printers, labels, scale, and integrations',
+        open_orders: 'Receipt history, payment details, and receipt reprinting',
+        open_reports: 'Sales reports and previous cash-up sessions',
+        open_settings: 'Till appearance, printers, scale, payments, and integrations',
         open_employees: 'Staff accounts, PINs, status, and assigned roles',
-        open_design: 'POS tile layout, pages, and scale button design',
+        open_design: 'POS tiles, button layout, labels, receipts, and scale tile design',
         open_sync: 'MariaDB connection, till status, and synchronization tools',
         open_audit: 'Recorded staff and system activity',
         open_stock_receiving: 'Supplier deliveries and stock quantity updates',

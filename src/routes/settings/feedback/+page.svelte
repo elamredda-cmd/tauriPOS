@@ -3,6 +3,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { now, settingsDB } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
+    import { BadgeCheck, MousePointerClick, ScanBarcode, ShoppingBasket, Vibrate } from '@lucide/svelte';
     import {
         playCartButtonFeedback,
         playErrorSound,
@@ -71,14 +72,6 @@
 </script>
 
 <MgmtPage title="Sound & Haptics" backFallback="/settings">
-    <div slot="actions" class="flex flex-wrap gap-3">
-        <button class="btn btn-secondary" data-feedback-silent="true" on:click={playCartButtonFeedback}>Test Button Click</button>
-        <button class="btn btn-secondary" data-feedback-silent="true" on:click={playItemAddedSound}>Test Item Added</button>
-        <button class="btn btn-secondary" data-feedback-silent="true" on:click={playScanSuccessSound}>Test Scan</button>
-        <button class="btn btn-secondary" data-feedback-silent="true" on:click={playSuccessSound}>Test Sale Complete</button>
-        <button class="btn btn-secondary" data-feedback-silent="true" disabled={!hapticsSupported || !hapticsEnabled} on:click={playHapticFeedback}>Test Vibration</button>
-    </div>
-
     <div class="settings-page-shell">
         <section class="settings-hero">
             <p class="settings-hero-kicker">Operator feedback</p>
@@ -86,6 +79,20 @@
             <p class="settings-hero-copy">
                 These controls decide what the cashier hears or feels when buttons are pressed, items are added, barcodes are scanned, sales complete, or a barcode fails.
             </p>
+        </section>
+
+        <section class="settings-section">
+            <div class="mb-4">
+                <h3 class="settings-section-title !mb-1">Preview Feedback</h3>
+                <p class="text-sm text-text-muted">Test each signal on this till without changing its settings.</p>
+            </div>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <button class="btn btn-secondary" data-feedback-silent="true" on:click={playCartButtonFeedback}><MousePointerClick size={18} /> Button Click</button>
+                <button class="btn btn-secondary" data-feedback-silent="true" on:click={playItemAddedSound}><ShoppingBasket size={18} /> Item Added</button>
+                <button class="btn btn-secondary" data-feedback-silent="true" on:click={playScanSuccessSound}><ScanBarcode size={18} /> Barcode Scan</button>
+                <button class="btn btn-secondary" data-feedback-silent="true" on:click={playSuccessSound}><BadgeCheck size={18} /> Sale Complete</button>
+                <button class="btn btn-secondary" data-feedback-silent="true" disabled={!hapticsSupported || !hapticsEnabled} on:click={playHapticFeedback}><Vibrate size={18} /> Vibration</button>
+            </div>
         </section>
 
         <section class="settings-section">

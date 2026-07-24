@@ -101,8 +101,8 @@
 
 <Modal bind:show title={editing?'Edit Tax Rate':'Add Tax Rate'} width="400px">
     <div class="form-grid">
-        <div class="field span-2"><label>Name *</label><input bind:value={cur.name} placeholder="e.g. Standard VAT" /></div>
-        <div class="field span-2"><label>Rate (%)</label><input type="number" bind:value={ratePercent} step="0.1" min="0" max="100" /></div>
+        <div class="field span-2"><label for="tax-rate-name">Name *</label><input id="tax-rate-name" bind:value={cur.name} placeholder="e.g. Standard VAT" /></div>
+        <div class="field span-2"><label for="tax-rate-value">Rate (%)</label><input id="tax-rate-value" type="number" bind:value={ratePercent} step="0.1" min="0" max="100" /></div>
         <div class="span-2"><TouchToggle bind:checked={cur.isDefault} label="Default Rate" /></div>
     </div>
     <svelte:fragment slot="footer">

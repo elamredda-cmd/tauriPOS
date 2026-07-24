@@ -5,6 +5,7 @@
     import { employeesDB, type AuditLog } from '$lib/stores/db';
     import { getAuditLogPage, getRecentManagerApprovals } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import { RefreshCw } from '@lucide/svelte';
     import {
         auditActionLabel,
         auditEntityLabel,
@@ -230,7 +231,7 @@
 
 <MgmtPage title="Audit Log">
     <button slot="actions" class="btn btn-secondary" disabled={loading || approvalsLoading} on:click={refreshAll}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg>
+        <RefreshCw size={18} aria-hidden="true" />
         Refresh
     </button>
 

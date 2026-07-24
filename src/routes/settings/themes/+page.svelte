@@ -9,6 +9,7 @@
         { id: 'midnight', name: 'Midnight', color1: '#080f1e', color2: '#3b82f6', desc: 'Classic dark blue, high contrast.' },
         { id: 'forest', name: 'Forest', color1: '#0a1a12', color2: '#10b981', desc: 'Earthy greens, easy on the eyes.' },
         { id: 'snow', name: 'Snow', color1: '#f8fafc', color2: '#3b82f6', desc: 'Bright, clean light theme.' },
+        { id: 'linen', name: 'Linen & Walnut', color1: '#f7f5f1', color2: '#76543c', desc: 'Soft warm surfaces with clear walnut accents.' },
         { id: 'coffee', name: 'Coffee', color1: '#1c1917', color2: '#d97706', desc: 'Warm browns and tan accents.' },
         { id: 'sunset', name: 'Sunset', color1: '#1a0b1e', color2: '#f43f5e', desc: 'Deep purple and vibrant rose.' }
     ];

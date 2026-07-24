@@ -16,7 +16,6 @@
         Printer,
         ReceiptText,
         RefreshCw,
-        Scale,
         ShieldCheck,
         Stethoscope,
         Tags,
@@ -475,11 +474,6 @@
 </script>
 
 <MgmtPage title="Printer Setup" backFallback="/settings">
-    <div slot="actions" class="printer-header-links">
-        <a class="btn btn-secondary" href="/settings/labels"><Tags size={18} /> Label Design</a>
-        <a class="btn btn-secondary" href="/settings/scale"><Scale size={18} /> Scale Setup</a>
-    </div>
-
     <div class="settings-page-shell printer-page-shell">
         <section class="printer-overview" aria-label="Printer hardware status">
             <div class="printer-overview-title">
@@ -771,18 +765,6 @@
 </MgmtPage>
 
 <style>
-    .printer-header-links {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.65rem;
-    }
-
-    .printer-header-links :global(.btn) {
-        min-height: 44px;
-        padding: 0.65rem 1rem;
-        font-size: 0.9rem;
-    }
-
     .printer-page-shell {
         gap: 0.9rem;
         padding: 1rem;
@@ -1538,11 +1520,6 @@
     }
 
     @media (max-width: 480px) {
-        .printer-header-links :global(.btn) {
-            flex: 1 1 calc(50% - 0.35rem);
-            min-width: 0;
-        }
-
         .setting-toggle-grid,
         .target-segment {
             grid-template-columns: minmax(0, 1fr);

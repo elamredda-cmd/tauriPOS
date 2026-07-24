@@ -166,19 +166,19 @@
                         <CustomSelect label="Supplier" bind:value={supplierId} options={supplierOptions} />
                     </div>
                     <div class="field">
-                        <label>Reference</label>
-                        <input bind:value={reference} placeholder="Invoice or delivery note" />
+                        <label for="stock-reference">Reference</label>
+                        <input id="stock-reference" bind:value={reference} placeholder="Invoice or delivery note" />
                     </div>
                     <div class="field">
-                        <label>Notes</label>
-                        <input bind:value={notes} placeholder="Optional notes" />
+                        <label for="stock-notes">Notes</label>
+                        <input id="stock-notes" bind:value={notes} placeholder="Optional notes" />
                     </div>
                 </div>
 
                 <div class="mb-4 grid gap-3 lg:grid-cols-[1fr_180px]">
                     <div class="field">
-                        <label>Find Product</label>
-                        <input class="search-input !min-h-11" bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
+                        <label for="stock-product-search">Find Product</label>
+                        <input id="stock-product-search" class="search-input !min-h-11" bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3 text-right">
                         <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Receipt Total Cost</span>

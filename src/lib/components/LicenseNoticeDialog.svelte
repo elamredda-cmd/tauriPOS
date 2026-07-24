@@ -33,6 +33,7 @@
         && $currentEmployee?.isActive
         && $currentShiftId
     );
+    $: canOpenActivationPage = $currentEmployee?.role === 'admin';
     $: blocked = Boolean(status && !status.accessAllowed);
     $: warning = Boolean(
         status
@@ -216,7 +217,9 @@
                 {#if !blocked}
                     <button class="btn btn-secondary" on:click={dismissWarning}>Remind me later</button>
                 {/if}
-                <button class="btn btn-secondary" on:click={openActivationPage}>Activation</button>
+                {#if canOpenActivationPage}
+                    <button class="btn btn-secondary" on:click={openActivationPage}>Activation</button>
+                {/if}
                 {#if blocked}
                     <button class="btn btn-primary" disabled={activating || !activationCode.trim()} on:click={activateCode}>
                         {activating ? 'Checking code...' : 'Activate now'}

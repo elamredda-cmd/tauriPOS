@@ -130,6 +130,34 @@
   --sidebar-active: var(--accent-primary);
 }
 
+/* Linen & Walnut Theme (Warm light) */
+.theme-linen {
+  --bg-base: #f7f5f1;
+  --bg-panel: #fffefd;
+  --bg-card: #efeae3;
+  --bg-card-hover: #e5dcd2;
+  --border-flat: #d2c7ba;
+  --border-focus: #76543c;
+  --text-main: #292521;
+  --text-muted: #6f665e;
+  --text-dark: #292521;
+  --text-inverse: #ffffff;
+  --accent-primary: #76543c;
+  --accent-primary-hover: #5f422f;
+  --success: #347354;
+  --warning: #a76615;
+  --danger: #b63d3d;
+  --overlay: rgba(41, 37, 33, 0.52);
+  --shadow: rgba(65, 48, 36, 0.16);
+  --card-shadow: 0 1px 2px rgba(65, 48, 36, 0.06), 0 2px 5px rgba(65, 48, 36, 0.08);
+  --tile-bg: #ffffff;
+  --tile-text: #292521;
+  --price-bg: #40362f;
+  --price-text: #ffffff;
+  --sidebar-hover: #eee7de;
+  --sidebar-active: var(--accent-primary);
+}
+
 /* Coffee Theme (Brown) */
 .theme-coffee {
   --bg-base: #1c1917;
@@ -251,7 +279,10 @@
   }
   .theme-snow input[type="date"],
   .theme-snow input[type="datetime-local"],
-  .theme-snow input[type="time"] {
+  .theme-snow input[type="time"],
+  .theme-linen input[type="date"],
+  .theme-linen input[type="datetime-local"],
+  .theme-linen input[type="time"] {
     color-scheme: light;
   }
   h1, h2, h3, h4, h5, h6 {

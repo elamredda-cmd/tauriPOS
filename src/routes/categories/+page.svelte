@@ -1,13 +1,15 @@
 <script lang="ts">
-    import { Pencil, Plus, Trash2 } from '@lucide/svelte';
+    import { Pencil, Plus, Star, Trash2 } from '@lucide/svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
-    import { categoriesDB, type Category, uuid, now } from '$lib/stores/db';
+    import { categoriesDB, settingsDB, type Category, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import { getCategoryUsageSummary, upsert, remove as removeSql } from '$lib/stores/database';
+    import { randomTileColor } from '$lib/tileColors';
+    import { DEFAULT_PRODUCT_CATEGORY_SETTING_KEY } from '$lib/categoryDefaults';
     import { onMount } from 'svelte';
 
     type CategoryUsage = { total: number; active: number; deactivated: number };
@@ -22,6 +24,11 @@
     let usageLoading = true;
     let saving = false;
     let deleting = false;
+    let defaultSavingId = '';
+
+    $: defaultCategoryId = $settingsDB.find(
+        (setting) => setting.key === DEFAULT_PRODUCT_CATEGORY_SETTING_KEY,
+    )?.value || '';
 
     $: filteredCategories = $categoriesDB.filter((category) => {
         const q = searchQuery.trim().toLowerCase();
@@ -37,7 +44,7 @@
     });
 
     function add() { 
-        cur = { id: uuid(), name:'', color:'#3b82f6', sortOrder: $categoriesDB.length + 1, isActive:true, createdAt: now() };
+        cur = { id: uuid(), name:'', color: randomTileColor(), sortOrder: $categoriesDB.length + 1, isActive:true, createdAt: now() };
         editing=false; 
         show=true; 
     }
@@ -71,6 +78,10 @@
             toast('Sort order must be 0 or higher', 'error');
             return;
         }
+        if (editing && cur.id === defaultCategoryId && cur.isActive === false) {
+            toast('Choose another default category before making this one inactive', 'error');
+            return;
+        }
         const record = {
             ...cur,
             name: cur.name.trim(),
@@ -92,6 +103,30 @@
             : [...list, record]);
         show = false;
         toast(editing ? 'Category updated' : 'Category added');
+    }
+
+    async function setDefaultCategory(category: Category) {
+        if (!category.isActive || defaultSavingId) return;
+        if (category.id === defaultCategoryId) return;
+        defaultSavingId = category.id;
+        const setting = {
+            key: DEFAULT_PRODUCT_CATEGORY_SETTING_KEY,
+            value: category.id,
+            updatedAt: now(),
+        };
+        try {
+            await upsert('settings', setting, 'key');
+            settingsDB.update((list) => [
+                ...list.filter((item) => item.key !== setting.key),
+                setting,
+            ]);
+            toast(`${category.name} is now the default category`, 'success');
+        } catch (error) {
+            console.error(error);
+            toast('Default category was not saved', 'error');
+        } finally {
+            defaultSavingId = '';
+        }
     }
 
     async function confirmDel(id: string) {
@@ -117,6 +152,18 @@
             deleting = false;
         }
         categoriesDB.update(l => l.filter(c => c.id !== id));
+        if (id === defaultCategoryId) {
+            const setting = { key: DEFAULT_PRODUCT_CATEGORY_SETTING_KEY, value: '', updatedAt: now() };
+            try {
+                await upsert('settings', setting, 'key');
+                settingsDB.update((list) => [
+                    ...list.filter((item) => item.key !== setting.key),
+                    setting,
+                ]);
+            } catch (error) {
+                console.warn('Could not clear the deleted default category:', error);
+            }
+        }
         toast('Category deleted', 'info');
         showDelConfirm = false;
     }
@@ -150,7 +197,12 @@
             {@const usage = categoryUsage(cat.id)}
             <tr>
                 <td><div class="swatch" style="background:{cat.color}"></div></td>
-                <td class="font-semibold">{cat.name}</td>
+                <td class="font-semibold">
+                    <div class="flex items-center gap-2">
+                        <span>{cat.name}</span>
+                        {#if cat.id === defaultCategoryId}<span class="tag !text-accent-primary">Default</span>{/if}
+                    </div>
+                </td>
                 <td>{cat.sortOrder}</td>
                 <td>
                     {#if usageLoading}
@@ -164,6 +216,13 @@
                     <span class="tag">{cat.isActive ? 'Active' : 'Inactive'}</span>
                 </td>
                 <td><div class="act-row">
+                    <button
+                        class="btn-icon act-btn {cat.id === defaultCategoryId ? '!text-warning' : ''}"
+                        title={cat.id === defaultCategoryId ? 'Default category for new items' : `Make ${cat.name} the default category`}
+                        aria-label={cat.id === defaultCategoryId ? `${cat.name} is the default category` : `Make ${cat.name} the default category`}
+                        disabled={!cat.isActive || defaultSavingId !== ''}
+                        on:click={() => setDefaultCategory(cat)}
+                    ><Star size={16} fill={cat.id === defaultCategoryId ? 'currentColor' : 'none'} /></button>
                     <button class="btn-icon act-btn" title="Edit category" aria-label={`Edit ${cat.name}`} on:click={() => edit(cat)}><Pencil size={16} /></button>
                     <button class="btn-icon act-btn danger" title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}><Trash2 size={16} /></button>
                 </div></td>

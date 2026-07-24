@@ -6,6 +6,8 @@
     import { getCurrentWindow } from "@tauri-apps/api/window";
     import { ChevronRight, LockKeyhole, Maximize2, Minimize2, ScanLine, Search, ShieldCheck, UsersRound, X } from "@lucide/svelte";
     import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
+    import { randomTileColor } from "$lib/tileColors";
+    import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
     import {
         productsDB,
         employeesDB,
@@ -1558,8 +1560,7 @@
         quickAddSku = "";
         quickAddPrice = "0";
         quickAddBusy = false;
-        quickAddCategoryId =
-            $activeCategories.length > 0 ? $activeCategories[0].id : "";
+        quickAddCategoryId = getDefaultProductCategoryId($activeCategories, $settingsDB);
         quickAddTaxRateId =
             get(taxRatesDB).find((t: any) => t.isDefault)?.id || "tax-standard-vat";
         showQuickAddModal = true;
@@ -1607,7 +1608,7 @@
             isWeighable: false,
             showInGoods: false,
             goodsSortOrder: 0,
-            color: "#6366f1",
+            color: randomTileColor(),
             image: "",
             isActive: true,
             createdAt: now(),

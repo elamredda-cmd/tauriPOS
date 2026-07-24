@@ -23,13 +23,11 @@
         MonitorCog,
         PackageCheck,
         Palette,
-        PanelsTopLeft,
         Printer,
         Save,
         Scale,
         Smartphone,
         Store as StoreIcon,
-        Tags,
         Type,
         Volume2,
         Wrench,
@@ -48,10 +46,8 @@
     const settingsShortcuts: SettingsShortcut[] = [
         { title: 'Colour theme', group: 'Appearance', description: 'Colours and contrast', path: '/settings/themes', accent: '#2563eb', icon: Palette },
         { title: 'Fonts & text', group: 'Appearance', description: 'Writing style and sizes', path: '/settings/fonts', accent: '#db2777', icon: Type },
-        { title: 'POS layout', group: 'Selling screen', description: 'Cart and toolbar positions', path: '/settings/layout', accent: '#0891b2', icon: PanelsTopLeft },
         { title: 'Printers & drawer', group: 'Hardware', description: 'Receipts, labels and drawer', path: '/settings/printers', accent: '#16a34a', icon: Printer },
         { title: 'Scale', group: 'Hardware', description: 'Port and weighing setup', path: '/settings/scale', accent: '#0f766e', icon: Scale },
-        { title: 'Label design', group: 'Printing', description: 'Shelf and barcode labels', path: '/settings/labels', accent: '#ca8a04', icon: Tags },
         { title: 'Scale barcodes', group: 'Barcodes', description: 'Embedded price rules', path: '/settings/barcodes', accent: '#16a34a', icon: Barcode },
         { title: 'Customer display', group: 'Checkout', description: 'Second-screen basket', path: '/settings/customer-display', accent: '#2563eb', icon: Monitor },
         { title: 'Card terminals', group: 'Checkout', description: 'SumUp, Dojo and providers', path: '/settings/payments', accent: '#059669', icon: CreditCard },
@@ -190,7 +186,7 @@
             <div class="settings-section-heading">
                 <div>
                     <span>Setup</span>
-                    <h2>Devices and appearance</h2>
+                    <h2>Appearance, hardware and services</h2>
                 </div>
                 <small>{visibleSettingsShortcuts.length} sections</small>
             </div>
@@ -272,9 +268,6 @@
                             <p>{$connectionState.mysqlOnline ? 'Connected to the central MariaDB server.' : 'Working from this till’s local SQLite database.'}</p>
                         </div>
                     </header>
-                    {#if $currentEmployee?.role === 'admin'}
-                        <a href="/settings/advanced" class="btn btn-secondary settings-panel-action">Maintenance <ChevronRight size={18} /></a>
-                    {/if}
                 </section>
             </div>
 
@@ -700,20 +693,11 @@
     }
 
     .settings-database-panel {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 0.7rem;
+        display: block;
     }
 
     .settings-database-panel .settings-panel-header {
         margin-bottom: 0;
-    }
-
-    .settings-panel-action {
-        min-height: 44px;
-        padding: 0.6rem 0.85rem;
-        font-size: 0.78em;
     }
 
     .settings-loyalty-grid {
@@ -961,7 +945,6 @@
         }
 
         .settings-inline-field,
-        .settings-database-panel,
         .settings-sub-options {
             grid-template-columns: 1fr;
         }

@@ -61,12 +61,12 @@
 
 <Modal bind:show title={editing?'Edit Supplier':'Add Supplier'} width="560px">
     <div class="form-grid">
-        <div class="field span-2"><label>Company Name *</label><input bind:value={cur.name} /></div>
-        <div class="field"><label>Contact Person</label><input bind:value={cur.contactName} /></div>
-        <div class="field"><label>Phone</label><input bind:value={cur.phone} /></div>
-        <div class="field"><label>Email</label><input type="email" bind:value={cur.email} /></div>
-        <div class="field"><label>Address</label><input bind:value={cur.address} /></div>
-        <div class="field span-2"><label>Notes</label><textarea bind:value={cur.notes}></textarea></div>
+        <div class="field span-2"><label for="supplier-name">Company Name *</label><input id="supplier-name" bind:value={cur.name} /></div>
+        <div class="field"><label for="supplier-contact">Contact Person</label><input id="supplier-contact" bind:value={cur.contactName} /></div>
+        <div class="field"><label for="supplier-phone">Phone</label><input id="supplier-phone" bind:value={cur.phone} /></div>
+        <div class="field"><label for="supplier-email">Email</label><input id="supplier-email" type="email" bind:value={cur.email} /></div>
+        <div class="field"><label for="supplier-address">Address</label><input id="supplier-address" bind:value={cur.address} /></div>
+        <div class="field span-2"><label for="supplier-notes">Notes</label><textarea id="supplier-notes" bind:value={cur.notes}></textarea></div>
     </div>
     <svelte:fragment slot="footer">
         <button class="btn btn-secondary" on:click={() => show=false}>Cancel</button>

@@ -101,11 +101,6 @@
 </script>
 
 <MgmtPage title="Scale Setup" backFallback="/settings">
-    <div slot="actions" class="flex flex-wrap gap-3">
-        <a class="btn btn-secondary" href="/settings/barcodes">Scale Barcode Rules</a>
-        <a class="btn btn-secondary" href="/settings/printers">Printer Setup</a>
-    </div>
-
     <div class="settings-page-shell">
         <section class="settings-hero">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -144,16 +139,18 @@
                     <div class="settings-mini-card mt-5">
                         <div class="form-grid">
                             <div class="field span-2">
-                                <label>Scale Port</label>
                                 {#if portOptions.length > 0}
                                     <CustomSelect
+                                        label="Scale Port"
                                         value={scale.devicePath}
                                         options={portOptions}
                                         placeholder="Choose the scale port..."
                                         on:change={(event) => updateSetting('scale_hardware_device_path', String(event.detail))}
                                     />
                                 {:else}
+                                    <label for="scale-port-fallback">Scale Port</label>
                                     <input
+                                        id="scale-port-fallback"
                                         value={scale.devicePath}
                                         placeholder="e.g. COM3 or /dev/cu.usbserial-0001"
                                         on:change={(event) => updateSetting('scale_hardware_device_path', event.currentTarget.value.trim())}
@@ -162,8 +159,9 @@
                                 <small class="text-text-muted">If there are many choices, unplug the adapter, click Find ports, plug it back in, and click Find ports again. The new one is usually the scale.</small>
                             </div>
                             <div class="field span-2">
-                                <label>Manual Port</label>
+                                <label for="scale-manual-port">Manual Port</label>
                                 <input
+                                    id="scale-manual-port"
                                     value={scale.devicePath}
                                     placeholder="Type only if the finder cannot see it"
                                     on:change={(event) => updateSetting('scale_hardware_device_path', event.currentTarget.value.trim())}
@@ -205,8 +203,9 @@
                                 on:change={(event) => updateSetting('scale_hardware_request_mode', String(event.detail))}
                             />
                             <div class="field">
-                                <label>Read Timeout</label>
+                                <label for="scale-read-timeout">Read Timeout</label>
                                 <input
+                                    id="scale-read-timeout"
                                     type="number"
                                     min="500"
                                     max="5000"

@@ -2,9 +2,9 @@ import { writable } from 'svelte/store';
 import { settingsDB, now } from './db';
 import { upsert } from './sqlite';
 
-export type Theme = 'midnight' | 'forest' | 'snow' | 'coffee' | 'sunset';
+export type Theme = 'midnight' | 'forest' | 'snow' | 'linen' | 'coffee' | 'sunset';
 
-export const THEMES: Theme[] = ['midnight', 'forest', 'snow', 'coffee', 'sunset'];
+export const THEMES: Theme[] = ['midnight', 'forest', 'snow', 'linen', 'coffee', 'sunset'];
 const THEME_KEY = 'active_theme';
 
 export const activeTheme = writable<Theme>('midnight');
