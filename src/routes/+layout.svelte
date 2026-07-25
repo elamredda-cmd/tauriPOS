@@ -34,6 +34,7 @@
     import LicenseNoticeDialog from '$lib/components/LicenseNoticeDialog.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
     import { markAppNavigation } from '$lib/navigation';
+    import { OWNER_CLOUD_ACTIVATION_EVENT, shouldStartOwnerCloudReporter } from '$lib/ownerCloudConfig';
 
     let dbReady = false;
     let dbError = '';
@@ -42,6 +43,7 @@
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let stopOwnerCloudReporter: (() => void) | null = null;
     let ownerCloudStartupTimer: ReturnType<typeof setTimeout> | null = null;
+    let ownerCloudActivationListener: (() => void) | null = null;
     let restorePendingMariaDbReplace = false;
     let lightStoreHydrationRunning = false;
     let queuedLightHydrationPath: string | null = null;
@@ -100,6 +102,17 @@
                 void checkAutomaticSetupBackup();
             }, AUTOMATIC_BACKUP_CHECK_MS);
         }, AUTOMATIC_BACKUP_START_DELAY_MS);
+    }
+
+    async function startOwnerCloudReporterIfNeeded(force = false) {
+        if (stopOwnerCloudReporter || window.location.pathname === '/customer-display') return;
+        if (!force && !await shouldStartOwnerCloudReporter()) return;
+        try {
+            const reporterModule = await import('$lib/ownerCloudReporter');
+            stopOwnerCloudReporter = reporterModule.startOwnerCloudReporter();
+        } catch (error) {
+            console.warn('owner cloud: delayed startup failed', error);
+        }
     }
 
     function isDatabaseIdentityMismatch(error: unknown): boolean {
@@ -351,13 +364,11 @@
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {
                 stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
-                ownerCloudStartupTimer = setTimeout(async () => {
-                    try {
-                        const reporterModule = await import('$lib/ownerCloudReporter');
-                        stopOwnerCloudReporter = reporterModule.startOwnerCloudReporter();
-                    } catch (error) {
-                        console.warn('owner cloud: delayed startup failed', error);
-                    }
+                ownerCloudActivationListener = () => void startOwnerCloudReporterIfNeeded(true);
+                window.addEventListener(OWNER_CLOUD_ACTIVATION_EVENT, ownerCloudActivationListener);
+                ownerCloudStartupTimer = setTimeout(() => {
+                    ownerCloudStartupTimer = null;
+                    void startOwnerCloudReporterIfNeeded();
                 }, 7000);
                 startAutomaticBackupSchedule();
             }
@@ -380,6 +391,9 @@
         stopCustomerDisplayAutoOpen?.();
         stopOwnerCloudReporter?.();
         if (ownerCloudStartupTimer) clearTimeout(ownerCloudStartupTimer);
+        if (ownerCloudActivationListener) {
+            window.removeEventListener(OWNER_CLOUD_ACTIVATION_EVENT, ownerCloudActivationListener);
+        }
         clearSyncStartupRetry();
         clearAutomaticBackupSchedule();
     });

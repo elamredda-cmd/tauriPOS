@@ -17,6 +17,8 @@ fn main() {
         "execute_printer_module",
         "commit_local_sale",
         "commit_mysql_sale",
+        "commit_local_stock_receipt",
+        "commit_mysql_stock_receipt",
         "commit_online_reversal",
         "allocate_mysql_till_sequence",
         "create_local_backup",
@@ -30,6 +32,9 @@ fn main() {
         "create_manual_license_request",
         "activate_manual_license",
         "activate_manual_license_file",
+        "owner_cloud_get_reporter_secret",
+        "owner_cloud_store_reporter_secret",
+        "owner_cloud_clear_reporter_secret",
     ]);
 
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(app_manifest))

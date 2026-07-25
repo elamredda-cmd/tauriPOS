@@ -525,9 +525,14 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
     bytes.push(...line(divider, config.encoding));
     for (const item of payload.lines) {
         const scaleDisplay = getScaleSaleDisplay(item.notes, item.quantity, item.unitPrice, item.originalPrice);
+        const quantityLabel = item.quantity === 0 && item.notes?.includes('Proportional partial refund')
+            ? 'Part'
+            : scaleDisplay.label;
         const lineTotal = item.lineTotal ?? item.unitPrice * item.quantity;
-        bytes.push(...line(cleanReceiptText(item.productName, width), config.encoding));
-        bytes.push(...line(textRow(scaleDisplay.label, money(lineTotal), width), config.encoding));
+        bytes.push(...line(
+            textRow(`${quantityLabel} ${item.productName}`, money(lineTotal), width),
+            config.encoding,
+        ));
         if (payload.design.showSku && item.productId) bytes.push(...line(`ID: ${cleanReceiptText(item.productId, width - 4)}`, config.encoding));
     }
 

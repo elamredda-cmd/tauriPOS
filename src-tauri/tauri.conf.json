@@ -28,7 +28,8 @@
     "windows": {
       "minimumWebview2Version": "125.0.2535.41",
       "webviewInstallMode": {
-        "type": "skip"
+        "type": "downloadBootstrapper",
+        "silent": true
       }
     },
     "icon": [

@@ -80,7 +80,7 @@ export const cctvConnectionState = writable<CctvConnectionState>({
     lastSentAt: 0,
 });
 
-const MAX_AUTOMATIC_QUEUE = 250;
+const MAX_AUTOMATIC_QUEUE = 8;
 const OFFLINE_COOLDOWN_MS = 15_000;
 const RECEIPT_LINES_PER_MESSAGE = 80;
 
@@ -97,7 +97,6 @@ let unavailableUntil = 0;
 let droppedMessageCount = 0;
 let consecutiveFailures = 0;
 let transportGeneration = 0;
-let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 function setting(settings: Setting[], key: string, fallback = ''): string {
     return settings.find((item) => item.key === key)?.value ?? fallback;
@@ -157,6 +156,13 @@ function normaliseLineWidth(value: number): number {
     return Math.max(24, Math.min(32, Math.round(value)));
 }
 
+function messageLineWidth(config: CctvPosConfig): number {
+    const width = normaliseLineWidth(config.lineWidth);
+    // Hikvision overlays can wrap as soon as the last configured column is
+    // occupied. Leave that column empty so the price stays on the same row.
+    return config.framingPreset === 'hikvision' ? Math.max(23, width - 1) : width;
+}
+
 function formatQuantity(value: number | undefined): string {
     const quantity = Number.isFinite(value) && Number(value) > 0 ? Number(value) : 1;
     return Number.isInteger(quantity) ? String(quantity) : quantity.toFixed(3).replace(/\.?0+$/, '');
@@ -187,8 +193,8 @@ function compactProductLine(
     width: number,
 ): string {
     return fitPrefixAndSuffix(
-        name,
-        `x${formatQuantity(quantity)} @${money(unitPrice)} =${money(lineTotal)}`,
+        `${formatQuantity(quantity)}x ${name}`,
+        `${money(unitPrice)} ${money(lineTotal)}`,
         width,
     );
 }
@@ -199,7 +205,7 @@ function compactScannedItemLine(
     lineTotal: number,
     width: number,
 ): string {
-    return fitPrefixAndSuffix(name, `x${formatQuantity(quantity)} ${money(lineTotal)}`, width);
+    return fitPrefixAndSuffix(`${formatQuantity(quantity)}x ${name}`, money(lineTotal), width);
 }
 
 function decodeControlMarkers(value: string): string {
@@ -232,7 +238,7 @@ async function transmitCctvPosText(text: string, config: CctvPosConfig): Promise
         host: config.host.trim(),
         port: config.port,
         text: frameCctvPosText(text, config),
-        timeoutMs: 500,
+        timeoutMs: 300,
         encoding: config.encoding,
     });
 }
@@ -253,6 +259,7 @@ function updateConnectionState(patch: Partial<CctvConnectionState>): void {
 function markOnline(result: CctvSendResult): void {
     unavailableUntil = 0;
     consecutiveFailures = 0;
+    droppedMessageCount = 0;
     updateConnectionState({
         status: 'online',
         message: 'TCP text sent. Check the linked camera to confirm the overlay is visible.',
@@ -274,27 +281,12 @@ function markOffline(error: unknown): void {
     });
 }
 
-function clearRetryTimer(): void {
-    if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = undefined;
-}
-
-function scheduleAutomaticRetry(): void {
-    if (retryTimer || automaticQueue.length === 0) return;
-    const delay = Math.max(250, unavailableUntil - Date.now());
-    retryTimer = setTimeout(() => {
-        retryTimer = undefined;
-        void drainAutomaticQueue();
-    }, delay);
-}
-
 export function resetCctvAutomaticQueue(message = 'CCTV automatic sending is disabled.'): void {
     transportGeneration += 1;
     automaticQueue = [];
     droppedMessageCount = 0;
     unavailableUntil = 0;
     consecutiveFailures = 0;
-    clearRetryTimer();
     updateConnectionState({ status: 'idle', message, retryAt: 0 });
 }
 
@@ -316,47 +308,22 @@ export async function sendCctvPosText(
     }
 }
 
-async function transmitDroppedMessageNotice(config: CctvPosConfig): Promise<boolean> {
-    if (droppedMessageCount <= 0) return true;
-    const count = droppedMessageCount;
-    const generation = transportGeneration;
-    try {
-        const result = await transmitCctvPosText(
-            formatCctvActionText({ action: 'CCTV GAP', name: `${count} older events condensed` }, config),
-            config,
-        );
-        if (generation !== transportGeneration) return true;
-        droppedMessageCount = Math.max(0, droppedMessageCount - count);
-        markOnline(result);
-        return true;
-    } catch (error) {
-        if (generation !== transportGeneration) return true;
-        markOffline(error);
-        return false;
-    }
-}
-
 async function drainAutomaticQueue(): Promise<void> {
     if (automaticWorkerRunning) return;
     automaticWorkerRunning = true;
-    clearRetryTimer();
     try {
         while (automaticQueue.length > 0) {
-            const cycleGeneration = transportGeneration;
             const config = getCctvPosConfig();
             if (!config.enabled || !config.host.trim()) {
                 resetCctvAutomaticQueue();
                 break;
             }
             if (Date.now() < unavailableUntil) {
-                scheduleAutomaticRetry();
+                droppedMessageCount += automaticQueue.length;
+                automaticQueue = [];
+                updateConnectionState({});
                 break;
             }
-            if (!await transmitDroppedMessageNotice(config)) {
-                scheduleAutomaticRetry();
-                break;
-            }
-            if (cycleGeneration !== transportGeneration) continue;
 
             const message = automaticQueue[0];
             if (!message) break;
@@ -369,9 +336,11 @@ async function drainAutomaticQueue(): Promise<void> {
                 markOnline(result);
             } catch (error) {
                 if (generation !== transportGeneration) continue;
+                if (automaticQueue[0] === message) automaticQueue.shift();
+                droppedMessageCount += 1 + automaticQueue.length;
+                automaticQueue = [];
                 markOffline(error);
-                console.warn(`CCTV POS ${message.kind} send will retry:`, error);
-                scheduleAutomaticRetry();
+                console.warn(`CCTV POS ${message.kind} send paused for 15 seconds:`, error);
                 break;
             }
         }
@@ -384,16 +353,38 @@ function queueAutomaticText(text: string, kind: CctvMessageKind): void {
     const config = getCctvPosConfig();
     if (!config.enabled || !config.host.trim()) return;
 
-    if (automaticQueue.length >= MAX_AUTOMATIC_QUEUE) {
-        const oldestItemIndex = automaticQueue.findIndex((message) => message.kind === 'item');
+    if (Date.now() < unavailableUntil) {
+        droppedMessageCount += 1;
+        updateConnectionState({});
+        return;
+    }
+
+    const message = { text, kind };
+    const protectedCount = automaticWorkerRunning && automaticQueue.length > 0 ? 1 : 0;
+
+    // Live trolley text is observational, so showing the newest scan quickly
+    // is more useful than replaying stale scans after a brief network delay.
+    if (kind === 'item' || kind === 'event') {
+        for (let index = automaticQueue.length - 1; index >= protectedCount; index -= 1) {
+            if (automaticQueue[index].kind === 'receipt') continue;
+            automaticQueue.splice(index, 1);
+            droppedMessageCount += 1;
+        }
+        automaticQueue.splice(protectedCount, 0, message);
+    } else {
+        automaticQueue.push(message);
+    }
+
+    while (automaticQueue.length > MAX_AUTOMATIC_QUEUE) {
+        const oldestItemIndex = automaticQueue.findIndex((queued, index) => (
+            index >= protectedCount && queued.kind !== 'receipt'
+        ));
         if (oldestItemIndex >= 0) automaticQueue.splice(oldestItemIndex, 1);
-        else automaticQueue.shift();
+        else automaticQueue.splice(Math.min(protectedCount, automaticQueue.length - 1), 1);
         droppedMessageCount += 1;
     }
-    automaticQueue.push({ text, kind });
     updateConnectionState({});
-    if (Date.now() < unavailableUntil) scheduleAutomaticRetry();
-    else void drainAutomaticQueue();
+    void drainAutomaticQueue();
 }
 
 export function formatCctvItemText(payload: CctvItemPayload, config = getCctvPosConfig()): string {
@@ -404,7 +395,7 @@ export function formatCctvItemText(payload: CctvItemPayload, config = getCctvPos
         payload.name,
         quantity,
         payload.price * quantity,
-        config.lineWidth,
+        messageLineWidth(config),
     );
 }
 
@@ -418,24 +409,27 @@ export function formatCctvActionText(payload: CctvActionPayload, config = getCct
             : '',
         Number.isFinite(payload.amount) ? money(Number(payload.amount)) : '',
     ].filter(Boolean).join(' ');
-    if (!suffix) return cleanText(prefix).slice(0, config.lineWidth);
-    return fitPrefixAndSuffix(prefix, suffix, config.lineWidth);
+    const width = messageLineWidth(config);
+    if (!suffix) return cleanText(prefix).slice(0, width);
+    return fitPrefixAndSuffix(prefix, suffix, width);
 }
 
 function formatReceiptRows(payload: CctvReceiptPayload, config: CctvPosConfig): string[] {
+    const width = messageLineWidth(config);
     return payload.lines.map((item) => compactProductLine(
         item.name,
         item.quantity,
         item.unitPrice,
         item.lineTotal,
-        config.lineWidth,
+        width,
     ));
 }
 
 export function formatCctvReceiptText(payload: CctvReceiptPayload, config = getCctvPosConfig()): string {
     const rows = formatReceiptRows(payload, config);
-    if (payload.discount > 0) rows.push(alignedLine('DISCOUNT', money(-payload.discount), config.lineWidth));
-    rows.push(alignedLine('TOTAL', money(payload.total), config.lineWidth));
+    const width = messageLineWidth(config);
+    if (payload.discount > 0) rows.push(alignedLine('DISCOUNT', money(-payload.discount), width));
+    rows.push(alignedLine('TOTAL', money(payload.total), width));
     return rows.join('\n');
 }
 
@@ -453,7 +447,7 @@ export function sendCctvAction(
     if (!config.enabled) return;
     if (channel === 'item' && !config.sendItems) return;
     if (channel === 'receipt' && !config.sendReceipts) return;
-    queueAutomaticText(formatCctvActionText(payload, config), 'event');
+    queueAutomaticText(formatCctvActionText(payload, config), channel === 'receipt' ? 'receipt' : 'event');
 }
 
 export function sendCctvReceipt(payload: CctvReceiptPayload): void {
@@ -470,6 +464,7 @@ export function formatCctvReceiptMessages(
     config = getCctvPosConfig(),
 ): string[] {
     const rows = formatReceiptRows(payload, config);
+    const width = messageLineWidth(config);
     const chunkCount = Math.max(1, Math.ceil(rows.length / RECEIPT_LINES_PER_MESSAGE));
     const messages: string[] = [];
     for (let index = 0; index < chunkCount; index += 1) {
@@ -478,13 +473,13 @@ export function formatCctvReceiptMessages(
             (index + 1) * RECEIPT_LINES_PER_MESSAGE,
         );
         if (chunkCount > 1) {
-            chunkRows.unshift(alignedLine('RECEIPT', `${index + 1}/${chunkCount}`, config.lineWidth));
+            chunkRows.unshift(alignedLine('RECEIPT', `${index + 1}/${chunkCount}`, width));
         }
         if (index === chunkCount - 1) {
             if (payload.discount > 0) {
-                chunkRows.push(alignedLine('DISCOUNT', money(-payload.discount), config.lineWidth));
+                chunkRows.push(alignedLine('DISCOUNT', money(-payload.discount), width));
             }
-            chunkRows.push(alignedLine('TOTAL', money(payload.total), config.lineWidth));
+            chunkRows.push(alignedLine('TOTAL', money(payload.total), width));
         }
         messages.push(chunkRows.join('\n'));
     }

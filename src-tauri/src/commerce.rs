@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{MySqlPool, Row, SqlitePool};
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{collections::HashSet, fs, path::PathBuf, thread, time::Duration};
 use tauri::{AppHandle, Manager};
 
 fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -151,6 +151,42 @@ pub struct SaleBundle {
 #[serde(rename_all = "camelCase")]
 pub struct CommitSaleResult {
     pub bundle: SaleBundle,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StockReceiptRecord {
+    pub id: String,
+    pub supplier_id: String,
+    pub employee_id: String,
+    pub reference: String,
+    pub notes: String,
+    pub total_cost: i64,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StockReceiptLineRecord {
+    pub id: String,
+    pub receipt_id: String,
+    pub product_id: String,
+    pub product_name: String,
+    pub quantity: i64,
+    pub unit_cost: i64,
+    pub inventory_log_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct StockReceiptBundle {
+    pub receipt: StockReceiptRecord,
+    pub lines: Vec<StockReceiptLineRecord>,
+    pub audit: AuditRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -1144,6 +1180,277 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
     tx.commit().await
 }
 
+fn validate_stock_receipt_bundle(bundle: &StockReceiptBundle) -> Result<(), sqlx::Error> {
+    let receipt = &bundle.receipt;
+    if receipt.id.trim().is_empty()
+        || receipt.employee_id.trim().is_empty()
+        || receipt.status != "received"
+        || bundle.lines.is_empty()
+    {
+        return Err(sqlx::Error::Protocol("Invalid stock receipt".into()));
+    }
+
+    let mut product_ids = HashSet::new();
+    let mut calculated_total = 0_i64;
+    for line in &bundle.lines {
+        if line.id.trim().is_empty()
+            || line.receipt_id != receipt.id
+            || line.product_id.trim().is_empty()
+            || line.inventory_log_id.trim().is_empty()
+            || line.quantity <= 0
+            || line.unit_cost < 0
+            || !product_ids.insert(line.product_id.as_str())
+        {
+            return Err(sqlx::Error::Protocol("Invalid stock receipt line".into()));
+        }
+        calculated_total =
+            calculated_total
+                .checked_add(line.quantity.checked_mul(line.unit_cost).ok_or_else(|| {
+                    sqlx::Error::Protocol("Stock receipt total is too large".into())
+                })?)
+                .ok_or_else(|| sqlx::Error::Protocol("Stock receipt total is too large".into()))?;
+    }
+    if receipt.total_cost != calculated_total {
+        return Err(sqlx::Error::Protocol(
+            "Stock receipt total does not match its lines".into(),
+        ));
+    }
+    if bundle.audit.entity_id != receipt.id
+        || bundle.audit.entity_type != "stock_receipt"
+        || bundle.audit.action != "stock_received"
+    {
+        return Err(sqlx::Error::Protocol("Invalid stock receipt audit".into()));
+    }
+    Ok(())
+}
+
+async fn insert_sqlite_stock_receipt_bundle(
+    pool: &SqlitePool,
+    bundle: &StockReceiptBundle,
+    outbox_id: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    validate_stock_receipt_bundle(bundle)?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let receipt = &bundle.receipt;
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM stock_receipts WHERE id = ? LIMIT 1")
+            .bind(&receipt.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing.is_some() {
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    sqlx::query(
+        "INSERT INTO stock_receipts (id, supplierId, employeeId, reference, notes, totalCost, status, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&receipt.id)
+    .bind(&receipt.supplier_id)
+    .bind(&receipt.employee_id)
+    .bind(&receipt.reference)
+    .bind(&receipt.notes)
+    .bind(receipt.total_cost)
+    .bind(&receipt.status)
+    .bind(&receipt.created_at)
+    .bind(&receipt.updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    let log_notes = if receipt.reference.trim().is_empty() {
+        "Stock receipt".to_string()
+    } else {
+        format!("Stock receipt {}", receipt.reference.trim())
+    };
+    for line in &bundle.lines {
+        sqlx::query(
+            "INSERT INTO stock_receipt_lines (id, receiptId, productId, quantity, unitCost, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&line.id)
+        .bind(&line.receipt_id)
+        .bind(&line.product_id)
+        .bind(line.quantity)
+        .bind(line.unit_cost)
+        .bind(&line.created_at)
+        .bind(&line.updated_at)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            "UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?",
+        )
+        .bind(line.quantity)
+        .bind(&receipt.updated_at)
+        .bind(&line.product_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(sqlx::Error::Protocol(format!(
+                "Product {} is no longer available",
+                line.product_name
+            )));
+        }
+
+        sqlx::query(
+            "INSERT INTO inventory_logs (id, productId, quantityChange, type, referenceId, employeeId, notes, createdAt, updatedAt)
+             VALUES (?, ?, ?, 'restock', ?, ?, ?, ?, ?)",
+        )
+        .bind(&line.inventory_log_id)
+        .bind(&line.product_id)
+        .bind(line.quantity)
+        .bind(&receipt.id)
+        .bind(&receipt.employee_id)
+        .bind(&log_notes)
+        .bind(&line.created_at)
+        .bind(&line.updated_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let audit = &bundle.audit;
+    sqlx::query(
+        "INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&audit.id)
+    .bind(&audit.employee_id)
+    .bind(&audit.action)
+    .bind(&audit.entity_type)
+    .bind(&audit.entity_id)
+    .bind(&audit.old_data)
+    .bind(&audit.new_data)
+    .bind(&audit.created_at)
+    .bind(&receipt.updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(outbox_id) = outbox_id.filter(|value| !value.trim().is_empty()) {
+        let data = serde_json::to_string(bundle)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO _offline_queue (id, table_name, operation, data, id_key, created_at)
+             VALUES (?, 'stock_receipts', 'stockReceiptBundle', ?, 'id', ?)",
+        )
+        .bind(outbox_id)
+        .bind(data)
+        .bind(&receipt.created_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await
+}
+
+async fn insert_mysql_stock_receipt_bundle(
+    pool: &MySqlPool,
+    bundle: &StockReceiptBundle,
+) -> Result<(), sqlx::Error> {
+    validate_stock_receipt_bundle(bundle)?;
+    let mut tx = pool.begin().await?;
+    let receipt = &bundle.receipt;
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM stock_receipts WHERE id = ? LIMIT 1")
+            .bind(&receipt.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if existing.is_some() {
+        tx.commit().await?;
+        return Ok(());
+    }
+    let stamp: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await?;
+
+    sqlx::query(
+        "INSERT INTO stock_receipts (id, supplierId, employeeId, reference, notes, totalCost, status, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&receipt.id)
+    .bind(&receipt.supplier_id)
+    .bind(&receipt.employee_id)
+    .bind(&receipt.reference)
+    .bind(&receipt.notes)
+    .bind(receipt.total_cost)
+    .bind(&receipt.status)
+    .bind(&receipt.created_at)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+
+    let log_notes = if receipt.reference.trim().is_empty() {
+        "Stock receipt".to_string()
+    } else {
+        format!("Stock receipt {}", receipt.reference.trim())
+    };
+    for line in &bundle.lines {
+        sqlx::query(
+            "INSERT INTO stock_receipt_lines (id, receiptId, productId, quantity, unitCost, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&line.id)
+        .bind(&line.receipt_id)
+        .bind(&line.product_id)
+        .bind(line.quantity)
+        .bind(line.unit_cost)
+        .bind(&line.created_at)
+        .bind(&stamp)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query(
+            "UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?",
+        )
+        .bind(line.quantity)
+        .bind(&stamp)
+        .bind(&line.product_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(sqlx::Error::Protocol(format!(
+                "Product {} is no longer available",
+                line.product_name
+            )));
+        }
+
+        sqlx::query(
+            "INSERT INTO inventory_logs (id, productId, quantityChange, type, referenceId, employeeId, notes, createdAt, updatedAt)
+             VALUES (?, ?, ?, 'restock', ?, ?, ?, ?, ?)",
+        )
+        .bind(&line.inventory_log_id)
+        .bind(&line.product_id)
+        .bind(line.quantity)
+        .bind(&receipt.id)
+        .bind(&receipt.employee_id)
+        .bind(&log_notes)
+        .bind(&line.created_at)
+        .bind(&stamp)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let audit = &bundle.audit;
+    sqlx::query(
+        "INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&audit.id)
+    .bind(&audit.employee_id)
+    .bind(&audit.action)
+    .bind(&audit.entity_type)
+    .bind(&audit.entity_id)
+    .bind(&audit.old_data)
+    .bind(&audit.new_data)
+    .bind(&audit.created_at)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await
+}
+
 #[tauri::command]
 pub async fn commit_local_sale(
     app: AppHandle,
@@ -1164,6 +1471,32 @@ pub async fn commit_mysql_sale(mysql_uri: String, bundle: SaleBundle) -> Result<
         .await
         .map_err(|e| e.to_string())?;
     insert_mysql_bundle(&pool, &bundle)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn commit_local_stock_receipt(
+    app: AppHandle,
+    bundle: StockReceiptBundle,
+    outbox_id: Option<String>,
+) -> Result<(), String> {
+    let uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let pool = SqlitePool::connect(&uri).await.map_err(|e| e.to_string())?;
+    insert_sqlite_stock_receipt_bundle(&pool, &bundle, outbox_id.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn commit_mysql_stock_receipt(
+    mysql_uri: String,
+    bundle: StockReceiptBundle,
+) -> Result<(), String> {
+    let pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    insert_mysql_stock_receipt_bundle(&pool, &bundle)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2724,6 +3057,9 @@ mod tests {
             "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, customerId TEXT, orderId TEXT, pointsChange INTEGER, reason TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
             "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY, tillNumber TEXT, markerTime TEXT)",
+            "CREATE TABLE stock_receipts (id TEXT PRIMARY KEY, supplierId TEXT, employeeId TEXT, reference TEXT, notes TEXT, totalCost INTEGER, status TEXT, createdAt TEXT, updatedAt TEXT)",
+            "CREATE TABLE stock_receipt_lines (id TEXT PRIMARY KEY, receiptId TEXT, productId TEXT, quantity INTEGER, unitCost INTEGER, createdAt TEXT, updatedAt TEXT)",
+            "CREATE TABLE _offline_queue (id TEXT PRIMARY KEY, table_name TEXT, operation TEXT, data TEXT, id_key TEXT, created_at TEXT, attempt_count INTEGER DEFAULT 0, last_error TEXT DEFAULT '', next_attempt_at TEXT DEFAULT '')",
         ] {
             sqlx::query(sql).execute(&pool).await.unwrap();
         }
@@ -2850,6 +3186,44 @@ mod tests {
             },
             original_order_to_update: None,
             original_status_update: None,
+        }
+    }
+
+    fn stock_receipt_bundle() -> StockReceiptBundle {
+        let stamp = "2026-07-24T12:00:00.000Z".to_string();
+        StockReceiptBundle {
+            receipt: StockReceiptRecord {
+                id: "receipt-1".into(),
+                supplier_id: "supplier-1".into(),
+                employee_id: "employee-1".into(),
+                reference: "INV-1".into(),
+                notes: "".into(),
+                total_cost: 120,
+                status: "received".into(),
+                created_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            },
+            lines: vec![StockReceiptLineRecord {
+                id: "receipt-line-1".into(),
+                receipt_id: "receipt-1".into(),
+                product_id: "product-1".into(),
+                product_name: "Test Product".into(),
+                quantity: 3,
+                unit_cost: 40,
+                inventory_log_id: "receipt-log-1".into(),
+                created_at: stamp.clone(),
+                updated_at: stamp.clone(),
+            }],
+            audit: AuditRecord {
+                id: "receipt-audit-1".into(),
+                employee_id: "employee-1".into(),
+                action: "stock_received".into(),
+                entity_type: "stock_receipt".into(),
+                entity_id: "receipt-1".into(),
+                old_data: "".into(),
+                new_data: "{\"lineCount\":1}".into(),
+                created_at: stamp,
+            },
         }
     }
 
@@ -3285,6 +3659,93 @@ mod tests {
             let mut numbers = [one.order.order_number, two.order.order_number];
             numbers.sort();
             assert_eq!(numbers, [3_000_001, 3_000_002]);
+        });
+    }
+
+    #[test]
+    fn stock_receipt_commits_once_with_its_outbox() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let bundle = stock_receipt_bundle();
+            insert_sqlite_stock_receipt_bundle(&pool, &bundle, Some("stock-outbox-1"))
+                .await
+                .unwrap();
+            insert_sqlite_stock_receipt_bundle(&pool, &bundle, Some("stock-outbox-1"))
+                .await
+                .unwrap();
+
+            let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stock_receipts")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stock_receipt_lines")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let logs: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM inventory_logs WHERE referenceId = 'receipt-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let stock: i64 =
+                sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = 'product-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let outbox: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM _offline_queue WHERE operation = 'stockReceiptBundle'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((receipts, lines, logs, stock, outbox), (1, 1, 1, 13, 1));
+        });
+    }
+
+    #[test]
+    fn failed_stock_receipt_rolls_back_every_part() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let mut bundle = stock_receipt_bundle();
+            bundle.lines.push(StockReceiptLineRecord {
+                id: "receipt-line-missing".into(),
+                receipt_id: bundle.receipt.id.clone(),
+                product_id: "missing-product".into(),
+                product_name: "Missing Product".into(),
+                quantity: 1,
+                unit_cost: 25,
+                inventory_log_id: "receipt-log-missing".into(),
+                created_at: bundle.receipt.created_at.clone(),
+                updated_at: bundle.receipt.updated_at.clone(),
+            });
+            bundle.receipt.total_cost += 25;
+
+            let result =
+                insert_sqlite_stock_receipt_bundle(&pool, &bundle, Some("stock-outbox-failed"))
+                    .await;
+            assert!(result.is_err());
+
+            let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stock_receipts")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let logs: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM inventory_logs WHERE referenceId = 'receipt-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let stock: i64 =
+                sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = 'product-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _offline_queue")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!((receipts, logs, stock, outbox), (0, 0, 10, 0));
         });
     }
 

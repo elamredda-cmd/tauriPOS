@@ -1592,6 +1592,27 @@ export async function getCategoryUsageSummary(): Promise<CategoryUsageSummary[]>
     });
 }
 
+export async function getTaxRateProductUsageCount(taxRateId: string): Promise<number> {
+    if (!taxRateId) return 0;
+    const d = await getDb();
+    const rows: Array<{ count: number }> = await d.select(
+        `SELECT COUNT(*) AS count FROM products WHERE taxRateId = ?`,
+        [taxRateId],
+    );
+    return Number(rows[0]?.count || 0);
+}
+
+export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
+    const d = await getDb();
+    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    return d.select(
+        `SELECT * FROM stock_receipts
+         ORDER BY createdAt DESC, id DESC
+         LIMIT ?`,
+        [safeLimit],
+    );
+}
+
 export type ProductStatusFilter = 'active' | 'deactivated' | 'all';
 
 export interface ProductPageOptions {

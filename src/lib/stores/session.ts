@@ -136,43 +136,166 @@ function writeSessionAudit(action: 'employee_login' | 'employee_logout', employe
         .catch((error) => console.warn(`session: could not audit ${action}:`, error));
 }
 
-export async function hashPin(pin: string): Promise<string> {
+const PIN_HASH_PREFIX = 'pbkdf2-sha256';
+const PIN_HASH_ITERATIONS = 210_000;
+const PIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
+const PIN_LOCKOUT_MS = 60 * 1000;
+const MAX_PIN_ATTEMPTS = 5;
+
+type PinAttemptState = {
+    failures: number;
+    firstFailureAt: number;
+    lockedUntil: number;
+};
+
+const pinAttempts = new Map<string, PinAttemptState>();
+
+export class PinRateLimitError extends Error {
+    retryAfterSeconds: number;
+
+    constructor(retryAfterSeconds: number) {
+        super(`Too many incorrect attempts. Try again in ${retryAfterSeconds} seconds.`);
+        this.name = 'PinRateLimitError';
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+    const binary = atob(value);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function derivePin(pin: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
+    const material = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(pin),
+        'PBKDF2',
+        false,
+        ['deriveBits'],
+    );
+    const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+        material,
+        256,
+    );
+    return new Uint8Array(bits);
+}
+
+async function legacyPinHash(pin: string): Promise<string> {
     const bytes = new TextEncoder().encode(`pos-pin-v1:${pin}`);
     const digest = await crypto.subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+    if (left.length !== right.length) return false;
+    let difference = 0;
+    for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index];
+    return difference === 0;
+}
+
+export async function hashPin(pin: string): Promise<string> {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const digest = await derivePin(pin, salt, PIN_HASH_ITERATIONS);
+    return `${PIN_HASH_PREFIX}$${PIN_HASH_ITERATIONS}$${bytesToBase64(salt)}$${bytesToBase64(digest)}`;
+}
+
+async function matchesEmployeePin(employee: Employee, pin: string): Promise<{ valid: boolean; upgrade: boolean }> {
+    const stored = String(employee.pinHash || '');
+    if (stored.startsWith(`${PIN_HASH_PREFIX}$`)) {
+        const parts = stored.split('$');
+        const iterations = Number(parts[1]);
+        if (parts.length !== 4 || !Number.isInteger(iterations) || iterations < 100_000) {
+            return { valid: false, upgrade: false };
+        }
+        try {
+            const actual = await derivePin(pin, base64ToBytes(parts[2]), iterations);
+            return { valid: equalBytes(actual, base64ToBytes(parts[3])), upgrade: false };
+        } catch {
+            return { valid: false, upgrade: false };
+        }
+    }
+    if (stored) {
+        return { valid: stored === await legacyPinHash(pin), upgrade: true };
+    }
+    return { valid: employee.pin === pin, upgrade: true };
+}
+
+function assertPinAttemptAllowed(key: string): void {
+    const state = pinAttempts.get(key);
+    if (!state?.lockedUntil) return;
+    const remaining = state.lockedUntil - Date.now();
+    if (remaining <= 0) {
+        pinAttempts.delete(key);
+        return;
+    }
+    throw new PinRateLimitError(Math.ceil(remaining / 1000));
+}
+
+function recordFailedPinAttempt(key: string): number {
+    const timestamp = Date.now();
+    const previous = pinAttempts.get(key);
+    const state = !previous || timestamp - previous.firstFailureAt > PIN_ATTEMPT_WINDOW_MS
+        ? { failures: 0, firstFailureAt: timestamp, lockedUntil: 0 }
+        : previous;
+    state.failures += 1;
+    if (state.failures >= MAX_PIN_ATTEMPTS) state.lockedUntil = timestamp + PIN_LOCKOUT_MS;
+    pinAttempts.set(key, state);
+    return state.lockedUntil > timestamp ? Math.ceil((state.lockedUntil - timestamp) / 1000) : 0;
 }
 
 export async function authenticatePin(pin: string): Promise<Employee | null> {
-    const hash = await hashPin(pin);
-    let employee = get(employeesDB).find((e) =>
-        e.isActive && ((e.pinHash && e.pinHash === hash) || (!e.pinHash && e.pin === pin))
-    ) || null;
-    return finishAuthentication(employee, hash);
+    const attemptKey = 'all-employees';
+    assertPinAttemptAllowed(attemptKey);
+    for (const candidate of get(employeesDB).filter((employee) => employee.isActive)) {
+        const match = await matchesEmployeePin(candidate, pin);
+        if (match.valid) {
+            pinAttempts.delete(attemptKey);
+            return finishAuthentication(candidate, pin, match.upgrade);
+        }
+    }
+    const retryAfter = recordFailedPinAttempt(attemptKey);
+    if (retryAfter) throw new PinRateLimitError(retryAfter);
+    return finishAuthentication(null, pin, false);
 }
 
 export async function authenticateEmployeePin(employeeId: string, pin: string): Promise<Employee | null> {
-    const hash = await hashPin(pin);
-    let employee = get(employeesDB).find((e) =>
-        e.id === employeeId &&
-        e.isActive &&
-        ((e.pinHash && e.pinHash === hash) || (!e.pinHash && e.pin === pin))
-    ) || null;
-    return finishAuthentication(employee, hash);
+    const attemptKey = `employee:${employeeId}`;
+    assertPinAttemptAllowed(attemptKey);
+    const employee = get(employeesDB).find((candidate) => candidate.id === employeeId && candidate.isActive) || null;
+    const match = employee ? await matchesEmployeePin(employee, pin) : { valid: false, upgrade: false };
+    if (!employee || !match.valid) {
+        const retryAfter = recordFailedPinAttempt(attemptKey);
+        if (retryAfter) throw new PinRateLimitError(retryAfter);
+        return finishAuthentication(null, pin, false);
+    }
+    pinAttempts.delete(attemptKey);
+    return finishAuthentication(employee, pin, match.upgrade);
 }
 
 export async function verifyEmployeePin(employeeId: string, pin: string): Promise<Employee | null> {
-    const hash = await hashPin(pin);
-    return get(employeesDB).find((e) =>
-        e.id === employeeId &&
-        e.isActive &&
-        ((e.pinHash && e.pinHash === hash) || (!e.pinHash && e.pin === pin))
-    ) || null;
+    const attemptKey = `approval:${employeeId}`;
+    assertPinAttemptAllowed(attemptKey);
+    const employee = get(employeesDB).find((candidate) => candidate.id === employeeId && candidate.isActive) || null;
+    if (employee && (await matchesEmployeePin(employee, pin)).valid) {
+        pinAttempts.delete(attemptKey);
+        return employee;
+    }
+    const retryAfter = recordFailedPinAttempt(attemptKey);
+    if (retryAfter) throw new PinRateLimitError(retryAfter);
+    return null;
 }
 
-async function finishAuthentication(employee: Employee | null, hash: string): Promise<Employee | null> {
+async function finishAuthentication(employee: Employee | null, pin: string, upgradeHash: boolean): Promise<Employee | null> {
     clearSupportExpiryTimer();
-    if (employee && !employee.pinHash) {
-        employee = { ...employee, pinHash: hash, pin: '' };
+    if (employee && upgradeHash) {
+        employee = { ...employee, pinHash: await hashPin(pin), pin: '' };
         employeesDB.update((list) => list.map((e) => e.id === employee?.id ? employee! : e));
         if (isTauri()) {
             const { upsert } = await import('./database');

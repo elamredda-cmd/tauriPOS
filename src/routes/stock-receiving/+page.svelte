@@ -3,15 +3,18 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import {
-        productsDB,
         suppliersDB,
-        inventoryLogDB,
         formatMoney,
         now,
         uuid,
         type Product,
     } from '$lib/stores/db';
-    import { adjustStock, getAll, upsert } from '$lib/stores/database';
+    import {
+        commitStockReceipt,
+        getProductsPage,
+        getRecentStockReceipts,
+        type StockReceiptBundle,
+    } from '$lib/stores/database';
     import { currentEmployee } from '$lib/stores/session';
     import { toast } from '$lib/stores/toast';
 
@@ -30,22 +33,53 @@
     let lines: ReceiptLine[] = [];
     let saving = false;
     let history: any[] = [];
+    let availableProducts: Product[] = [];
+    let productsLoading = false;
+    let productSearchTimer: ReturnType<typeof setTimeout> | null = null;
+    let productSearchToken = 0;
 
     $: supplierOptions = [
         { label: 'No supplier', value: '' },
         ...$suppliersDB.map((supplier) => ({ label: supplier.name, value: supplier.id })),
     ];
-    $: availableProducts = $productsDB
-        .filter((product) => product.isActive)
-        .filter((product) => {
-            const q = search.trim().toLowerCase();
-            if (!q) return true;
-            return [product.name, product.sku, product.barcode, product.scalePlu]
-                .some((value) => String(value || '').toLowerCase().includes(q));
-        })
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .slice(0, 20);
     $: totalCost = lines.reduce((sum, line) => sum + line.quantity * line.unitCost, 0);
+
+    async function loadAvailableProducts() {
+        const token = ++productSearchToken;
+        productsLoading = true;
+        try {
+            const result = await getProductsPage({
+                query: search.trim(),
+                status: 'active',
+                limit: 20,
+                offset: 0,
+            });
+            if (token === productSearchToken) availableProducts = result.rows as Product[];
+        } catch (error) {
+            if (token === productSearchToken) {
+                availableProducts = [];
+                toast(`Could not search products: ${error}`, 'error');
+            }
+        } finally {
+            if (token === productSearchToken) productsLoading = false;
+        }
+    }
+
+    function scheduleProductSearch() {
+        if (productSearchTimer) clearTimeout(productSearchTimer);
+        productSearchTimer = setTimeout(() => {
+            productSearchTimer = null;
+            void loadAvailableProducts();
+        }, 180);
+    }
+
+    function handleProductSearchKeydown(event: KeyboardEvent) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        if (productSearchTimer) clearTimeout(productSearchTimer);
+        productSearchTimer = null;
+        void loadAvailableProducts();
+    }
 
     function addProduct(product: Product) {
         const existing = lines.find((line) => line.productId === product.id);
@@ -75,9 +109,7 @@
 
     async function loadHistory() {
         try {
-            history = (await getAll('stock_receipts'))
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-                .slice(0, 20);
+            history = await getRecentStockReceipts(20);
         } catch {
             history = [];
         }
@@ -88,7 +120,7 @@
             toast('Sign in before receiving stock', 'error');
             return;
         }
-        const validLines = lines.filter((line) => line.quantity > 0);
+        const validLines = lines.filter((line) => Number.isInteger(line.quantity) && line.quantity > 0);
         if (validLines.length === 0) {
             toast('Add at least one product and quantity', 'error');
             return;
@@ -97,52 +129,52 @@
         const receiptId = uuid();
         const stamp = now();
         try {
-            await upsert('stock_receipts', {
-                id: receiptId,
-                supplierId,
-                employeeId: $currentEmployee.id,
-                reference: reference.trim(),
-                notes: notes.trim(),
-                totalCost,
-                status: 'received',
-                createdAt: stamp,
-                updatedAt: stamp,
-            });
-            for (const line of validLines) {
-                await upsert('stock_receipt_lines', {
+            const receiptReference = reference.trim();
+            const bundle: StockReceiptBundle = {
+                receipt: {
+                    id: receiptId,
+                    supplierId,
+                    employeeId: $currentEmployee.id,
+                    reference: receiptReference,
+                    notes: notes.trim(),
+                    totalCost,
+                    status: 'received',
+                    createdAt: stamp,
+                    updatedAt: stamp,
+                },
+                lines: validLines.map((line) => ({
                     id: line.id,
                     receiptId,
                     productId: line.productId,
+                    productName: line.productName,
                     quantity: line.quantity,
                     unitCost: line.unitCost,
+                    inventoryLogId: uuid(),
                     createdAt: stamp,
                     updatedAt: stamp,
-                });
-                await adjustStock(line.productId, line.quantity);
-                const log = {
+                })),
+                audit: {
                     id: uuid(),
-                    productId: line.productId,
-                    quantityChange: line.quantity,
-                    type: 'restock',
-                    referenceId: receiptId,
                     employeeId: $currentEmployee.id,
-                    notes: reference.trim() ? `Stock receipt ${reference.trim()}` : 'Stock receipt',
+                    action: 'stock_received',
+                    entityType: 'stock_receipt',
+                    entityId: receiptId,
+                    oldData: '',
+                    newData: JSON.stringify({
+                        reference: receiptReference,
+                        supplierId,
+                        lineCount: validLines.length,
+                        totalCost,
+                    }),
                     createdAt: stamp,
-                    updatedAt: stamp,
-                };
-                await upsert('inventory_logs', log);
-                inventoryLogDB.update((existing) => [...existing, log as any]);
-                productsDB.update((items) => items.map((product) =>
-                    product.id === line.productId
-                        ? { ...product, stockLevel: (product.stockLevel || 0) + line.quantity, updatedAt: stamp }
-                        : product,
-                ));
-            }
+                },
+            };
+            await commitStockReceipt(bundle);
             toast('Stock received', 'success');
             lines = [];
             reference = '';
             notes = '';
-            await loadHistory();
+            await Promise.all([loadHistory(), loadAvailableProducts()]);
         } catch (error) {
             toast(`Could not save stock receipt: ${error}`, 'error');
         } finally {
@@ -150,7 +182,14 @@
         }
     }
 
-    onMount(loadHistory);
+    onMount(() => {
+        void loadHistory();
+        void loadAvailableProducts();
+        return () => {
+            if (productSearchTimer) clearTimeout(productSearchTimer);
+            productSearchToken++;
+        };
+    });
 </script>
 
 <MgmtPage title="Stock Receiving">
@@ -161,7 +200,7 @@
     <div class="h-full overflow-y-auto p-5">
         <div class="grid gap-5 xl:grid-cols-[1fr_420px]">
             <section class="rounded-lg border border-border-flat bg-bg-card p-5">
-                <div class="mb-4 grid gap-3 lg:grid-cols-3">
+                <div class="mb-4 grid gap-3 md:grid-cols-3">
                     <div class="field">
                         <CustomSelect label="Supplier" bind:value={supplierId} options={supplierOptions} />
                     </div>
@@ -175,10 +214,10 @@
                     </div>
                 </div>
 
-                <div class="mb-4 grid gap-3 lg:grid-cols-[1fr_180px]">
+                <div class="mb-4 grid gap-3 md:grid-cols-[1fr_180px]">
                     <div class="field">
                         <label for="stock-product-search">Find Product</label>
-                        <input id="stock-product-search" class="search-input !min-h-11" bind:value={search} placeholder="Search name, SKU, barcode, PLU..." />
+                        <input id="stock-product-search" class="search-input !min-h-11" bind:value={search} on:input={scheduleProductSearch} on:keydown={handleProductSearchKeydown} placeholder="Search name, SKU, barcode, PLU..." />
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3 text-right">
                         <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Receipt Total Cost</span>
@@ -187,6 +226,11 @@
                 </div>
 
                 <div class="mb-5 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {#if productsLoading}
+                        <p class="col-span-full m-0 py-5 text-center text-sm text-text-muted">Finding products...</p>
+                    {:else if availableProducts.length === 0}
+                        <p class="col-span-full m-0 py-5 text-center text-sm text-text-muted">No matching products.</p>
+                    {:else}
                     {#each availableProducts as product}
                         <button
                             type="button"
@@ -197,10 +241,11 @@
                             <span class="text-xs text-text-muted">Stock {product.stockLevel || 0} · Cost {formatMoney(product.costPrice || 0)}</span>
                         </button>
                     {/each}
+                    {/if}
                 </div>
 
                 <div class="overflow-x-auto rounded-lg border border-border-flat">
-                    <table class="w-full min-w-[700px] text-left">
+                    <table class="w-full min-w-[600px] text-left">
                         <thead class="bg-bg-panel text-sm text-text-muted">
                             <tr>
                                 <th class="p-3">Product</th>
@@ -215,7 +260,7 @@
                                 <tr class="border-t border-border-flat">
                                     <td class="p-3 font-bold">{line.productName}</td>
                                     <td class="p-3">
-                                        <input class="!h-11" type="number" min="1" value={line.quantity} on:change={(event) => updateLine(line.id, { quantity: Math.max(1, Number(event.currentTarget.value) || 1) })} />
+                                        <input class="!h-11" type="number" min="1" step="1" value={line.quantity} on:change={(event) => updateLine(line.id, { quantity: Math.max(1, Math.trunc(Number(event.currentTarget.value) || 1)) })} />
                                     </td>
                                     <td class="p-3">
                                         <input class="!h-11" type="number" min="0" step="0.01" value={(line.unitCost / 100).toFixed(2)} on:change={(event) => updateLine(line.id, { unitCost: Math.max(0, Math.round((Number(event.currentTarget.value) || 0) * 100)) })} />

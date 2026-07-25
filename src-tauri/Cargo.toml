@@ -34,6 +34,7 @@ serialport = { version = "4.9", default-features = false }
 sha2 = "0.10"
 wait-timeout = "0.2"
 zip = { version = "8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+keyring = "=4.1.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Printing", "Win32_System_Power", "Win32_Devices_Communication", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Security", "Win32_UI_Controls_Dialogs"] }

@@ -69,9 +69,9 @@
             {@const scaleDisplay = getScaleSaleDisplay(line.notes, line.quantity, line.unitPrice, line.originalPrice)}
             {@const isPartialRefundLine = line.quantity === 0 && line.notes?.includes('Proportional partial refund')}
             <div class="receipt-line">
-                <span>{isPartialRefundLine ? 'Part' : scaleDisplay.label}</span>
-                <span>
-                    {line.productName}
+                <span class="receipt-line-description">
+                    <b>{isPartialRefundLine ? 'Part' : scaleDisplay.label}</b>
+                    <span>{line.productName}</span>
                     {#if scaleDisplay.kind === 'weight' && line.originalPrice}
                         <small>{formatMoney(line.originalPrice)}/kg</small>
                     {/if}
@@ -130,8 +130,9 @@
     .receipt-meta, .receipt-totals, .receipt-lines { display: flex; flex-direction: column; gap: var(--receipt-line-gap); }
     .receipt-meta > div, .receipt-totals > div { display: flex; justify-content: space-between; gap: 8px; }
     .receipt-meta > div span:last-child { text-align: right; }
-    .receipt-line { display: grid; grid-template-columns: min-content 1fr min-content; gap: 5px; align-items: start; }
-    .receipt-line > span:first-child, .receipt-line > span:last-child { white-space: nowrap; }
+    .receipt-line { display: grid; grid-template-columns: minmax(0, 1fr) min-content; gap: 6px; align-items: start; }
+    .receipt-line-description { min-width: 0; overflow-wrap: anywhere; }
+    .receipt-line-description b { margin-right: 4px; white-space: nowrap; }
     .receipt-line > span:last-child { text-align: right; }
     small { display: block; opacity: 0.7; }
     .receipt-total { font-size: 1.15em; font-weight: 800; }

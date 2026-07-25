@@ -244,7 +244,7 @@
         overflow: hidden;
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
+        gap: 0.9rem;
         padding: var(--app-page-gutter, 1.5rem);
         background: var(--bg-base);
         color: var(--text-main);
@@ -401,7 +401,7 @@
         display: grid;
         grid-template-columns: repeat(5, minmax(0, 1fr));
         grid-template-rows: repeat(3, clamp(132px, 23vh, 178px));
-        gap: 0.65rem;
+        gap: 0.9rem;
         align-content: center;
     }
 
@@ -416,13 +416,13 @@
         border-radius: 0.45rem;
         background: var(--bg-card);
         color: var(--text-main);
-        padding: 0.8rem;
+        padding: 0.9rem;
         text-align: left;
         display: flex;
         flex-direction: column;
         align-items: stretch;
         justify-content: flex-start;
-        gap: 0.65rem;
+        gap: 0.7rem;
         transition: none;
     }
 
@@ -482,7 +482,7 @@
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
         line-clamp: 2;
-        font-size: 1.08rem;
+        font-size: 1.17rem;
         line-height: 1.12;
         letter-spacing: 0;
         overflow-wrap: anywhere;
@@ -494,7 +494,7 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        font-size: 0.68rem;
+        font-size: 0.72rem;
         line-height: 1;
         color: var(--tile-accent);
     }
@@ -506,7 +506,7 @@
         -webkit-line-clamp: 2;
         line-clamp: 2;
         color: var(--text-muted);
-        font-size: 0.76rem;
+        font-size: 0.82rem;
         font-weight: 650;
         line-height: 1.28;
         letter-spacing: 0;
@@ -528,12 +528,12 @@
     @media (max-width: 1100px) {
         .admin-page,
         .admin-grid {
-            gap: 0.5rem;
+            gap: 0.7rem;
         }
 
         .admin-tile {
-            padding: 0.65rem;
-            gap: 0.45rem;
+            padding: 0.72rem;
+            gap: 0.52rem;
         }
 
         .admin-tile-icon {
@@ -542,11 +542,11 @@
         }
 
         .admin-tile strong {
-            font-size: 0.98rem;
+            font-size: 1.08rem;
         }
 
         .admin-tile-description {
-            font-size: 0.7rem;
+            font-size: 0.76rem;
         }
     }
 
@@ -567,7 +567,7 @@
         }
 
         .admin-tile-group {
-            font-size: 0.6rem;
+            font-size: 0.64rem;
         }
 
         .admin-title h1 {
@@ -599,8 +599,8 @@
         }
 
         .admin-tile {
-            padding: 0.55rem;
-            gap: 0.38rem;
+            padding: 0.62rem;
+            gap: 0.44rem;
         }
 
         .admin-tile-icon {
@@ -609,12 +609,12 @@
         }
 
         .admin-tile strong {
-            font-size: 0.92rem;
+            font-size: 1rem;
         }
 
         .admin-tile-description {
-            font-size: 0.66rem;
-            line-height: 1.2;
+            font-size: 0.71rem;
+            line-height: 1.24;
         }
     }
 

@@ -5,6 +5,7 @@ import { formatLabelProductName, getLabelDesign } from '$lib/labels';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import {
+    buildEscposReceipt,
     buildEscposTextReport,
     buildEscposTestReceipt,
     encodeEscposRaster,
@@ -58,6 +59,69 @@ describe('printer configuration', () => {
 });
 
 describe('receipt command safety', () => {
+    it('prints quantity, product name, and amount on the same item row', () => {
+        const config = getReceiptPrinterConfig(settings({
+            receipt_printer_connection: 'usb_raw',
+            receipt_printer_name: 'Receipt Printer',
+            receipt_printer_cut_paper: 'false',
+        }));
+        const bytes = buildEscposReceipt({
+            store: { name: 'Test Shop' },
+            order: {
+                id: 'order-1',
+                orderNumber: 12,
+                total: 500,
+                subtotal: 500,
+                discountAmount: 0,
+                paymentMethod: 'cash',
+                amountTendered: 500,
+            },
+            lines: [{
+                id: 'line-1',
+                orderId: 'order-1',
+                productId: 'product-1',
+                productName: 'Red Apples',
+                quantity: 2,
+                unitPrice: 250,
+                lineTotal: 500,
+            }],
+            cashierName: 'Cashier',
+            tillName: 'Till 1',
+            design: {
+                headerText: 'Test Shop',
+                footerText: 'Thank you',
+                paperWidth: '80mm',
+                textSize: 'medium',
+                titleTextSize: 'medium',
+                fontFamily: 'standard',
+                density: 'compact',
+                showAddress: false,
+                showPhone: false,
+                showEmail: false,
+                showReceiptNumber: false,
+                showDateTime: false,
+                showCashier: false,
+                showTill: false,
+                showPayment: false,
+                showSku: false,
+                showBarcode: false,
+                customMessage: '',
+            },
+        } as any, config);
+
+        const printableRows = bytes
+            .reduce<number[][]>((rows, byte) => {
+                if (byte === 0x0a) rows.push([]);
+                else rows[rows.length - 1].push(byte);
+                return rows;
+            }, [[]])
+            .map((row) => String.fromCharCode(...row.filter((byte) => byte >= 0x20 && byte <= 0x7e)));
+
+        expect(printableRows.some((row) => (
+            row.includes('2x Red Apples') && row.includes('5.00')
+        ))).toBe(true);
+    });
+
     it('cuts a generic receipt without emitting a drawer pulse', () => {
         const config = getReceiptPrinterConfig(settings({
             receipt_printer_connection: 'usb_raw',

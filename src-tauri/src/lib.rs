@@ -2,6 +2,7 @@ mod commerce;
 mod dojo;
 mod licensing;
 mod printer_modules;
+mod secret_store;
 mod sumup;
 
 use serde::Serialize;
@@ -1413,6 +1414,8 @@ pub fn run() {
             printer_modules::execute_printer_module,
             commerce::commit_local_sale,
             commerce::commit_mysql_sale,
+            commerce::commit_local_stock_receipt,
+            commerce::commit_mysql_stock_receipt,
             commerce::commit_online_reversal,
             commerce::commit_online_loyalty_sale,
             commerce::allocate_mysql_till_sequence,
@@ -1429,6 +1432,9 @@ pub fn run() {
             licensing::activate_manual_license_file,
             licensing::create_support_access_request,
             licensing::activate_support_access,
+            secret_store::owner_cloud_get_reporter_secret,
+            secret_store::owner_cloud_store_reporter_secret,
+            secret_store::owner_cloud_clear_reporter_secret,
             dojo::dojo_get_config,
             dojo::dojo_save_config,
             dojo::dojo_clear_secret,

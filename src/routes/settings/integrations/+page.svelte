@@ -325,7 +325,7 @@
                     </div>
                     {#if $cctvConnectionState.dropped > 0}
                         <p class="mt-2 font-bold text-warning">
-                            {$cctvConnectionState.dropped} older events were condensed. A CCTV GAP marker will be sent first.
+                            {$cctvConnectionState.dropped} stale live updates were skipped to keep the overlay current.
                         </p>
                     {/if}
                 </div>

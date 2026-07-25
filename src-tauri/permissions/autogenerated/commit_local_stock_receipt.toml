@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-commit-local-stock-receipt"
+description = "Enables the commit_local_stock_receipt command without any pre-configured scope."
+commands.allow = ["commit_local_stock_receipt"]
+
+[[permission]]
+identifier = "deny-commit-local-stock-receipt"
+description = "Denies the commit_local_stock_receipt command without any pre-configured scope."
+commands.deny = ["commit_local_stock_receipt"]

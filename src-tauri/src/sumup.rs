@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager};
 
+use crate::secret_store::{self, SUMUP_AFFILIATE_KEY, SUMUP_API_KEY};
+
 const SUMUP_API_BASE: &str = "https://api.sumup.com";
 const CONFIG_FILE_NAME: &str = "sumup.json";
 
@@ -16,7 +18,9 @@ struct SumupStoredConfig {
     reader_name: String,
     currency: String,
     affiliate_app_id: String,
+    #[serde(default, skip_serializing)]
     api_key: String,
+    #[serde(default, skip_serializing)]
     affiliate_key: String,
 }
 
@@ -139,12 +143,29 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn load_config(app: &AppHandle) -> Result<SumupStoredConfig, String> {
     let path = config_path(app)?;
     if !path.exists() {
-        return Ok(SumupStoredConfig::default());
+        let mut config = SumupStoredConfig::default();
+        config.api_key = secret_store::load(SUMUP_API_KEY)?;
+        config.affiliate_key = secret_store::load(SUMUP_AFFILIATE_KEY)?;
+        return Ok(config);
     }
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read the SumUp settings: {error}"))?;
-    serde_json::from_str(&contents)
-        .map_err(|error| format!("The saved SumUp settings are invalid: {error}"))
+    let mut config: SumupStoredConfig = serde_json::from_str(&contents)
+        .map_err(|error| format!("The saved SumUp settings are invalid: {error}"))?;
+    let legacy_api_key = std::mem::take(&mut config.api_key);
+    let legacy_affiliate_key = std::mem::take(&mut config.affiliate_key);
+    if !legacy_api_key.is_empty() {
+        secret_store::save(SUMUP_API_KEY, &legacy_api_key)?;
+    }
+    if !legacy_affiliate_key.is_empty() {
+        secret_store::save(SUMUP_AFFILIATE_KEY, &legacy_affiliate_key)?;
+    }
+    config.api_key = secret_store::load(SUMUP_API_KEY)?;
+    config.affiliate_key = secret_store::load(SUMUP_AFFILIATE_KEY)?;
+    if !legacy_api_key.is_empty() || !legacy_affiliate_key.is_empty() {
+        save_config_file(app, &config)?;
+    }
+    Ok(config)
 }
 
 fn save_config_file(app: &AppHandle, config: &SumupStoredConfig) -> Result<(), String> {
@@ -403,6 +424,8 @@ pub fn sumup_save_config(
                 .into(),
         );
     }
+    secret_store::save(SUMUP_API_KEY, &next.api_key)?;
+    secret_store::save(SUMUP_AFFILIATE_KEY, &next.affiliate_key)?;
     save_config_file(&app, &next)?;
     Ok(SumupPublicConfig::from(&next))
 }
@@ -411,6 +434,8 @@ pub fn sumup_save_config(
 pub fn sumup_clear_secrets(app: AppHandle) -> Result<SumupPublicConfig, String> {
     let mut config = load_config(&app)?;
     config.enabled = false;
+    secret_store::delete(SUMUP_API_KEY)?;
+    secret_store::delete(SUMUP_AFFILIATE_KEY)?;
     config.api_key.clear();
     config.affiliate_key.clear();
     save_config_file(&app, &config)?;
@@ -680,6 +705,18 @@ mod tests {
         config.api_key = "api".into();
         config.affiliate_key = "affiliate".into();
         assert!(config_is_ready(&config));
+    }
+
+    #[test]
+    fn saved_config_never_serializes_secrets() {
+        let mut config = SumupStoredConfig::default();
+        config.api_key = "private-api-key".into();
+        config.affiliate_key = "private-affiliate-key".into();
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("private-api-key"));
+        assert!(!serialized.contains("private-affiliate-key"));
+        assert!(!serialized.contains("apiKey"));
+        assert!(!serialized.contains("affiliateKey"));
     }
 
     #[test]

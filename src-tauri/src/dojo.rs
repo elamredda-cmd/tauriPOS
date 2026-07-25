@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager};
 
+use crate::secret_store::{self, DOJO_API_KEY};
+
 const DOJO_API_BASE: &str = "https://api.dojo.tech";
 const DOJO_API_VERSION: &str = "2026-02-27";
 const CONFIG_FILE_NAME: &str = "dojo.json";
@@ -17,6 +19,7 @@ struct DojoStoredConfig {
     currency: String,
     software_house_id: String,
     reseller_id: String,
+    #[serde(default, skip_serializing)]
     api_key: String,
 }
 
@@ -150,12 +153,23 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn load_config(app: &AppHandle) -> Result<DojoStoredConfig, String> {
     let path = config_path(app)?;
     if !path.exists() {
-        return Ok(DojoStoredConfig::default());
+        let mut config = DojoStoredConfig::default();
+        config.api_key = secret_store::load(DOJO_API_KEY)?;
+        return Ok(config);
     }
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read the Dojo settings: {error}"))?;
-    serde_json::from_str(&contents)
-        .map_err(|error| format!("The saved Dojo settings are invalid: {error}"))
+    let mut config: DojoStoredConfig = serde_json::from_str(&contents)
+        .map_err(|error| format!("The saved Dojo settings are invalid: {error}"))?;
+    let legacy_api_key = std::mem::take(&mut config.api_key);
+    if !legacy_api_key.is_empty() {
+        secret_store::save(DOJO_API_KEY, &legacy_api_key)?;
+    }
+    config.api_key = secret_store::load(DOJO_API_KEY)?;
+    if !legacy_api_key.is_empty() {
+        save_config_file(app, &config)?;
+    }
+    Ok(config)
 }
 
 fn save_config_file(app: &AppHandle, config: &DojoStoredConfig) -> Result<(), String> {
@@ -356,6 +370,7 @@ pub fn dojo_save_config(
             "Complete the API key, integration IDs, and terminal before enabling Dojo".into(),
         );
     }
+    secret_store::save(DOJO_API_KEY, &next.api_key)?;
     save_config_file(&app, &next)?;
     Ok(DojoPublicConfig::from(&next))
 }
@@ -364,6 +379,7 @@ pub fn dojo_save_config(
 pub fn dojo_clear_secret(app: AppHandle) -> Result<DojoPublicConfig, String> {
     let mut config = load_config(&app)?;
     config.enabled = false;
+    secret_store::delete(DOJO_API_KEY)?;
     config.api_key.clear();
     save_config_file(&app, &config)?;
     Ok(DojoPublicConfig::from(&config))
@@ -707,6 +723,15 @@ mod tests {
         config.terminal_id = "tm_sandbox_test".into();
         config.api_key = "sk_sandbox_test".into();
         assert!(config_is_ready(&config));
+    }
+
+    #[test]
+    fn saved_config_never_serializes_secret() {
+        let mut config = DojoStoredConfig::default();
+        config.api_key = "private-api-key".into();
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("private-api-key"));
+        assert!(!serialized.contains("apiKey"));
     }
 
     #[test]

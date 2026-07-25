@@ -29,7 +29,12 @@ const RECEIPT_BLOCK = 1_000_000;
 const RECEIPT_HIGH_WATER_KEY = 'receipt_number_high_water';
 const LIGHT_STORE_ROUTES = new Set([
     '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
-    '/design', '/design/scale', '/tiles', '/settings/layout', '/settings/labels',
+    '/design', '/design/scale', '/tiles', '/stock-receiving', '/suppliers', '/tax-rates', '/sync', '/about', '/setup',
+    '/settings', '/settings/advanced', '/settings/barcodes', '/settings/customer-display',
+    '/settings/feedback', '/settings/fonts', '/settings/integrations', '/settings/labels',
+    '/settings/layout', '/settings/licence', '/settings/owner-app', '/settings/payments',
+    '/settings/payments/dojo', '/settings/payments/sumup', '/settings/permissions', '/settings/printers',
+    '/settings/receipt', '/settings/scale', '/settings/themes',
 ]);
 const POS_LIGHT_ROUTE_TABLES = [
     'categories',
@@ -110,6 +115,25 @@ const SHIFTS_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
 ] as const;
+const SETTINGS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+] as const;
+const SUPPLIERS_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'suppliers',
+] as const;
+const TAX_RATES_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'tax_rates',
+] as const;
+const STOCK_RECEIVING_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'suppliers',
+] as const;
 const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
     'orders',
     'order_lines',
@@ -144,6 +168,16 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/audit') return [...AUDIT_LIGHT_ROUTE_TABLES];
     if (pathname === '/label-print') return [...LABEL_PRINT_LIGHT_ROUTE_TABLES];
     if (pathname === '/customer-display') return [...CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES];
+    if (pathname === '/suppliers') return [...SUPPLIERS_LIGHT_ROUTE_TABLES];
+    if (pathname === '/tax-rates') return [...TAX_RATES_LIGHT_ROUTE_TABLES];
+    if (pathname === '/stock-receiving') return [...STOCK_RECEIVING_LIGHT_ROUTE_TABLES];
+    if (
+        pathname === '/sync'
+        || pathname === '/about'
+        || pathname === '/setup'
+        || pathname === '/settings'
+        || pathname.startsWith('/settings/')
+    ) return [...SETTINGS_LIGHT_ROUTE_TABLES];
     return [...POS_LIGHT_ROUTE_TABLES];
 }
 
@@ -624,6 +658,10 @@ async function executeQueuedOperation(row: any, data: any, mysqlDb: any, d: any)
         const config = get(connectionState).mysqlConfig;
         if (!config) throw new Error('MariaDB configuration is unavailable');
         await invoke('commit_mysql_sale', { mysqlUri: buildMysqlUri(config), bundle: data });
+    } else if (row.operation === 'stockReceiptBundle') {
+        const config = get(connectionState).mysqlConfig;
+        if (!config) throw new Error('MariaDB configuration is unavailable');
+        await invoke('commit_mysql_stock_receipt', { mysqlUri: buildMysqlUri(config), bundle: data });
     } else if (row.operation === 'promotionBundle') {
         const refs = await promotionRefsForQueuedRow(row, data);
         if (await remoteHasPromotionDelete(mysqlDb, refs)) {
@@ -676,7 +714,7 @@ async function drainOfflineQueue(): Promise<number> {
             `SELECT * FROM _offline_queue
              WHERE COALESCE(next_attempt_at, '') = '' OR next_attempt_at <= ?
              ORDER BY
-                CASE WHEN operation = 'saleBundle' THEN 0
+                CASE WHEN operation IN ('saleBundle', 'stockReceiptBundle') THEN 0
                      WHEN table_name = 'audit_logs' THEN 2
                      ELSE 1 END,
                 created_at ASC,
@@ -725,7 +763,7 @@ async function drainOfflineQueue(): Promise<number> {
 
                 const attempt = await recordQueueFailure(d, row, error);
                 if (isTransientSyncError(error)) throw error;
-                const maxAttempts = row.operation === 'saleBundle'
+                const maxAttempts = row.operation === 'saleBundle' || row.operation === 'stockReceiptBundle'
                     ? SALE_QUEUE_MAX_ATTEMPTS
                     : OFFLINE_QUEUE_MAX_ATTEMPTS;
                 if (attempt >= maxAttempts) {
@@ -1098,6 +1136,7 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
     'transaction_purge_applied_at', 'sync_change_cursor',
     'training_mode_enabled',
+    'owner_cloud_reporter_password',
     'cctv_pos_enabled', 'cctv_pos_host', 'cctv_pos_port', 'cctv_pos_number',
     'cctv_pos_name', 'cctv_pos_source_ip', 'cctv_pos_encoding',
     'cctv_pos_line_width', 'cctv_pos_send_items', 'cctv_pos_send_receipts',
@@ -2831,6 +2870,18 @@ export async function getProductsByIds(ids: string[], activeOnly = true, compact
 
 export const getCategoryUsageSummary = sqlite.getCategoryUsageSummary;
 
+export async function getTaxRateProductUsageCount(taxRateId: string): Promise<number> {
+    if (!isTauri()) {
+        return get(productsDB).filter((product) => product.taxRateId === taxRateId).length;
+    }
+    return sqlite.getTaxRateProductUsageCount(taxRateId);
+}
+
+export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
+    if (!isTauri()) return [];
+    return sqlite.getRecentStockReceipts(limit);
+}
+
 export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Promise<sqlite.OrderPageResult> {
     const result = await sqlite.getOrdersPage(options);
     return {
@@ -3111,6 +3162,60 @@ export async function setStockLevel(
         () => mysql.mysqlSetStockLevel(productId, stockLevel, expectedStockLevel),
         () => queueLocalProductSnapshot(productId, stamped),
     );
+}
+
+export interface StockReceiptBundle {
+    receipt: {
+        id: string;
+        supplierId: string;
+        employeeId: string;
+        reference: string;
+        notes: string;
+        totalCost: number;
+        status: 'received';
+        createdAt: string;
+        updatedAt: string;
+    };
+    lines: Array<{
+        id: string;
+        receiptId: string;
+        productId: string;
+        productName: string;
+        quantity: number;
+        unitCost: number;
+        inventoryLogId: string;
+        createdAt: string;
+        updatedAt: string;
+    }>;
+    audit: {
+        id: string;
+        employeeId: string;
+        action: 'stock_received';
+        entityType: 'stock_receipt';
+        entityId: string;
+        oldData: string;
+        newData: string;
+        createdAt: string;
+    };
+}
+
+/** Commit stock receipt, lines, stock deltas, logs and its outbox row atomically. */
+export async function commitStockReceipt(bundle: StockReceiptBundle): Promise<void> {
+    const queueForSync = isMultiMode();
+    const outboxId = queueForSync ? crypto.randomUUID() : null;
+    await invoke('commit_local_stock_receipt', { bundle, outboxId });
+    if (queueForSync) {
+        offlineQueueFlushRequested = true;
+        void flushOfflineQueue().catch((error) => {
+            console.warn('database: stock receipt outbox flush failed:', error);
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: false,
+                syncError: String(error),
+            }));
+        });
+    }
+    notifyOwnerCloudDataChanged();
 }
 
 export interface SaleBundle {
@@ -4747,10 +4852,15 @@ let isFastSyncRunning = false;
 let isHeartbeatRunning = false;
 let isChangeSyncRunning = false;
 let isPresenceRunning = false;
+let lastSyncUserActivityAt = Date.now();
+let removeSyncActivityListeners: (() => void) | null = null;
+let backgroundSyncGeneration = 0;
 const OFFLINE_RECONNECT_CHECK_MS = 60 * 1000;
-const CHANGE_POLL_INTERVAL_MS = 5 * 1000;
+const ACTIVE_CHANGE_POLL_INTERVAL_MS = 5 * 1000;
+const IDLE_CHANGE_POLL_INTERVAL_MS = 15 * 1000;
+const SYNC_ACTIVITY_WINDOW_MS = 30 * 1000;
 const FAST_SYNC_INTERVAL_MS = 60 * 1000;
-const FULL_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const FULL_SYNC_INTERVAL_MS = 15 * 60 * 1000;
 const TILL_PRESENCE_INTERVAL_MS = 15 * 1000;
 const TILL_ONLINE_WINDOW_SECONDS = 45;
 const SYNC_CHANGE_CURSOR_KEY = 'sync_change_cursor';
@@ -5418,12 +5528,15 @@ export async function triggerSync(): Promise<void> {
  *  - Offline: no full/fast sync attempts; only a reconnect probe every 60 seconds
  */
 export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVAL_MS): Promise<void> {
+    const syncGeneration = ++backgroundSyncGeneration;
     if (syncInterval) clearInterval(syncInterval);
     if (fastSyncInterval) clearInterval(fastSyncInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (changePollInterval) clearInterval(changePollInterval);
     if (presenceInterval) clearInterval(presenceInterval);
     if (presenceStartTimeout) clearTimeout(presenceStartTimeout);
+    removeSyncActivityListeners?.();
+    removeSyncActivityListeners = null;
     syncInterval = null;
     fastSyncInterval = null;
     heartbeatInterval = null;
@@ -5433,6 +5546,16 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
 
     if (await pauseSyncIfRestorePending()) return;
 
+    if (typeof window !== 'undefined') {
+        const markActivity = () => { lastSyncUserActivityAt = Date.now(); };
+        window.addEventListener('pointerdown', markActivity, { passive: true });
+        window.addEventListener('keydown', markActivity);
+        removeSyncActivityListeners = () => {
+            window.removeEventListener('pointerdown', markActivity);
+            window.removeEventListener('keydown', markActivity);
+        };
+    }
+
     // Do not block the POS. A heartbeat confirms the connection first; once
     // online it flushes queued writes and starts a full catch-up sync.
     runHeartbeat().catch(console.error);
@@ -5440,7 +5563,18 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
     // Cheap cursor polling gives other tills near-real-time changes without
     // repeatedly scanning every transaction table.
     runChangeSyncCycle().catch(console.error);
-    changePollInterval = setInterval(() => runChangeSyncCycle(), CHANGE_POLL_INTERVAL_MS);
+    const scheduleChangePoll = () => {
+        if (syncGeneration !== backgroundSyncGeneration) return;
+        const recentlyActive = typeof document !== 'undefined'
+            && !document.hidden
+            && Date.now() - lastSyncUserActivityAt <= SYNC_ACTIVITY_WINDOW_MS;
+        const delay = recentlyActive ? ACTIVE_CHANGE_POLL_INTERVAL_MS : IDLE_CHANGE_POLL_INTERVAL_MS;
+        changePollInterval = setTimeout(async () => {
+            await runChangeSyncCycle().catch(console.error);
+            scheduleChangePoll();
+        }, delay);
+    };
+    scheduleChangePoll();
 
     // Fallback reconciliation catches changes from servers installed before
     // change-log triggers were available.
@@ -5466,6 +5600,7 @@ export async function startBackgroundSync(intervalMs: number = FAST_SYNC_INTERVA
 
 /** Stop background sync. */
 export function stopBackgroundSync(): void {
+    backgroundSyncGeneration++;
     if (syncInterval) {
         clearInterval(syncInterval);
         syncInterval = null;
@@ -5490,6 +5625,8 @@ export function stopBackgroundSync(): void {
         clearTimeout(presenceStartTimeout);
         presenceStartTimeout = null;
     }
+    removeSyncActivityListeners?.();
+    removeSyncActivityListeners = null;
 }
 
 /**

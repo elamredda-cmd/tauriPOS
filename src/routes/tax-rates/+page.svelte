@@ -4,14 +4,15 @@
     import Modal from '$lib/components/Modal.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
-    import { productsDB, taxRatesDB, type TaxRate, uuid, now } from '$lib/stores/db';
+    import { taxRatesDB, type TaxRate, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { upsert, remove as removeSql } from '$lib/stores/database';
+    import { getTaxRateProductUsageCount, upsert, remove as removeSql } from '$lib/stores/database';
 
     let show = false; 
     let editing = false;
     let showDelConfirm = false;
     let idToDelete = "";
+    let checkingUsageId = "";
     let cur: Partial<TaxRate> & { updatedAt?: string } = {};
     let ratePercent = 0;
 
@@ -47,19 +48,28 @@
         }
     }
 
-    function confirmDel(id: string) {
+    async function confirmDel(id: string) {
+        if (checkingUsageId) return;
+        checkingUsageId = id;
         const tax = $taxRatesDB.find(t => t.id === id);
-        const usedCount = $productsDB.filter(product => product.taxRateId === id).length;
-        if (usedCount > 0) {
-            toast(`This tax rate is used by ${usedCount} item${usedCount === 1 ? '' : 's'}. Change those items first.`, 'error');
-            return;
+        try {
+            const usedCount = await getTaxRateProductUsageCount(id);
+            if (usedCount > 0) {
+                toast(`This tax rate is used by ${usedCount} item${usedCount === 1 ? '' : 's'}. Change those items first.`, 'error');
+                return;
+            }
+            if (tax?.isDefault) {
+                toast('Set another tax rate as default before deleting this one.', 'error');
+                return;
+            }
+            idToDelete = id;
+            showDelConfirm = true;
+        } catch (error) {
+            console.error('Could not check tax rate usage:', error);
+            toast('Could not check whether this tax rate is in use', 'error');
+        } finally {
+            checkingUsageId = "";
         }
-        if (tax?.isDefault) {
-            toast('Set another tax rate as default before deleting this one.', 'error');
-            return;
-        }
-        idToDelete = id;
-        showDelConfirm = true;
     }
 
     async function handleDel() {
@@ -90,7 +100,7 @@
                 <td>{t.isDefault ? '✓ Yes' : '-'}</td>
                 <td><div class="act-row">
                     <button class="btn-icon act-btn" title={`Edit ${t.name}`} aria-label={`Edit ${t.name}`} on:click={() => edit(t)}><Pencil size={16} /></button>
-                    <button class="btn-icon act-btn danger" title={`Delete ${t.name}`} aria-label={`Delete ${t.name}`} on:click={() => confirmDel(t.id)}><Trash2 size={16} /></button>
+                    <button class="btn-icon act-btn danger" disabled={checkingUsageId === t.id} title={`Delete ${t.name}`} aria-label={`Delete ${t.name}`} on:click={() => confirmDel(t.id)}><Trash2 size={16} /></button>
                 </div></td>
             </tr>
             {/each}

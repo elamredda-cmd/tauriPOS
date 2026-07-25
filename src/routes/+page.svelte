@@ -85,7 +85,7 @@
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
     import { getReceiptDesign } from "$lib/receipt";
-    import { authenticateEmployeePin, currentEmployee, currentShiftId, isSupportEmployee, logout, restoreRememberedEmployeeSession, startSupportSession, verifyEmployeePin } from "$lib/stores/session";
+    import { authenticateEmployeePin, currentEmployee, currentShiftId, isSupportEmployee, logout, PinRateLimitError, restoreRememberedEmployeeSession, startSupportSession, verifyEmployeePin } from "$lib/stores/session";
     import { connectionState } from "$lib/stores/connection";
     import { getBarcodeRules, parseScaleBarcode } from "$lib/barcodeRules";
     import { getScaleSaleDisplay } from "$lib/scaleSale";
@@ -863,7 +863,16 @@
             managerApprovalError = "Choose an authorized approver";
             return;
         }
-        const approver = await verifyEmployeePin(managerApprovalEmployeeId, managerApprovalPin);
+        let approver: Employee | null;
+        try {
+            approver = await verifyEmployeePin(managerApprovalEmployeeId, managerApprovalPin);
+        } catch (error) {
+            managerApprovalError = error instanceof PinRateLimitError
+                ? error.message
+                : "Could not verify this PIN";
+            managerApprovalPin = "";
+            return;
+        }
         if (!approver || !hasPermission(approver, managerApprovalPermission, $settingsDB)) {
             managerApprovalError = "PIN does not approve this action";
             managerApprovalPin = "";
@@ -1049,7 +1058,9 @@
             logout();
             loginErrorPin = loginPin;
             loginPin = "";
-            loginError = "Could not open this till shift. Check the database connection and try again.";
+            loginError = error instanceof PinRateLimitError
+                ? error.message
+                : "Could not open this till shift. Check the database connection and try again.";
         } finally {
             loginBusy = false;
         }

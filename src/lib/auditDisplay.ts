@@ -38,6 +38,7 @@ const ACTION_LABELS: Record<string, string> = {
     sale_completed: 'Sale completed',
     stock_adjusted: 'Stock adjusted',
     stock_counted: 'Stock count saved',
+    stock_received: 'Stock delivery received',
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -109,6 +110,7 @@ const FIELD_LABELS: Record<string, string> = {
     loyaltyPoints: 'Loyalty points',
     loyaltyPointsEarned: 'Points earned',
     loyaltyPointsRedeemed: 'Points redeemed',
+    lineCount: 'Different items',
     maxApplications: 'Maximum uses per sale',
     minQuantity: 'Minimum quantity',
     name: 'Name',
@@ -145,6 +147,7 @@ const FIELD_LABELS: Record<string, string> = {
     status: 'Status',
     stockLevel: 'Stock level',
     subtotal: 'Subtotal',
+    supplierId: 'Supplier',
     taxAmount: 'Tax amount',
     taxRate: 'Tax rate',
     taxRateId: 'Tax rate',
@@ -152,6 +155,7 @@ const FIELD_LABELS: Record<string, string> = {
     tillName: 'Till',
     tillNumber: 'Till',
     total: 'Total',
+    totalCost: 'Total cost',
     trackStock: 'Track stock',
     type: 'Type',
     unitPrice: 'Unit price',
@@ -177,7 +181,7 @@ const MONEY_FIELDS = new Set([
     'costPrice', 'discountAmount', 'expectedCard', 'expectedCash', 'lineTotal',
     'loyaltyCreditUsed', 'openingFloat', 'originalPrice', 'price', 'refundAmount',
     'reportTotal', 'secondPrice', 'subtotal', 'taxAmount', 'taxTotal', 'total',
-    'unitPrice',
+    'totalCost', 'unitPrice',
 ]);
 
 const BOOLEAN_FIELDS = new Set([
@@ -198,6 +202,7 @@ const REFERENCE_KINDS: Record<string, string> = {
     productId: 'product',
     registerId: 'till',
     requestedByEmployeeId: 'employee',
+    supplierId: 'supplier',
     reversalId: 'order',
     taxRateId: 'tax_rate',
     tillNumber: 'till',
