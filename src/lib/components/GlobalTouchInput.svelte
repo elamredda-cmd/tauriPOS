@@ -18,15 +18,11 @@
     let lastPointerTarget: Element | null = null;
     let focusTimer: number | undefined;
     let targetRectStyle = "";
-    let liftedText = "";
     let liftedIsPlaceholder = true;
-    const activeInputClasses = [
-        "!border-accent-primary",
-        "!bg-bg-card",
-        "!outline-2",
-        "!outline-accent-primary",
-        "!outline-offset-1",
-    ];
+    let liftedBeforeSelection = "";
+    let liftedSelectedText = "";
+    let liftedAfterSelection = "";
+    const activeInputClasses = ["touch-input-target-active"];
 
     const ignoredTypes = new Set([
         "checkbox", "radio", "color", "date", "datetime-local", "time",
@@ -170,9 +166,12 @@
     $: {
         const rawText = value || target?.value || "";
         liftedIsPlaceholder = !rawText;
-        liftedText = rawText
-            ? (masked ? "●".repeat(rawText.length) : rawText)
-            : (target?.placeholder || title);
+        const from = Math.max(0, Math.min(selectionStart, selectionEnd, rawText.length));
+        const to = Math.max(from, Math.min(Math.max(selectionStart, selectionEnd), rawText.length));
+        const display = (text: string) => masked ? "●".repeat(text.length) : text;
+        liftedBeforeSelection = display(rawText.slice(0, from));
+        liftedSelectedText = display(rawText.slice(from, to));
+        liftedAfterSelection = display(rawText.slice(to));
     }
 
     onMount(() => {
@@ -230,17 +229,30 @@
     ></div>
     {#if targetRectStyle}
         <div
-            class="touch-input-lifted pointer-events-none fixed z-[1901] flex items-center overflow-hidden rounded-xl border-2 border-accent-primary bg-bg-card px-4 font-bold text-text-main shadow-[0_18px_45px_var(--shadow)]"
+            class="touch-input-lifted pointer-events-none fixed z-[1901]"
             style={targetRectStyle}
             aria-hidden="true"
         >
-            <span class="overflow-hidden text-ellipsis whitespace-nowrap {liftedIsPlaceholder ? 'text-text-muted font-bold' : ''}">
-                {liftedText}
+            <span class="touch-input-lifted-label">Editing · {title}</span>
+            <span class="touch-input-lifted-value {liftedIsPlaceholder ? 'is-placeholder' : ''}">
+                {#if liftedIsPlaceholder}
+                    <span class="touch-input-lifted-caret"></span>
+                    <span>{target?.placeholder || title}</span>
+                {:else}
+                    <span>{liftedBeforeSelection}</span>
+                    {#if selectionStart === selectionEnd}
+                        <span class="touch-input-lifted-caret"></span>
+                    {:else}
+                        <span class="touch-input-lifted-selection">{liftedSelectedText}</span>
+                    {/if}
+                    <span>{liftedAfterSelection}</span>
+                {/if}
             </span>
+            <span class="touch-input-lifted-status" aria-hidden="true"></span>
         </div>
     {/if}
     <div
-        class="touch-input-panel fixed bottom-2 left-1/2 z-[1902] w-[min(980px,calc(100%_-_1rem))] -translate-x-1/2 overflow-hidden rounded-xl border border-border-flat bg-bg-panel shadow-[0_-15px_55px_var(--shadow)]"
+        class="touch-input-panel fixed bottom-3 left-1/2 z-[1902] w-[min(1040px,calc(100%_-_1rem))] -translate-x-1/2 overflow-hidden"
         role="dialog"
         tabindex="-1"
         aria-modal="true"

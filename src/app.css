@@ -1340,11 +1340,112 @@
 }
 
 .touch-input-backdrop {
-    background: rgba(0, 0, 0, .45);
+    background: rgba(0, 0, 0, .38);
+    backdrop-filter: blur(1.5px);
+}
+
+.touch-input-target-active {
+    border-color: var(--accent-primary) !important;
+    outline: none !important;
+    background: var(--bg-card) !important;
+    box-shadow: none !important;
 }
 
 .touch-input-lifted {
-    box-shadow: 0 18px 45px var(--shadow), 0 0 0 5px rgba(59, 130, 246, .24);
+    display: flex;
+    align-items: center;
+    overflow: visible;
+    border: 2px solid var(--accent-primary);
+    border-radius: .85rem;
+    background: var(--bg-card);
+    padding: 0 2.75rem 0 1rem;
+    color: var(--text-main);
+    font-weight: 750;
+    box-shadow: 0 18px 45px var(--shadow);
+}
+
+.touch-input-lifted-label {
+    position: absolute;
+    top: -.72rem;
+    left: .75rem;
+    max-width: calc(100% - 2rem);
+    overflow: hidden;
+    border: 2px solid var(--bg-panel);
+    border-radius: 999px;
+    background: var(--accent-primary);
+    padding: .18rem .55rem;
+    color: #fff;
+    font-size: .6rem;
+    font-weight: 900;
+    letter-spacing: .08em;
+    line-height: 1;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.touch-input-lifted-value {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    overflow: hidden;
+    font-size: inherit;
+    text-overflow: ellipsis;
+    white-space: pre;
+}
+
+.touch-input-lifted-value.is-placeholder {
+    color: var(--text-muted);
+}
+
+.touch-input-lifted-selection {
+    border-radius: .2rem;
+    background: var(--accent-primary);
+    padding: 0 2px;
+    color: #fff;
+}
+
+.touch-input-lifted-caret {
+    width: 0;
+    height: 1.35em;
+    flex: 0 0 auto;
+    border-left: 2px solid var(--accent-primary);
+    animation: touch-input-caret-blink 1s steps(1, end) infinite;
+}
+
+.touch-input-lifted-status {
+    position: absolute;
+    right: 1rem;
+    width: .55rem;
+    height: .55rem;
+    border-radius: 999px;
+    background: var(--accent-primary);
+    box-shadow: 0 0 0 4px var(--bg-panel);
+}
+
+.touch-input-panel {
+    isolation: isolate;
+    border: 1px solid var(--border-flat);
+    border-radius: 1.1rem;
+    background: var(--bg-panel);
+    box-shadow: 0 -18px 60px var(--shadow), 0 0 0 1px rgba(255, 255, 255, .025);
+}
+
+.touch-input-panel::before {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    background: var(--accent-primary);
+    content: "";
+    pointer-events: none;
+}
+
+@keyframes touch-input-caret-blink {
+    0%, 48% { opacity: 1; }
+    49%, 100% { opacity: 0; }
 }
 
 /* Fallbacks for older WebView2 builds used by some Windows POS tills.

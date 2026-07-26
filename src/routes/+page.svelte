@@ -248,6 +248,7 @@
 
     let showNotFoundModal = false;
     let notFoundBarcode = "";
+    let scanAgainButton: HTMLButtonElement;
     let showQuickAddModal = false;
     let showScaleModal = false;
     let selectedScaleProductId = "";
@@ -307,6 +308,13 @@
     $: selectedLoginEmployee = activeLoginEmployees.find((employee) => employee.id === selectedLoginEmployeeId) || null;
     $: if (loginError && loginPin && loginPin !== loginErrorPin) loginError = "";
     $: if (!$currentEmployee && loginDialog) void tick().then(() => loginDialog?.focus({ preventScroll: true }));
+    $: if (showNotFoundModal && scanAgainButton) {
+        void tick().then(() => {
+            if (showNotFoundModal && scanAgainButton?.isConnected) {
+                scanAgainButton.focus({ preventScroll: true });
+            }
+        });
+    }
     $: managerApprovers = $employeesDB
         .filter((employee) => employee.isActive && hasPermission(employee, managerApprovalPermission, $settingsDB))
         .sort((a, b) => a.name.localeCompare(b.name));
@@ -5637,22 +5645,16 @@
 {#if showNotFoundModal}
     <div class="modal-overlay">
         <div
-            class="w-[320px] max-w-[95vw] max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card border-2 border-danger flex flex-col gap-4"
-            role="dialog"
+            class="w-[460px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl border border-border-flat bg-bg-panel p-5 text-text-main shadow-[0_24px_70px_var(--shadow)] sm:p-6"
+            role="alertdialog"
             aria-modal="true"
             aria-labelledby="not-found-dialog-title"
+            aria-describedby="not-found-dialog-description not-found-dialog-code"
         >
-            <div class="modal-header">
-                <h3 id="not-found-dialog-title" class="text-danger">Product Not Found</h3>
-                <button
-                    class="modal-close text-danger hover:text-white hover:bg-danger"
-                    aria-label="Close product not found dialog"
-                    on:click={() => (showNotFoundModal = false)}>✕</button
-                >
-            </div>
-            <div class="text-center py-2">
+            <div class="flex items-start gap-3.5">
                 <div
-                    class="w-16 h-16 mx-auto mb-4 rounded-full bg-danger/10 border-2 border-danger flex items-center justify-center"
+                    class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-danger/20 bg-danger/10 text-danger"
+                    aria-hidden="true"
                 >
                     <svg
                         viewBox="0 0 24 24"
@@ -5661,33 +5663,59 @@
                         stroke-width="2"
                         stroke-linecap="round"
                         stroke-linejoin="round"
-                        class="w-8 h-8 text-danger"
+                        class="h-6 w-6"
                     >
-                        <circle cx="12" cy="12" r="10" />
-                        <line x1="12" y1="8" x2="12" y2="12" />
-                        <line x1="12" y1="16" x2="12.01" y2="16" />
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M12 8v4" />
+                        <path d="M12 16h.01" />
                     </svg>
                 </div>
-                <p class="mb-1 text-[1.1rem] text-danger font-bold">
-                    Barcode Not Found
-                </p>
-                <p class="mb-5 text-[0.9rem] text-text-muted">
-                    <code class="bg-bg-panel px-2 py-0.5 rounded text-text-main font-mono">{notFoundBarcode}</code>
-                </p>
-                <div class="flex flex-col gap-2">
-                    <button
-                        class="btn btn-primary h-[50px] text-base"
-                        on:click={openQuickAdd}
-                    >
-                        Add New Product
-                    </button>
-                    <button
-                        class="btn h-[50px] text-base"
-                        on:click={() => (showNotFoundModal = false)}
-                    >
-                        Cancel
-                    </button>
+                <div class="min-w-0 flex-1 pt-0.5">
+                    <span class="text-[0.7rem] font-black uppercase tracking-[0.12em] text-danger">Scan issue</span>
+                    <h3 id="not-found-dialog-title" class="m-0 mt-1 text-xl font-black leading-tight">
+                        No product matches this barcode
+                    </h3>
                 </div>
+                <button
+                    type="button"
+                    class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-transparent bg-transparent text-xl text-text-muted transition-colors hover:border-border-flat hover:bg-bg-card hover:text-text-main"
+                    aria-label="Close product not found dialog"
+                    on:click={() => (showNotFoundModal = false)}>✕</button
+                >
+            </div>
+
+            <p id="not-found-dialog-description" class="mb-0 mt-4 text-[0.95rem] leading-relaxed text-text-muted">
+                Check the scanned code and try again. If this is a new item, you can add it without leaving the sale.
+            </p>
+
+            <div class="mt-4 rounded-xl border border-border-flat bg-bg-card p-4">
+                <div class="flex items-center gap-2 text-[0.7rem] font-black uppercase tracking-[0.1em] text-text-muted">
+                    <ScanLine size={17} strokeWidth={2.3} aria-hidden="true" />
+                    <span>Scanned barcode</span>
+                </div>
+                <code
+                    id="not-found-dialog-code"
+                    class="mt-2 block break-all rounded-lg border border-border-flat bg-bg-base px-3 py-2.5 text-center font-mono text-base font-black tracking-[0.08em] text-text-main"
+                >{notFoundBarcode}</code>
+            </div>
+
+            <div class="mt-5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <button
+                    bind:this={scanAgainButton}
+                    type="button"
+                    class="btn btn-primary w-full"
+                    on:click={() => (showNotFoundModal = false)}
+                >
+                    <ScanLine size={19} strokeWidth={2.4} aria-hidden="true" />
+                    Scan again
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-secondary w-full"
+                    on:click={openQuickAdd}
+                >
+                    Add product
+                </button>
             </div>
         </div>
     </div>

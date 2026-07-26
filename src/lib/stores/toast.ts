@@ -17,9 +17,17 @@ export function toast(
     showPrint: boolean = false,
     onPrint?: ToastItem['onPrint'],
 ) {
-    const id = ++counter;
-    toasts.update(t => [...t, { id, message, type, showPrint, onPrint }]);
-    setTimeout(() => removeToast(id), 15000);
+    let id: number | null = null;
+    toasts.update((current) => {
+        const isDuplicate = !showPrint && !onPrint && current.some((item) =>
+            !item.showPrint && !item.onPrint && item.type === type && item.message === message
+        );
+        if (isDuplicate) return current;
+
+        id = ++counter;
+        return [...current, { id, message, type, showPrint, onPrint }];
+    });
+    if (id !== null) setTimeout(() => removeToast(id!), 15000);
 }
 
 export function removeToast(id: number) {
