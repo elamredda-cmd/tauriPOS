@@ -1,8 +1,8 @@
 <script lang="ts">
     import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
-    import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import {
         posPagesDB,
         activePosPages,
@@ -203,6 +203,13 @@
 
     function runProductSearch() {
         appliedSearchTerm = searchTerm.trim();
+        hasProductSearchRun = true;
+        void loadAvailableProducts();
+    }
+
+    function clearProductSearch() {
+        searchTerm = '';
+        appliedSearchTerm = '';
         hasProductSearchRun = true;
         void loadAvailableProducts();
     }
@@ -460,13 +467,20 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12"></path><path d="M18 6 6 18"></path></svg>
                 </button>
             </header>
-            <div class="picker-search-row">
-                <div class="picker-search">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
-                    <input id="tile-product-search" bind:value={searchTerm} on:keydown={handleProductSearchKeydown} placeholder="Search name, SKU, barcode, or PLU" data-touch-keyboard="button" aria-label="Search products" />
-                    <TouchKeyboardButton targetId="tile-product-search" label="Open product search keyboard" embedded />
+            <div class="search-controls search-controls-fill">
+                <div class="search-primary">
+                    <SearchField
+                        id="tile-product-search"
+                        bind:value={searchTerm}
+                        placeholder="Search name, SKU, barcode, or PLU"
+                        ariaLabel="Search products"
+                        keyboardLabel="Open product search keyboard"
+                        clearLabel="Clear product search"
+                        onKeydown={handleProductSearchKeydown}
+                        onClear={clearProductSearch}
+                    />
                 </div>
-                <button type="button" class="picker-find" disabled={productSearchLoading} on:click={runProductSearch}>
+                <button type="button" class="btn btn-primary search-toolbar-action min-w-[104px] picker-find" disabled={productSearchLoading} on:click={runProductSearch}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
                     {productSearchLoading ? 'Finding...' : 'Find'}
                 </button>
@@ -592,12 +606,7 @@
     .dialog-close { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
     .dialog-close svg { width: 20px; height: 20px; }
     .product-picker { width: min(680px, 95vw); height: min(650px, 90vh); overflow: hidden; }
-    .picker-search-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: .55rem; }
-    .picker-search { position: relative; min-height: 50px; display: flex; align-items: center; gap: .6rem; padding: 0 .8rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); }
-    .picker-search svg { width: 21px; height: 21px; flex: 0 0 auto; color: var(--text-muted); }
-    .picker-search input { min-width: 0; flex: 1; padding-right: 2.5rem; border: 0; outline: 0; background: transparent; color: var(--text-main); }
-    .picker-find { min-height: 50px; padding: 0 .8rem; display: flex; align-items: center; justify-content: center; gap: .4rem; border: 1px solid var(--accent-primary); border-radius: .4rem; background: var(--accent-primary); color: white; font-size: .8rem; font-weight: 900; }
-    .picker-find:hover { filter: brightness(1.08); }
+    .picker-find { font-size: .85rem; }
     .picker-find:disabled { opacity: .58; cursor: wait; }
     .picker-find svg { width: 18px; height: 18px; }
     .picker-status { min-height: 24px; color: var(--text-muted); font-size: .72rem; font-weight: 750; }
@@ -617,5 +626,5 @@
     .remove-product-summary div { min-width: 0; display: flex; flex-direction: column; }
     .remove-product-summary span { color: var(--text-muted); font-size: .78rem; }
     @media (max-height: 680px) and (min-width: 721px) { .pos-page-tabs { min-height: 43px; } .pos-page-tab, .add-pos-page { height: 41px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 43px; } }
-    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } .picker-search-row { grid-template-columns: minmax(0,1fr) 90px; } }
+    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } }
 </style>

@@ -24,12 +24,15 @@
     const actionPermissions: PermissionKey[] = [
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
     ];
-    const permissionKeys = [...pagePermissions, ...actionPermissions];
+    const accountPermissions: PermissionKey[] = [
+        'charge_customer_account', 'take_account_payment', 'adjust_customer_account',
+    ];
+    const permissionKeys = [...pagePermissions, ...actionPermissions, ...accountPermissions];
     const permissionDescriptions: Record<PermissionKey, string> = {
         open_items: 'Products, categories, barcodes, prices, and stock settings',
         open_suppliers: 'Supplier records used by stock receiving',
         open_tax_rates: 'VAT rates and tax configuration',
-        open_customers: 'Customer profiles, contact details, and loyalty balances',
+        open_customers: 'Customer profiles, contact details, loyalty value, and account statements',
         open_discounts: 'Promotions, bundles, offers, and discounts',
         open_orders: 'Receipt history, payment details, and receipt reprinting',
         open_reports: 'Sales reports and previous cash-up sessions',
@@ -44,6 +47,9 @@
         manual_discount: 'Apply a non-automatic discount at checkout',
         open_cash_drawer: 'Open the cash drawer manually from the checkout screen',
         end_day_close: 'Open the restricted close-period screen and create a Z report without access to detailed sales reports',
+        charge_customer_account: 'Use Pay Later at checkout for a customer with an active account',
+        take_account_payment: 'Record a cash or card payment against an amount owed',
+        adjust_customer_account: 'Post an opening balance, correction, or write-off with a required reason',
     };
 
     let selectedRole: Employee['role'] = 'manager';
@@ -189,6 +195,27 @@
                     {/each}
                 </div>
             </section>
+
+            <section class="permission-group account-permissions">
+                <div class="group-heading"><span>Customer accounts</span><small>Pay Later and balance controls</small></div>
+                <div class="permission-list">
+                    {#each accountPermissions as key}
+                        {@const enabled = selectedPermissions.includes(key)}
+                        <button
+                            type="button"
+                            class="permission-row"
+                            class:enabled
+                            role="switch"
+                            aria-checked={enabled}
+                            disabled={saving || selectedRole === 'admin'}
+                            on:click={() => toggle(selectedRole, key)}
+                        >
+                            <span class="permission-copy"><strong>{permissionLabels[key]}</strong><small>{permissionDescriptions[key]}</small></span>
+                            <span class="switch" class:on={enabled} aria-hidden="true"><i></i></span>
+                        </button>
+                    {/each}
+                </div>
+            </section>
         </div>
 
         {#if selectedRole === 'admin'}
@@ -232,14 +259,16 @@
     .role-summary > strong { flex: 0 0 auto; color: var(--accent-primary); font-size: .78rem; }
     .permission-groups { margin-top: .75rem; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(310px, .65fr); gap: .75rem; align-items: start; }
     .permission-group { min-width: 0; overflow: hidden; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
+    .permission-group:first-child { grid-row: span 2; }
     .group-heading { min-height: 54px; padding: .7rem .85rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
     .group-heading span { font-size: .82rem; font-weight: 900; text-transform: uppercase; }
     .group-heading small { color: var(--text-muted); font-size: .69rem; font-weight: 700; }
     .permission-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .permission-group:last-child .permission-list { grid-template-columns: minmax(0, 1fr); }
+    .permission-group:not(:first-child) .permission-list { grid-template-columns: minmax(0, 1fr); }
+    .account-permissions { grid-column: 2; }
     .permission-row { min-width: 0; min-height: 68px; padding: .7rem .8rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; color: var(--text-main); text-align: left; border: 0; border-right: 1px solid var(--border-flat); border-bottom: 1px solid var(--border-flat); background: var(--bg-card); cursor: pointer; }
     .permission-row:nth-child(even) { border-right: 0; }
-    .permission-group:last-child .permission-row { border-right: 0; }
+    .permission-group:not(:first-child) .permission-row { border-right: 0; }
     .permission-row:hover:not(:disabled) { background: var(--bg-card-hover); }
     .permission-row.enabled { box-shadow: inset 3px 0 var(--success); background: var(--bg-panel); }
     .permission-row:disabled { cursor: default; opacity: 1; }
@@ -255,14 +284,16 @@
     .admin-note svg { width: 18px; height: 18px; flex: 0 0 18px; color: var(--accent-primary); }
     @media (max-width: 900px) {
         .permission-groups { grid-template-columns: minmax(0, 1fr); }
-        .permission-group:last-child .permission-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .permission-group:last-child .permission-row { border-right: 1px solid var(--border-flat); }
-        .permission-group:last-child .permission-row:nth-child(even) { border-right: 0; }
+        .permission-group:not(:first-child) .permission-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .permission-group:not(:first-child) .permission-row { border-right: 1px solid var(--border-flat); }
+        .permission-group:not(:first-child) .permission-row:nth-child(even) { border-right: 0; }
+        .account-permissions { grid-column: auto; }
+        .permission-group:first-child { grid-row: auto; }
     }
     @media (max-width: 680px) {
         .role-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .permission-list, .permission-group:last-child .permission-list { grid-template-columns: minmax(0, 1fr); }
-        .permission-row, .permission-group:last-child .permission-row { border-right: 0; }
+        .permission-list, .permission-group:not(:first-child) .permission-list { grid-template-columns: minmax(0, 1fr); }
+        .permission-row, .permission-group:not(:first-child) .permission-row { border-right: 0; }
         .role-summary { align-items: flex-start; }
         .role-summary > strong { display: none; }
     }

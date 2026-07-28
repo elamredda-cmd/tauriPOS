@@ -4,6 +4,7 @@
     import { goto } from '$app/navigation';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import { formatMoney, now, settingsDB, type Shift } from '$lib/stores/db';
     import {
         closeShiftLocalFirst,
@@ -23,6 +24,8 @@
         salesTotal?: number;
         cashPayments?: number;
         cardPayments?: number;
+        accountRepaymentsCash?: number;
+        accountRepaymentsCard?: number;
         cashMovements?: number;
     };
 
@@ -172,6 +175,13 @@
         runSearch();
     }
 
+    function clearShiftSearch() {
+        searchQuery = '';
+        if (!appliedSearchQuery && page === 0) return;
+        appliedSearchQuery = '';
+        page = 0;
+    }
+
     function clearFilters() {
         searchQuery = '';
         appliedSearchQuery = '';
@@ -189,7 +199,14 @@
     }
 
     function expectedCash(shift: ShiftSummaryRow): number {
-        return money(shift.openingFloat) + money(shift.cashPayments) + money(shift.cashMovements);
+        return money(shift.openingFloat)
+            + money(shift.cashPayments)
+            + money(shift.accountRepaymentsCash)
+            + money(shift.cashMovements);
+    }
+
+    function expectedCard(shift: ShiftSummaryRow): number {
+        return money(shift.cardPayments) + money(shift.accountRepaymentsCard);
     }
 
     function formatDate(value: string, includeYear = false): string {
@@ -227,7 +244,7 @@
         isClosing = true;
         try {
             const cashExpected = expectedCash(activeShift);
-            const cardExpected = money(activeShift.cardPayments);
+            const cardExpected = expectedCard(activeShift);
             const actualCard = reconcileCard ? actualCardInput! : cardExpected;
             const closed: Shift = {
                 id: activeShift.id,
@@ -320,21 +337,26 @@
 
     {#if canViewShiftHistory}
         <section class="history-panel">
-            <div class="history-heading">
-                <div class="history-title"><span class="eyebrow">Audit history</span><h2>Previous Cash-ups</h2></div>
-                <div class="history-controls">
-                    <input
-                        class="search-input"
-                        aria-label="Search sessions"
-                        value={searchQuery}
-                        on:input={(event) => searchQuery = event.currentTarget.value}
-                        on:keydown={handleSearchKeydown}
-                        placeholder="Till, cashier, date, or note..."
-                    />
-                    <button class="btn btn-secondary" on:click={runSearch}>Find</button>
-                    <div class="status-filter"><CustomSelect bind:value={statusFilter} options={statusOptions} /></div>
-                    <span class="result-count">{shiftsLoading ? 'Loading...' : `${shiftsTotal} / ${overallTotal}`}</span>
-                    {#if searchQuery || appliedSearchQuery || statusFilter !== 'all'}<button class="btn btn-secondary clear-button" on:click={clearFilters}>Clear</button>{/if}
+            <div class="history-heading search-strip">
+                <div class="history-title search-strip-intro"><span class="eyebrow">Audit history</span><h2>Previous Cash-ups</h2></div>
+                <div class="history-controls search-controls">
+                    <div class="history-search search-primary">
+                        <SearchField
+                            id="shift-search"
+                            bind:value={searchQuery}
+                            placeholder="Till, cashier, date, or note..."
+                            ariaLabel="Search sessions"
+                            keyboardLabel="Open session search keyboard"
+                            clearLabel="Clear session search"
+                            clearVisible={Boolean(searchQuery || appliedSearchQuery)}
+                            onKeydown={handleSearchKeydown}
+                            onClear={clearShiftSearch}
+                        />
+                    </div>
+                    <button class="btn btn-primary search-toolbar-action" on:click={runSearch}>Find</button>
+                    <div class="status-filter search-control search-filter"><CustomSelect bind:value={statusFilter} options={statusOptions} /></div>
+                    <span class="result-count search-meta">{shiftsLoading ? 'Loading...' : `${shiftsTotal} / ${overallTotal}`}</span>
+                    {#if statusFilter !== 'all'}<button class="btn btn-secondary clear-button search-toolbar-action" on:click={clearFilters}>Reset</button>{/if}
                 </div>
             </div>
 
@@ -367,8 +389,8 @@
                             {#if expandedId === shift.id}
                                 <tr><td colspan="6" class="details-cell">
                                     <div class="shift-details">
-                                        <div><h4>Cash</h4><p><span>Opening Float</span><b>{formatMoney(money(shift.openingFloat))}</b></p><p><span>Cash Payments</span><b>{formatMoney(money(shift.cashPayments))}</b></p><p><span>Cash Movements</span><b>{formatMoney(money(shift.cashMovements))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCash)) : 'After close'}</b></p><p><span>Counted</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCash)) : '-'}</b></p></div>
-                                        <div><h4>Card</h4><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCard)) : 'After close'}</b></p><p><span>Machine</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCard)) : '-'}</b></p><p><span>Difference</span><b>{shift.status === 'closed' ? formatMoney(money(shift.cardDifference)) : '-'}</b></p></div>
+                                        <div><h4>Cash</h4><p><span>Opening Float</span><b>{formatMoney(money(shift.openingFloat))}</b></p><p><span>Cash Sales</span><b>{formatMoney(money(shift.cashPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCash))}</b></p><p><span>Cash Movements</span><b>{formatMoney(money(shift.cashMovements))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCash)) : 'After close'}</b></p><p><span>Counted</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCash)) : '-'}</b></p></div>
+                                        <div><h4>Card</h4><p><span>Card Sales</span><b>{formatMoney(money(shift.cardPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCard))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCard)) : 'After close'}</b></p><p><span>Machine</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCard)) : '-'}</b></p><p><span>Difference</span><b>{shift.status === 'closed' ? formatMoney(money(shift.cardDifference)) : '-'}</b></p></div>
                                         <div><h4>Activity</h4><p><span>Orders</span><b>{money(shift.orderCount)}</b></p><p><span>Total Sales</span><b>{formatMoney(money(shift.salesTotal))}</b></p><p><span>Closed By</span><b>{shift.closedByName || '-'}</b></p>{#if shift.notes}<p><span>Notes</span><b>{shift.notes}</b></p>{/if}</div>
                                     </div>
                                 </td></tr>
@@ -427,14 +449,9 @@
     .feature-off { padding: .8rem 1.25rem; display: flex; flex-direction: column; gap: .15rem; color: var(--text-muted); border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
     .feature-off strong { color: var(--text-main); }
     .history-panel { min-width: 0; }
-    .history-heading { padding: .75rem 1rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
     .history-title { min-width: 150px; }
     .history-title h2 { margin: .1rem 0 0; font-size: 1rem; }
-    .history-controls { min-width: 0; flex: 1; display: flex; align-items: center; justify-content: flex-end; gap: .55rem; }
-    .history-controls .search-input { min-width: 190px; max-width: 360px; height: 42px; min-height: 42px; flex: 1; }
-    .history-controls .btn { min-height: 42px; height: 42px; padding-inline: .8rem; }
-    .status-filter { width: 170px; }
-    .result-count { min-width: 74px; text-align: center; color: var(--text-muted); font-size: .76rem; font-weight: 800; }
+    .history-controls .btn { padding-inline: .8rem; }
     .clear-button { font-size: .76rem; }
     .load-error { padding: .65rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: var(--danger); border-bottom: 1px solid var(--danger); background: rgba(239,68,68,.08); }
     .table-wrap { overflow-x: auto; }
@@ -453,11 +470,6 @@
     .shift-details p span { color: var(--text-muted); }
     .shift-details p b { overflow-wrap: anywhere; text-align: right; }
     .pagination { padding: .75rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: var(--text-muted); border-top: 1px solid var(--border-flat); background: var(--bg-panel); font-size: .8rem; font-weight: 700; }
-    @media (max-width: 900px) {
-        .history-heading { align-items: stretch; flex-direction: column; }
-        .history-controls { justify-content: stretch; }
-        .history-controls .search-input { max-width: none; }
-    }
     @media (max-width: 700px) {
         .cash-up-heading { align-items: stretch; flex-direction: column; }
         .open-badge { align-self: flex-start; }
@@ -466,9 +478,6 @@
         .shift-snapshot article:nth-child(-n+2) { border-bottom: 1px solid var(--border-flat); }
         .close-grid, .shift-details { grid-template-columns: 1fr; }
         .notes-field, .close-button, .close-help { grid-column: span 1; }
-        .history-controls { flex-wrap: wrap; }
-        .history-controls .search-input { flex-basis: 100%; }
-        .status-filter { flex: 1; }
         .shift-details > div { padding: 0 0 .7rem; border-right: 0; border-bottom: 1px solid var(--border-flat); }
         .shift-details > div:last-child { padding-bottom: 0; border-bottom: 0; }
     }

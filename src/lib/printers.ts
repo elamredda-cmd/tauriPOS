@@ -309,6 +309,15 @@ function money(pence: number): string {
     return `${(Number(pence || 0) / 100).toFixed(2)}`;
 }
 
+function receiptPaymentLabel(method: string, isRefund = false): string {
+    const normalized = String(method || 'cash').toLowerCase();
+    if (normalized.includes('account')) {
+        if (isRefund) return normalized.includes('+') ? 'MIXED REFUND' : 'ACCOUNT CREDIT';
+        return normalized.includes('loyalty') ? 'PAY LATER + LOYALTY' : 'PAY LATER';
+    }
+    return String(method || 'cash').toUpperCase();
+}
+
 function cleanReceiptText(value: string, max = 42): string {
     return String(value || '')
         .replace(/[\r\n\t]+/g, ' ')
@@ -543,7 +552,16 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
     }
     bytes.push(...commands.boldOn, ...line(textRow('TOTAL', money(payload.order.total), width), config.encoding), ...commands.boldOff);
     if (payload.design.showPayment) {
-        bytes.push(...line(textRow((payload.order.paymentMethod || 'cash').toUpperCase(), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
+        const hasAccountMovement = String(payload.order.paymentMethod || '').toLowerCase().includes('account');
+        const isRefund = payload.order.type === 'return';
+        bytes.push(...line(textRow(receiptPaymentLabel(payload.order.paymentMethod, isRefund), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
+        if (hasAccountMovement) {
+            bytes.push(
+                ...commands.boldOn,
+                ...line(isRefund ? 'CUSTOMER ACCOUNT CREDITED' : 'CHARGED TO CUSTOMER ACCOUNT', config.encoding),
+                ...commands.boldOff,
+            );
+        }
         if ((payload.order.amountTendered || 0) > payload.order.total) {
             bytes.push(...line(textRow('Change', money((payload.order.amountTendered || 0) - payload.order.total), width), config.encoding));
         }

@@ -16,6 +16,7 @@
         savePromotionBundle,
     } from '$lib/stores/database';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
@@ -1094,17 +1095,22 @@
             {/if}
         </div>
 
-        <div class="field span-2 mt-2">
+        <div class="field span-2">
             <label for="bundle-product-search">Find Products</label>
-            <div class="flex gap-2">
-                <div class="relative min-w-0 flex-1">
-                    <input id="bundle-product-search" data-touch-keyboard="button" bind:value={productSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bundle')} placeholder="Search name, SKU, barcode, or PLU..." class="search-input !pr-20" />
-                    {#if productSearch}
-                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bundle')}>✕</button>
-                    {/if}
-                    <TouchKeyboardButton targetId="bundle-product-search" label="Open bundle product search keyboard" embedded />
+            <div class="search-controls search-controls-fill">
+                <div class="search-primary">
+                    <SearchField
+                        id="bundle-product-search"
+                        bind:value={productSearch}
+                        placeholder="Search name, SKU, barcode, or PLU..."
+                        ariaLabel="Search bundle products"
+                        keyboardLabel="Open bundle product search keyboard"
+                        clearLabel="Clear bundle product search"
+                        onKeydown={(event) => handlePickerSearchKeydown(event, 'bundle')}
+                        onClear={() => clearPickerSearch('bundle')}
+                    />
                 </div>
-                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bundle} on:click={() => runPickerSearch('bundle')}>
+                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.bundle} on:click={() => runPickerSearch('bundle')}>
                     {pickerLoading.bundle ? 'Finding...' : 'Find'}
                 </button>
             </div>
@@ -1187,17 +1193,22 @@
                 </div>
             {/if}
         </div>
-        <div class="field span-2 mt-2">
+        <div class="field span-2">
             <label for="bogo-product-search">Find Products</label>
-            <div class="flex gap-2">
-                <div class="relative min-w-0 flex-1">
-                    <input id="bogo-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={bogoProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'bogo')} placeholder="Search name, SKU, barcode, or PLU..." />
-                    {#if bogoProductSearch}
-                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('bogo')}>✕</button>
-                    {/if}
-                    <TouchKeyboardButton targetId="bogo-product-search" label="Open promotion product search keyboard" embedded />
+            <div class="search-controls search-controls-fill">
+                <div class="search-primary">
+                    <SearchField
+                        id="bogo-product-search"
+                        bind:value={bogoProductSearch}
+                        placeholder="Search name, SKU, barcode, or PLU..."
+                        ariaLabel="Search promotion products"
+                        keyboardLabel="Open promotion product search keyboard"
+                        clearLabel="Clear promotion product search"
+                        onKeydown={(event) => handlePickerSearchKeydown(event, 'bogo')}
+                        onClear={() => clearPickerSearch('bogo')}
+                    />
                 </div>
-                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.bogo} on:click={() => runPickerSearch('bogo')}>
+                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.bogo} on:click={() => runPickerSearch('bogo')}>
                     {pickerLoading.bogo ? 'Finding...' : 'Find'}
                 </button>
             </div>
@@ -1311,15 +1322,20 @@
         </div>
         <div class="field span-2">
             <label for="temporary-product-search">Find Item *</label>
-            <div class="flex gap-2">
-                <div class="relative min-w-0 flex-1">
-                    <input id="temporary-product-search" data-touch-keyboard="button" class="search-input !pr-20" bind:value={temporaryProductSearch} on:keydown={(event) => handlePickerSearchKeydown(event, 'temporary')} placeholder="Search by item name, SKU, barcode or PLU..." />
-                    {#if temporaryProductSearch}
-                        <button aria-label="Clear product search" class="absolute right-11 top-1/2 -translate-y-1/2 bg-transparent border-0 text-text-muted p-2 cursor-pointer" on:click={() => clearPickerSearch('temporary')}>✕</button>
-                    {/if}
-                    <TouchKeyboardButton targetId="temporary-product-search" label="Open item search keyboard" embedded />
+            <div class="search-controls search-controls-fill">
+                <div class="search-primary">
+                    <SearchField
+                        id="temporary-product-search"
+                        bind:value={temporaryProductSearch}
+                        placeholder="Search by item name, SKU, barcode or PLU..."
+                        ariaLabel="Search temporary discount products"
+                        keyboardLabel="Open item search keyboard"
+                        clearLabel="Clear item search"
+                        onKeydown={(event) => handlePickerSearchKeydown(event, 'temporary')}
+                        onClear={() => clearPickerSearch('temporary')}
+                    />
                 </div>
-                <button class="btn btn-secondary min-w-[92px]" disabled={pickerLoading.temporary} on:click={() => runPickerSearch('temporary')}>
+                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.temporary} on:click={() => runPickerSearch('temporary')}>
                     {pickerLoading.temporary ? 'Finding...' : 'Find'}
                 </button>
             </div>

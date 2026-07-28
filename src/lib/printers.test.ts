@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Setting } from '$lib/stores/db';
 import { formatLabelProductName, getLabelDesign } from '$lib/labels';
+import { defaultReceiptDesign } from '$lib/receipt';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -120,6 +121,69 @@ describe('receipt command safety', () => {
         expect(printableRows.some((row) => (
             row.includes('2x Red Apples') && row.includes('5.00')
         ))).toBe(true);
+    });
+
+    it('prints an account refund as a credit instead of a new Pay Later charge', () => {
+        const config = getReceiptPrinterConfig(settings({
+            receipt_printer_connection: 'usb_raw',
+            receipt_printer_name: 'Receipt Printer',
+            receipt_printer_cut_paper: 'false',
+        }));
+        const bytes = buildEscposReceipt({
+            store: { name: 'Test Shop' },
+            order: {
+                id: 'refund-1',
+                orderNumber: 13,
+                type: 'return',
+                total: -500,
+                subtotal: -500,
+                discountAmount: 0,
+                paymentMethod: 'account',
+                amountTendered: -500,
+            },
+            lines: [],
+            cashierName: 'Cashier',
+            tillName: 'Till 1',
+            design: { ...defaultReceiptDesign, showPayment: true },
+        } as any, config);
+
+        const printableText = String.fromCharCode(
+            ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
+        );
+        expect(printableText).toContain('ACCOUNT CREDIT');
+        expect(printableText).toContain('CUSTOMER ACCOUNT CREDITED');
+        expect(printableText).not.toContain('CHARGED TO CUSTOMER ACCOUNT');
+    });
+
+    it('labels a Pay Later sale as charged to the customer account', () => {
+        const config = getReceiptPrinterConfig(settings({
+            receipt_printer_connection: 'usb_raw',
+            receipt_printer_name: 'Receipt Printer',
+            receipt_printer_cut_paper: 'false',
+        }));
+        const bytes = buildEscposReceipt({
+            store: { name: 'Test Shop' },
+            order: {
+                id: 'sale-account-1',
+                orderNumber: 14,
+                type: 'sale',
+                total: 500,
+                subtotal: 500,
+                discountAmount: 0,
+                paymentMethod: 'account',
+                amountTendered: 500,
+            },
+            lines: [],
+            cashierName: 'Cashier',
+            tillName: 'Till 1',
+            design: { ...defaultReceiptDesign, showPayment: true },
+        } as any, config);
+
+        const printableText = String.fromCharCode(
+            ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
+        );
+        expect(printableText).toContain('PAY LATER');
+        expect(printableText).toContain('CHARGED TO CUSTOMER ACCOUNT');
     });
 
     it('cuts a generic receipt without emitting a drawer pulse', () => {

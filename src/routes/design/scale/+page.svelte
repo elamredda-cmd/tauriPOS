@@ -2,6 +2,7 @@
     import { onDestroy } from 'svelte';
     import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
     import { formatMoney, now, settingsDB, type Product, uuid } from '$lib/stores/db';
     import { getProductsByIds, getProductsPage, upsert } from '$lib/stores/database';
@@ -119,6 +120,11 @@
     function scheduleAvailableSearch(delay = 180) {
         if (availableSearchTimer) clearTimeout(availableSearchTimer);
         availableSearchTimer = setTimeout(() => void loadAvailableProducts(), delay);
+    }
+
+    function clearAvailableSearch() {
+        search = '';
+        scheduleAvailableSearch(0);
     }
 
     async function loadAvailableProducts() {
@@ -348,9 +354,19 @@
                     <div><span>Available products</span><h2>Add Scale Tiles</h2></div>
                     <small>{availableLoading ? 'Searching' : `${availableProducts.length} available`}</small>
                 </header>
-                <div class="scale-search">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
-                    <input bind:value={search} on:input={() => scheduleAvailableSearch()} placeholder="Search name, SKU, barcode, or PLU" data-touch-keyboard="button" aria-label="Search weighable products" />
+                <div class="search-controls search-controls-fill">
+                    <div class="search-primary">
+                        <SearchField
+                            id="scale-product-search"
+                            bind:value={search}
+                            placeholder="Search name, SKU, barcode, or PLU"
+                            ariaLabel="Search weighable products"
+                            keyboardLabel="Open weighable product search keyboard"
+                            clearLabel="Clear weighable product search"
+                            onInput={() => scheduleAvailableSearch()}
+                            onClear={clearAvailableSearch}
+                        />
+                    </div>
                 </div>
                 <div class="available-list">
                     {#if availableLoading}
@@ -442,9 +458,6 @@
     .product-actions button:disabled { opacity: .28; cursor: not-allowed; }
     .product-actions button.remove { color: var(--danger); }
     .product-actions svg { width: 18px; height: 18px; }
-    .scale-search { min-height: 48px; display: flex; align-items: center; gap: .55rem; padding: 0 .7rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); }
-    .scale-search svg { width: 20px; height: 20px; color: var(--text-muted); }
-    .scale-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); }
     .available-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-auto-rows: 64px; align-content: start; }
     .available-product { position: relative; min-width: 0; padding: .45rem .55rem; overflow: hidden; display: grid; grid-template-columns: 5px minmax(0,1fr) 22px; align-items: center; gap: .55rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-main); text-align: left; }
     .available-product:hover { border-color: var(--success); background: var(--bg-card-hover); }

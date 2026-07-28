@@ -23,6 +23,13 @@ interface FlatAuditValue {
 
 const ACTION_LABELS: Record<string, string> = {
     cash_drawer_opened: 'Cash drawer opened',
+    customer_account_adjustment_posted: 'Customer account adjusted',
+    customer_account_charge_posted: 'Pay Later charge posted',
+    customer_account_config_updated: 'Customer account settings updated',
+    customer_account_opening_balance_posted: 'Customer account opening balance posted',
+    customer_account_payment_received: 'Customer account payment received',
+    customer_account_refund_posted: 'Customer account refund posted',
+    customer_account_reversal_posted: 'Customer account entry reversed',
     employee_login: 'Staff signed in',
     employee_logout: 'Staff signed out',
     manager_approval_granted: 'Manager approval granted',
@@ -46,6 +53,8 @@ const ENTITY_LABELS: Record<string, string> = {
     cash_movement: 'Cash movement',
     category: 'Category',
     customer: 'Customer',
+    customer_account: 'Customer account',
+    customer_account_entry: 'Customer account entry',
     discount: 'Discount',
     employee: 'Staff member',
     order: 'Order',
@@ -73,6 +82,13 @@ const FIELD_LABELS: Record<string, string> = {
     address: 'Address',
     amount: 'Amount',
     amountTendered: 'Amount tendered',
+    accountId: 'Customer account',
+    accountEnabled: 'Pay Later enabled',
+    accountOnHold: 'Account on hold',
+    amountPence: 'Account movement',
+    balanceBefore: 'Balance before',
+    balanceAfter: 'Balance after',
+    balancePence: 'Account balance',
     autoApply: 'Applied automatically',
     barcode: 'Barcode',
     bundlePrice: 'Bundle price',
@@ -88,6 +104,8 @@ const FIELD_LABELS: Record<string, string> = {
     color: 'Colour',
     contactName: 'Contact name',
     costPrice: 'Cost price',
+    creditLimit: 'Account limit',
+    creditLimitPence: 'Account limit',
     customerId: 'Customer',
     customerName: 'Customer',
     discountAmount: 'Discount',
@@ -99,6 +117,7 @@ const FIELD_LABELS: Record<string, string> = {
     expectedStockLevel: 'Expected stock',
     groupId: 'Promotion group',
     isActive: 'Active',
+    isEnabled: 'Pay Later enabled',
     isDefault: 'Default tax rate',
     isPriceOverride: 'Price changed at till',
     isWeighable: 'Weighed item',
@@ -106,7 +125,7 @@ const FIELD_LABELS: Record<string, string> = {
     itemQuantity: 'Total quantity',
     kind: 'Promotion type',
     loyaltyCode: 'Loyalty code',
-    loyaltyCreditUsed: 'Loyalty credit used',
+    loyaltyCreditUsed: 'Loyalty value used',
     loyaltyPoints: 'Loyalty points',
     loyaltyPointsEarned: 'Points earned',
     loyaltyPointsRedeemed: 'Points redeemed',
@@ -121,6 +140,7 @@ const FIELD_LABELS: Record<string, string> = {
     orderNumber: 'Receipt number',
     originalOrderId: 'Original order',
     originalPrice: 'Original price',
+    paymentReference: 'Payment reference',
     pageId: 'POS page',
     paymentMethod: 'Payment method',
     phone: 'Phone',
@@ -137,12 +157,15 @@ const FIELD_LABELS: Record<string, string> = {
     refundAmount: 'Refund amount',
     registerId: 'Till',
     reportTotal: 'Report total',
+    saleReference: 'Receipt reference',
     reversalId: 'Refund record',
+    reversesEntryId: 'Reverses account entry',
     role: 'Role',
     scalePlu: 'Scale PLU',
     scope: 'Report scope',
     secondPrice: 'Offer price',
     sku: 'SKU',
+    shiftId: 'Till session',
     startAt: 'Starts',
     status: 'Status',
     stockLevel: 'Stock level',
@@ -158,6 +181,7 @@ const FIELD_LABELS: Record<string, string> = {
     totalCost: 'Total cost',
     trackStock: 'Track stock',
     type: 'Type',
+    entryType: 'Entry type',
     unitPrice: 'Unit price',
     value: 'Value',
 };
@@ -176,16 +200,16 @@ const SETTING_LABELS: Record<string, string> = {
 };
 
 const MONEY_FIELDS = new Set([
-    'actualCard', 'actualCash', 'amount', 'amountTendered', 'bundlePrice',
+    'actualCard', 'actualCash', 'amount', 'amountPence', 'amountTendered', 'balanceAfter', 'balanceBefore', 'balancePence', 'bundlePrice',
     'cardAmount', 'cardDifference', 'cashAmount', 'cashDifference', 'changeGiven',
-    'costPrice', 'discountAmount', 'expectedCard', 'expectedCash', 'lineTotal',
+    'costPrice', 'creditLimit', 'creditLimitPence', 'discountAmount', 'expectedCard', 'expectedCash', 'lineTotal',
     'loyaltyCreditUsed', 'openingFloat', 'originalPrice', 'price', 'refundAmount',
     'reportTotal', 'secondPrice', 'subtotal', 'taxAmount', 'taxTotal', 'total',
     'totalCost', 'unitPrice',
 ]);
 
 const BOOLEAN_FIELDS = new Set([
-    'autoApply', 'isActive', 'isDefault', 'isPriceOverride', 'isWeighable',
+    'accountEnabled', 'accountOnHold', 'autoApply', 'isActive', 'isDefault', 'isEnabled', 'isPriceOverride', 'isWeighable',
     'showInGoods', 'trackStock',
 ]);
 
@@ -209,7 +233,7 @@ const REFERENCE_KINDS: Record<string, string> = {
 };
 
 const HIDDEN_FIELDS = new Set([
-    'createdAt', 'id', 'pin', 'pinHash', 'receiptKey', 'storeId', 'updatedAt',
+    'createdAt', 'id', 'idempotencyKey', 'pin', 'pinHash', 'receiptKey', 'storeId', 'updatedAt',
 ]);
 
 function titleWords(value: string): string {
@@ -339,7 +363,7 @@ function formatScalar(
         const date = formatDate(value);
         if (date) return date;
     }
-    if (['action', 'kind', 'paymentMethod', 'reason', 'role', 'scope', 'status', 'type'].includes(key)) {
+    if (['action', 'entryType', 'kind', 'paymentMethod', 'reason', 'role', 'scope', 'status', 'type'].includes(key)) {
         return titleWords(String(value).replace(/\+/g, ' + '));
     }
     if (typeof value === 'boolean') return value ? 'Yes' : 'No';

@@ -252,7 +252,7 @@
         </div>
     {/if}
     <div
-        class="touch-input-panel fixed bottom-3 left-1/2 z-[1902] w-[min(1040px,calc(100%_-_1rem))] -translate-x-1/2 overflow-hidden"
+        class="touch-input-panel fixed bottom-3 left-1/2 z-[1902] -translate-x-1/2 {numeric ? 'touch-input-numeric-panel' : 'touch-input-keyboard-panel'}"
         role="dialog"
         tabindex="-1"
         aria-modal="true"
@@ -262,14 +262,18 @@
         on:keydown={(event) => event.key === "Escape" && done()}
     >
         {#if numeric}
-            <div class="flex items-center justify-between gap-2 px-[.8rem] pb-0 pt-[.7rem]">
-                <div class="flex flex-col">
+            <div class="touch-input-numeric-header flex items-center justify-between gap-2 px-[.8rem] pb-0 pt-[.7rem]">
+                <div class="flex min-w-0 flex-col">
                     <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">Touch digit pad</span>
-                    <strong>{title}</strong>
+                    <strong class="truncate">{title}</strong>
                 </div>
-                <button type="button" class="rounded-[.45rem] border border-border-flat bg-bg-card px-[.8rem] py-[.55rem] text-text-main" on:click={done}>Close</button>
+                <button
+                    type="button"
+                    class="touch-input-close rounded-[.55rem] border border-border-flat bg-bg-card px-[.8rem] py-[.55rem] font-bold text-text-main"
+                    on:click={done}
+                >Close</button>
             </div>
-            <div class="mx-auto w-[min(420px,100%)] p-[.65rem]">
+            <div class="touch-input-numeric-body mx-auto w-full p-[.65rem]">
                 <TouchDigitPad
                     bind:value
                     {masked}
@@ -297,3 +301,66 @@
         {/if}
     </div>
 {/if}
+
+<style>
+    .touch-input-keyboard-panel {
+        width: min(1040px, calc(100% - 1rem));
+        overflow: hidden;
+    }
+
+    .touch-input-numeric-panel {
+        width: min(450px, calc(100% - 1rem));
+        max-height: calc(100dvh - 1.5rem);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+    }
+
+    .touch-input-numeric-header {
+        position: sticky;
+        z-index: 3;
+        top: 0;
+        min-height: 58px;
+        background: var(--bg-panel);
+    }
+
+    .touch-input-close {
+        min-width: 70px;
+        min-height: 44px;
+        flex: 0 0 auto;
+        touch-action: manipulation;
+    }
+
+    .touch-input-close:hover:not(:disabled),
+    .touch-input-close:focus-visible {
+        color: var(--accent-primary);
+        border-color: var(--accent-primary);
+        background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card));
+    }
+
+    .touch-input-close:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent-primary) 35%, transparent);
+        outline-offset: 2px;
+    }
+
+    .touch-input-close:active:not(:disabled) {
+        translate: 0 1px;
+    }
+
+    @media (max-height: 700px) {
+        .touch-input-numeric-panel {
+            bottom: .35rem;
+            max-height: calc(100dvh - .7rem);
+        }
+
+        .touch-input-numeric-header {
+            min-height: 50px;
+            padding-top: .35rem;
+        }
+
+        .touch-input-numeric-body {
+            padding: .45rem;
+        }
+    }
+</style>

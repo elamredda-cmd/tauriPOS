@@ -1,7 +1,7 @@
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
-use sqlx::mysql::MySqlPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::mysql::{MySqlPoolOptions, MySqlRow};
+use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
 use sqlx::{MySqlPool, Row, SqlitePool};
 use std::{collections::HashSet, fs, path::PathBuf, thread, time::Duration};
 use tauri::{AppHandle, Manager};
@@ -85,10 +85,102 @@ pub struct PaymentRecord {
     pub amount: i64,
     pub cash_amount: i64,
     pub card_amount: i64,
+    #[serde(default)]
+    pub loyalty_amount: i64,
+    #[serde(default)]
+    pub account_amount: i64,
     pub reference: String,
     pub change_given: i64,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerAccountRecord {
+    pub id: String,
+    pub customer_id: String,
+    pub is_enabled: bool,
+    pub credit_limit_pence: i64,
+    pub balance_pence: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerAccountChange {
+    pub id: String,
+    pub customer_id: String,
+    #[serde(default)]
+    pub order_id: String,
+    pub entry_type: String,
+    pub amount_pence: i64,
+    #[serde(default)]
+    pub payment_method: String,
+    #[serde(default)]
+    pub reference: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub receipt_number: i64,
+    #[serde(default)]
+    pub receipt_key: String,
+    #[serde(default)]
+    pub employee_id: String,
+    #[serde(default)]
+    pub till_number: String,
+    #[serde(default)]
+    pub shift_id: String,
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub reverses_entry_id: String,
+    #[serde(default)]
+    pub balance_after_pence: i64,
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerAccountEntryRecord {
+    pub id: String,
+    pub account_id: String,
+    pub customer_id: String,
+    pub order_id: String,
+    pub entry_type: String,
+    pub amount_pence: i64,
+    pub payment_method: String,
+    pub reference: String,
+    pub description: String,
+    pub receipt_number: i64,
+    pub receipt_key: String,
+    pub employee_id: String,
+    pub till_number: String,
+    pub shift_id: String,
+    pub idempotency_key: String,
+    pub reverses_entry_id: String,
+    pub balance_after_pence: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveCustomerAccountConfigInput {
+    pub customer_id: String,
+    pub is_enabled: bool,
+    pub credit_limit_pence: i64,
+    #[serde(default)]
+    pub employee_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerAccountMutationResult {
+    pub account: CustomerAccountRecord,
+    pub entry: CustomerAccountEntryRecord,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -140,6 +232,8 @@ pub struct SaleBundle {
     pub stock_changes: Vec<StockChange>,
     #[serde(default)]
     pub loyalty_changes: Vec<LoyaltyChange>,
+    #[serde(default)]
+    pub account_changes: Vec<CustomerAccountChange>,
     pub audit: AuditRecord,
     #[serde(default)]
     pub original_order_to_update: Option<String>,
@@ -393,6 +487,517 @@ async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error
 const RECEIPT_BLOCK: i64 = 1_000_000;
 const RECEIPT_HIGH_WATER_KEY: &str = "receipt_number_high_water";
 
+fn utc_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn account_protocol_error(message: impl Into<String>) -> sqlx::Error {
+    sqlx::Error::Protocol(message.into())
+}
+
+fn sqlite_account_from_row(row: &SqliteRow) -> Result<CustomerAccountRecord, sqlx::Error> {
+    Ok(CustomerAccountRecord {
+        id: row.try_get("id")?,
+        customer_id: row.try_get("customerId")?,
+        is_enabled: row.try_get::<i64, _>("isEnabled")? != 0,
+        credit_limit_pence: row.try_get("creditLimitPence")?,
+        balance_pence: row.try_get("balancePence")?,
+        created_at: row.try_get("createdAt")?,
+        updated_at: row.try_get("updatedAt")?,
+    })
+}
+
+fn mysql_account_from_row(row: &MySqlRow) -> Result<CustomerAccountRecord, sqlx::Error> {
+    Ok(CustomerAccountRecord {
+        id: row.try_get("id")?,
+        customer_id: row.try_get("customerId")?,
+        is_enabled: row.try_get::<i64, _>("isEnabled")? != 0,
+        credit_limit_pence: row.try_get("creditLimitPence")?,
+        balance_pence: row.try_get("balancePence")?,
+        created_at: row.try_get("createdAt")?,
+        updated_at: row.try_get("updatedAt")?,
+    })
+}
+
+fn sqlite_account_entry_from_row(
+    row: &SqliteRow,
+) -> Result<CustomerAccountEntryRecord, sqlx::Error> {
+    Ok(CustomerAccountEntryRecord {
+        id: row.try_get("id")?,
+        account_id: row.try_get("accountId")?,
+        customer_id: row.try_get("customerId")?,
+        order_id: row.try_get("orderId")?,
+        entry_type: row.try_get("entryType")?,
+        amount_pence: row.try_get("amountPence")?,
+        payment_method: row.try_get("paymentMethod")?,
+        reference: row.try_get("reference")?,
+        description: row.try_get("description")?,
+        receipt_number: row.try_get("receiptNumber")?,
+        receipt_key: row.try_get("receiptKey")?,
+        employee_id: row.try_get("employeeId")?,
+        till_number: row.try_get("tillNumber")?,
+        shift_id: row.try_get("shiftId")?,
+        idempotency_key: row.try_get("idempotencyKey")?,
+        reverses_entry_id: row.try_get("reversesEntryId")?,
+        balance_after_pence: row.try_get("balanceAfterPence")?,
+        created_at: row.try_get("createdAt")?,
+        updated_at: row.try_get("updatedAt")?,
+    })
+}
+
+fn mysql_account_entry_from_row(row: &MySqlRow) -> Result<CustomerAccountEntryRecord, sqlx::Error> {
+    Ok(CustomerAccountEntryRecord {
+        id: row.try_get("id")?,
+        account_id: row.try_get("accountId")?,
+        customer_id: row.try_get("customerId")?,
+        order_id: row.try_get("orderId")?,
+        entry_type: row.try_get("entryType")?,
+        amount_pence: row.try_get("amountPence")?,
+        payment_method: row.try_get("paymentMethod")?,
+        reference: row.try_get("reference")?,
+        description: row.try_get("description")?,
+        receipt_number: row.try_get("receiptNumber")?,
+        receipt_key: row.try_get("receiptKey")?,
+        employee_id: row.try_get("employeeId")?,
+        till_number: row.try_get("tillNumber")?,
+        shift_id: row.try_get("shiftId")?,
+        idempotency_key: row.try_get("idempotencyKey")?,
+        reverses_entry_id: row.try_get("reversesEntryId")?,
+        balance_after_pence: row.try_get("balanceAfterPence")?,
+        created_at: row.try_get("createdAt")?,
+        updated_at: row.try_get("updatedAt")?,
+    })
+}
+
+fn entry_matches_change(
+    entry: &CustomerAccountEntryRecord,
+    change: &CustomerAccountChange,
+) -> bool {
+    entry.account_id == change.customer_id
+        && entry.customer_id == change.customer_id
+        && entry.order_id == change.order_id
+        && entry.entry_type == change.entry_type
+        && entry.amount_pence == change.amount_pence
+        && entry.payment_method == change.payment_method
+        && entry.reference == change.reference
+        && entry.description == change.description
+        && entry.receipt_number == change.receipt_number
+        && entry.receipt_key == change.receipt_key
+        && entry.employee_id == change.employee_id
+        && entry.till_number == change.till_number
+        && entry.shift_id == change.shift_id
+        && entry.idempotency_key == change.idempotency_key
+        && entry.reverses_entry_id == change.reverses_entry_id
+}
+
+fn validate_account_change_shape(change: &CustomerAccountChange) -> Result<(), sqlx::Error> {
+    if change.id.trim().is_empty()
+        || change.customer_id.trim().is_empty()
+        || change.idempotency_key.trim().is_empty()
+        || change.employee_id.trim().is_empty()
+        || change.amount_pence == 0
+    {
+        return Err(account_protocol_error("Invalid customer account entry"));
+    }
+    match change.entry_type.as_str() {
+        "charge" | "opening_balance" if change.amount_pence <= 0 => {
+            return Err(account_protocol_error(
+                "Customer account charges must increase the amount owed",
+            ));
+        }
+        "payment" | "refund" if change.amount_pence >= 0 => {
+            return Err(account_protocol_error(
+                "Customer account payments and refunds must reduce the amount owed",
+            ));
+        }
+        "adjustment" if change.description.trim().is_empty() => {
+            return Err(account_protocol_error(
+                "Customer account adjustments require a reason",
+            ));
+        }
+        "reversal" if change.reverses_entry_id.trim().is_empty() => {
+            return Err(account_protocol_error(
+                "Customer account reversals require the original entry",
+            ));
+        }
+        "charge" | "payment" | "adjustment" | "refund" | "reversal" | "opening_balance" => {}
+        _ => {
+            return Err(account_protocol_error(
+                "Invalid customer account entry type",
+            ))
+        }
+    }
+    if change.entry_type == "payment"
+        && !matches!(change.payment_method.as_str(), "cash" | "card" | "other")
+    {
+        return Err(account_protocol_error(
+            "Customer account payments require cash, card, or other",
+        ));
+    }
+    if change.entry_type != "reversal" && !change.reverses_entry_id.trim().is_empty() {
+        return Err(account_protocol_error(
+            "Only a reversal can reference another account entry",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_account_balance_change(
+    account: &CustomerAccountRecord,
+    change: &CustomerAccountChange,
+) -> Result<i64, sqlx::Error> {
+    let balance = account
+        .balance_pence
+        .checked_add(change.amount_pence)
+        .ok_or_else(|| account_protocol_error("Customer account balance is too large"))?;
+    if change.entry_type == "payment" && balance < 0 {
+        return Err(account_protocol_error(
+            "Payment exceeds the amount this customer owes",
+        ));
+    }
+    if change.amount_pence > 0 && change.entry_type != "reversal" {
+        if !account.is_enabled {
+            return Err(account_protocol_error(
+                "This customer's Pay Later account is not enabled",
+            ));
+        }
+        if account.credit_limit_pence > 0 && balance > account.credit_limit_pence {
+            return Err(account_protocol_error(
+                "This purchase exceeds the customer's credit limit",
+            ));
+        }
+    }
+    Ok(balance)
+}
+
+fn change_to_entry(change: &CustomerAccountChange, updated_at: &str) -> CustomerAccountEntryRecord {
+    CustomerAccountEntryRecord {
+        id: change.id.clone(),
+        account_id: change.customer_id.clone(),
+        customer_id: change.customer_id.clone(),
+        order_id: change.order_id.clone(),
+        entry_type: change.entry_type.clone(),
+        amount_pence: change.amount_pence,
+        payment_method: change.payment_method.clone(),
+        reference: change.reference.clone(),
+        description: change.description.clone(),
+        receipt_number: change.receipt_number,
+        receipt_key: change.receipt_key.clone(),
+        employee_id: change.employee_id.clone(),
+        till_number: change.till_number.clone(),
+        shift_id: change.shift_id.clone(),
+        idempotency_key: change.idempotency_key.clone(),
+        reverses_entry_id: change.reverses_entry_id.clone(),
+        balance_after_pence: change.balance_after_pence,
+        created_at: change.created_at.clone(),
+        updated_at: updated_at.to_string(),
+    }
+}
+
+async fn fetch_sqlite_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    customer_id: &str,
+) -> Result<CustomerAccountRecord, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt
+         FROM customer_accounts WHERE customerId = ? LIMIT 1",
+    )
+    .bind(customer_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| account_protocol_error("Customer Pay Later account was not found"))?;
+    sqlite_account_from_row(&row)
+}
+
+async fn fetch_mysql_account(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    customer_id: &str,
+    lock: bool,
+) -> Result<CustomerAccountRecord, sqlx::Error> {
+    let sql = if lock {
+        "SELECT CAST(id AS CHAR) AS id, CAST(customerId AS CHAR) AS customerId,
+                CAST(isEnabled AS SIGNED) AS isEnabled,
+                CAST(creditLimitPence AS SIGNED) AS creditLimitPence,
+                CAST(balancePence AS SIGNED) AS balancePence,
+                CAST(createdAt AS CHAR) AS createdAt, CAST(updatedAt AS CHAR) AS updatedAt
+         FROM customer_accounts WHERE customerId = ? LIMIT 1 FOR UPDATE"
+    } else {
+        "SELECT CAST(id AS CHAR) AS id, CAST(customerId AS CHAR) AS customerId,
+                CAST(isEnabled AS SIGNED) AS isEnabled,
+                CAST(creditLimitPence AS SIGNED) AS creditLimitPence,
+                CAST(balancePence AS SIGNED) AS balancePence,
+                CAST(createdAt AS CHAR) AS createdAt, CAST(updatedAt AS CHAR) AS updatedAt
+         FROM customer_accounts WHERE customerId = ? LIMIT 1"
+    };
+    let row = sqlx::query(sql)
+        .bind(customer_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| account_protocol_error("Customer Pay Later account was not found"))?;
+    mysql_account_from_row(&row)
+}
+
+async fn find_sqlite_account_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    change: &CustomerAccountChange,
+) -> Result<Option<CustomerAccountEntryRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
+                reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
+                shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt
+         FROM customer_account_entries WHERE id = ? OR idempotencyKey = ? LIMIT 1",
+    )
+    .bind(&change.id)
+    .bind(&change.idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref().map(sqlite_account_entry_from_row).transpose()
+}
+
+async fn find_mysql_account_entry(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    change: &CustomerAccountChange,
+) -> Result<Option<CustomerAccountEntryRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT CAST(id AS CHAR) AS id, CAST(accountId AS CHAR) AS accountId,
+                CAST(customerId AS CHAR) AS customerId, CAST(orderId AS CHAR) AS orderId,
+                CAST(entryType AS CHAR) AS entryType, CAST(amountPence AS SIGNED) AS amountPence,
+                CAST(paymentMethod AS CHAR) AS paymentMethod, CAST(reference AS CHAR) AS reference,
+                CAST(description AS CHAR) AS description, CAST(receiptNumber AS SIGNED) AS receiptNumber,
+                CAST(receiptKey AS CHAR) AS receiptKey, CAST(employeeId AS CHAR) AS employeeId,
+                CAST(tillNumber AS CHAR) AS tillNumber, CAST(shiftId AS CHAR) AS shiftId,
+                CAST(idempotencyKey AS CHAR) AS idempotencyKey,
+                CAST(reversesEntryId AS CHAR) AS reversesEntryId,
+                CAST(balanceAfterPence AS SIGNED) AS balanceAfterPence,
+                CAST(createdAt AS CHAR) AS createdAt, CAST(updatedAt AS CHAR) AS updatedAt
+         FROM customer_account_entries WHERE id = ? OR idempotencyKey = ? LIMIT 1",
+    )
+    .bind(&change.id)
+    .bind(&change.idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref().map(mysql_account_entry_from_row).transpose()
+}
+
+async fn validate_sqlite_account_reversal(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    change: &CustomerAccountChange,
+) -> Result<(), sqlx::Error> {
+    if change.entry_type != "reversal" {
+        return Ok(());
+    }
+    let original: Option<(String, i64)> = sqlx::query_as(
+        "SELECT customerId, amountPence FROM customer_account_entries WHERE id = ? LIMIT 1",
+    )
+    .bind(&change.reverses_entry_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((customer_id, amount)) = original else {
+        return Err(account_protocol_error(
+            "The customer account entry being reversed was not found",
+        ));
+    };
+    let already_reversed: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM customer_account_entries WHERE reversesEntryId = ? LIMIT 1",
+    )
+    .bind(&change.reverses_entry_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if customer_id != change.customer_id
+        || amount.checked_neg() != Some(change.amount_pence)
+        || already_reversed.is_some()
+    {
+        return Err(account_protocol_error("Invalid customer account reversal"));
+    }
+    Ok(())
+}
+
+async fn validate_mysql_account_reversal(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    change: &CustomerAccountChange,
+) -> Result<(), sqlx::Error> {
+    if change.entry_type != "reversal" {
+        return Ok(());
+    }
+    let original: Option<(String, i64)> = sqlx::query_as(
+        "SELECT CAST(customerId AS CHAR), CAST(amountPence AS SIGNED)
+         FROM customer_account_entries WHERE id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(&change.reverses_entry_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((customer_id, amount)) = original else {
+        return Err(account_protocol_error(
+            "The customer account entry being reversed was not found",
+        ));
+    };
+    let already_reversed: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM customer_account_entries WHERE reversesEntryId = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(&change.reverses_entry_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if customer_id != change.customer_id
+        || amount.checked_neg() != Some(change.amount_pence)
+        || already_reversed.is_some()
+    {
+        return Err(account_protocol_error("Invalid customer account reversal"));
+    }
+    Ok(())
+}
+
+async fn apply_sqlite_account_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    change: &mut CustomerAccountChange,
+) -> Result<CustomerAccountMutationResult, sqlx::Error> {
+    validate_account_change_shape(change)?;
+    let mut account = fetch_sqlite_account(tx, &change.customer_id).await?;
+    if let Some(entry) = find_sqlite_account_entry(tx, change).await? {
+        if !entry_matches_change(&entry, change) {
+            return Err(account_protocol_error(
+                "Customer account idempotency conflict",
+            ));
+        }
+        change.id = entry.id.clone();
+        change.balance_after_pence = entry.balance_after_pence;
+        change.created_at = entry.created_at.clone();
+        change.updated_at = entry.updated_at.clone();
+        return Ok(CustomerAccountMutationResult { account, entry });
+    }
+    validate_sqlite_account_reversal(tx, change).await?;
+    let balance = validate_account_balance_change(&account, change)?;
+    let stamp = if change.updated_at.trim().is_empty() {
+        utc_stamp()
+    } else {
+        change.updated_at.clone()
+    };
+    if change.created_at.trim().is_empty() {
+        change.created_at = stamp.clone();
+    }
+    change.updated_at = stamp.clone();
+    change.balance_after_pence = balance;
+    let result = sqlx::query(
+        "UPDATE customer_accounts SET balancePence = ?, updatedAt = ?
+         WHERE customerId = ? AND balancePence = ?",
+    )
+    .bind(balance)
+    .bind(&stamp)
+    .bind(&change.customer_id)
+    .bind(account.balance_pence)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "Customer account balance changed; refresh and try again",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO customer_account_entries
+         (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
+          reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&change.id)
+    .bind(&change.customer_id)
+    .bind(&change.customer_id)
+    .bind(&change.order_id)
+    .bind(&change.entry_type)
+    .bind(change.amount_pence)
+    .bind(&change.payment_method)
+    .bind(&change.reference)
+    .bind(&change.description)
+    .bind(change.receipt_number)
+    .bind(&change.receipt_key)
+    .bind(&change.employee_id)
+    .bind(&change.till_number)
+    .bind(&change.shift_id)
+    .bind(&change.idempotency_key)
+    .bind(&change.reverses_entry_id)
+    .bind(balance)
+    .bind(&change.created_at)
+    .bind(&stamp)
+    .execute(&mut **tx)
+    .await?;
+    account.balance_pence = balance;
+    account.updated_at = stamp.clone();
+    let entry = change_to_entry(change, &stamp);
+    Ok(CustomerAccountMutationResult { account, entry })
+}
+
+async fn apply_mysql_account_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    change: &mut CustomerAccountChange,
+    stamp: &str,
+) -> Result<CustomerAccountMutationResult, sqlx::Error> {
+    validate_account_change_shape(change)?;
+    let mut account = fetch_mysql_account(tx, &change.customer_id, true).await?;
+    if let Some(entry) = find_mysql_account_entry(tx, change).await? {
+        if !entry_matches_change(&entry, change) {
+            return Err(account_protocol_error(
+                "Customer account idempotency conflict",
+            ));
+        }
+        change.id = entry.id.clone();
+        change.balance_after_pence = entry.balance_after_pence;
+        change.created_at = entry.created_at.clone();
+        change.updated_at = entry.updated_at.clone();
+        return Ok(CustomerAccountMutationResult { account, entry });
+    }
+    validate_mysql_account_reversal(tx, change).await?;
+    let balance = validate_account_balance_change(&account, change)?;
+    if change.created_at.trim().is_empty() {
+        change.created_at = stamp.to_string();
+    }
+    change.updated_at = stamp.to_string();
+    change.balance_after_pence = balance;
+    let result = sqlx::query(
+        "UPDATE customer_accounts SET balancePence = ?, updatedAt = ? WHERE customerId = ?",
+    )
+    .bind(balance)
+    .bind(stamp)
+    .bind(&change.customer_id)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "Customer account balance changed; refresh and try again",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO customer_account_entries
+         (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
+          reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&change.id)
+    .bind(&change.customer_id)
+    .bind(&change.customer_id)
+    .bind(&change.order_id)
+    .bind(&change.entry_type)
+    .bind(change.amount_pence)
+    .bind(&change.payment_method)
+    .bind(&change.reference)
+    .bind(&change.description)
+    .bind(change.receipt_number)
+    .bind(&change.receipt_key)
+    .bind(&change.employee_id)
+    .bind(&change.till_number)
+    .bind(&change.shift_id)
+    .bind(&change.idempotency_key)
+    .bind(&change.reverses_entry_id)
+    .bind(balance)
+    .bind(&change.created_at)
+    .bind(stamp)
+    .execute(&mut **tx)
+    .await?;
+    account.balance_pence = balance;
+    account.updated_at = stamp.to_string();
+    let entry = change_to_entry(change, stamp);
+    Ok(CustomerAccountMutationResult { account, entry })
+}
+
 struct ReversalValidationContext {
     original_status: String,
     original_shift_id: String,
@@ -407,10 +1012,125 @@ struct ReversalValidationContext {
     expected_stock: Vec<(String, i64)>,
     expected_line_quantities: Vec<(String, i64)>,
     void_period_closed: bool,
-    original_payment: (i64, i64, i64),
-    previous_payment: (i64, i64, i64),
+    original_payment: (i64, i64, i64, i64),
+    previous_payment: (i64, i64, i64, i64),
     original_points: i64,
     previous_points_adjustment: i64,
+}
+
+fn payment_allocation(payment: &PaymentRecord) -> Result<(i64, i64, i64, i64), sqlx::Error> {
+    let total = payment
+        .amount
+        .checked_abs()
+        .ok_or_else(|| account_protocol_error("Invalid payment amount"))?;
+    let mut cash = payment
+        .cash_amount
+        .checked_abs()
+        .ok_or_else(|| account_protocol_error("Invalid cash amount"))?;
+    let mut card = payment
+        .card_amount
+        .checked_abs()
+        .ok_or_else(|| account_protocol_error("Invalid card amount"))?;
+    let mut loyalty = payment
+        .loyalty_amount
+        .checked_abs()
+        .ok_or_else(|| account_protocol_error("Invalid loyalty amount"))?;
+    let mut account = payment
+        .account_amount
+        .checked_abs()
+        .ok_or_else(|| account_protocol_error("Invalid customer account amount"))?;
+
+    // Older receipts predate the explicit component columns. Preserve their
+    // allocation while ensuring new Pay Later amounts can never be mistaken
+    // for loyalty during a refund.
+    if cash == 0 && payment.method == "cash" {
+        cash = total;
+    }
+    if card == 0 && payment.method == "card" {
+        card = total;
+    }
+    if loyalty == 0 && payment.method == "loyalty" {
+        loyalty = total;
+    }
+    if account == 0
+        && matches!(
+            payment.method.as_str(),
+            "account" | "pay_later" | "customer_account"
+        )
+    {
+        account = total;
+    }
+    let allocated = cash
+        .checked_add(card)
+        .and_then(|value| value.checked_add(loyalty))
+        .and_then(|value| value.checked_add(account))
+        .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+    if allocated > total {
+        return Err(account_protocol_error(
+            "Payment allocation exceeds the payment total",
+        ));
+    }
+    if allocated < total {
+        if payment.loyalty_amount == 0 && payment.account_amount == 0 {
+            loyalty = loyalty
+                .checked_add(total - allocated)
+                .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+        } else {
+            return Err(account_protocol_error(
+                "Payment components do not match the payment total",
+            ));
+        }
+    }
+    Ok((cash, card, loyalty, account))
+}
+
+fn sum_payment_allocations(
+    payments: impl IntoIterator<Item = PaymentRecord>,
+) -> Result<(i64, i64, i64, i64), sqlx::Error> {
+    let mut result = (0_i64, 0_i64, 0_i64, 0_i64);
+    for payment in payments {
+        let allocation = payment_allocation(&payment)?;
+        result.0 = result
+            .0
+            .checked_add(allocation.0)
+            .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+        result.1 = result
+            .1
+            .checked_add(allocation.1)
+            .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+        result.2 = result
+            .2
+            .checked_add(allocation.2)
+            .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+        result.3 = result
+            .3
+            .checked_add(allocation.3)
+            .ok_or_else(|| account_protocol_error("Payment allocation is too large"))?;
+    }
+    Ok(result)
+}
+
+fn sum_payment_allocation_rows(
+    rows: Vec<(String, i64, i64, i64, i64, i64)>,
+) -> Result<(i64, i64, i64, i64), sqlx::Error> {
+    sum_payment_allocations(rows.into_iter().map(
+        |(method, amount, cash_amount, card_amount, loyalty_amount, account_amount)| {
+            PaymentRecord {
+                id: String::new(),
+                order_id: String::new(),
+                method,
+                amount,
+                cash_amount,
+                card_amount,
+                loyalty_amount,
+                account_amount,
+                reference: String::new(),
+                change_given: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            }
+        },
+    ))
 }
 
 fn same_quantities(expected: &[(String, i64)], actual: &[(String, i64)]) -> bool {
@@ -420,6 +1140,80 @@ fn same_quantities(expected: &[(String, i64)], actual: &[(String, i64)]) -> bool
                 actual_id == product_id && actual_quantity == quantity
             })
         })
+}
+
+fn prepare_sale_account_changes(bundle: &mut SaleBundle) -> Result<(), sqlx::Error> {
+    let account_amount = bundle.payment.account_amount;
+    if account_amount == 0 && bundle.account_changes.is_empty() {
+        return Ok(());
+    }
+    let order = &bundle.order;
+    let expected_type = match order.order_type.as_str() {
+        "sale" if account_amount > 0 => "charge",
+        "return" if account_amount < 0 => "refund",
+        _ => {
+            return Err(account_protocol_error(
+                "Invalid Pay Later allocation for this transaction",
+            ));
+        }
+    };
+    if order.customer_id.trim().is_empty()
+        || bundle.payment.order_id != order.id
+        || bundle.account_changes.is_empty()
+    {
+        return Err(account_protocol_error(
+            "Pay Later requires a selected customer and account entry",
+        ));
+    }
+    let change_total = bundle
+        .account_changes
+        .iter()
+        .try_fold(0_i64, |sum, change| {
+            sum.checked_add(change.amount_pence)
+                .ok_or_else(|| account_protocol_error("Customer account amount is too large"))
+        })?;
+    if change_total != account_amount {
+        return Err(account_protocol_error(
+            "Customer account entries do not match the Pay Later amount",
+        ));
+    }
+    let mut ids = HashSet::new();
+    let mut idempotency_keys = HashSet::new();
+    for change in &mut bundle.account_changes {
+        if change.customer_id != order.customer_id
+            || change.order_id != order.id
+            || change.entry_type != expected_type
+            || !ids.insert(change.id.clone())
+            || !idempotency_keys.insert(change.idempotency_key.clone())
+            || (change.receipt_number != 0 && change.receipt_number != order.order_number)
+            || (!change.receipt_key.trim().is_empty() && change.receipt_key != order.receipt_key)
+            || (!change.employee_id.trim().is_empty() && change.employee_id != order.employee_id)
+            || (!change.till_number.trim().is_empty() && change.till_number != order.till_number)
+            || (!change.shift_id.trim().is_empty() && change.shift_id != order.shift_id)
+        {
+            return Err(account_protocol_error(
+                "Invalid customer account sale entry",
+            ));
+        }
+        change.receipt_number = order.order_number;
+        change.receipt_key = order.receipt_key.clone();
+        change.employee_id = order.employee_id.clone();
+        change.till_number = order.till_number.clone();
+        change.shift_id = order.shift_id.clone();
+        if change.created_at.trim().is_empty() {
+            change.created_at = order.completed_at.clone();
+        }
+        change.updated_at = order.updated_at.clone();
+        change.balance_after_pence = 0;
+        validate_account_change_shape(change)?;
+    }
+    let allocation = payment_allocation(&bundle.payment)?;
+    if allocation.3 != account_amount.abs() {
+        return Err(account_protocol_error(
+            "Pay Later allocation does not match the payment",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_reversal_bundle(
@@ -439,6 +1233,7 @@ fn validate_reversal_bundle(
         .map(|line| line.discount_amount)
         .sum::<i64>();
     let line_tax = bundle.lines.iter().map(|line| line.tax_amount).sum::<i64>();
+    let payment_allocation = payment_allocation(&bundle.payment)?;
 
     if o.status != "completed"
         || bundle.lines.is_empty()
@@ -447,7 +1242,8 @@ fn validate_reversal_bundle(
         || bundle.payment.method != o.payment_method
         || bundle.payment.cash_amount > 0
         || bundle.payment.card_amount > 0
-        || bundle.payment.cash_amount.abs() + bundle.payment.card_amount.abs() > refund_amount
+        || bundle.payment.loyalty_amount > 0
+        || bundle.payment.account_amount > 0
         || o.amount_tendered != o.total
         || o.customer_id != context.original_customer_id
         || o.subtotal > 0
@@ -474,6 +1270,14 @@ fn validate_reversal_bundle(
                 || change.customer_id != o.customer_id
                 || change.reason != "refund_adjustment"
         })
+        || bundle.account_changes.len() > 1
+        || bundle.account_changes.iter().any(|change| {
+            change.order_id != o.id
+                || change.customer_id != o.customer_id
+                || change.entry_type != "refund"
+                || change.amount_pence != -payment_allocation.3
+        })
+        || (payment_allocation.3 == 0) != bundle.account_changes.is_empty()
     {
         return Err(sqlx::Error::Protocol("Invalid reversal bundle".into()));
     }
@@ -490,18 +1294,17 @@ fn validate_reversal_bundle(
         ));
     }
 
-    let cash = bundle.payment.cash_amount.abs();
-    let card = bundle.payment.card_amount.abs();
-    let loyalty = refund_amount - cash - card;
+    let (cash, card, loyalty, account) = payment_allocation;
     let cumulative_payment = (
         context.previous_payment.0 + cash,
         context.previous_payment.1 + card,
         context.previous_payment.2 + loyalty,
+        context.previous_payment.3 + account,
     );
-    if loyalty < 0
-        || cumulative_payment.0 > context.original_payment.0
+    if cumulative_payment.0 > context.original_payment.0
         || cumulative_payment.1 > context.original_payment.1
         || cumulative_payment.2 > context.original_payment.2
+        || cumulative_payment.3 > context.original_payment.3
     {
         return Err(sqlx::Error::Protocol(
             "Refund payment allocation exceeds the original payment".into(),
@@ -686,31 +1489,25 @@ async fn validate_sqlite_reversal(
     .bind(&o.original_order_id)
     .fetch_all(&mut **tx)
     .await?;
-    let original_payment: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-                COALESCE(SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0),
-                COALESCE(SUM(ABS(amount)
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0)
+    let original_payment_rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT method, amount, COALESCE(cashAmount, 0), COALESCE(cardAmount, 0),
+                COALESCE(loyaltyAmount, 0), COALESCE(accountAmount, 0)
          FROM payments WHERE orderId = ?",
     )
     .bind(&o.original_order_id)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    let previous_payment: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-                COALESCE(SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0),
-                COALESCE(SUM(ABS(p.amount)
-                    - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END
-                    - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0)
+    let original_payment = sum_payment_allocation_rows(original_payment_rows)?;
+    let previous_payment_rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT p.method, p.amount, COALESCE(p.cashAmount, 0), COALESCE(p.cardAmount, 0),
+                COALESCE(p.loyaltyAmount, 0), COALESCE(p.accountAmount, 0)
          FROM payments p JOIN orders r ON r.id = p.orderId
          WHERE r.type = 'return' AND r.originalOrderId = ?",
     )
     .bind(&o.original_order_id)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
+    let previous_payment = sum_payment_allocation_rows(previous_payment_rows)?;
     let original_points: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(pointsChange), 0) FROM loyalty_logs WHERE orderId = ?",
     )
@@ -825,31 +1622,31 @@ async fn validate_mysql_reversal(
     .bind(&o.original_order_id)
     .fetch_all(&mut **tx)
     .await?;
-    let original_payment: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-                CAST(COALESCE(SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END), 0) AS SIGNED),
-                CAST(COALESCE(SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0) AS SIGNED),
-                CAST(COALESCE(SUM(ABS(amount)
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(cashAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cashAmount, 0)) ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(cardAmount, 0)), 0), ABS(amount)) WHEN method = 'split' THEN ABS(COALESCE(cardAmount, 0)) ELSE 0 END), 0) AS SIGNED)
+    let original_payment_rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT CAST(method AS CHAR), CAST(amount AS SIGNED),
+                CAST(COALESCE(cashAmount, 0) AS SIGNED),
+                CAST(COALESCE(cardAmount, 0) AS SIGNED),
+                CAST(COALESCE(loyaltyAmount, 0) AS SIGNED),
+                CAST(COALESCE(accountAmount, 0) AS SIGNED)
          FROM payments WHERE orderId = ?",
     )
     .bind(&o.original_order_id)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    let previous_payment: (i64, i64, i64) = sqlx::query_as(
-        "SELECT
-                CAST(COALESCE(SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END), 0) AS SIGNED),
-                CAST(COALESCE(SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0) AS SIGNED),
-                CAST(COALESCE(SUM(ABS(p.amount)
-                    - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(ABS(COALESCE(p.cashAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cashAmount, 0)) ELSE 0 END
-                    - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(ABS(COALESCE(p.cardAmount, 0)), 0), ABS(p.amount)) WHEN p.method = 'split' THEN ABS(COALESCE(p.cardAmount, 0)) ELSE 0 END), 0) AS SIGNED)
+    let original_payment = sum_payment_allocation_rows(original_payment_rows)?;
+    let previous_payment_rows: Vec<(String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT CAST(p.method AS CHAR), CAST(p.amount AS SIGNED),
+                CAST(COALESCE(p.cashAmount, 0) AS SIGNED),
+                CAST(COALESCE(p.cardAmount, 0) AS SIGNED),
+                CAST(COALESCE(p.loyaltyAmount, 0) AS SIGNED),
+                CAST(COALESCE(p.accountAmount, 0) AS SIGNED)
          FROM payments p JOIN orders r ON r.id = p.orderId
          WHERE r.type = 'return' AND r.originalOrderId = ?",
     )
     .bind(&o.original_order_id)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
+    let previous_payment = sum_payment_allocation_rows(previous_payment_rows)?;
     let original_points: i64 = sqlx::query_scalar(
         "SELECT CAST(COALESCE(SUM(pointsChange), 0) AS SIGNED) FROM loyalty_logs WHERE orderId = ?",
     )
@@ -968,8 +1765,9 @@ async fn insert_sqlite_bundle(
     // simultaneous payments cannot both allocate the same receipt.
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut committed = bundle.clone();
-    validate_sqlite_reversal(&mut tx, &committed).await?;
     allocate_local_receipt(&mut tx, &mut committed.order).await?;
+    prepare_sale_account_changes(&mut committed)?;
+    validate_sqlite_reversal(&mut tx, &committed).await?;
     committed.audit.new_data = serde_json::json!({
         "orderNumber": committed.order.order_number,
         "total": committed.order.total,
@@ -987,7 +1785,7 @@ async fn insert_sqlite_bundle(
     .bind(o.amount_tendered).bind(&o.created_at).bind(&o.completed_at).bind(&o.updated_at)
     .execute(&mut *tx).await?;
 
-    for l in &bundle.lines {
+    for l in &committed.lines {
         sqlx::query(
             "INSERT INTO order_lines (id, orderId, productId, productName, quantity, unitPrice, costPrice, discountId, discountAmount, taxRate, taxAmount, lineTotal, isPriceOverride, originalPrice, notes, updatedAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -999,16 +1797,17 @@ async fn insert_sqlite_bundle(
         .bind(&l.notes).bind(&l.updated_at).execute(&mut *tx).await?;
     }
 
-    let p = &bundle.payment;
+    let p = &committed.payment;
     sqlx::query(
-        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, reference, changeGiven, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&p.id).bind(&p.order_id).bind(&p.method).bind(p.amount).bind(p.cash_amount)
-    .bind(p.card_amount).bind(&p.reference).bind(p.change_given).bind(&p.created_at)
+    .bind(p.card_amount).bind(p.loyalty_amount).bind(p.account_amount)
+    .bind(&p.reference).bind(p.change_given).bind(&p.created_at)
     .bind(&p.updated_at).execute(&mut *tx).await?;
 
-    for s in &bundle.stock_changes {
+    for s in &committed.stock_changes {
         sqlx::query("UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?")
             .bind(s.delta)
             .bind(&o.updated_at)
@@ -1023,7 +1822,7 @@ async fn insert_sqlite_bundle(
         .bind(&s.notes).bind(&o.completed_at).bind(&o.updated_at).execute(&mut *tx).await?;
     }
 
-    for change in &bundle.loyalty_changes {
+    for change in &committed.loyalty_changes {
         let result = if change.points_change < 0 && change.reason == "redeemed" {
             sqlx::query("UPDATE customers SET loyaltyPoints = loyaltyPoints + ?, updatedAt = ? WHERE id = ? AND loyaltyPoints >= ?")
                 .bind(change.points_change).bind(&o.updated_at).bind(&change.customer_id).bind(-change.points_change)
@@ -1043,7 +1842,11 @@ async fn insert_sqlite_bundle(
             .bind(&change.reason).bind(&change.created_at).bind(&o.updated_at).execute(&mut *tx).await?;
     }
 
-    let a = &bundle.audit;
+    for change in &mut committed.account_changes {
+        apply_sqlite_account_change(&mut tx, change).await?;
+    }
+
+    let a = &committed.audit;
     sqlx::query(
         "INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1066,9 +1869,14 @@ async fn insert_sqlite_bundle(
     Ok(committed)
 }
 
-async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<(), sqlx::Error> {
+async fn insert_mysql_bundle(
+    pool: &MySqlPool,
+    bundle: &SaleBundle,
+) -> Result<SaleBundle, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let o = &bundle.order;
+    let mut committed = bundle.clone();
+    prepare_sale_account_changes(&mut committed)?;
+    let o = &committed.order;
     // A till can lose the network response after MariaDB committed the sale.
     // Treat replaying that exact immutable order as success instead of blocking
     // every later offline operation with a duplicate-key error.
@@ -1079,14 +1887,32 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
             .await?;
     if let Some(receipt_key) = existing_receipt {
         if receipt_key == o.receipt_key {
+            for change in &mut committed.account_changes {
+                let entry = find_mysql_account_entry(&mut tx, change)
+                    .await?
+                    .ok_or_else(|| {
+                        account_protocol_error(
+                            "Existing sale is missing its customer account entry",
+                        )
+                    })?;
+                if !entry_matches_change(&entry, change) {
+                    return Err(account_protocol_error(
+                        "Customer account idempotency conflict",
+                    ));
+                }
+                change.id = entry.id;
+                change.balance_after_pence = entry.balance_after_pence;
+                change.created_at = entry.created_at;
+                change.updated_at = entry.updated_at;
+            }
             tx.commit().await?;
-            return Ok(());
+            return Ok(committed);
         }
         return Err(sqlx::Error::Protocol(
             "SYNC_CONFLICT: order id already exists with a different receipt".into(),
         ));
     }
-    validate_mysql_reversal(&mut tx, bundle).await?;
+    validate_mysql_reversal(&mut tx, &committed).await?;
     // Delta sync checkpoints use MariaDB's clock. Stamp the bundle when the
     // server receives it so sales created while offline are not hidden behind
     // a checkpoint that advanced before they were uploaded.
@@ -1105,7 +1931,7 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
     .bind(o.amount_tendered).bind(&o.created_at).bind(&o.completed_at).bind(&stamp)
     .execute(&mut *tx).await?;
 
-    for l in &bundle.lines {
+    for l in &committed.lines {
         sqlx::query(
             "INSERT INTO order_lines (id, orderId, productId, productName, quantity, unitPrice, costPrice, discountId, discountAmount, taxRate, taxAmount, lineTotal, isPriceOverride, originalPrice, notes, updatedAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1116,16 +1942,17 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
         .bind(if l.is_price_override { 1 } else { 0 }).bind(l.original_price)
         .bind(&l.notes).bind(&stamp).execute(&mut *tx).await?;
     }
-    let p = &bundle.payment;
+    let p = &committed.payment;
     sqlx::query(
-        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, reference, changeGiven, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&p.id).bind(&p.order_id).bind(&p.method).bind(p.amount).bind(p.cash_amount)
-    .bind(p.card_amount).bind(&p.reference).bind(p.change_given).bind(&p.created_at)
+    .bind(p.card_amount).bind(p.loyalty_amount).bind(p.account_amount)
+    .bind(&p.reference).bind(p.change_given).bind(&p.created_at)
     .bind(&stamp).execute(&mut *tx).await?;
 
-    for s in &bundle.stock_changes {
+    for s in &committed.stock_changes {
         sqlx::query("UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?")
             .bind(s.delta)
             .bind(&stamp)
@@ -1139,7 +1966,7 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
         .bind(&s.log_id).bind(&s.product_id).bind(s.delta).bind(&s.movement_type).bind(&o.id).bind(&s.employee_id)
         .bind(&s.notes).bind(&o.completed_at).bind(&stamp).execute(&mut *tx).await?;
     }
-    for change in &bundle.loyalty_changes {
+    for change in &committed.loyalty_changes {
         let result = if change.points_change < 0 && change.reason == "redeemed" {
             sqlx::query("UPDATE customers SET loyaltyPoints = loyaltyPoints + ?, updatedAt = ? WHERE id = ? AND loyaltyPoints >= ?")
                 .bind(change.points_change).bind(&stamp).bind(&change.customer_id).bind(-change.points_change)
@@ -1158,7 +1985,10 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
             .bind(&change.id).bind(&change.customer_id).bind(&change.order_id).bind(change.points_change)
             .bind(&change.reason).bind(&change.created_at).bind(&stamp).execute(&mut *tx).await?;
     }
-    let a = &bundle.audit;
+    for change in &mut committed.account_changes {
+        apply_mysql_account_change(&mut tx, change, &stamp).await?;
+    }
+    let a = &committed.audit;
     sqlx::query(
         "INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1167,8 +1997,8 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
     .bind(&a.old_data).bind(&a.new_data).bind(&a.created_at).bind(&stamp)
     .execute(&mut *tx).await?;
     if let (Some(id), Some(status)) = (
-        &bundle.original_order_to_update,
-        &bundle.original_status_update,
+        &committed.original_order_to_update,
+        &committed.original_status_update,
     ) {
         sqlx::query("UPDATE orders SET status = ?, updatedAt = ? WHERE id = ?")
             .bind(status)
@@ -1177,6 +2007,202 @@ async fn insert_mysql_bundle(pool: &MySqlPool, bundle: &SaleBundle) -> Result<()
             .execute(&mut *tx)
             .await?;
     }
+    tx.commit().await?;
+    Ok(committed)
+}
+
+async fn save_sqlite_customer_account_config(
+    pool: &SqlitePool,
+    input: &SaveCustomerAccountConfigInput,
+) -> Result<CustomerAccountRecord, sqlx::Error> {
+    if input.customer_id.trim().is_empty() || input.credit_limit_pence < 0 {
+        return Err(account_protocol_error("Invalid customer account settings"));
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let customer_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM customers WHERE id = ? LIMIT 1")
+            .bind(&input.customer_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if customer_exists.is_none() {
+        return Err(account_protocol_error("Customer was not found"));
+    }
+    let stamp = utc_stamp();
+    sqlx::query(
+        "INSERT INTO customer_accounts
+         (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT(customerId) DO UPDATE SET
+           isEnabled = excluded.isEnabled,
+           creditLimitPence = excluded.creditLimitPence,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&input.customer_id)
+    .bind(&input.customer_id)
+    .bind(if input.is_enabled { 1 } else { 0 })
+    .bind(input.credit_limit_pence)
+    .bind(&stamp)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    let account = fetch_sqlite_account(&mut tx, &input.customer_id).await?;
+    tx.commit().await?;
+    Ok(account)
+}
+
+async fn save_mysql_customer_account_config(
+    pool: &MySqlPool,
+    input: &SaveCustomerAccountConfigInput,
+) -> Result<CustomerAccountRecord, sqlx::Error> {
+    if input.customer_id.trim().is_empty() || input.credit_limit_pence < 0 {
+        return Err(account_protocol_error("Invalid customer account settings"));
+    }
+    let mut tx = pool.begin().await?;
+    let customer_exists: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(id AS CHAR) FROM customers WHERE id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(&input.customer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if customer_exists.is_none() {
+        return Err(account_protocol_error("Customer was not found"));
+    }
+    let stamp: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await?;
+    sqlx::query(
+        "INSERT INTO customer_accounts
+         (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, 0, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           isEnabled = VALUES(isEnabled),
+           creditLimitPence = VALUES(creditLimitPence),
+           updatedAt = VALUES(updatedAt)",
+    )
+    .bind(&input.customer_id)
+    .bind(&input.customer_id)
+    .bind(if input.is_enabled { 1 } else { 0 })
+    .bind(input.credit_limit_pence)
+    .bind(&stamp)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    let account = fetch_mysql_account(&mut tx, &input.customer_id, true).await?;
+    tx.commit().await?;
+    Ok(account)
+}
+
+async fn post_sqlite_customer_account_entry(
+    pool: &SqlitePool,
+    input: &CustomerAccountChange,
+) -> Result<CustomerAccountMutationResult, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut change = input.clone();
+    let result = apply_sqlite_account_change(&mut tx, &mut change).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn post_mysql_customer_account_entry(
+    pool: &MySqlPool,
+    input: &CustomerAccountChange,
+) -> Result<CustomerAccountMutationResult, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let stamp: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut change = input.clone();
+    let result = apply_mysql_account_change(&mut tx, &mut change, &stamp).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn cache_sqlite_customer_account(
+    pool: &SqlitePool,
+    account: &CustomerAccountRecord,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query(
+        "INSERT INTO customer_accounts
+         (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(customerId) DO UPDATE SET
+           isEnabled = excluded.isEnabled,
+           creditLimitPence = excluded.creditLimitPence,
+           balancePence = excluded.balancePence,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&account.id)
+    .bind(&account.customer_id)
+    .bind(if account.is_enabled { 1 } else { 0 })
+    .bind(account.credit_limit_pence)
+    .bind(account.balance_pence)
+    .bind(&account.created_at)
+    .bind(&account.updated_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
+async fn cache_sqlite_customer_account_mutation(
+    pool: &SqlitePool,
+    result: &CustomerAccountMutationResult,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let account = &result.account;
+    sqlx::query(
+        "INSERT INTO customer_accounts
+         (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(customerId) DO UPDATE SET
+           isEnabled = excluded.isEnabled,
+           creditLimitPence = excluded.creditLimitPence,
+           balancePence = excluded.balancePence,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&account.id)
+    .bind(&account.customer_id)
+    .bind(if account.is_enabled { 1 } else { 0 })
+    .bind(account.credit_limit_pence)
+    .bind(account.balance_pence)
+    .bind(&account.created_at)
+    .bind(&account.updated_at)
+    .execute(&mut *tx)
+    .await?;
+    let entry = &result.entry;
+    sqlx::query(
+        "INSERT INTO customer_account_entries
+         (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
+          reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           balanceAfterPence = excluded.balanceAfterPence,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&entry.id)
+    .bind(&entry.account_id)
+    .bind(&entry.customer_id)
+    .bind(&entry.order_id)
+    .bind(&entry.entry_type)
+    .bind(entry.amount_pence)
+    .bind(&entry.payment_method)
+    .bind(&entry.reference)
+    .bind(&entry.description)
+    .bind(entry.receipt_number)
+    .bind(&entry.receipt_key)
+    .bind(&entry.employee_id)
+    .bind(&entry.till_number)
+    .bind(&entry.shift_id)
+    .bind(&entry.idempotency_key)
+    .bind(&entry.reverses_entry_id)
+    .bind(entry.balance_after_pence)
+    .bind(&entry.created_at)
+    .bind(&entry.updated_at)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await
 }
 
@@ -1472,7 +2498,90 @@ pub async fn commit_mysql_sale(mysql_uri: String, bundle: SaleBundle) -> Result<
         .map_err(|e| e.to_string())?;
     insert_mysql_bundle(&pool, &bundle)
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_local_customer_account_config(
+    app: AppHandle,
+    input: SaveCustomerAccountConfigInput,
+) -> Result<CustomerAccountRecord, String> {
+    let uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let pool = SqlitePool::connect(&uri).await.map_err(|e| e.to_string())?;
+    save_sqlite_customer_account_config(&pool, &input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn save_online_customer_account_config(
+    app: AppHandle,
+    mysql_uri: String,
+    input: SaveCustomerAccountConfigInput,
+) -> Result<CustomerAccountRecord, String> {
+    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    let account = save_mysql_customer_account_config(&mysql_pool, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    match SqlitePool::connect(&local_uri).await {
+        Ok(local_pool) => {
+            if let Err(error) = cache_sqlite_customer_account(&local_pool, &account).await {
+                eprintln!(
+                    "MariaDB accepted customer account settings but the local cache update failed; background sync will repair it: {error}"
+                );
+            }
+        }
+        Err(error) => eprintln!(
+            "MariaDB accepted customer account settings but the local cache could not be opened; background sync will repair it: {error}"
+        ),
+    }
+    Ok(account)
+}
+
+#[tauri::command]
+pub async fn commit_local_customer_account_entry(
+    app: AppHandle,
+    input: CustomerAccountChange,
+) -> Result<CustomerAccountMutationResult, String> {
+    let uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let pool = SqlitePool::connect(&uri).await.map_err(|e| e.to_string())?;
+    post_sqlite_customer_account_entry(&pool, &input)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn commit_online_customer_account_entry(
+    app: AppHandle,
+    mysql_uri: String,
+    input: CustomerAccountChange,
+) -> Result<CustomerAccountMutationResult, String> {
+    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = post_mysql_customer_account_entry(&mysql_pool, &input)
+        .await
+        .map_err(|e| e.to_string())?;
+    let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    match SqlitePool::connect(&local_uri).await {
+        Ok(local_pool) => {
+            if let Err(error) =
+                cache_sqlite_customer_account_mutation(&local_pool, &result).await
+            {
+                eprintln!(
+                    "MariaDB accepted the customer account entry but the local cache update failed; background sync will repair it: {error}"
+                );
+            }
+        }
+        Err(error) => eprintln!(
+            "MariaDB accepted the customer account entry but the local cache could not be opened; background sync will repair it: {error}"
+        ),
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1531,17 +2640,22 @@ pub async fn commit_online_reversal(
     let mysql_pool = connect_mysql_for_pos(&mysql_uri)
         .await
         .map_err(|e| e.to_string())?;
-    insert_mysql_bundle(&mysql_pool, &committed)
+    let committed = insert_mysql_bundle(&mysql_pool, &committed)
         .await
         .map_err(|e| e.to_string())?;
-    let committed = match insert_sqlite_bundle(&local_pool, &committed).await {
+    let locally_committed = match insert_sqlite_bundle(&local_pool, &committed).await {
         Ok(local) => local,
         Err(error) => {
             eprintln!("MariaDB accepted reversal but local cache insert failed; background sync will repair it: {error}");
-            committed
+            committed.clone()
         }
     };
-    Ok(CommitSaleResult { bundle: committed })
+    let bundle = if committed.account_changes.is_empty() {
+        locally_committed
+    } else {
+        committed
+    };
+    Ok(CommitSaleResult { bundle })
 }
 
 #[tauri::command]
@@ -1588,16 +2702,72 @@ pub async fn commit_online_loyalty_sale(
     let mysql_pool = connect_mysql_for_pos(&mysql_uri)
         .await
         .map_err(|e| e.to_string())?;
-    insert_mysql_bundle(&mysql_pool, &committed)
+    let committed = insert_mysql_bundle(&mysql_pool, &committed)
         .await
         .map_err(|e| e.to_string())?;
-    let committed = match insert_sqlite_bundle(&local_pool, &committed).await {
+    let locally_committed = match insert_sqlite_bundle(&local_pool, &committed).await {
         Ok(local) => local,
         Err(error) => {
             eprintln!("MariaDB accepted loyalty sale but local cache insert failed; background sync will repair it: {error}");
-            committed
+            committed.clone()
         }
     };
+    let bundle = if committed.account_changes.is_empty() {
+        locally_committed
+    } else {
+        committed
+    };
+    Ok(CommitSaleResult { bundle })
+}
+
+#[tauri::command]
+pub async fn commit_online_customer_account_sale(
+    app: AppHandle,
+    mysql_uri: String,
+    bundle: SaleBundle,
+) -> Result<CommitSaleResult, String> {
+    crate::licensing::require_sale_access(&app).await?;
+    if bundle.order.order_type != "sale"
+        || bundle.order.customer_id.trim().is_empty()
+        || bundle.payment.account_amount <= 0
+        || bundle.account_changes.is_empty()
+        || bundle.account_changes.iter().any(|change| {
+            change.customer_id != bundle.order.customer_id
+                || change.order_id != bundle.order.id
+                || change.entry_type != "charge"
+                || change.amount_pence <= 0
+        })
+    {
+        return Err("Invalid Pay Later sale".into());
+    }
+
+    let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let local_pool = SqlitePool::connect(&local_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Allocate a receipt without making the sale visible locally. The shared
+    // account is locked and charged on MariaDB before the till may complete.
+    let mut local_tx = local_pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut reserved = bundle.clone();
+    allocate_local_receipt(&mut local_tx, &mut reserved.order)
+        .await
+        .map_err(|e| e.to_string())?;
+    local_tx.rollback().await.map_err(|e| e.to_string())?;
+
+    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|e| e.to_string())?;
+    let committed = insert_mysql_bundle(&mysql_pool, &reserved)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(error) = insert_sqlite_bundle(&local_pool, &committed).await {
+        eprintln!(
+            "MariaDB accepted Pay Later sale but local cache insert failed; background sync will repair it: {error}"
+        );
+    }
     Ok(CommitSaleResult { bundle: committed })
 }
 
@@ -2933,6 +4103,8 @@ mod tests {
                 "CREATE TABLE audit_logs (id TEXT PRIMARY KEY, entityId TEXT, entityType TEXT, action TEXT)",
                 "CREATE TABLE manager_approvals (id TEXT PRIMARY KEY, entityId TEXT, entityType TEXT, action TEXT)",
                 "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, orderId TEXT)",
+                "CREATE TABLE customer_accounts (id TEXT PRIMARY KEY, customerId TEXT, balancePence INTEGER)",
+                "CREATE TABLE customer_account_entries (id TEXT PRIMARY KEY, accountId TEXT, customerId TEXT, orderId TEXT, balanceAfterPence INTEGER)",
                 "CREATE TABLE daily_sales_summary (id TEXT PRIMARY KEY)",
                 "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY)",
                 "CREATE TABLE _offline_queue (id TEXT PRIMARY KEY, operation TEXT, table_name TEXT)",
@@ -2954,6 +4126,8 @@ mod tests {
                 "INSERT INTO manager_approvals VALUES ('approval-1', 'order-1', 'order', 'refund_void')",
                 "INSERT INTO loyalty_logs VALUES ('loyalty-sale', 'order-1')",
                 "INSERT INTO loyalty_logs VALUES ('loyalty-manual', '')",
+                "INSERT INTO customer_accounts VALUES ('customer-1', 'customer-1', 3750)",
+                "INSERT INTO customer_account_entries VALUES ('account-entry-1', 'customer-1', 'customer-1', 'order-1', 3750)",
                 "INSERT INTO daily_sales_summary VALUES ('summary-1')",
                 "INSERT INTO till_report_markers VALUES ('marker-1')",
                 "INSERT INTO _offline_queue VALUES ('queue-sale', 'saleBundle', 'orders')",
@@ -3017,6 +4191,8 @@ mod tests {
                 ("inventory_logs", 1),
                 ("audit_logs", 1),
                 ("loyalty_logs", 1),
+                ("customer_accounts", 1),
+                ("customer_account_entries", 1),
             ] {
                 let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                     .fetch_one(&backup_pool)
@@ -3049,11 +4225,13 @@ mod tests {
         for sql in [
             "CREATE TABLE orders (id TEXT PRIMARY KEY, shiftId TEXT, customerId TEXT, employeeId TEXT, orderNumber INTEGER, receiptKey TEXT UNIQUE, type TEXT, status TEXT, originalOrderId TEXT, subtotal INTEGER, discountId TEXT, discountAmount INTEGER, taxTotal INTEGER, total INTEGER, tillNumber TEXT, notes TEXT, paymentMethod TEXT, amountTendered INTEGER, createdAt TEXT, completedAt TEXT, updatedAt TEXT)",
             "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT, productId TEXT, productName TEXT, quantity INTEGER, unitPrice INTEGER, costPrice INTEGER, discountId TEXT, discountAmount INTEGER, taxRate REAL, taxAmount INTEGER, lineTotal INTEGER, isPriceOverride INTEGER, originalPrice INTEGER, notes TEXT, updatedAt TEXT)",
-            "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT, method TEXT, amount INTEGER, cashAmount INTEGER, cardAmount INTEGER, reference TEXT, changeGiven INTEGER, createdAt TEXT, updatedAt TEXT)",
+            "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT, method TEXT, amount INTEGER, cashAmount INTEGER, cardAmount INTEGER, loyaltyAmount INTEGER DEFAULT 0, accountAmount INTEGER DEFAULT 0, reference TEXT, changeGiven INTEGER, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE products (id TEXT PRIMARY KEY, stockLevel INTEGER, updatedAt TEXT)",
             "CREATE TABLE inventory_logs (id TEXT PRIMARY KEY, productId TEXT, quantityChange INTEGER, type TEXT, referenceId TEXT, employeeId TEXT, notes TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE audit_logs (id TEXT PRIMARY KEY, employeeId TEXT, action TEXT, entityType TEXT, entityId TEXT, oldData TEXT, newData TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE customers (id TEXT PRIMARY KEY, loyaltyPoints INTEGER, updatedAt TEXT)",
+            "CREATE TABLE customer_accounts (id TEXT PRIMARY KEY, customerId TEXT NOT NULL UNIQUE, isEnabled INTEGER NOT NULL DEFAULT 0, creditLimitPence INTEGER NOT NULL DEFAULT 0, balancePence INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
+            "CREATE TABLE customer_account_entries (id TEXT PRIMARY KEY, accountId TEXT NOT NULL, customerId TEXT NOT NULL, orderId TEXT NOT NULL DEFAULT '', entryType TEXT NOT NULL, amountPence INTEGER NOT NULL, paymentMethod TEXT NOT NULL DEFAULT '', reference TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', receiptNumber INTEGER NOT NULL DEFAULT 0, receiptKey TEXT NOT NULL DEFAULT '', employeeId TEXT NOT NULL DEFAULT '', tillNumber TEXT NOT NULL DEFAULT '', shiftId TEXT NOT NULL DEFAULT '', idempotencyKey TEXT NOT NULL UNIQUE, reversesEntryId TEXT NOT NULL DEFAULT '', balanceAfterPence INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
             "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, customerId TEXT, orderId TEXT, pointsChange INTEGER, reason TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
             "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY, tillNumber TEXT, markerTime TEXT)",
@@ -3160,6 +4338,8 @@ mod tests {
                 amount: 100,
                 cash_amount: 100,
                 card_amount: 0,
+                loyalty_amount: 0,
+                account_amount: 0,
                 reference: "".into(),
                 change_given: 0,
                 created_at: stamp.clone(),
@@ -3174,6 +4354,7 @@ mod tests {
                 movement_type: "sale".into(),
             }],
             loyalty_changes: vec![],
+            account_changes: vec![],
             audit: AuditRecord {
                 id: format!("audit-{id}"),
                 employee_id: "employee".into(),
@@ -3187,6 +4368,79 @@ mod tests {
             original_order_to_update: None,
             original_status_update: None,
         }
+    }
+
+    async fn enable_test_account(pool: &SqlitePool, credit_limit_pence: i64) {
+        sqlx::query(
+            "INSERT INTO customer_accounts
+             (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+             VALUES ('customer-1', 'customer-1', 1, ?, 0,
+                     '2026-07-27T12:00:00.000Z', '2026-07-27T12:00:00.000Z')",
+        )
+        .bind(credit_limit_pence)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn account_change(
+        id: &str,
+        order_id: &str,
+        entry_type: &str,
+        amount_pence: i64,
+        payment_method: &str,
+    ) -> CustomerAccountChange {
+        CustomerAccountChange {
+            id: id.into(),
+            customer_id: "customer-1".into(),
+            order_id: order_id.into(),
+            entry_type: entry_type.into(),
+            amount_pence,
+            payment_method: payment_method.into(),
+            reference: String::new(),
+            description: if entry_type == "adjustment" {
+                "Test adjustment".into()
+            } else {
+                String::new()
+            },
+            receipt_number: 0,
+            receipt_key: String::new(),
+            employee_id: "employee".into(),
+            till_number: String::new(),
+            shift_id: String::new(),
+            idempotency_key: format!("idempotency-{id}"),
+            reverses_entry_id: String::new(),
+            balance_after_pence: 0,
+            created_at: "2026-07-27T12:00:00.000Z".into(),
+            updated_at: "2026-07-27T12:00:00.000Z".into(),
+        }
+    }
+
+    fn account_sale(id: &str, receipt: &str, amount_pence: i64) -> SaleBundle {
+        let mut sale = bundle(id, receipt, &format!("payment-{id}"));
+        sale.order.customer_id = "customer-1".into();
+        sale.order.payment_method = "account".into();
+        sale.order.total = amount_pence;
+        sale.order.subtotal = amount_pence;
+        sale.order.tax_total = 0;
+        sale.order.amount_tendered = amount_pence;
+        sale.lines[0].line_total = amount_pence;
+        sale.lines[0].unit_price = amount_pence;
+        sale.lines[0].tax_amount = 0;
+        sale.payment.method = "account".into();
+        sale.payment.amount = amount_pence;
+        sale.payment.cash_amount = 0;
+        sale.payment.card_amount = 0;
+        sale.payment.loyalty_amount = 0;
+        sale.payment.account_amount = amount_pence;
+        sale.account_changes = vec![account_change(
+            &format!("account-charge-{id}"),
+            id,
+            "charge",
+            amount_pence,
+            "",
+        )];
+        sale
     }
 
     fn stock_receipt_bundle() -> StockReceiptBundle {
@@ -3561,6 +4815,145 @@ mod tests {
             assert_eq!(points, 150);
             assert_eq!(orders, 0);
             assert_eq!(logs, 0);
+        });
+    }
+
+    #[test]
+    fn account_charge_and_idempotent_payment_update_the_ledger_atomically() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 500).await;
+            let sale = account_sale("account-sale", "till-1:1000001", 100);
+            let committed = insert_sqlite_bundle(&pool, &sale).await.unwrap();
+            assert_eq!(committed.account_changes[0].balance_after_pence, 100);
+
+            let payment = account_change("account-payment", "", "payment", -40, "cash");
+            let first = post_sqlite_customer_account_entry(&pool, &payment)
+                .await
+                .unwrap();
+            let mut retry = payment.clone();
+            retry.id = "account-payment-retry".into();
+            let replay = post_sqlite_customer_account_entry(&pool, &retry)
+                .await
+                .unwrap();
+            let balance: i64 = sqlx::query_scalar(
+                "SELECT balancePence FROM customer_accounts WHERE customerId = 'customer-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM customer_account_entries")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(first.entry.balance_after_pence, 60);
+            assert_eq!(replay.entry.balance_after_pence, 60);
+            assert_eq!(replay.entry.id, "account-payment");
+            assert_eq!((balance, entries), (60, 2));
+        });
+    }
+
+    #[test]
+    fn account_limit_failure_rolls_back_the_entire_sale() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 50).await;
+            let result = insert_sqlite_bundle(
+                &pool,
+                &account_sale("account-over-limit", "till-1:1000001", 100),
+            )
+            .await;
+            assert!(result.is_err());
+            let balance: i64 = sqlx::query_scalar(
+                "SELECT balancePence FROM customer_accounts WHERE customerId = 'customer-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let orders: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE id = 'account-over-limit'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let stock: i64 =
+                sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = 'product-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((balance, orders, stock), (0, 0, 10));
+        });
+    }
+
+    #[test]
+    fn account_payment_cannot_exceed_the_amount_owed() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 500).await;
+            insert_sqlite_bundle(
+                &pool,
+                &account_sale("account-overpay-sale", "till-1:1000001", 100),
+            )
+            .await
+            .unwrap();
+            let overpayment = account_change("account-overpayment", "", "payment", -101, "card");
+            assert!(post_sqlite_customer_account_entry(&pool, &overpayment)
+                .await
+                .is_err());
+            let balance: i64 = sqlx::query_scalar(
+                "SELECT balancePence FROM customer_accounts WHERE customerId = 'customer-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let payments: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM customer_account_entries WHERE entryType = 'payment'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((balance, payments), (100, 0));
+        });
+    }
+
+    #[test]
+    fn on_account_refund_is_not_reclassified_as_loyalty() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 500).await;
+            insert_sqlite_bundle(
+                &pool,
+                &account_sale("account-refund-sale", "till-1:1000001", 100),
+            )
+            .await
+            .unwrap();
+            let repayment = account_change("account-refund-payment", "", "payment", -100, "cash");
+            post_sqlite_customer_account_entry(&pool, &repayment)
+                .await
+                .unwrap();
+
+            let mut refund =
+                refund_bundle("account-refund", "account-refund-sale", 100, "refunded");
+            refund.order.customer_id = "customer-1".into();
+            refund.order.payment_method = "account".into();
+            refund.payment.method = "account".into();
+            refund.payment.cash_amount = 0;
+            refund.payment.account_amount = -100;
+            refund.account_changes = vec![account_change(
+                "account-refund-entry",
+                "account-refund",
+                "refund",
+                -100,
+                "",
+            )];
+            let committed = insert_sqlite_bundle(&pool, &refund).await.unwrap();
+            let balance: i64 = sqlx::query_scalar(
+                "SELECT balancePence FROM customer_accounts WHERE customerId = 'customer-1'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(committed.account_changes[0].balance_after_pence, -100);
+            assert_eq!(balance, -100);
         });
     }
 

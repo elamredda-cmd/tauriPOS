@@ -34,7 +34,10 @@ export type PermissionKey =
     | 'refund_void'
     | 'manual_discount'
     | 'open_cash_drawer'
-    | 'end_day_close';
+    | 'end_day_close'
+    | 'charge_customer_account'
+    | 'take_account_payment'
+    | 'adjust_customer_account';
 
 export const permissionLabels: Record<PermissionKey, string> = {
     open_items: 'Open Items',
@@ -55,6 +58,9 @@ export const permissionLabels: Record<PermissionKey, string> = {
     manual_discount: 'Apply Manual Discounts',
     open_cash_drawer: 'Open Cash Drawer',
     end_day_close: 'End Day / Z Report',
+    charge_customer_account: 'Charge Customer Accounts',
+    take_account_payment: 'Take Account Payments',
+    adjust_customer_account: 'Adjust Customer Accounts',
 };
 
 export type RolePermissionMatrix = Record<Employee['role'], PermissionKey[]>;
@@ -66,12 +72,14 @@ export const defaultRolePermissions: RolePermissionMatrix = {
         'open_orders', 'open_reports', 'open_settings',
         'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
+        'charge_customer_account', 'take_account_payment', 'adjust_customer_account',
     ],
     supervisor: [
         'open_orders', 'open_reports', 'open_stock_receiving',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
+        'charge_customer_account',
     ],
-    cashier: ['manual_discount'],
+    cashier: ['manual_discount', 'charge_customer_account'],
 };
 
 export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix {
@@ -101,6 +109,8 @@ export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix 
                     normalized.push('open_orders');
                 }
             }
+            // New financial permissions are denied by default for an existing
+            // custom matrix. An administrator can opt roles in after upgrade.
             return normalized;
         };
         return {
@@ -132,7 +142,7 @@ export function hasPermission(
 }
 
 export function serializeRolePermissions(matrix: RolePermissionMatrix): string {
-    return JSON.stringify({ version: 3, roles: matrix });
+    return JSON.stringify({ version: 4, roles: matrix });
 }
 
 const routePermissions: Array<{ path: string; permission: PermissionKey }> = [

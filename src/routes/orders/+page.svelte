@@ -4,6 +4,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import {
         formatMoney,
         settingsDB,
@@ -320,43 +321,37 @@
 </script>
 
 <MgmtPage title="Order History">
-    <div class="orders-toolbar">
-            <div class="order-search-control">
-                <div class="pointer-events-none absolute inset-y-0 left-0 flex w-10 items-center justify-center">
-                    <svg class="text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18">
-                        <circle cx="11" cy="11" r="8"></circle>
-                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                    </svg>
-                </div>
-                <input
-                    class="search-input !h-11 !min-h-11 !rounded-md !bg-bg-card !pl-10 !pr-10 !text-sm"
-                    value={searchQuery}
-                    on:input={handleOrderSearchInput}
-                    on:keydown={handleOrderSearchKeydown}
+    <div class="search-strip">
+        <div class="search-strip-intro">
+            <strong class="block text-sm font-black text-text-main">Find order history</strong>
+            <span class="mt-1 block text-xs text-text-muted">Search receipts, items, cashiers, or customers, then narrow the list by status.</span>
+        </div>
+        <div class="search-controls">
+            <div class="search-primary">
+                <SearchField
+                    id="order-search"
+                    bind:value={searchQuery}
                     placeholder="Receipt, item, cashier, customer..."
+                    ariaLabel="Search order history"
+                    keyboardLabel="Open order search keyboard"
+                    clearLabel="Clear order search"
+                    clearVisible={Boolean(searchQuery || appliedSearchQuery)}
+                    onInput={handleOrderSearchInput}
+                    onKeydown={handleOrderSearchKeydown}
+                    onClear={clearOrderSearch}
                 />
-                {#if searchQuery || appliedSearchQuery}
-                    <button
-                        type="button"
-                        class="order-search-clear"
-                        aria-label="Clear receipt search"
-                        title="Clear search"
-                        on:click={clearOrderSearch}
-                    >
-                        ×
-                    </button>
-                {/if}
             </div>
-            <button class="btn btn-secondary order-find" on:click={runOrderSearch}>Find</button>
-            <div class="order-filter">
+            <button class="btn btn-primary search-toolbar-action" on:click={runOrderSearch}>Find</button>
+            <div class="search-control search-filter">
                 <CustomSelect bind:value={statusFilter} options={statusFilterOptions} />
             </div>
-            <span class="order-count">
+            {#if statusFilter !== 'all'}
+                <button class="btn btn-secondary search-toolbar-action" on:click={clearOrderFilters}>Reset</button>
+            {/if}
+            <span class="search-meta">
                 {ordersLoading ? 'Searching...' : `${sqlTotal} / ${ordersTotal}`}
             </span>
-            {#if statusFilter !== 'all'}
-                <button class="btn btn-secondary order-reset" on:click={clearOrderFilters}>Reset</button>
-            {/if}
+        </div>
     </div>
 
     <div class="orders-table-wrap">
@@ -577,14 +572,6 @@
 </Modal>
 
 <style>
-    .orders-toolbar { min-width: 0; padding: .75rem 1rem; display: flex; align-items: center; gap: .6rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
-    .order-search-control { position: relative; min-width: 220px; max-width: 520px; flex: 1; }
-    .order-search-clear { position: absolute; right: .4rem; top: 50%; width: 1.9rem; height: 1.9rem; display: grid; place-items: center; transform: translateY(-50%); color: var(--text-muted); font-size: 1.2rem; border: 1px solid var(--border-flat); border-radius: .35rem; background: var(--bg-base); }
-    .order-search-clear:hover { color: var(--text-main); border-color: var(--accent-primary); }
-    .order-find { height: 44px; min-height: 44px; padding-inline: 1rem; }
-    .order-filter { width: 190px; flex: 0 0 190px; }
-    .order-count { min-width: 76px; padding: .55rem .65rem; color: var(--text-muted); font-size: .72rem; font-weight: 800; text-align: center; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
-    .order-reset { min-height: 40px; padding: .45rem .7rem; font-size: .75rem; }
     .orders-table-wrap { overflow: auto; }
     .orders-table { min-width: 900px; }
     .receipt-button { min-width: 4.25rem; min-height: 2.1rem; padding: .35rem .55rem; color: var(--accent-primary); font-weight: 900; text-align: left; border: 1px solid var(--border-flat); border-radius: .35rem; background: var(--bg-card); }
@@ -612,17 +599,12 @@
     .order-print-button { display: inline-flex; align-items: center; gap: .45rem; }
     .order-print-button svg { width: 18px; height: 18px; }
     @media (max-width: 900px) {
-        .orders-toolbar { flex-wrap: wrap; }
-        .order-search-control { max-width: none; }
-        .order-filter { width: 160px; flex-basis: 160px; }
         .order-overview-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .transaction-record { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .transaction-record > div:nth-child(2n) { border-right: 0; }
         .transaction-record > div:nth-child(n+3) { border-top: 1px solid var(--border-flat); }
     }
     @media (max-width: 680px) {
-        .order-search-control { min-width: 100%; flex-basis: 100%; }
-        .order-filter { flex: 1; }
         .order-overview-grid { grid-template-columns: 1fr 1fr; }
     }
 </style>

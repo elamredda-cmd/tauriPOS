@@ -84,6 +84,59 @@ export interface Customer {
     notes: string;
     createdAt: string;
     updatedAt: string;
+    /** Joined account summary fields returned by customer-management queries. */
+    accountId?: string;
+    accountEnabled?: boolean;
+    accountCreditLimitPence?: number;
+    accountBalancePence?: number;
+}
+
+export type CustomerAccountEntryType =
+    | 'charge'
+    | 'payment'
+    | 'adjustment'
+    | 'refund'
+    | 'reversal'
+    | 'opening_balance';
+
+export type CustomerAccountPaymentMethod = '' | 'cash' | 'card' | 'other';
+
+/**
+ * Durable customer-account summary. The append-only entry ledger is the audit
+ * trail; balancePence is an atomically maintained cache for fast checkout and
+ * customer-list reads. Positive balances are amounts owed to the shop.
+ */
+export interface CustomerAccount {
+    id: string;
+    customerId: string;
+    isEnabled: boolean;
+    creditLimitPence: number;
+    balancePence: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+/** One immutable movement on a customer account (+ owed / - reduction). */
+export interface CustomerAccountEntry {
+    id: string;
+    accountId: string;
+    customerId: string;
+    orderId: string;
+    entryType: CustomerAccountEntryType;
+    amountPence: number;
+    paymentMethod: CustomerAccountPaymentMethod;
+    reference: string;
+    description: string;
+    receiptNumber: number;
+    receiptKey: string;
+    employeeId: string;
+    tillNumber: string;
+    shiftId: string;
+    idempotencyKey: string;
+    reversesEntryId: string;
+    balanceAfterPence: number;
+    createdAt: string;
+    updatedAt: string;
 }
 
 // 5. Category
@@ -119,6 +172,7 @@ export interface Product {
     stockLevel: number;
     trackStock: boolean;
     allowPriceOverride?: boolean;
+    isAgeRestricted?: boolean;
     isWeighable: boolean;
     showInGoods: boolean;
     goodsSortOrder: number;
@@ -289,10 +343,12 @@ export interface OrderLine {
 export interface Payment {
     id: string;
     orderId: string;
-    method: 'cash' | 'card' | 'split' | 'mobile' | 'gift_card' | 'store_credit' | 'loyalty';
+    method: 'cash' | 'card' | 'split' | 'mobile' | 'gift_card' | 'store_credit' | 'loyalty' | 'account';
     amount: number;          // pence (total sale amount)
     cashAmount: number;      // pence (cash tendered)
     cardAmount: number;      // pence (card portion)
+    loyaltyAmount: number;   // pence (explicit loyalty-value portion)
+    accountAmount: number;   // pence (explicit customer-account portion)
     reference: string;
     changeGiven: number;     // pence
     createdAt: string;
@@ -487,6 +543,8 @@ export const storeDB = writable<Store>(seedStore);
 export const registersDB = writable<Register[]>(seedRegisters);
 export const employeesDB = writable<Employee[]>(seedEmployees);
 export const customersDB = writable<Customer[]>([]);
+export const customerAccountsDB = writable<CustomerAccount[]>([]);
+export const customerAccountEntriesDB = writable<CustomerAccountEntry[]>([]);
 export const categoriesDB = writable<Category[]>(seedCategories);
 export const taxRatesDB = writable<TaxRate[]>(seedTaxRates);
 export const productsDB = writable<Product[]>(seedProducts);

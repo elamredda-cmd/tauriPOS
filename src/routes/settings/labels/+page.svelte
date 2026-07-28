@@ -4,6 +4,7 @@
     import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import { formatMoney, now, settingsDB, storeDB, type Product } from '$lib/stores/db';
     import { getProductsPage, upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
@@ -104,6 +105,11 @@
     function handleSearchInput(event: Event) {
         search = (event.currentTarget as HTMLInputElement).value;
         scheduleProductSearch();
+    }
+
+    function clearProductSearch() {
+        search = '';
+        scheduleProductSearch(0);
     }
 
     function usePreset(width: number, height: number) {
@@ -232,13 +238,20 @@
 
             <div class="editor-body" role="tabpanel">
                 {#if activeTab === 'item'}
-                    <div class="item-tools">
-                        <div class="search-box">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
-                            <input value={search} on:input={handleSearchInput} placeholder="Name, SKU, barcode or PLU" aria-label="Find item" />
-                            {#if search}<button type="button" aria-label="Clear item search" title="Clear search" on:click={() => { search = ''; scheduleProductSearch(0); }}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg></button>{/if}
+                    <div class="item-tools search-controls search-controls-fill">
+                        <div class="item-search search-primary">
+                            <SearchField
+                                id="label-designer-item-search"
+                                bind:value={search}
+                                placeholder="Name, SKU, barcode or PLU"
+                                ariaLabel="Find item"
+                                keyboardLabel="Open item search keyboard"
+                                clearLabel="Clear item search"
+                                onInput={handleSearchInput}
+                                onClear={clearProductSearch}
+                            />
                         </div>
-                        <div class="result-count">{productLoading ? 'Searching' : `${productTotalCapped ? `${productTotal}+` : productTotal} items`}</div>
+                        <div class="result-count search-meta">{productLoading ? 'Searching' : `${productTotalCapped ? `${productTotal}+` : productTotal} items`}</div>
                     </div>
                     <div class="product-results" aria-live="polite">
                         {#if productError}
@@ -391,14 +404,8 @@
     .editor-tabs button.active { border-color: color-mix(in srgb, var(--accent-primary) 55%, var(--border-flat)); background: color-mix(in srgb, var(--accent-primary) 13%, var(--bg-card)); color: var(--accent-primary); }
     .editor-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 
-    .item-tools { padding: .55rem; display: flex; align-items: center; gap: .55rem; border-bottom: 1px solid var(--border-flat); }
-    .search-box { flex: 1; height: 42px; padding: 0 .65rem; display: flex; align-items: center; gap: .5rem; border: 1px solid var(--border-flat); border-radius: 6px; background: var(--bg-base); }
-    .search-box:focus-within { border-color: var(--accent-primary); }
-    .search-box > svg { width: 18px; height: 18px; flex: 0 0 auto; color: var(--text-muted); }
-    .search-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-main); font: inherit; }
-    .search-box button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; background: transparent; color: var(--text-muted); }
-    .search-box button svg { width: 16px; height: 16px; }
-    .result-count { flex: 0 0 auto; color: var(--text-muted); font-size: .72rem; font-weight: 800; }
+    .item-tools { padding: .55rem; border-bottom: 1px solid var(--border-flat); }
+    .result-count { font-size: .72rem; }
     .product-results { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .45rem; scrollbar-color: var(--accent-primary) var(--bg-card); }
     .product-results > button { width: 100%; min-height: 52px; padding: .4rem .6rem; display: grid; grid-template-columns: minmax(0, 1fr) auto 21px; align-items: center; gap: .55rem; border: 0; border-bottom: 1px solid var(--border-flat); background: transparent; color: var(--text-main); text-align: left; }
     .product-results > button:first-of-type { border-top: 1px solid var(--border-flat); }

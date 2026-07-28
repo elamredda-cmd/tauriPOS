@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import { employeesDB, type AuditLog } from '$lib/stores/db';
     import { getAuditLogPage, getRecentManagerApprovals } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
@@ -138,6 +139,11 @@
         runSearch();
     }
 
+    function clearSearch() {
+        query = '';
+        if (appliedQuery) appliedQuery = '';
+    }
+
     function humanize(value: string) {
         return String(value || 'record')
             .replace(/[_-]+/g, ' ')
@@ -236,29 +242,37 @@
     </button>
 
     <div class="audit-page">
-        <section class="audit-filter-panel">
-            <div class="audit-filter-heading">
+        <section class="audit-filter-panel search-strip">
+            <div class="audit-filter-heading search-strip-intro">
                 <div>
                     <span>Recorded activity</span>
                     <strong>{total.toLocaleString()} event{total === 1 ? '' : 's'}</strong>
                 </div>
                 <small>Changes, staff access, sales and manager approvals</small>
             </div>
-            <div class="audit-filter-grid">
-                <div class="field">
+            <div class="audit-filter-grid search-controls">
+                <div class="field search-primary">
                     <label for="audit-search">Find Activity</label>
-                    <div class="audit-search-control">
-                        <input id="audit-search" bind:value={query} on:keydown={handleSearchKeydown} placeholder="Employee, action, receipt, item or record ID" />
-                        <button class="btn btn-primary" disabled={loading} on:click={runSearch}>
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
-                            Find
-                        </button>
-                    </div>
+                    <SearchField
+                        id="audit-search"
+                        bind:value={query}
+                        placeholder="Employee, action, receipt, item or record ID"
+                        ariaLabel="Find audit activity"
+                        keyboardLabel="Open audit search keyboard"
+                        clearLabel="Clear audit search"
+                        clearVisible={Boolean(query || appliedQuery)}
+                        onKeydown={handleSearchKeydown}
+                        onClear={clearSearch}
+                    />
                 </div>
-                <div class="field">
+                <button class="btn btn-primary search-toolbar-action" disabled={loading} on:click={runSearch}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
+                    Find
+                </button>
+                <div class="field search-control search-filter">
                     <CustomSelect label="Action" bind:value={actionFilter} options={actionOptions} />
                 </div>
-                <div class="field">
+                <div class="field search-control search-filter">
                     <CustomSelect label="Record Type" bind:value={entityFilter} options={entityOptions} />
                 </div>
             </div>
@@ -446,15 +460,12 @@
 <style>
     .audit-page { height: 100%; overflow-y: auto; padding: 1rem; display: flex; flex-direction: column; gap: 1rem; }
     .audit-filter-panel, .audit-activity-panel, .audit-approvals-panel { border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); }
-    .audit-filter-panel { padding: .85rem; display: grid; grid-template-columns: minmax(190px, .55fr) minmax(0, 1.45fr); align-items: end; gap: 1rem; }
     .audit-filter-heading { min-width: 0; display: flex; flex-direction: column; gap: .18rem; }
     .audit-filter-heading div { display: flex; align-items: baseline; gap: .45rem; }
     .audit-filter-heading span { color: var(--accent-primary); font-size: .68rem; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
     .audit-filter-heading strong { color: var(--text-main); font-size: 1.05rem; }
     .audit-filter-heading small { color: var(--text-muted); font-size: .76rem; line-height: 1.25; }
-    .audit-filter-grid { min-width: 0; display: grid; grid-template-columns: minmax(220px, 1fr) minmax(150px, .55fr) minmax(150px, .55fr); gap: .65rem; }
-    .audit-search-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem; }
-    .audit-search-control .btn { min-height: 48px; }
+    .audit-filter-grid { min-width: 0; }
     .audit-section-header { min-height: 64px; padding: .75rem .9rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-flat); }
     .audit-section-header h2 { margin: 0; font-size: 1.05rem; }
     .audit-section-header span { color: var(--text-muted); font-size: .78rem; }
@@ -497,7 +508,7 @@
     .audit-change-values.single { grid-template-columns: minmax(0, 1fr); }
     .audit-change-values > svg { width: 16px; height: 16px; color: var(--text-muted); justify-self: center; }
     .audit-value-before, .audit-value-after { min-width: 0; min-height: 42px; padding: .35rem .45rem; display: flex; flex-direction: column; justify-content: center; gap: .08rem; border-radius: .35rem; }
-    .audit-value-before { background: rgba(239, 68, 68, .08); }
+    .audit-value-before { background: rgba(var(--danger-rgb), .08); }
     .audit-value-after { background: rgba(34, 197, 94, .09); }
     .audit-value-before small, .audit-value-after small { color: var(--text-muted); font-size: .61rem; font-weight: 800; text-transform: uppercase; }
     .audit-value-before strong, .audit-value-after strong { color: var(--text-main); font-size: .76rem; line-height: 1.25; overflow-wrap: anywhere; }
@@ -510,7 +521,7 @@
     .audit-technical-details pre { min-height: 84px; max-height: 260px; margin: .3rem 0 0; padding: .65rem; overflow: auto; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); font-family: ui-monospace, monospace; font-size: .69rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
     .audit-bottom-pager { padding: .75rem; display: flex; align-items: center; justify-content: flex-end; gap: .65rem; border-top: 1px solid var(--border-flat); }
     .audit-bottom-pager span { color: var(--text-muted); font-size: .75rem; font-weight: 800; }
-    .audit-error { margin: .75rem; padding: .65rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--danger); border: 1px solid rgba(239, 68, 68, .45); border-radius: .4rem; background: rgba(239, 68, 68, .10); font-size: .78rem; }
+    .audit-error { margin: .75rem; padding: .65rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--danger); border: 1px solid rgba(var(--danger-rgb), .45); border-radius: .4rem; background: rgba(var(--danger-rgb), .10); font-size: .78rem; }
     .audit-empty { min-height: 150px; display: grid; place-items: center; color: var(--text-muted); font-size: .82rem; text-align: center; }
     .audit-empty.compact { min-height: 88px; }
     .audit-approval-list { display: flex; flex-direction: column; }
@@ -520,14 +531,12 @@
     .audit-approval-list p { margin: .1rem 0; color: var(--text-main); font-size: .76rem; }
     .audit-approval-list small { color: var(--text-muted); font-size: .7rem; }
     @media (max-width: 1050px) {
-        .audit-filter-panel { grid-template-columns: 1fr; }
         .audit-filter-heading { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
         .audit-filter-heading small { text-align: right; }
         .audit-event-toggle { grid-template-columns: 10px minmax(150px, 1fr) minmax(90px, .35fr) auto 20px; gap: .5rem; }
     }
     @media (max-width: 720px) {
         .audit-page { padding: .55rem; gap: .65rem; }
-        .audit-filter-grid { grid-template-columns: 1fr; }
         .audit-filter-heading small { display: none; }
         .audit-section-header { align-items: flex-start; }
         .audit-event-toggle { grid-template-columns: 10px minmax(0, 1fr) 20px; }

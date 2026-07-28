@@ -51,24 +51,54 @@ export function getRemainingRefundAmount(
 
 export function allocateRefundPayment(
     refundAmount: number,
-    payments: Array<{ method?: string; amount: number; cashAmount: number; cardAmount: number }>,
-    previousReversalPayments: Array<{ method?: string; amount: number; cashAmount: number; cardAmount: number }> = [],
+    payments: Array<{
+        method?: string;
+        amount: number;
+        cashAmount: number;
+        cardAmount: number;
+        loyaltyAmount?: number;
+        accountAmount?: number;
+    }>,
+    previousReversalPayments: Array<{
+        method?: string;
+        amount: number;
+        cashAmount: number;
+        cardAmount: number;
+        loyaltyAmount?: number;
+        accountAmount?: number;
+    }> = [],
 ) {
-    const paymentParts = (payment: { method?: string; amount: number; cashAmount: number; cardAmount: number }) => {
+    const paymentParts = (payment: {
+        method?: string;
+        amount: number;
+        cashAmount: number;
+        cardAmount: number;
+        loyaltyAmount?: number;
+        accountAmount?: number;
+    }) => {
         const amount = Math.abs(payment.amount || 0);
         let cashAmount = Math.abs(payment.cashAmount || 0);
         let cardAmount = Math.abs(payment.cardAmount || 0);
+        let loyaltyAmount = Math.abs(payment.loyaltyAmount || 0);
+        let accountAmount = Math.abs(payment.accountAmount || 0);
+        const hasExplicitExtendedAllocation = payment.loyaltyAmount !== undefined
+            || payment.accountAmount !== undefined;
         // Older receipts can predate the split columns. Recover their component
         // from the recorded payment method instead of treating it as loyalty.
-        if (cashAmount === 0 && cardAmount === 0) {
+        if (!hasExplicitExtendedAllocation && cashAmount === 0 && cardAmount === 0) {
             if (payment.method === 'cash') cashAmount = amount;
             if (payment.method === 'card') cardAmount = amount;
+            if (payment.method === 'account' || payment.method === 'store_credit') accountAmount = amount;
+        }
+        if (!hasExplicitExtendedAllocation) {
+            loyaltyAmount = Math.max(0, amount - cashAmount - cardAmount - accountAmount);
         }
         return {
             amount,
             cashAmount,
             cardAmount,
-            loyaltyAmount: Math.max(0, amount - cashAmount - cardAmount),
+            loyaltyAmount,
+            accountAmount,
         };
     };
     const originalParts = payments.map(paymentParts);
@@ -76,20 +106,25 @@ export function allocateRefundPayment(
     const cash = originalParts.reduce((sum, payment) => sum + payment.cashAmount, 0);
     const card = originalParts.reduce((sum, payment) => sum + payment.cardAmount, 0);
     const loyalty = originalParts.reduce((sum, payment) => sum + payment.loyaltyAmount, 0);
+    const account = originalParts.reduce((sum, payment) => sum + payment.accountAmount, 0);
     const previouslyRefunded = previousParts.reduce((sum, payment) => sum + payment.amount, 0);
-    const [targetCash, targetCard, targetLoyalty] = allocateProportionally(
+    const [targetCash, targetCard, targetLoyalty, targetAccount] = allocateProportionally(
         refundAmount + previouslyRefunded,
-        [cash, card, loyalty],
+        [cash, card, loyalty, account],
     );
     const cashAmount = Math.max(0, targetCash - previousParts.reduce((sum, payment) => sum + payment.cashAmount, 0));
     const cardAmount = Math.max(0, targetCard - previousParts.reduce((sum, payment) => sum + payment.cardAmount, 0));
     const loyaltyAmount = Math.max(0, targetLoyalty - previousParts.reduce((sum, payment) => sum + payment.loyaltyAmount, 0));
-    const method = cashAmount > 0 && cardAmount > 0
+    const accountAmount = Math.max(0, targetAccount - previousParts.reduce((sum, payment) => sum + payment.accountAmount, 0));
+    const activeParts = [cashAmount, cardAmount, loyaltyAmount, accountAmount].filter((amount) => amount > 0).length;
+    const method = activeParts > 1
         ? 'split'
         : cashAmount > 0
             ? 'cash'
             : cardAmount > 0
                 ? 'card'
-                : 'loyalty';
-    return { method, cashAmount, cardAmount, loyaltyAmount };
+                : accountAmount > 0
+                    ? 'account'
+                    : 'loyalty';
+    return { method, cashAmount, cardAmount, loyaltyAmount, accountAmount };
 }

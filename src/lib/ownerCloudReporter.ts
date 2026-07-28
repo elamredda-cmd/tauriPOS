@@ -66,6 +66,13 @@ export interface OwnerClosedReportInput {
         totalCash: number;
         totalCard: number;
         totalLoyalty: number;
+        totalAccount: number;
+        accountCharges: number;
+        accountRepaymentsCash: number;
+        accountRepaymentsCard: number;
+        accountAdjustments: number;
+        openingAccountOwed: number;
+        closingAccountOwed: number;
         unrecordedAmount: number;
         unrecordedTxCount: number;
     };
@@ -118,10 +125,19 @@ function emptyReportSnapshot(): ReportSnapshot {
             totalCash: 0,
             totalCard: 0,
             totalLoyalty: 0,
+            totalAccount: 0,
             cashTxCount: 0,
             cardTxCount: 0,
             splitTxCount: 0,
             loyaltyTxCount: 0,
+            accountTxCount: 0,
+            accountCharges: 0,
+            accountRepaymentsCash: 0,
+            accountRepaymentsCard: 0,
+            accountAdjustments: 0,
+            openingAccountOwed: 0,
+            closingAccountOwed: 0,
+            accountActivityScope: 'shop',
             totalAmount: 0,
             unrecordedAmount: 0,
             unrecordedTxCount: 0,
@@ -314,6 +330,10 @@ async function buildSnapshot() {
             transactions: cleanNumber(till.transactions),
             cash: cleanNumber(till.cashTotal),
             card: cleanNumber(till.cardTotal),
+            loyalty: cleanNumber(till.loyaltyTotal),
+            payLater: cleanNumber(till.accountTotal),
+            accountCashCollected: cleanNumber(till.accountRepaymentsCash),
+            accountCardCollected: cleanNumber(till.accountRepaymentsCard),
             itemsSold: cleanNumber(till.itemsSold),
         };
     });
@@ -331,12 +351,16 @@ async function buildSnapshot() {
             transactions: 0,
             cash: 0,
             card: 0,
+            loyalty: 0,
+            payLater: 0,
+            accountCashCollected: 0,
+            accountCardCollected: 0,
             itemsSold: 0,
         });
     }
 
     return {
-        schemaVersion: 1,
+        schemaVersion: 3,
         shopId: identity.shopId,
         shopName: identity.shopName || 'Shop',
         businessDate,
@@ -359,6 +383,18 @@ async function buildSnapshot() {
             cash: cleanNumber(report.breakdown.totalCash),
             card: cleanNumber(report.breakdown.totalCard),
             loyalty: cleanNumber(report.breakdown.totalLoyalty),
+            payLater: cleanNumber(report.breakdown.totalAccount),
+            accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
+            accountCardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+        },
+        customerAccounts: {
+            scope: report.breakdown.accountActivityScope,
+            openingOwed: cleanNumber(report.breakdown.openingAccountOwed),
+            charges: cleanNumber(report.breakdown.accountCharges),
+            cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
+            cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+            adjustments: cleanNumber(report.breakdown.accountAdjustments),
+            closingOwed: cleanNumber(report.breakdown.closingAccountOwed),
         },
         tills,
         recentOrders,
@@ -436,7 +472,7 @@ async function flushClosedReportOutbox(
         const deleted = (await getDoc(deletionRef)).exists();
         if (!deleted) {
             await setDoc(reportRef, {
-                schemaVersion: 2,
+                schemaVersion: 3,
                 reportType: 'end_of_day',
                 shopId: identity.shopId,
                 shopName: identity.shopName || 'Shop',
@@ -460,8 +496,20 @@ async function flushClosedReportOutbox(
                     cash: cleanNumber(report.breakdown.totalCash),
                     card: cleanNumber(report.breakdown.totalCard),
                     loyalty: cleanNumber(report.breakdown.totalLoyalty),
+                    payLater: cleanNumber(report.breakdown.totalAccount),
+                    accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
+                    accountCardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
                     unrecorded: cleanNumber(report.breakdown.unrecordedAmount),
                     unrecordedTransactions: cleanNumber(report.breakdown.unrecordedTxCount),
+                },
+                customerAccounts: {
+                    scope: 'shop',
+                    openingOwed: cleanNumber(report.breakdown.openingAccountOwed),
+                    charges: cleanNumber(report.breakdown.accountCharges),
+                    cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
+                    cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+                    adjustments: cleanNumber(report.breakdown.accountAdjustments),
+                    closingOwed: cleanNumber(report.breakdown.closingAccountOwed),
                 },
                 topProducts: report.topProducts.slice(0, 10).map(product => ({
                     name: String(product.name || 'Item'),

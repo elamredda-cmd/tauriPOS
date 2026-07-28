@@ -16,10 +16,17 @@
 import * as sqlite from './sqlite';
 import * as mysql from './mysql';
 import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection } from './connection';
+import type { MysqlConfig } from './connection';
 import { get } from 'svelte/store';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { currentEmployee } from './session';
 import { notifyOwnerCloudDataChanged } from '$lib/ownerCloudEvents';
+import type {
+    CustomerAccount,
+    CustomerAccountEntry,
+    CustomerAccountEntryType,
+    CustomerAccountPaymentMethod,
+} from './db';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
@@ -45,6 +52,8 @@ const POS_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
     'customers',
+    'customer_accounts',
+    'customer_account_entries',
     'registers',
     'discounts',
     'promo_groups',
@@ -140,6 +149,7 @@ const LIGHT_ROUTE_SKIP_HYDRATION_TABLES = new Set([
     'payments',
     'inventory_logs',
     'loyalty_logs',
+    'customer_account_entries',
     'audit_logs',
 ]);
 
@@ -409,6 +419,11 @@ async function queueOffline(
     data: any,
     idKey: string = 'id'
 ): Promise<string> {
+    if (tableName === 'customer_accounts'
+        || tableName === 'customer_account_entries'
+        || (operation === 'saleBundle' && Array.isArray(data?.accountChanges) && data.accountChanges.length > 0)) {
+        throw new Error('Customer-account balance changes are online-only and cannot be queued');
+    }
     const d = await sqlite.getDb();
     const id = crypto.randomUUID();
     await d.execute(
@@ -498,6 +513,7 @@ const AUDIT_BOOLEAN_FIELDS = new Set([
     'autoApply',
     'isActive',
     'isDefault',
+    'isAgeRestricted',
     'isPriceOverride',
     'isWeighable',
     'showInGoods',
@@ -1532,6 +1548,9 @@ async function purgeLocalTransactionsBefore(marker: string): Promise<void> {
     const salesAuditTypes = `'order','shift','cash_movement','report'`;
     const salesAuditActions = `'sale_completed','order_refunded','order_partially_refunded','order_voided','refund_completed','report_period_closed'`;
 
+    // customer_accounts and customer_account_entries are deliberately absent:
+    // receivables must survive receipt/history deletion. Account writes are
+    // online-only, so there can be no pending account outbox row to discard.
     await preserveLocalReceiptHighWater(d);
     await d.execute(`DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders WHERE ${oldOrder})`, [marker]);
     await d.execute(
@@ -1710,6 +1729,7 @@ const PUSH_TABLES = [
     'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'settings', 'customers', 'registers',
+    'customer_accounts', 'customer_account_entries',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
@@ -1724,6 +1744,7 @@ const REMOTE_REPLACE_DELETE_TABLES = [
     'manager_approvals', 'till_report_markers',
     'cash_movements', 'shifts',
     'payments', 'order_lines', 'orders',
+    'customer_account_entries', 'customer_accounts',
     'loyalty_logs', 'audit_logs', 'inventory_logs',
     'product_suppliers', 'suppliers',
     'promo_group_items', 'promo_groups', 'discounts',
@@ -1795,6 +1816,8 @@ const REMOTE_COMPLETENESS_CORE_TABLES = [
     'products',
     'categories',
     'customers',
+    'customer_accounts',
+    'customer_account_entries',
     'tax_rates',
     'registers',
 ] as const;
@@ -1825,6 +1848,8 @@ function normalizeRemoteCompletenessCounts(row: any): RemoteCompletenessCounts {
         products: Number(row.products || 0),
         categories: Number(row.categories || 0),
         customers: Number(row.customers || 0),
+        customer_accounts: Number(row.customer_accounts || 0),
+        customer_account_entries: Number(row.customer_account_entries || 0),
         tax_rates: Number(row.tax_rates || 0),
         registers: Number(row.registers || 0),
     };
@@ -1835,6 +1860,8 @@ async function localCompletenessCounts(localDb: any): Promise<RemoteCompleteness
         `SELECT (SELECT COUNT(*) FROM products) AS products,
                 (SELECT COUNT(*) FROM categories) AS categories,
                 (SELECT COUNT(*) FROM customers) AS customers,
+                (SELECT COUNT(*) FROM customer_accounts) AS customer_accounts,
+                (SELECT COUNT(*) FROM customer_account_entries) AS customer_account_entries,
                 (SELECT COUNT(*) FROM tax_rates) AS tax_rates,
                 (SELECT COUNT(*) FROM registers) AS registers`
     );
@@ -1846,6 +1873,8 @@ async function remoteCompletenessCounts(remote: any): Promise<RemoteCompleteness
         `SELECT (SELECT COUNT(*) FROM products) AS products,
                 (SELECT COUNT(*) FROM categories) AS categories,
                 (SELECT COUNT(*) FROM customers) AS customers,
+                (SELECT COUNT(*) FROM customer_accounts) AS customer_accounts,
+                (SELECT COUNT(*) FROM customer_account_entries) AS customer_account_entries,
                 (SELECT COUNT(*) FROM tax_rates) AS tax_rates,
                 (SELECT COUNT(*) FROM registers) AS registers`
     );
@@ -1982,6 +2011,20 @@ async function validateLocalDataForRestore(localDb: any): Promise<void> {
                   FROM payments p LEFT JOIN orders o ON o.id = p.orderId
                   WHERE o.id IS NULL`,
         },
+        {
+            label: 'Customer accounts pointing to missing customers',
+            tables: ['customer_accounts', 'customers'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM customer_accounts a LEFT JOIN customers c ON c.id = a.customerId
+                  WHERE c.id IS NULL`,
+        },
+        {
+            label: 'Customer account entries pointing to missing accounts',
+            tables: ['customer_account_entries', 'customer_accounts'],
+            sql: `SELECT COUNT(*) AS count
+                  FROM customer_account_entries e LEFT JOIN customer_accounts a ON a.id = e.accountId
+                  WHERE a.id IS NULL`,
+        },
     ];
 
     for (const check of orphanChecks) {
@@ -1989,6 +2032,22 @@ async function validateLocalDataForRestore(localDb: any): Promise<void> {
         if (hasTables.every(Boolean)) {
             await addRestoreIssueForCount(localDb, issues, check.label, check.sql);
         }
+    }
+
+    if (await localTableExists(localDb, 'customer_accounts')
+        && await localTableExists(localDb, 'customer_account_entries')) {
+        await addRestoreIssueForCount(
+            localDb,
+            issues,
+            'Customer accounts with a balance that does not match their ledger',
+            `SELECT COUNT(*) AS count FROM (
+                SELECT a.id
+                FROM customer_accounts a
+                LEFT JOIN customer_account_entries e ON e.accountId = a.id
+                GROUP BY a.id, a.balancePence
+                HAVING a.balancePence <> COALESCE(SUM(e.amountPence), 0)
+            ) mismatched_accounts`,
+        );
     }
 
     if (issues.length > 0) {
@@ -2071,6 +2130,12 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
 // ─── CRUD Operations ────────────────────────────────────────────────────────
 
 export async function upsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    if (table === 'customer_account_entries') {
+        throw new Error('Customer-account entries are append-only; use postCustomerAccountEntry');
+    }
+    if (table === 'customer_accounts') {
+        throw new Error('Use saveCustomerAccountConfig to change a customer account');
+    }
     // Keep local/offline writes eligible for delta sync. MariaDB replaces this
     // with its own server-clock timestamp when the write reaches the server.
     if (table !== 'settings' && !obj.updatedAt) {
@@ -2134,6 +2199,9 @@ export async function saveCustomerProfile(customer: any): Promise<void> {
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id'): Promise<void> {
+    if (table === 'customer_account_entries' || table === 'customer_accounts') {
+        throw new Error('Customer-account records cannot be deleted; post a reversing entry instead');
+    }
     const auditBefore = AUDITED_TABLES.has(table) ? await getLocalRow(table, idKey, id) : null;
     await sqlite.remove(table, id, idKey);
     if (auditBefore && shouldAuditTableMutation(table, auditBefore)) {
@@ -2468,10 +2536,341 @@ export async function ensureSharedSettingValue(key: string, candidate: string): 
     return candidate;
 }
 
+export interface SaveCustomerAccountConfigInput {
+    customerId: string;
+    isEnabled: boolean;
+    creditLimitPence: number;
+    employeeId?: string;
+}
+
+export interface PostCustomerAccountEntryInput {
+    customerId: string;
+    entryType: CustomerAccountEntryType;
+    amountPence: number;
+    paymentMethod?: CustomerAccountPaymentMethod;
+    reference?: string;
+    description?: string;
+    receiptNumber?: number;
+    receiptKey?: string;
+    orderId?: string;
+    employeeId: string;
+    tillNumber?: string;
+    shiftId?: string;
+    idempotencyKey?: string;
+    reversesEntryId?: string;
+}
+
+export interface CustomerAccountEntryPage {
+    entries: CustomerAccountEntry[];
+    total: number;
+}
+
+export interface CustomerAccountMutationResult {
+    account: CustomerAccount;
+    entry: CustomerAccountEntry;
+}
+
+function normalizeAccount(row: any, customerId = ''): CustomerAccount {
+    return {
+        id: String(row?.id || customerId),
+        customerId: String(row?.customerId || customerId),
+        isEnabled: Boolean(row?.isEnabled),
+        creditLimitPence: Number(row?.creditLimitPence || 0),
+        balancePence: Number(row?.balancePence || 0),
+        createdAt: String(row?.createdAt || ''),
+        updatedAt: String(row?.updatedAt || ''),
+    };
+}
+
+function normalizeAccountEntry(row: any): CustomerAccountEntry {
+    return {
+        id: String(row?.id || ''),
+        accountId: String(row?.accountId || row?.customerId || ''),
+        customerId: String(row?.customerId || ''),
+        orderId: String(row?.orderId || ''),
+        entryType: row?.entryType,
+        amountPence: Number(row?.amountPence || 0),
+        paymentMethod: row?.paymentMethod || '',
+        reference: String(row?.reference || ''),
+        description: String(row?.description || ''),
+        receiptNumber: Number(row?.receiptNumber || 0),
+        receiptKey: String(row?.receiptKey || ''),
+        employeeId: String(row?.employeeId || ''),
+        tillNumber: String(row?.tillNumber || ''),
+        shiftId: String(row?.shiftId || ''),
+        idempotencyKey: String(row?.idempotencyKey || ''),
+        reversesEntryId: String(row?.reversesEntryId || ''),
+        balanceAfterPence: Number(row?.balanceAfterPence || 0),
+        createdAt: String(row?.createdAt || ''),
+        updatedAt: String(row?.updatedAt || ''),
+    };
+}
+
+function cacheBrowserAccount(account: CustomerAccount): void {
+    customerAccountsDB.update((accounts) => [
+        account,
+        ...accounts.filter((candidate) => candidate.customerId !== account.customerId),
+    ]);
+    customersDB.update((customers) => customers.map((customer) => customer.id === account.customerId
+        ? {
+            ...customer,
+            accountId: account.id,
+            accountEnabled: account.isEnabled,
+            accountCreditLimitPence: account.creditLimitPence,
+            accountBalancePence: account.balancePence,
+        }
+        : customer));
+}
+
+function cacheBrowserAccountEntry(entry: CustomerAccountEntry): void {
+    customerAccountEntriesDB.update((entries) => [
+        entry,
+        ...entries.filter((candidate) => candidate.id !== entry.id),
+    ]);
+}
+
+async function requireOnlineCustomerAccount(action: string): Promise<MysqlConfig> {
+    let state = get(connectionState);
+    if (!state.mysqlOnline) {
+        await pingMysql();
+        state = get(connectionState);
+    }
+    if (!state.mysqlOnline || !state.mysqlConfig) {
+        throw new Error(`${action} requires the shared MariaDB database to be online`);
+    }
+    return state.mysqlConfig;
+}
+
+/** Side-effect-free; a customer without config reads as a disabled zero account. */
+export async function getCustomerAccount(customerId: string): Promise<CustomerAccount> {
+    const normalizedId = String(customerId || '').trim();
+    if (!normalizedId) throw new Error('Customer ID is required');
+    if (!isTauri()) {
+        return get(customerAccountsDB).find((account) => account.customerId === normalizedId)
+            || normalizeAccount(null, normalizedId);
+    }
+    if (isMultiMode() && get(connectionState).mysqlOnline) {
+        try {
+            const account = await mysql.mysqlGetCustomerAccount(normalizedId);
+            if (account.createdAt) await sqlite.upsert('customer_accounts', account, 'id');
+            return account;
+        } catch (error) {
+            console.warn('database: MariaDB customer account read failed, using local cache:', error);
+        }
+    }
+    return sqlite.getCustomerAccount(normalizedId);
+}
+
+export async function getCustomerAccountEntries(
+    customerId: string,
+    options: { limit?: number; offset?: number } = {},
+): Promise<CustomerAccountEntryPage> {
+    const normalizedId = String(customerId || '').trim();
+    if (!normalizedId) throw new Error('Customer ID is required');
+    const limit = Math.max(1, Math.min(200, Math.floor(Number(options.limit || 50))));
+    const offset = Math.max(0, Math.floor(Number(options.offset || 0)));
+    if (!isTauri()) {
+        const entries = get(customerAccountEntriesDB)
+            .filter((entry) => entry.customerId === normalizedId)
+            .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt))
+                || right.id.localeCompare(left.id));
+        return { entries: entries.slice(offset, offset + limit), total: entries.length };
+    }
+    if (isMultiMode() && get(connectionState).mysqlOnline) {
+        try {
+            const page = await mysql.mysqlGetCustomerAccountEntries(normalizedId, { limit, offset });
+            if (page.entries.length > 0) {
+                await sqlite.bulkUpsert('customer_account_entries', page.entries, 'id');
+            }
+            return page;
+        } catch (error) {
+            console.warn('database: MariaDB customer account history read failed, using local cache:', error);
+        }
+    }
+    return sqlite.getCustomerAccountEntries(normalizedId, { limit, offset });
+}
+
+export async function saveCustomerAccountConfig(
+    input: SaveCustomerAccountConfigInput,
+): Promise<CustomerAccount> {
+    const customerId = String(input.customerId || '').trim();
+    const creditLimitPence = Math.trunc(Number(input.creditLimitPence));
+    if (!customerId) throw new Error('Customer ID is required');
+    if (!Number.isSafeInteger(creditLimitPence) || creditLimitPence < 0) {
+        throw new Error('Credit limit must be a valid non-negative amount');
+    }
+    const before = await getCustomerAccount(customerId);
+    const normalizedInput = {
+        customerId,
+        isEnabled: Boolean(input.isEnabled),
+        creditLimitPence,
+        employeeId: String(input.employeeId || currentAuditEmployeeId()),
+    };
+    let account: CustomerAccount;
+    if (!isTauri()) {
+        const stamp = new Date().toISOString();
+        account = {
+            ...before,
+            id: customerId,
+            customerId,
+            isEnabled: normalizedInput.isEnabled,
+            creditLimitPence,
+            createdAt: before.createdAt || stamp,
+            updatedAt: stamp,
+        };
+        cacheBrowserAccount(account);
+    } else if (isMultiMode()) {
+        const config = await requireOnlineCustomerAccount('Customer-account changes');
+        account = normalizeAccount(await invoke<CustomerAccount>('save_online_customer_account_config', {
+            mysqlUri: buildMysqlUri(config),
+            input: normalizedInput,
+        }), customerId);
+        await sqlite.upsert('customer_accounts', account, 'id');
+    } else {
+        account = normalizeAccount(await invoke<CustomerAccount>('save_local_customer_account_config', {
+            input: normalizedInput,
+        }), customerId);
+    }
+    cacheBrowserAccount(account);
+    await recordAuditEvent(
+        'customer_account_config_updated',
+        'customer_account',
+        customerId,
+        before,
+        account,
+        normalizedInput.employeeId,
+    );
+    return account;
+}
+
+const ACCOUNT_ENTRY_AUDIT_ACTION: Record<CustomerAccountEntryType, string> = {
+    charge: 'customer_account_charge_posted',
+    payment: 'customer_account_payment_received',
+    adjustment: 'customer_account_adjustment_posted',
+    refund: 'customer_account_refund_posted',
+    reversal: 'customer_account_reversal_posted',
+    opening_balance: 'customer_account_opening_balance_posted',
+};
+
+export async function postCustomerAccountEntry(
+    input: PostCustomerAccountEntryInput,
+): Promise<CustomerAccountMutationResult> {
+    const customerId = String(input.customerId || '').trim();
+    const amountPence = Math.trunc(Number(input.amountPence));
+    if (!customerId) throw new Error('Customer ID is required');
+    if (!ACCOUNT_ENTRY_AUDIT_ACTION[input.entryType]) throw new Error('Unsupported customer-account entry type');
+    if (!Number.isSafeInteger(amountPence) || amountPence === 0) {
+        throw new Error('Account entry amount must be a non-zero whole number of pence');
+    }
+    if (input.entryType === 'charge' && amountPence < 0) {
+        throw new Error('Account charges must increase the amount owed');
+    }
+    if ((input.entryType === 'payment' || input.entryType === 'refund') && amountPence > 0) {
+        throw new Error('Payments and refunds must reduce the amount owed');
+    }
+    const paymentMethod = input.paymentMethod || '';
+    if (input.entryType === 'payment' && !['cash', 'card', 'other'].includes(paymentMethod)) {
+        throw new Error('Account payments require a cash, card, or other payment method');
+    }
+    const requestedIdempotencyKey = String(input.idempotencyKey || '').trim();
+    if (!isTauri() && requestedIdempotencyKey) {
+        const existingEntry = get(customerAccountEntriesDB)
+            .find((entry) => entry.idempotencyKey === requestedIdempotencyKey);
+        if (existingEntry) {
+            return {
+                account: await getCustomerAccount(existingEntry.customerId),
+                entry: existingEntry,
+            };
+        }
+    }
+    const stamp = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const normalizedInput = {
+        id,
+        accountId: customerId,
+        customerId,
+        orderId: String(input.orderId || ''),
+        entryType: input.entryType,
+        amountPence,
+        paymentMethod,
+        reference: String(input.reference || ''),
+        description: String(input.description || ''),
+        receiptNumber: Math.max(0, Math.trunc(Number(input.receiptNumber || 0))),
+        receiptKey: String(input.receiptKey || ''),
+        employeeId: String(input.employeeId || currentAuditEmployeeId()),
+        tillNumber: String(input.tillNumber || ''),
+        shiftId: String(input.shiftId || ''),
+        idempotencyKey: requestedIdempotencyKey || `customer-account:${id}`,
+        reversesEntryId: String(input.reversesEntryId || ''),
+        balanceAfterPence: 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+    };
+
+    let result: CustomerAccountMutationResult;
+    if (!isTauri()) {
+        const before = await getCustomerAccount(customerId);
+        if (input.entryType === 'charge' && !before.isEnabled) {
+            throw new Error('This customer account is on hold');
+        }
+        const balancePence = before.balancePence + amountPence;
+        if (input.entryType === 'payment' && balancePence < 0) {
+            throw new Error('The payment is greater than the amount owed');
+        }
+        if (input.entryType === 'charge'
+            && before.creditLimitPence > 0
+            && balancePence > before.creditLimitPence) {
+            throw new Error('This charge would exceed the customer credit limit');
+        }
+        const account: CustomerAccount = {
+            ...before,
+            id: customerId,
+            customerId,
+            balancePence,
+            createdAt: before.createdAt || stamp,
+            updatedAt: stamp,
+        };
+        const entry = normalizeAccountEntry({ ...normalizedInput, balanceAfterPence: balancePence });
+        result = { account, entry };
+    } else if (isMultiMode()) {
+        const config = await requireOnlineCustomerAccount('Customer-account balance changes');
+        result = await invoke<CustomerAccountMutationResult>('commit_online_customer_account_entry', {
+            mysqlUri: buildMysqlUri(config),
+            input: normalizedInput,
+        });
+    } else {
+        result = await invoke<CustomerAccountMutationResult>('commit_local_customer_account_entry', {
+            input: normalizedInput,
+        });
+    }
+    result = {
+        account: normalizeAccount(result.account, customerId),
+        entry: normalizeAccountEntry(result.entry),
+    };
+    if (isTauri()) {
+        await sqlite.upsert('customer_accounts', result.account, 'id');
+        await sqlite.upsert('customer_account_entries', result.entry, 'id');
+    }
+    cacheBrowserAccount(result.account);
+    cacheBrowserAccountEntry(result.entry);
+    await recordAuditEvent(
+        ACCOUNT_ENTRY_AUDIT_ACTION[input.entryType],
+        'customer_account_entry',
+        result.entry.id,
+        null,
+        { ...result.entry, balancePence: result.account.balancePence },
+        normalizedInput.employeeId,
+    );
+    notifyOwnerCloudDataChanged();
+    return result;
+}
+
 export interface CustomerUsage {
     orders: number;
     loyaltyEntries: number;
     loyaltyPoints: number;
+    accountEntries: number;
+    accountBalancePence: number;
     sharedVerified: boolean;
 }
 
@@ -2520,13 +2919,17 @@ export async function getCustomerUsage(customerId: string): Promise<CustomerUsag
         `SELECT
             (SELECT COUNT(*) FROM orders WHERE customerId = ?) AS orders,
             (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries,
-            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints`,
-        [customerId, customerId, customerId],
+            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints,
+            (SELECT COUNT(*) FROM customer_account_entries WHERE customerId = ?) AS accountEntries,
+            COALESCE((SELECT balancePence FROM customer_accounts WHERE customerId = ? LIMIT 1), 0) AS accountBalancePence`,
+        [customerId, customerId, customerId, customerId, customerId],
     );
     const localUsage: CustomerUsage = {
         orders: Number(rows[0]?.orders || 0),
         loyaltyEntries: Number(rows[0]?.loyaltyEntries || 0),
         loyaltyPoints: Number(rows[0]?.loyaltyPoints || 0),
+        accountEntries: Number(rows[0]?.accountEntries || 0),
+        accountBalancePence: Number(rows[0]?.accountBalancePence || 0),
         sharedVerified: false,
     };
 
@@ -2545,14 +2948,18 @@ export async function getCustomerUsage(customerId: string): Promise<CustomerUsag
         `SELECT
             (SELECT COUNT(*) FROM orders WHERE customerId = ?) AS orders,
             (SELECT COUNT(*) FROM loyalty_logs WHERE customerId = ?) AS loyaltyEntries,
-            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints`,
-        [customerId, customerId, customerId],
+            COALESCE((SELECT loyaltyPoints FROM customers WHERE id = ? LIMIT 1), 0) AS loyaltyPoints,
+            (SELECT COUNT(*) FROM customer_account_entries WHERE customerId = ?) AS accountEntries,
+            COALESCE((SELECT balancePence FROM customer_accounts WHERE customerId = ? LIMIT 1), 0) AS accountBalancePence`,
+        [customerId, customerId, customerId, customerId, customerId],
     );
     const remotePoints = Number(remoteRows[0]?.loyaltyPoints || 0);
     return {
         orders: Math.max(localUsage.orders, Number(remoteRows[0]?.orders || 0)),
         loyaltyEntries: Math.max(localUsage.loyaltyEntries, Number(remoteRows[0]?.loyaltyEntries || 0)),
         loyaltyPoints: remotePoints !== 0 ? remotePoints : localUsage.loyaltyPoints,
+        accountEntries: Math.max(localUsage.accountEntries, Number(remoteRows[0]?.accountEntries || 0)),
+        accountBalancePence: Number(remoteRows[0]?.accountBalancePence ?? localUsage.accountBalancePence),
         sharedVerified: true,
     };
 }
@@ -2561,6 +2968,12 @@ export async function removeCustomerSafely(customerId: string): Promise<void> {
     const usage = await getCustomerUsage(customerId);
     if (usage.loyaltyPoints !== 0) {
         throw new Error('This customer still has a loyalty-points balance and cannot be deleted');
+    }
+    if (usage.accountBalancePence !== 0) {
+        throw new Error('This customer still has an account balance and cannot be deleted');
+    }
+    if (usage.accountEntries > 0) {
+        throw new Error('This customer has account history that must be retained; archive the customer instead');
     }
     if (usage.orders > 0 || usage.loyaltyEntries > 0) {
         throw new Error('This customer has linked sales or loyalty history and cannot be deleted');
@@ -2574,8 +2987,10 @@ export async function removeCustomerSafely(customerId: string): Promise<void> {
              WHERE id = ?
                AND COALESCE(loyaltyPoints, 0) = 0
                AND NOT EXISTS (SELECT 1 FROM orders WHERE customerId = ? LIMIT 1)
-               AND NOT EXISTS (SELECT 1 FROM loyalty_logs WHERE customerId = ? LIMIT 1)`,
-            [customerId, customerId, customerId],
+               AND NOT EXISTS (SELECT 1 FROM loyalty_logs WHERE customerId = ? LIMIT 1)
+               AND NOT EXISTS (SELECT 1 FROM customer_account_entries WHERE customerId = ? LIMIT 1)
+               AND COALESCE((SELECT balancePence FROM customer_accounts WHERE customerId = ? LIMIT 1), 0) = 0`,
+            [customerId, customerId, customerId, customerId, customerId],
         );
         if (Number(result?.rowsAffected || 0) === 0) {
             const existing: any[] = await remote.select(
@@ -2589,6 +3004,12 @@ export async function removeCustomerSafely(customerId: string): Promise<void> {
     }
 
     await remove('customers', customerId);
+    const localDb = await sqlite.getDb();
+    await localDb.execute(`DELETE FROM customer_accounts WHERE customerId = ?`, [customerId]);
+    if (isMultiMode()) {
+        const remote = await getMysqlDb();
+        if (remote) await remote.execute(`DELETE FROM customer_accounts WHERE customerId = ?`, [customerId]);
+    }
 }
 
 export async function getCustomerLoyaltyHistory(
@@ -2784,7 +3205,7 @@ export async function getTileProducts(): Promise<any[]> {
     return sqlite.getTileProducts();
 }
 
-const PRODUCT_BOOL_KEYS = ['isActive', 'isWeighable', 'showInGoods', 'trackStock'];
+const PRODUCT_BOOL_KEYS = ['isActive', 'isAgeRestricted', 'isWeighable', 'showInGoods', 'trackStock'];
 
 function hydrateProducts(rows: any[]): any[] {
     return rows.map((row) => sqlite.rehydrateBooleans(row, PRODUCT_BOOL_KEYS));
@@ -2830,6 +3251,16 @@ export async function getCustomersPage(options: sqlite.CustomerPageOptions = {})
                 customer.email,
                 customer.loyaltyCode,
             ].some((value) => String(value || '').toLowerCase().includes(query)))
+            .map((customer) => {
+                const account = get(customerAccountsDB).find((candidate) => candidate.customerId === customer.id);
+                return {
+                    ...customer,
+                    accountId: account?.id || customer.id,
+                    accountEnabled: account?.isEnabled || false,
+                    accountCreditLimitPence: account?.creditLimitPence || 0,
+                    accountBalancePence: account?.balancePence || 0,
+                };
+            })
             .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
         return { rows: rows.slice(offset, offset + limit), total: rows.length };
     }
@@ -2837,7 +3268,18 @@ export async function getCustomersPage(options: sqlite.CustomerPageOptions = {})
 }
 
 export async function getCustomerById(customerId: string): Promise<any | null> {
-    if (!isTauri()) return get(customersDB).find((customer) => customer.id === customerId) || null;
+    if (!isTauri()) {
+        const customer = get(customersDB).find((candidate) => candidate.id === customerId);
+        if (!customer) return null;
+        const account = await getCustomerAccount(customerId);
+        return {
+            ...customer,
+            accountId: account.id,
+            accountEnabled: account.isEnabled,
+            accountCreditLimitPence: account.creditLimitPence,
+            accountBalancePence: account.balancePence,
+        };
+    }
     return sqlite.getCustomerById(customerId);
 }
 
@@ -2849,14 +3291,34 @@ export async function getPaymentCustomer(customerId: string): Promise<any | null
     const remote = await getMysqlDb();
     if (!remote) throw new Error('The shared MariaDB database is unavailable');
     const rows: any[] = await remote.select(
-        `SELECT * FROM customers WHERE id = ? LIMIT 1`,
+        `SELECT c.*,
+                COALESCE(a.id, c.id) AS accountId,
+                COALESCE(a.isEnabled, 0) AS accountEnabled,
+                COALESCE(a.creditLimitPence, 0) AS accountCreditLimitPence,
+                COALESCE(a.balancePence, 0) AS accountBalancePence,
+                a.createdAt AS accountCreatedAt,
+                a.updatedAt AS accountUpdatedAt
+         FROM customers c
+         LEFT JOIN customer_accounts a ON a.customerId = c.id
+         WHERE c.id = ? LIMIT 1`,
         [customerId],
     );
     connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
     if (rows.length === 0) return null;
 
-    const customer = rows[0];
+    const customer = sqlite.rehydrateBooleans(rows[0], ['accountEnabled']);
     await sqlite.upsert('customers', customer, 'id');
+    if (customer.accountCreatedAt) {
+        await sqlite.upsert('customer_accounts', {
+            id: customer.accountId,
+            customerId,
+            isEnabled: customer.accountEnabled,
+            creditLimitPence: customer.accountCreditLimitPence,
+            balancePence: customer.accountBalancePence,
+            createdAt: customer.accountCreatedAt,
+            updatedAt: customer.accountUpdatedAt,
+        }, 'id');
+    }
     return customer;
 }
 
@@ -3035,6 +3497,21 @@ export async function updateProductFields(
     const stamped = await prepareProductGoodsMenuWrite(
         normalizeProductIdentifiers({ ...patch, updatedAt: new Date().toISOString() }),
     );
+    if (!isTauri()) {
+        const products = get(productsDB);
+        for (const key of ['sku', 'barcode', 'scalePlu'] as const) {
+            const value = String(stamped[key] || '').trim();
+            if (!value) continue;
+            const duplicate = products.find((product) => product.id !== stamped.id
+                && String(product[key] || '').trim() === value);
+            if (duplicate) {
+                const label = key === 'barcode' ? 'Barcode' : key === 'scalePlu' ? 'Scale PLU' : 'SKU';
+                throw new Error(`${label} is already used by ${duplicate.name}`);
+            }
+        }
+        patchProductInStore({ ...stamped, ...(hasImage ? { image } : {}) });
+        return;
+    }
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
         await sqlite.updateProductFields(stamped);
@@ -3238,13 +3715,214 @@ export interface SaleBundle {
         reason: string;
         createdAt: string;
     }[];
+    accountChanges?: CustomerAccountChange[];
     audit: any;
     originalOrderToUpdate?: string;
     originalStatusUpdate?: string;
 }
 
+export interface CustomerAccountChange {
+    id: string;
+    accountId?: string;
+    customerId: string;
+    orderId: string;
+    entryType: CustomerAccountEntryType;
+    amountPence: number;
+    paymentMethod?: CustomerAccountPaymentMethod;
+    reference?: string;
+    description?: string;
+    receiptNumber?: number;
+    receiptKey?: string;
+    employeeId: string;
+    tillNumber?: string;
+    shiftId?: string;
+    idempotencyKey: string;
+    reversesEntryId?: string;
+    balanceAfterPence?: number;
+    createdAt: string;
+    updatedAt?: string;
+}
+
 interface CommitSaleResult {
     bundle: SaleBundle;
+}
+
+function commitBrowserPreviewSale(bundle: SaleBundle): SaleBundle {
+    const stamp = new Date().toISOString();
+    const existingOrders = get(ordersDB);
+    const existingOrder = existingOrders.find((candidate) => candidate.id === bundle.order?.id);
+    if (existingOrder) {
+        const existingPayment = get(paymentsDB).find((candidate) => candidate.orderId === existingOrder.id)
+            || bundle.payment;
+        const entries = get(customerAccountEntriesDB);
+        return {
+            ...bundle,
+            order: existingOrder,
+            payment: existingPayment,
+            accountChanges: (bundle.accountChanges || []).map((change) => {
+                const entry = entries.find((candidate) => candidate.idempotencyKey === change.idempotencyKey);
+                return entry ? {
+                    ...change,
+                    orderId: entry.orderId,
+                    receiptNumber: entry.receiptNumber,
+                    receiptKey: entry.receiptKey,
+                    balanceAfterPence: entry.balanceAfterPence,
+                } : change;
+            }),
+        };
+    }
+    const orderNumber = Number(bundle.order?.orderNumber || 0)
+        || Math.max(0, ...existingOrders.map((order) => Number(order.orderNumber || 0))) + 1;
+    const order = {
+        ...bundle.order,
+        orderNumber,
+        receiptKey: bundle.order?.receiptKey || `preview-${orderNumber}`,
+        updatedAt: bundle.order?.updatedAt || stamp,
+    };
+    const payment = {
+        ...bundle.payment,
+        orderId: order.id,
+        accountAmount: Number(bundle.payment?.accountAmount || 0),
+        loyaltyAmount: Number(bundle.payment?.loyaltyAmount ?? (
+            Number(bundle.payment?.amount || 0)
+            - Number(bundle.payment?.cashAmount || 0)
+            - Number(bundle.payment?.cardAmount || 0)
+            - Number(bundle.payment?.accountAmount || 0)
+        )),
+        updatedAt: bundle.payment?.updatedAt || stamp,
+    };
+
+    // Validate and prepare every balance movement before mutating any store so
+    // preview mode mirrors the native all-or-nothing transaction.
+    const nextAccounts = get(customerAccountsDB).map((account) => ({ ...account }));
+    const nextEntries = get(customerAccountEntriesDB).map((entry) => ({ ...entry }));
+    const committedAccountChanges: CustomerAccountChange[] = [];
+    for (const change of bundle.accountChanges || []) {
+        const existingByKey = nextEntries.find((entry) => entry.idempotencyKey === change.idempotencyKey);
+        if (existingByKey) {
+            committedAccountChanges.push({
+                ...change,
+                orderId: existingByKey.orderId || order.id,
+                receiptNumber: existingByKey.receiptNumber || orderNumber,
+                receiptKey: existingByKey.receiptKey || order.receiptKey,
+                balanceAfterPence: existingByKey.balanceAfterPence,
+            });
+            continue;
+        }
+        let accountIndex = nextAccounts.findIndex((account) => account.customerId === change.customerId);
+        const account = accountIndex >= 0
+            ? nextAccounts[accountIndex]
+            : normalizeAccount(null, change.customerId);
+        const amountPence = Math.trunc(Number(change.amountPence || 0));
+        if (!Number.isSafeInteger(amountPence) || amountPence === 0) {
+            throw new Error('Account entry amount must be a non-zero whole number of pence');
+        }
+        if (change.entryType === 'charge' && !account.isEnabled) {
+            throw new Error('This customer account is on hold');
+        }
+        const balancePence = account.balancePence + amountPence;
+        if (change.entryType === 'payment' && balancePence < 0) {
+            throw new Error('The payment is greater than the amount owed');
+        }
+        if (change.entryType === 'charge'
+            && account.creditLimitPence > 0
+            && balancePence > account.creditLimitPence) {
+            throw new Error('This charge would exceed the customer credit limit');
+        }
+        const nextAccount: CustomerAccount = {
+            ...account,
+            id: change.customerId,
+            customerId: change.customerId,
+            balancePence,
+            createdAt: account.createdAt || change.createdAt || stamp,
+            updatedAt: change.updatedAt || stamp,
+        };
+        if (accountIndex < 0) {
+            accountIndex = nextAccounts.length;
+            nextAccounts.push(nextAccount);
+        } else {
+            nextAccounts[accountIndex] = nextAccount;
+        }
+        const entry = normalizeAccountEntry({
+            ...change,
+            accountId: change.accountId || change.customerId,
+            orderId: change.orderId || order.id,
+            receiptNumber: change.receiptNumber || orderNumber,
+            receiptKey: change.receiptKey || order.receiptKey,
+            balanceAfterPence: balancePence,
+            updatedAt: change.updatedAt || stamp,
+        });
+        nextEntries.unshift(entry);
+        committedAccountChanges.push({
+            ...change,
+            orderId: change.orderId || order.id,
+            receiptNumber: change.receiptNumber || orderNumber,
+            receiptKey: change.receiptKey || order.receiptKey,
+            balanceAfterPence: balancePence,
+        });
+    }
+
+    ordersDB.update((orders) => [order, ...orders.filter((candidate) => candidate.id !== order.id)]);
+    orderLinesDB.update((lines) => [
+        ...bundle.lines,
+        ...lines.filter((candidate) => !bundle.lines.some((line) => line.id === candidate.id)),
+    ]);
+    paymentsDB.update((payments) => [payment, ...payments.filter((candidate) => candidate.id !== payment.id)]);
+    if (bundle.stockChanges.length > 0) {
+        productsDB.update((products) => products.map((product) => {
+            const delta = bundle.stockChanges
+                .filter((change) => change.productId === product.id)
+                .reduce((sum, change) => sum + Number(change.delta || 0), 0);
+            return delta ? { ...product, stockLevel: product.stockLevel + delta, updatedAt: stamp } : product;
+        }));
+        inventoryLogDB.update((logs) => [
+            ...bundle.stockChanges.map((change) => ({
+                id: change.logId,
+                productId: change.productId,
+                quantityChange: change.delta,
+                type: (change.movementType || 'sale') as any,
+                referenceId: order.id,
+                employeeId: change.employeeId,
+                notes: change.notes,
+                createdAt: stamp,
+            })),
+            ...logs,
+        ]);
+    }
+    if (bundle.loyaltyChanges?.length) {
+        loyaltyLogDB.update((entries) => [
+            ...bundle.loyaltyChanges!.map((change) => ({
+                ...change,
+                reason: change.reason as any,
+                updatedAt: change.createdAt || stamp,
+            })),
+            ...entries,
+        ]);
+        customersDB.update((customers) => customers.map((customer) => ({
+            ...customer,
+            loyaltyPoints: customer.loyaltyPoints + bundle.loyaltyChanges!
+                .filter((change) => change.customerId === customer.id)
+                .reduce((sum, change) => sum + Number(change.pointsChange || 0), 0),
+        })));
+    }
+    if (bundle.audit) {
+        auditLogDB.update((logs) => [bundle.audit, ...logs.filter((log) => log.id !== bundle.audit.id)]);
+    }
+    if (bundle.originalOrderToUpdate) {
+        ordersDB.update((orders) => orders.map((candidate) => candidate.id === bundle.originalOrderToUpdate
+            ? { ...candidate, status: (bundle.originalStatusUpdate || candidate.status) as any, updatedAt: stamp }
+            : candidate));
+    }
+    customerAccountsDB.set(nextAccounts);
+    customerAccountEntriesDB.set(nextEntries);
+    for (const account of nextAccounts) cacheBrowserAccount(account);
+
+    return {
+        ...bundle,
+        order,
+        payment,
+        accountChanges: committedAccountChanges,
+    };
 }
 
 /**
@@ -3253,18 +3931,26 @@ interface CommitSaleResult {
  * as one unit if the server is unavailable. This prevents half-written sales.
  */
 export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
+    if (!isTauri()) {
+        const committed = commitBrowserPreviewSale(bundle);
+        notifyOwnerCloudDataChanged();
+        return committed;
+    }
     const requiresSharedLoyaltyBalance = bundle.order?.type === 'sale'
         && Boolean(bundle.loyaltyChanges?.some((change) => change.reason === 'redeemed' && change.pointsChange < 0));
-    if (isMultiMode() && (bundle.order?.type === 'return' || requiresSharedLoyaltyBalance)) {
+    const requiresSharedAccountBalance = Boolean(bundle.accountChanges?.length);
+    if (isMultiMode() && (bundle.order?.type === 'return' || requiresSharedLoyaltyBalance || requiresSharedAccountBalance)) {
         let state = get(connectionState);
         if (!state.mysqlOnline) {
             await pingMysql();
             state = get(connectionState);
         }
         if (!state.mysqlOnline) {
-            throw new Error(requiresSharedLoyaltyBalance
-                ? 'Loyalty credit requires the main MariaDB database to be online'
-                : 'Refunds and voids require the main MariaDB database to be online');
+            throw new Error(requiresSharedAccountBalance
+                ? 'Customer-account sales require the main MariaDB database to be online'
+                : requiresSharedLoyaltyBalance
+                    ? 'Loyalty credit requires the main MariaDB database to be online'
+                    : 'Refunds and voids require the main MariaDB database to be online');
         }
         if (state.mysqlOnline) {
             if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
@@ -3272,13 +3958,17 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
                 const pendingBeforeAuthoritativeSale = await pendingReportWriteCount();
                 if (pendingBeforeAuthoritativeSale > 0) await flushOfflineQueue();
                 if (await pendingReportWriteCount() > 0) {
-                    throw new Error(requiresSharedLoyaltyBalance
-                        ? 'Pending sales must synchronize before loyalty credit can be used'
-                        : 'Pending sales or report closes must synchronize before a refund or void');
+                    throw new Error(requiresSharedAccountBalance
+                        ? 'Pending sales must synchronize before a customer account can be used'
+                        : requiresSharedLoyaltyBalance
+                            ? 'Pending sales must synchronize before loyalty credit can be used'
+                            : 'Pending sales or report closes must synchronize before a refund or void');
                 }
-                const command = requiresSharedLoyaltyBalance
-                    ? 'commit_online_loyalty_sale'
-                    : 'commit_online_reversal';
+                const command = bundle.order?.type === 'return'
+                    ? 'commit_online_reversal'
+                    : requiresSharedAccountBalance
+                        ? 'commit_online_customer_account_sale'
+                        : 'commit_online_loyalty_sale';
                 // tauri-invoke: commit_online_loyalty_sale, commit_online_reversal
                 const committed = await invoke<CommitSaleResult>(command, {
                     mysqlUri: buildMysqlUri(state.mysqlConfig),
@@ -3457,6 +4147,289 @@ export interface ReportSnapshot {
     warning?: string;
 }
 
+function browserReportOrders(startTime: string, endTime: string, tillNumber?: string): any[] {
+    const start = new Date(startTime).getTime();
+    const end = new Date(endTime).getTime();
+    return get(ordersDB).filter((order) => {
+        const completed = new Date(order.completedAt || order.createdAt || '').getTime();
+        return ['completed', 'refunded', 'partially_refunded', 'voided'].includes(order.status)
+            && order.status !== 'voided'
+            && !(order.type === 'return' && String(order.notes || '').startsWith('Void of receipt '))
+            && Number.isFinite(completed)
+            && completed >= start
+            && completed < end
+            && (!tillNumber || order.tillNumber === tillNumber);
+    });
+}
+
+function browserPaymentAmounts(payment: any): { cash: number; card: number; loyalty: number; account: number } {
+    const amount = Number(payment?.amount || 0);
+    const rawCash = Number(payment?.cashAmount || 0);
+    const rawCard = Number(payment?.cardAmount || 0);
+    const cash = rawCash !== 0 ? rawCash : payment?.method === 'cash' ? amount : 0;
+    const card = rawCard !== 0
+        ? rawCard
+        : ['card', 'sumup', 'dojo', 'mobile'].includes(payment?.method) ? amount : 0;
+    const account = Number(payment?.accountAmount || 0);
+    const loyalty = Number(payment?.loyaltyAmount ?? (amount - cash - card - account));
+    return { cash, card, loyalty, account };
+}
+
+function browserAccountActivity(startTime: string, endTime: string): Pick<sqlite.PaymentBreakdown,
+    'accountCharges' | 'accountRepaymentsCash' | 'accountRepaymentsCard' |
+    'accountAdjustments' | 'openingAccountOwed' | 'closingAccountOwed' |
+    'accountActivityScope'> {
+    const start = new Date(startTime).getTime();
+    const end = new Date(endTime).getTime();
+    let openingAccountOwed = 0;
+    let closingAccountOwed = 0;
+    let accountCharges = 0;
+    let accountRepaymentsCash = 0;
+    let accountRepaymentsCard = 0;
+    let accountAdjustments = 0;
+    for (const entry of get(customerAccountEntriesDB)) {
+        const created = new Date(entry.createdAt).getTime();
+        if (!Number.isFinite(created)) continue;
+        if (created < start) openingAccountOwed += entry.amountPence;
+        if (created < end) closingAccountOwed += entry.amountPence;
+        if (created < start || created >= end) continue;
+        if (entry.entryType === 'charge') accountCharges += entry.amountPence;
+        else if (entry.entryType === 'payment' && entry.amountPence < 0) {
+            if (entry.paymentMethod === 'cash') accountRepaymentsCash += -entry.amountPence;
+            if (entry.paymentMethod === 'card') accountRepaymentsCard += -entry.amountPence;
+        } else if (entry.entryType !== 'payment') accountAdjustments += entry.amountPence;
+    }
+    return {
+        accountCharges,
+        accountRepaymentsCash,
+        accountRepaymentsCard,
+        accountAdjustments,
+        openingAccountOwed,
+        closingAccountOwed,
+        accountActivityScope: 'shop',
+    };
+}
+
+function browserBreakdown(
+    orders: any[],
+    startTime: string,
+    endTime: string,
+): sqlite.PaymentBreakdown {
+    const payments = get(paymentsDB);
+    let totalCash = 0;
+    let totalCard = 0;
+    let totalLoyalty = 0;
+    let totalAccount = 0;
+    let cashTxCount = 0;
+    let cardTxCount = 0;
+    let splitTxCount = 0;
+    let loyaltyTxCount = 0;
+    let accountTxCount = 0;
+    let unrecordedAmount = 0;
+    let unrecordedTxCount = 0;
+    for (const order of orders) {
+        const orderPayments = payments.filter((payment) => payment.orderId === order.id);
+        if (orderPayments.length === 0) {
+            unrecordedAmount += Number(order.total || 0);
+            unrecordedTxCount++;
+            continue;
+        }
+        const amounts = orderPayments.reduce((sum, payment) => {
+            const value = browserPaymentAmounts(payment);
+            return {
+                cash: sum.cash + value.cash,
+                card: sum.card + value.card,
+                loyalty: sum.loyalty + value.loyalty,
+                account: sum.account + value.account,
+            };
+        }, { cash: 0, card: 0, loyalty: 0, account: 0 });
+        totalCash += amounts.cash;
+        totalCard += amounts.card;
+        totalLoyalty += amounts.loyalty;
+        totalAccount += amounts.account;
+        if (amounts.cash && amounts.card) splitTxCount++;
+        else if (amounts.cash) cashTxCount++;
+        else if (amounts.card) cardTxCount++;
+        if (amounts.loyalty) loyaltyTxCount++;
+        if (amounts.account) accountTxCount++;
+    }
+    return {
+        totalCash,
+        totalCard,
+        totalLoyalty,
+        totalAccount,
+        cashTxCount,
+        cardTxCount,
+        splitTxCount,
+        loyaltyTxCount,
+        accountTxCount,
+        ...browserAccountActivity(startTime, endTime),
+        totalAmount: orders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+        unrecordedAmount,
+        unrecordedTxCount,
+    };
+}
+
+function getBrowserReportSnapshotForPeriod(
+    startTime: string,
+    endTime: string,
+    sortBy: 'quantity' | 'revenue' = 'quantity',
+    limit = 10,
+    tillNumber?: string,
+): ReportSnapshot {
+    const orders = browserReportOrders(startTime, endTime, tillNumber);
+    const orderIds = new Set(orders.map((order) => order.id));
+    const lines = get(orderLinesDB).filter((line) => orderIds.has(line.orderId));
+    const saleOrders = orders.filter((order) => order.type !== 'return');
+    const overview: sqlite.SalesOverview = {
+        totalRevenue: orders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+        totalTransactions: saleOrders.length,
+        refundTransactions: orders.length - saleOrders.length,
+        avgTransactionValue: saleOrders.length
+            ? Math.round(saleOrders.reduce((sum, order) => sum + Number(order.total || 0), 0) / saleOrders.length)
+            : 0,
+        totalItemsSold: lines.reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+    };
+    const breakdown = browserBreakdown(orders, startTime, endTime);
+
+    const productGroups = new Map<string, sqlite.TopProduct>();
+    const products = get(productsDB);
+    for (const line of lines) {
+        const key = String(line.productId || line.productName || 'unknown');
+        const existing = productGroups.get(key) || {
+            name: line.productName || 'Unknown',
+            sku: products.find((product) => product.id === line.productId)?.sku || '',
+            qtySold: 0,
+            totalRevenue: 0,
+            avgPrice: 0,
+        };
+        existing.qtySold += Number(line.quantity || 0);
+        existing.totalRevenue += Number(line.lineTotal || 0);
+        existing.avgPrice = existing.qtySold ? Math.round(existing.totalRevenue / existing.qtySold) : 0;
+        productGroups.set(key, existing);
+    }
+    const topProducts = [...productGroups.values()]
+        .sort((left, right) => sortBy === 'revenue'
+            ? right.totalRevenue - left.totalRevenue
+            : right.qtySold - left.qtySold)
+        .slice(0, Math.max(1, limit));
+
+    const registerNames = new Map(get(registersDB).map((register) => [register.id, register.name]));
+    const tillIds = new Set([
+        ...get(registersDB).filter((register) => register.isActive).map((register) => register.id),
+        ...get(ordersDB).map((order) => order.tillNumber).filter(Boolean),
+    ]);
+    const tillOptions: sqlite.TillReportOption[] = [...tillIds].map((id, index) => ({
+        id,
+        name: registerNames.get(id)
+            || (id === 'browser-preview-till' ? 'Browser Preview' : `Till ${index + 1}`),
+    }));
+    const entries = get(customerAccountEntriesDB);
+    const periodStart = new Date(startTime).getTime();
+    const periodEnd = new Date(endTime).getTime();
+    const tillSummaries: sqlite.TillSalesSummary[] = tillOptions.map((option) => {
+        const tillOrders = browserReportOrders(startTime, endTime, option.id);
+        const ids = new Set(tillOrders.map((order) => order.id));
+        const tillLines = get(orderLinesDB).filter((line) => ids.has(line.orderId));
+        const tender = browserBreakdown(tillOrders, startTime, endTime);
+        const collections = entries.filter((entry) => entry.tillNumber === option.id
+            && entry.entryType === 'payment'
+            && new Date(entry.createdAt).getTime() >= periodStart
+            && new Date(entry.createdAt).getTime() < periodEnd);
+        return {
+            ...option,
+            netSales: tillOrders.reduce((sum, order) => sum + Number(order.total || 0), 0),
+            grossSales: tillOrders.filter((order) => order.type !== 'return')
+                .reduce((sum, order) => sum + Number(order.total || 0) + Number(order.discountAmount || 0), 0),
+            refunds: Math.abs(tillOrders.filter((order) => Number(order.total || 0) < 0)
+                .reduce((sum, order) => sum + Number(order.total || 0), 0)),
+            taxTotal: tillOrders.reduce((sum, order) => sum + Number(order.taxTotal || 0), 0),
+            transactions: tillOrders.filter((order) => order.type !== 'return').length,
+            refundTransactions: tillOrders.filter((order) => order.type === 'return').length,
+            itemsSold: tillLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+            cashTotal: tender.totalCash,
+            cardTotal: tender.totalCard,
+            loyaltyTotal: tender.totalLoyalty,
+            accountTotal: tender.totalAccount,
+            accountRepaymentsCash: collections.filter((entry) => entry.paymentMethod === 'cash')
+                .reduce((sum, entry) => sum - Math.min(0, entry.amountPence), 0),
+            accountRepaymentsCard: collections.filter((entry) => entry.paymentMethod === 'card')
+                .reduce((sum, entry) => sum - Math.min(0, entry.amountPence), 0),
+        };
+    });
+
+    const dayGroups = new Map<string, sqlite.DailySalesPoint>();
+    for (const order of orders) {
+        const date = new Date(order.completedAt || order.createdAt).toLocaleDateString('en-CA');
+        const point = dayGroups.get(date) || { date, netSales: 0, transactions: 0 };
+        point.netSales += Number(order.total || 0);
+        if (order.type !== 'return') point.transactions++;
+        dayGroups.set(date, point);
+    }
+
+    const voidOrders = get(ordersDB).filter((order) => {
+        const created = new Date(order.completedAt || order.createdAt || '').getTime();
+        return created >= periodStart && created < periodEnd
+            && order.type === 'return' && String(order.notes || '').startsWith('Void of receipt ')
+            && (!tillNumber || order.tillNumber === tillNumber);
+    });
+    const costTotal = lines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.costPrice || 0), 0);
+    const netSales = overview.totalRevenue;
+    const taxTotal = orders.reduce((sum, order) => sum + Number(order.taxTotal || 0), 0);
+    const business: sqlite.BusinessSummary = {
+        grossSales: saleOrders.reduce((sum, order) => sum + Number(order.total || 0) + Number(order.discountAmount || 0), 0),
+        refunds: Math.abs(orders.filter((order) => order.type === 'return')
+            .reduce((sum, order) => sum + Number(order.total || 0), 0)),
+        voids: Math.abs(voidOrders.reduce((sum, order) => sum + Number(order.total || 0), 0)),
+        voidTransactions: voidOrders.length,
+        netSales,
+        taxTotal,
+        discountTotal: saleOrders.reduce((sum, order) => sum + Number(order.discountAmount || 0), 0),
+        costTotal,
+        grossProfit: netSales - taxTotal - costTotal,
+    };
+
+    const employeeNames = new Map(get(employeesDB).map((employee) => [employee.id, employee.name]));
+    const employeeGroups = new Map<string, sqlite.EmployeeSalesSummary>();
+    for (const order of orders) {
+        const current = employeeGroups.get(order.employeeId) || {
+            employeeId: order.employeeId || '',
+            employeeName: employeeNames.get(order.employeeId) || 'Unknown employee',
+            netSales: 0,
+            grossSales: 0,
+            refunds: 0,
+            transactions: 0,
+            refundTransactions: 0,
+            avgTransaction: 0,
+        };
+        current.netSales += Number(order.total || 0);
+        if (order.type === 'return') {
+            current.refunds += Math.abs(Number(order.total || 0));
+            current.refundTransactions++;
+        } else {
+            current.grossSales += Number(order.total || 0) + Number(order.discountAmount || 0);
+            current.transactions++;
+        }
+        current.avgTransaction = current.transactions
+            ? Math.round((current.netSales + current.refunds) / current.transactions)
+            : 0;
+        employeeGroups.set(current.employeeId, current);
+    }
+
+    return {
+        overview,
+        breakdown,
+        topProducts,
+        tillOptions,
+        tillSummaries,
+        dailyTrend: [...dayGroups.values()].sort((left, right) => left.date.localeCompare(right.date)),
+        business,
+        employeeSales: [...employeeGroups.values()].sort((left, right) => right.netSales - left.netSales),
+        source: 'sqlite',
+        warning: 'Browser preview data — the real shop database was not changed.',
+    };
+}
+
 async function getSqliteReportSnapshot(
     startDate: string,
     endDate: string,
@@ -3579,6 +4552,10 @@ export async function getReportSnapshot(
     limit: number = 10,
     tillNumber?: string
 ): Promise<ReportSnapshot> {
+    if (!isTauri()) {
+        const [startTime, endTime] = reportDateBounds(startDate, endDate);
+        return getBrowserReportSnapshotForPeriod(startTime, endTime, sortBy, limit, tillNumber);
+    }
     if (isMultiMode()) {
         try {
             const pendingBeforeFlush = await pendingReportWriteCount();
@@ -4287,15 +5264,26 @@ export interface SchemaValidationResult {
 }
 
 const CRITICAL_SCHEMA: Record<string, string[]> = {
-    products: ['id', 'price', 'costPrice', 'stockLevel', 'trackStock', 'allowPriceOverride', 'updatedAt'],
+    products: ['id', 'price', 'costPrice', 'stockLevel', 'trackStock', 'allowPriceOverride', 'isAgeRestricted', 'updatedAt'],
     product_images: ['id', 'image', 'updatedAt'],
     discounts: ['id', 'kind', 'groupId', 'bundleQuantity', 'bundlePrice', 'updatedAt'],
     promo_groups: ['id', 'name', 'isActive', 'updatedAt'],
     promo_group_items: ['id', 'groupId', 'productId', 'updatedAt'],
     orders: ['id', 'orderNumber', 'receiptKey', 'shiftId', 'employeeId', 'taxTotal', 'total', 'tillNumber', 'updatedAt'],
     order_lines: ['id', 'orderId', 'productId', 'costPrice', 'taxRate', 'taxAmount', 'lineTotal', 'updatedAt'],
-    payments: ['id', 'orderId', 'amount', 'cashAmount', 'cardAmount', 'updatedAt'],
+    payments: ['id', 'orderId', 'amount', 'cashAmount', 'cardAmount', 'loyaltyAmount', 'accountAmount', 'updatedAt'],
     customers: ['id', 'name', 'postcode', 'loyaltyCode', 'loyaltyPoints', 'updatedAt'],
+    customer_accounts: ['id', 'customerId', 'isEnabled', 'creditLimitPence', 'balancePence', 'createdAt', 'updatedAt'],
+    customer_account_entries: [
+        'id', 'accountId', 'customerId', 'orderId', 'entryType', 'amountPence',
+        'paymentMethod', 'reference', 'description', 'receiptNumber', 'receiptKey',
+        'employeeId', 'tillNumber', 'shiftId', 'idempotencyKey', 'reversesEntryId',
+        'balanceAfterPence', 'createdAt', 'updatedAt',
+    ],
+    daily_sales_summary: [
+        'date', 'tillNumber', 'cashTotal', 'cardTotal', 'accountTotal',
+        'accountRepaymentsCash', 'accountRepaymentsCard', 'totalSales', 'transactionCount', 'updatedAt',
+    ],
     loyalty_logs: ['id', 'customerId', 'orderId', 'pointsChange', 'reason', 'updatedAt'],
     employees: ['id', 'storeId', 'pinHash', 'role', 'email', 'isActive', 'updatedAt'],
     inventory_logs: ['id', 'productId', 'quantityChange', 'referenceId', 'updatedAt'],
@@ -4312,6 +5300,11 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
 export async function validateDatabaseSchemas(): Promise<SchemaValidationResult> {
     const issues: string[] = [];
     const local = await sqlite.getDb();
+    const versionRows: any[] = await local.select(`PRAGMA user_version`);
+    const localSchemaVersion = Number(versionRows[0]?.user_version || 0);
+    if (localSchemaVersion !== 1) {
+        issues.push(`SQLite: schema version is ${localSchemaVersion}; expected 1`);
+    }
     for (const [table, expected] of Object.entries(CRITICAL_SCHEMA)) {
         const rows: any[] = await local.select(`PRAGMA table_info(${table})`);
         const columns = new Set(rows.map((r) => r.name));
@@ -4348,6 +5341,14 @@ export async function validateDatabaseSchemas(): Promise<SchemaValidationResult>
             const changeLogColumns = new Set(changeLogRows.map((row) => row.COLUMN_NAME));
             for (const column of ['seq', 'table_name', 'changedAt']) {
                 if (!changeLogColumns.has(column)) issues.push(`MariaDB: sync_change_log.${column} is missing`);
+            }
+            const migrationRows: any[] = await remote.select(
+                `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pos_schema_migrations'`,
+            );
+            const migrationColumns = new Set(migrationRows.map((row) => row.COLUMN_NAME));
+            for (const column of ['name', 'appliedAt']) {
+                if (!migrationColumns.has(column)) issues.push(`MariaDB: pos_schema_migrations.${column} is missing`);
             }
         }
     }
@@ -4448,7 +5449,7 @@ async function clearRemoteTombstones(remote: any): Promise<void> {
 const LOCAL_CACHE_RESET_TABLES = [
     'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'customers', 'registers',
+    'employees', 'customers', 'customer_accounts', 'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
@@ -4645,6 +5646,14 @@ export async function getNextOrderNumber(): Promise<number> {
 export async function getTillPeriodReport(
     tillNumber: string, startTime: string, endTime: string
 ) {
+    if (!isTauri()) {
+        const snapshot = getBrowserReportSnapshotForPeriod(startTime, endTime, 'quantity', 10, tillNumber);
+        return {
+            overview: snapshot.overview,
+            breakdown: snapshot.breakdown,
+            topProducts: snapshot.topProducts,
+        };
+    }
     if (isMultiMode()) {
         try {
             const pendingBeforeFlush = await pendingReportWriteCount();
@@ -4663,6 +5672,7 @@ export async function getTillPeriodReport(
 export async function getLiveTillPeriodReport(
     tillNumber: string, startTime: string, endTime: string
 ) {
+    if (!isTauri()) return getTillPeriodReport(tillNumber, startTime, endTime);
     if (!isMultiMode()) return sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
     await ensureLiveSystemReportReady();
     return mysql.mysqlGetTillPeriodReport(tillNumber, startTime, endTime);
@@ -4672,12 +5682,27 @@ export async function getLiveTillPeriodReport(
 
 import {
     productsDB, patchProductInStore, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
-    settingsDB, customersDB, storeDB, registersDB, discountsDB,
+    settingsDB, customersDB, customerAccountsDB, customerAccountEntriesDB,
+    storeDB, registersDB, discountsDB,
     ordersDB, orderLinesDB, paymentsDB, suppliersDB, productSuppliersDB,
     inventoryLogDB, loyaltyLogDB, auditLogDB, shiftsDB, cashMovementsDB,
     promoGroupsDB, promoGroupItemsDB
 } from './db';
 import { hydrateTheme } from './theme';
+
+function withCustomerAccountSummaries(customers: any[], accounts: CustomerAccount[]): any[] {
+    const byCustomer = new Map(accounts.map((account) => [account.customerId, account]));
+    return customers.map((customer) => {
+        const account = byCustomer.get(customer.id);
+        return {
+            ...customer,
+            accountId: account?.id || customer.id,
+            accountEnabled: account?.isEnabled || false,
+            accountCreditLimitPence: account?.creditLimitPence || 0,
+            accountBalancePence: account?.balancePence || 0,
+        };
+    });
+}
 
 /**
  * Read all tables from the current data source (MySQL in multi mode,
@@ -4712,6 +5737,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
     if (!requested) {
         const [
             cats, pages, tiles, prods, taxRates, emps, settings, customers,
+            customerAccounts, customerAccountEntries,
             registers, discounts, promoGroups, promoGroupItems,
             orders, orderLines, payments, suppliers, productSuppliers,
             inventoryLog, loyaltyLog, auditLog, shifts, cashMovements
@@ -4724,6 +5750,8 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             sqlite.getAll('employees'),
             sqlite.getAll('settings'),
             sqlite.getAll('customers'),
+            sqlite.getAll('customer_accounts'),
+            sqlite.getAll('customer_account_entries'),
             sqlite.getAll('registers'),
             sqlite.getAll('discounts'),
             sqlite.getAll('promo_groups'),
@@ -4745,13 +5773,17 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
         tilesDB.set(tiles);
         const prodsWithImages = await sqlite.attachProductImages(prods);
         productsDB.set(prodsWithImages.map(p => sqlite.rehydrateBooleans(p, [
-            'isActive', 'isWeighable', 'showInGoods', 'trackStock'
+            'isActive', 'isAgeRestricted', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
         taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
         employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
         settingsDB.set(settings);
         hydrateTheme(settings);
-        customersDB.set(customers);
+        const normalizedAccounts = customerAccounts.map((account) =>
+            sqlite.rehydrateBooleans(account, ['isEnabled']) as CustomerAccount);
+        customersDB.set(withCustomerAccountSummaries(customers, normalizedAccounts));
+        customerAccountsDB.set(normalizedAccounts);
+        customerAccountEntriesDB.set(customerAccountEntries as CustomerAccountEntry[]);
         registersDB.set(registers.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
         discountsDB.set(discounts.map(d => sqlite.rehydrateBooleans(d, ['isActive', 'autoApply'])));
         promoGroupsDB.set(promoGroups.map(g => sqlite.rehydrateBooleans(g, ['isActive'])));
@@ -4787,7 +5819,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             ? await sqlite.getPosScreenProducts()
             : await sqlite.attachProductImages(await sqlite.getAll('products'));
         productsDB.set(rows.map(p => sqlite.rehydrateBooleans(p, [
-            'isActive', 'isWeighable', 'showInGoods', 'trackStock'
+            'isActive', 'isAgeRestricted', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
     }
     if (shouldHydrate('tax_rates')) {
@@ -4807,7 +5839,21 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             try { storeDB.set(JSON.parse(storeInfo.value)); } catch (e) { /* ignore */ }
         }
     }
-    if (shouldHydrate('customers')) customersDB.set(await sqlite.getAll('customers'));
+    if (shouldHydrate('customers')) {
+        customersDB.set(withCustomerAccountSummaries(
+            await sqlite.getAll('customers'),
+            get(customerAccountsDB),
+        ));
+    }
+    if (shouldHydrate('customer_accounts')) {
+        const rows = await sqlite.getAll('customer_accounts');
+        customerAccountsDB.set(rows.map((account) =>
+            sqlite.rehydrateBooleans(account, ['isEnabled']) as CustomerAccount));
+        customersDB.update((customers) => withCustomerAccountSummaries(customers, get(customerAccountsDB)));
+    }
+    if (shouldHydrate('customer_account_entries')) {
+        customerAccountEntriesDB.set(await sqlite.getAll('customer_account_entries'));
+    }
     if (shouldHydrate('registers')) {
         const rows = await sqlite.getAll('registers');
         registersDB.set(rows.map(r => sqlite.rehydrateBooleans(r, ['isActive'])));
@@ -5029,7 +6075,7 @@ async function runHeartbeat(): Promise<void> {
 const FAST_SYNC_TABLES = [
     'app_identity',
     'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
-    'customers', 'loyalty_logs',
+    'customers', 'loyalty_logs', 'customer_accounts', 'customer_account_entries',
     'till_report_markers', 'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
 ];
 // MariaDB stamps every synced write with its own UTC clock. A short overlap
@@ -5042,7 +6088,8 @@ const ALL_SYNC_TABLES = [
     'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'registers',
+    'employees', 'settings', 'customers', 'customer_accounts',
+    'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
@@ -5649,6 +6696,8 @@ export async function purgeAllTransactions(): Promise<void> {
             if (!server) throw new Error('MariaDB must be online before deleting shop-wide transactions.');
             marker = await mysql.mysqlGetServerTime();
 
+            // Never delete customer_accounts/customer_account_entries here.
+            // Their copied receipt references remain useful after orders go.
             await server.execute(`DELETE FROM inventory_logs WHERE referenceId IN (SELECT id FROM orders)`);
             await server.execute(
                 `DELETE FROM audit_logs
@@ -5778,7 +6827,7 @@ export async function wipeAndPullFromServer(): Promise<void> {
         const tablesToWipe = [
             'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
             'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-            'employees', 'customers', 'registers',
+            'employees', 'customers', 'customer_accounts', 'customer_account_entries', 'registers',
             'suppliers', 'product_suppliers', 'inventory_logs',
             'orders', 'order_lines', 'payments',
             'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',

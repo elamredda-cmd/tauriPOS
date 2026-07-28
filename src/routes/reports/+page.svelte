@@ -33,6 +33,12 @@
         return new Date(date.getTime() - offset).toISOString().split('T')[0];
     }
 
+    function formatAccountPosition(pence: number) {
+        if (pence > 0) return `Owed ${formatMoney(pence)}`;
+        if (pence < 0) return `Customer credit ${formatMoney(Math.abs(pence))}`;
+        return `Clear ${formatMoney(0)}`;
+    }
+
     // Reports open on today's trading date by default.
     const today = new Date();
     let startDate = localDateValue(today);
@@ -51,7 +57,15 @@
     ];
 
     let overview: SalesOverview = { totalRevenue: 0, totalTransactions: 0, refundTransactions: 0, avgTransactionValue: 0, totalItemsSold: 0 };
-    let breakdown: PaymentBreakdown = { totalCash: 0, totalCard: 0, totalLoyalty: 0, cashTxCount: 0, cardTxCount: 0, splitTxCount: 0, loyaltyTxCount: 0, totalAmount: 0, unrecordedAmount: 0, unrecordedTxCount: 0 };
+    const emptyPaymentBreakdown = (): PaymentBreakdown => ({
+        totalCash: 0, totalCard: 0, totalLoyalty: 0, totalAccount: 0,
+        cashTxCount: 0, cardTxCount: 0, splitTxCount: 0, loyaltyTxCount: 0, accountTxCount: 0,
+        accountCharges: 0, accountRepaymentsCash: 0, accountRepaymentsCard: 0, accountAdjustments: 0,
+        openingAccountOwed: 0, closingAccountOwed: 0,
+        accountActivityScope: 'shop',
+        totalAmount: 0, unrecordedAmount: 0, unrecordedTxCount: 0,
+    });
+    let breakdown: PaymentBreakdown = emptyPaymentBreakdown();
     let topProducts: TopProduct[] = [];
     let allTills: TillReportOption[] = [];
     let tillSummaries: TillSalesSummary[] = [];
@@ -74,7 +88,7 @@
 
     function clearReportResults() {
         overview = { totalRevenue: 0, totalTransactions: 0, refundTransactions: 0, avgTransactionValue: 0, totalItemsSold: 0 };
-        breakdown = { totalCash: 0, totalCard: 0, totalLoyalty: 0, cashTxCount: 0, cardTxCount: 0, splitTxCount: 0, loyaltyTxCount: 0, totalAmount: 0, unrecordedAmount: 0, unrecordedTxCount: 0 };
+        breakdown = emptyPaymentBreakdown();
         topProducts = [];
         tillSummaries = [];
         dailyTrend = [];
@@ -129,18 +143,6 @@
         loading = true;
         reportError = '';
         const till = selectedTill || undefined;
-        if (previewMode) {
-            clearReportResults();
-            appliedStartDate = startDate;
-            appliedEndDate = endDate;
-            appliedTill = selectedTill;
-            appliedSortBy = sortBy;
-            reportSource = 'Browser Preview';
-            loadedReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
-            lastRefreshed = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            loading = false;
-            return;
-        }
         try {
             const snapshot = await withReportTimeout(
                 getReportSnapshot(startDate, endDate, sortBy, 10, till),
@@ -154,7 +156,9 @@
             dailyTrend = snapshot.dailyTrend;
             business = snapshot.business;
             employeeSales = snapshot.employeeSales;
-            reportSource = snapshot.source === 'mariadb' ? 'Live MariaDB' : 'Local SQLite';
+            reportSource = previewMode
+                ? 'Browser Preview'
+                : snapshot.source === 'mariadb' ? 'Live MariaDB' : 'Local SQLite';
             reportError = snapshot.warning || '';
             appliedStartDate = startDate;
             appliedEndDate = endDate;
@@ -229,11 +233,20 @@
             ['Payment Method', 'Amount (GBP)', 'Transactions'],
             ['Cash', pounds(breakdown.totalCash), breakdown.cashTxCount],
             ['Card', pounds(breakdown.totalCard), breakdown.cardTxCount],
-            ['Loyalty Credit', pounds(breakdown.totalLoyalty), breakdown.loyaltyTxCount],
+            ['Loyalty Value', pounds(breakdown.totalLoyalty), breakdown.loyaltyTxCount],
+            ['Pay Later', pounds(breakdown.totalAccount), breakdown.accountTxCount],
             ['Unrecorded', pounds(breakdown.unrecordedAmount), breakdown.unrecordedTxCount],
             [],
-            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash', 'Card', 'Loyalty Credit'],
-            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal)]),
+            ['Shop Customer Accounts', 'Amount (GBP)'],
+            ['Opening Account Balance', pounds(breakdown.openingAccountOwed)],
+            ['New Pay Later Charges', pounds(breakdown.accountCharges)],
+            ['Cash Payments Received', pounds(breakdown.accountRepaymentsCash)],
+            ['Card Payments Received', pounds(breakdown.accountRepaymentsCard)],
+            ['Adjustments / Refunds', pounds(breakdown.accountAdjustments)],
+            ['Closing Account Balance', pounds(breakdown.closingAccountOwed)],
+            [],
+            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash Sales', 'Card Sales', 'Loyalty Value', 'Pay Later', 'Account Cash Collected', 'Account Card Collected'],
+            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal), pounds(till.accountTotal), pounds(till.accountRepaymentsCash), pounds(till.accountRepaymentsCard)]),
             [],
             ['Employee', 'Net Sales', 'Gross Sales', 'Refunds', 'Sales', 'Refund Transactions', 'Average Transaction'],
             ...employeeSales.map(employee => [employee.employeeName, pounds(employee.netSales), pounds(employee.grossSales), pounds(employee.refunds), employee.transactions, employee.refundTransactions, pounds(employee.avgTransaction)]),
@@ -276,6 +289,15 @@
             `Cash: ${formatMoney(breakdown.totalCash)}`,
             `Card: ${formatMoney(breakdown.totalCard)}`,
             `Loyalty: ${formatMoney(breakdown.totalLoyalty)}`,
+            `Pay later: ${formatMoney(breakdown.totalAccount)}`,
+            ''.padEnd(32, '-'),
+            'Shop customer accounts',
+            `Opening account: ${formatAccountPosition(breakdown.openingAccountOwed)}`,
+            `New charges: ${formatMoney(breakdown.accountCharges)}`,
+            `Cash collected: ${formatMoney(breakdown.accountRepaymentsCash)}`,
+            `Card collected: ${formatMoney(breakdown.accountRepaymentsCard)}`,
+            `Adjustments: ${formatMoney(breakdown.accountAdjustments)}`,
+            `Closing account: ${formatAccountPosition(breakdown.closingAccountOwed)}`,
         ];
         if (topProducts.length > 0) {
             lines.push(''.padEnd(32, '-'), 'Top products');
@@ -363,6 +385,15 @@
             `Cash: ${formatMoney(data.breakdown.totalCash)}`,
             `Card: ${formatMoney(data.breakdown.totalCard)}`,
             `Loyalty: ${formatMoney(data.breakdown.totalLoyalty)}`,
+            `Pay later: ${formatMoney(data.breakdown.totalAccount)}`,
+            ''.padEnd(32, '-'),
+            'Shop customer accounts',
+            `Opening account: ${formatAccountPosition(data.breakdown.openingAccountOwed)}`,
+            `New charges: ${formatMoney(data.breakdown.accountCharges)}`,
+            `Cash collected: ${formatMoney(data.breakdown.accountRepaymentsCash)}`,
+            `Card collected: ${formatMoney(data.breakdown.accountRepaymentsCard)}`,
+            `Adjustments: ${formatMoney(data.breakdown.accountAdjustments)}`,
+            `Closing account: ${formatAccountPosition(data.breakdown.closingAccountOwed)}`,
         ];
         if (data.breakdown.unrecordedAmount !== 0) {
             lines.push(`Unrecorded: ${formatMoney(data.breakdown.unrecordedAmount)}`);
@@ -505,10 +536,12 @@
     $: paymentMagnitude = Math.abs(breakdown.totalCash)
         + Math.abs(breakdown.totalCard)
         + Math.abs(breakdown.totalLoyalty)
+        + Math.abs(breakdown.totalAccount)
         + Math.abs(breakdown.unrecordedAmount);
     $: cashPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalCash) / paymentMagnitude) * 100) : 0;
     $: cardPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalCard) / paymentMagnitude) * 100) : 0;
     $: loyaltyPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalLoyalty) / paymentMagnitude) * 100) : 0;
+    $: accountPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.totalAccount) / paymentMagnitude) * 100) : 0;
     $: unrecordedPercent = paymentMagnitude > 0 ? Math.round((Math.abs(breakdown.unrecordedAmount) / paymentMagnitude) * 100) : 0;
     $: visibleTillSummaries = appliedTill ? tillSummaries.filter((till) => till.id === appliedTill) : tillSummaries;
     $: tillTotals = [...visibleTillSummaries].sort((a, b) => Math.abs(b.netSales) - Math.abs(a.netSales));
@@ -524,6 +557,9 @@
     $: tillCashTotal = tillTotals.reduce((sum, till) => sum + till.cashTotal, 0);
     $: tillCardTotal = tillTotals.reduce((sum, till) => sum + till.cardTotal, 0);
     $: tillLoyaltyTotal = tillTotals.reduce((sum, till) => sum + till.loyaltyTotal, 0);
+    $: tillAccountTotal = tillTotals.reduce((sum, till) => sum + till.accountTotal, 0);
+    $: tillAccountRepaymentsCash = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCash, 0);
+    $: tillAccountRepaymentsCard = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCard, 0);
     $: maxTillNetSales = Math.max(1, ...tillTotals.map((till) => Math.abs(till.netSales)));
     $: summaryCards = [
         { label: 'Net Sales', value: formatMoney(business.netSales), detail: 'After refunds and discounts', tone: 'text-success' },
@@ -699,7 +735,7 @@
                                 </div>
                             </div>
 
-                            <div class="mt-3 grid grid-cols-3 gap-2 text-xs text-text-muted">
+                            <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-text-muted">
                                 <div class="rounded-md bg-bg-card px-2 py-1.5">
                                     <span class="block">Cash</span>
                                     <strong class="text-success">{formatMoney(till.cashTotal)}</strong>
@@ -711,6 +747,18 @@
                                 <div class="rounded-md bg-bg-card px-2 py-1.5">
                                     <span class="block">Loyalty</span>
                                     <strong class="text-text-main">{formatMoney(till.loyaltyTotal)}</strong>
+                                </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Pay later</span>
+                                    <strong class="text-warning">{formatMoney(till.accountTotal)}</strong>
+                                </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Account cash collected</span>
+                                    <strong class="text-success">{formatMoney(till.accountRepaymentsCash)}</strong>
+                                </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Account card collected</span>
+                                    <strong class="text-accent-primary">{formatMoney(till.accountRepaymentsCard)}</strong>
                                 </div>
                             </div>
                         </article>
@@ -732,6 +780,9 @@
                                 <th>Cash</th>
                                 <th>Card</th>
                                 <th>Loyalty</th>
+                                <th>Pay Later</th>
+                                <th>Account Cash</th>
+                                <th>Account Card</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -748,6 +799,9 @@
                                     <td>{formatMoney(till.cashTotal)}</td>
                                     <td>{formatMoney(till.cardTotal)}</td>
                                     <td>{formatMoney(till.loyaltyTotal)}</td>
+                                    <td>{formatMoney(till.accountTotal)}</td>
+                                    <td>{formatMoney(till.accountRepaymentsCash)}</td>
+                                    <td>{formatMoney(till.accountRepaymentsCard)}</td>
                                 </tr>
                             {/each}
                             <tr class="bg-bg-panel font-extrabold">
@@ -762,6 +816,9 @@
                                 <td>{formatMoney(tillCashTotal)}</td>
                                 <td>{formatMoney(tillCardTotal)}</td>
                                 <td>{formatMoney(tillLoyaltyTotal)}</td>
+                                <td>{formatMoney(tillAccountTotal)}</td>
+                                <td>{formatMoney(tillAccountRepaymentsCash)}</td>
+                                <td>{formatMoney(tillAccountRepaymentsCard)}</td>
                             </tr>
                         </tbody>
                     </table>
@@ -820,6 +877,15 @@
                             <span class="text-right text-sm font-bold">{loyaltyPercent}%</span>
                         </div>
                     {/if}
+                    {#if breakdown.totalAccount !== 0}
+                        <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
+                            <span class="text-sm font-bold text-text-muted">Pay later</span>
+                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                                <div class="h-full rounded-md min-w-[2px] bg-danger" style="width: {Math.max(0, accountPercent)}%"></div>
+                            </div>
+                            <span class="text-right text-sm font-bold">{accountPercent}%</span>
+                        </div>
+                    {/if}
                     {#if breakdown.unrecordedAmount !== 0}
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Missing</span>
@@ -849,6 +915,13 @@
                             <div class="text-xs text-text-muted">{breakdown.loyaltyTxCount} transactions</div>
                         </div>
                     {/if}
+                    {#if breakdown.totalAccount !== 0}
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                            <div class="text-xs font-bold text-text-muted">Pay Later Sales</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatMoney(breakdown.totalAccount)}</div>
+                            <div class="text-xs text-text-muted">{breakdown.accountTxCount} transactions</div>
+                        </div>
+                    {/if}
                     {#if breakdown.splitTxCount > 0}
                         <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                             <div class="text-xs font-bold text-text-muted">Split Payments</div>
@@ -863,6 +936,38 @@
                             <div class="text-xs text-text-muted">{breakdown.unrecordedTxCount} transactions need payment records</div>
                         </div>
                     {/if}
+                </div>
+            </section>
+
+            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5 lg:col-span-2">
+                <div class="text-xs font-black uppercase tracking-[0.16em] text-warning">Shop Customer Accounts</div>
+                <h3 class="m-0 mt-1 text-xl">Shop-wide account balances and payments collected</h3>
+                <p class="mt-1 text-sm text-text-muted">This receivables statement covers the whole shop, even when a till is selected. Account payments are money collected, not new sales.</p>
+                <div class="mt-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Opening Account Position</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatAccountPosition(breakdown.openingAccountOwed)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">New Pay Later Charges</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatMoney(breakdown.accountCharges)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Cash Collected</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-success">{formatMoney(breakdown.accountRepaymentsCash)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Card Collected</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-accent-primary">{formatMoney(breakdown.accountRepaymentsCard)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Refunds / Adjustments</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountAdjustments)}</div>
+                    </div>
+                    <div class="rounded-lg border border-warning/50 bg-warning/10 p-3">
+                        <div class="text-xs font-bold text-text-muted">Closing Account Position</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatAccountPosition(breakdown.closingAccountOwed)}</div>
+                    </div>
                 </div>
             </section>
         </div>
@@ -1031,11 +1136,16 @@
             </div>
 
             <!-- Payment breakdown -->
-            <div class="grid grid-cols-3 gap-2">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
                 <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
                     <div class="text-xs font-semibold text-text-muted">Cash</div>
                     <div class="text-lg font-extrabold font-serif text-success">{formatMoney(tillReportData.breakdown.totalCash)}</div>
                     <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.cashTxCount} tx</div>
+                </div>
+                <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
+                    <div class="text-xs font-semibold text-text-muted">Pay Later</div>
+                    <div class="text-lg font-extrabold font-serif text-warning">{formatMoney(tillReportData.breakdown.totalAccount)}</div>
+                    <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.accountTxCount} tx</div>
                 </div>
                 <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
                     <div class="text-xs font-semibold text-text-muted">Card</div>
@@ -1054,6 +1164,18 @@
                         <div class="text-[0.7rem] text-text-muted">{tillReportData.breakdown.unrecordedTxCount} tx (missing payment records)</div>
                     </div>
                 {/if}
+            </div>
+
+            <div class="rounded-lg border border-warning/40 bg-warning/10 p-3">
+                <div class="text-[0.65rem] font-black uppercase tracking-[0.14em] text-warning">Shop Customer Accounts</div>
+                <div class="mt-2 grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
+                    <span>Opening account <b class="block">{formatAccountPosition(tillReportData.breakdown.openingAccountOwed)}</b></span>
+                    <span>New charges <b class="block">{formatMoney(tillReportData.breakdown.accountCharges)}</b></span>
+                    <span>Cash collected <b class="block text-success">{formatMoney(tillReportData.breakdown.accountRepaymentsCash)}</b></span>
+                    <span>Card collected <b class="block text-accent-primary">{formatMoney(tillReportData.breakdown.accountRepaymentsCard)}</b></span>
+                    <span>Adjustments <b class="block">{formatMoney(tillReportData.breakdown.accountAdjustments)}</b></span>
+                    <span>Closing account <b class="block text-warning">{formatAccountPosition(tillReportData.breakdown.closingAccountOwed)}</b></span>
+                </div>
             </div>
 
             <div class="rounded-lg border border-border-flat bg-bg-panel p-3">

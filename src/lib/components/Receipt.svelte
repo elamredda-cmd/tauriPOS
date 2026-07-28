@@ -36,6 +36,13 @@
         .toUpperCase()
         .replace(/[^0-9A-Z. $/+%-]/g, '')
         .slice(0, 32);
+    $: normalizedPaymentMethod = String(order.paymentMethod || 'cash').toLowerCase();
+    $: hasAccountMovement = normalizedPaymentMethod.includes('account');
+    $: paymentLabel = hasAccountMovement
+        ? order.type === 'return'
+            ? normalizedPaymentMethod.includes('+') ? 'MIXED REFUND' : 'ACCOUNT CREDIT'
+            : normalizedPaymentMethod.includes('loyalty') ? 'PAY LATER + LOYALTY' : 'PAY LATER'
+        : String(order.paymentMethod || 'cash').toUpperCase();
 </script>
 
 <div
@@ -90,7 +97,13 @@
         {/if}
         <div class="receipt-total"><span>Total</span><span>{formatMoney(order.total || 0)}</span></div>
         {#if design.showPayment}
-            <div><span>{(order.paymentMethod || 'cash').toUpperCase()}</span><span>{formatMoney(order.amountTendered || order.total || 0)}</span></div>
+            <div><span>{paymentLabel}</span><span>{formatMoney(order.amountTendered || order.total || 0)}</span></div>
+            {#if hasAccountMovement}
+                <div class="receipt-account-note">
+                    <span>{order.type === 'return' ? 'Customer account credited' : 'Charged to customer account'}</span>
+                    <span>{order.type === 'return' ? 'ACCOUNT REFUND' : 'PAY LATER'}</span>
+                </div>
+            {/if}
             {#if (order.amountTendered || 0) > order.total}
                 <div><span>Change</span><span>{formatMoney((order.amountTendered || 0) - order.total)}</span></div>
             {/if}
@@ -128,6 +141,7 @@
     .receipt-message { margin-top: 5px; }
     .receipt-divider { overflow: hidden; white-space: nowrap; margin: 5px 0; text-align: center; }
     .receipt-meta, .receipt-totals, .receipt-lines { display: flex; flex-direction: column; gap: var(--receipt-line-gap); }
+    .receipt-account-note { font-weight: 800; }
     .receipt-meta > div, .receipt-totals > div { display: flex; justify-content: space-between; gap: 8px; }
     .receipt-meta > div span:last-child { text-align: right; }
     .receipt-line { display: grid; grid-template-columns: minmax(0, 1fr) min-content; gap: 6px; align-items: start; }

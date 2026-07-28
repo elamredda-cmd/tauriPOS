@@ -26,10 +26,11 @@
     } from "$lib/stores/database";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
+    import SearchField from "$lib/components/SearchField.svelte";
     import TouchToggle from "$lib/components/TouchToggle.svelte";
     import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
     import AdminPageHeader from "$lib/components/AdminPageHeader.svelte";
-    import { Grid3X3, Plus } from "@lucide/svelte";
+    import { Delete as DeleteIcon, Grid3X3, Plus } from "@lucide/svelte";
     import { getBarcodeRules } from "$lib/barcodeRules";
     import { randomTileColor } from "$lib/tileColors";
     import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
@@ -85,9 +86,11 @@
     ];
 
     // Numpad for Price Input
+    const MAX_ITEM_PRICE_PENCE = 999_999_999;
+    const MAX_ITEM_PRICE_DIGITS = String(MAX_ITEM_PRICE_PENCE).length;
     let showPricePad = false;
     let priceString = "";
-    let pricePadOverlay: HTMLDivElement | null = null;
+    let pricePadDialog: HTMLDivElement | null = null;
     let productImageInput: HTMLInputElement | null = null;
     let imageUploadError = "";
 
@@ -103,7 +106,7 @@
     async function openPricePad() {
         showPricePad = true;
         await tick();
-        pricePadOverlay?.focus();
+        pricePadDialog?.focus();
     }
 
     function closeGoodsMenu() {
@@ -263,6 +266,7 @@
                 (taxes.length > 0 ? taxes[0].id : ""),
             trackStock: stockTrackingEnabled,
             allowPriceOverride: false,
+            isAgeRestricted: false,
             showInGoods: false,
             goodsSortOrder: 0,
             isWeighable: false,
@@ -281,7 +285,7 @@
     }
 
     async function openEditModal(item: Product) {
-        currentItem = { ...item, image: item.image || "" };
+        currentItem = { ...item, isAgeRestricted: !!item.isAgeRestricted, image: item.image || "" };
         originalItem = { ...item };
         priceString = item.price.toString();
         selectedPluLength = item.scalePlu?.length || configuredPluLengths[0] || 5;
@@ -478,16 +482,20 @@
     function handlePricePadKey(key: string) {
         if (key === "C") {
             priceString = "0";
+        } else if (key === "DELETE") {
+            priceString = priceString.length > 1 ? priceString.slice(0, -1) : "0";
         } else if (key === "ENTER") {
             currentItem.price = parseInt(priceString) || 0;
             showPricePad = false;
         } else if (key === "00") {
-            if (priceString !== "0") priceString += "00";
-        } else {
+            if (priceString !== "0" && priceString.length < MAX_ITEM_PRICE_DIGITS) {
+                priceString = `${priceString}00`.slice(0, MAX_ITEM_PRICE_DIGITS);
+            }
+        } else if (/^\d$/.test(key) && priceString.length < MAX_ITEM_PRICE_DIGITS) {
             if (priceString === "0") priceString = key;
             else priceString += key;
         }
-        currentItem.price = parseInt(priceString) || 0;
+        currentItem.price = Math.min(parseInt(priceString) || 0, MAX_ITEM_PRICE_PENCE);
     }
 
     function getCategoryName(id: string): string {
@@ -644,42 +652,51 @@
         </button>
     </AdminPageHeader>
 
-    <div class="items-filter-toolbar" aria-label="Item filters">
-        <div class="items-search relative min-w-0">
-            <svg class="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18"
-                ><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            <input
-                id="items-search"
-                class="search-input !pl-10 !pr-12"
-                type="text"
-                data-touch-keyboard="button"
-                value={searchQuery}
-                on:input={handleItemsSearchInput}
-                on:keydown={handleItemsSearchKeydown}
-                placeholder="Search name, SKU, barcode, PLU..."
-            />
-            <TouchKeyboardButton targetId="items-search" label="Open item search keyboard" embedded />
+    <div class="search-strip" aria-label="Item filters">
+        <div class="search-strip-intro">
+            <strong class="block text-sm font-black text-text-main">Find and filter items</strong>
+            <span class="mt-1 block text-xs text-text-muted">Search by name, SKU, barcode, or PLU, then narrow the list by category or status.</span>
         </div>
-        <div class="items-category-filter">
-            <CustomSelect
-                bind:value={selectedCategoryId}
-                options={[{label: 'All Categories', value: 'all'}, ...activeCategoryOptions]}
-                menuMinWidth="min(340px, calc(100vw - 2rem))"
-                largeOptions
-            />
+        <div class="search-controls items-search-controls">
+            <div class="items-search-query">
+                <div class="search-primary">
+                    <SearchField
+                        id="items-search"
+                        bind:value={searchQuery}
+                        placeholder="Search name, SKU, barcode, PLU..."
+                        ariaLabel="Search items by name, SKU, barcode, or PLU"
+                        keyboardLabel="Open item search keyboard"
+                        clearLabel="Clear item search"
+                        clearVisible={Boolean(searchQuery || appliedSearchQuery)}
+                        onInput={handleItemsSearchInput}
+                        onKeydown={handleItemsSearchKeydown}
+                        onClear={clearItemsSearch}
+                    />
+                </div>
+                <button class="btn btn-primary search-toolbar-action" on:click={runItemsSearch}>Find</button>
+            </div>
+            <div class="search-control search-filter">
+                <CustomSelect
+                    bind:value={selectedCategoryId}
+                    options={[{label: 'All Categories', value: 'all'}, ...activeCategoryOptions]}
+                    menuMinWidth="min(340px, calc(100vw - 2rem))"
+                    largeOptions
+                />
+            </div>
+            <div class="search-control search-filter">
+                <CustomSelect
+                    bind:value={selectedStatus}
+                    options={[
+                        { label: 'Active Items', value: 'active' },
+                        { label: 'Deactivated Items', value: 'deactivated' },
+                        { label: 'All Items', value: 'all' },
+                    ]}
+                />
+            </div>
+            <span class="search-meta">
+                {itemsLoading ? 'Loading...' : `${formatResultCount(totalItems, totalItemsCapped)} items`}
+            </span>
         </div>
-        <div class="items-status-filter">
-            <CustomSelect
-                bind:value={selectedStatus}
-                options={[
-                    { label: 'Active Items', value: 'active' },
-                    { label: 'Deactivated Items', value: 'deactivated' },
-                    { label: 'All Items', value: 'all' },
-                ]}
-            />
-        </div>
-        <button class="btn btn-primary items-command-btn" on:click={runItemsSearch}>Find</button>
-        <button class="btn btn-secondary items-command-btn" disabled={!searchQuery && !appliedSearchQuery} on:click={clearItemsSearch}>Clear</button>
     </div>
 
     <div class="items-table-panel flat-panel flex-1 overflow-auto rounded-md p-px">
@@ -731,7 +748,12 @@
                                 {/if}
                             </div>
                         </td>
-                        <td class="item-name-cell items-col-name font-semibold" title={item.name}>{item.name}</td>
+                        <td class="item-name-cell items-col-name font-semibold" title={item.name}>
+                            <span>{item.name}</span>
+                            {#if item.isAgeRestricted}
+                                <span class="ml-2 inline-flex rounded-md bg-warning/15 px-1.5 py-0.5 text-[0.7rem] font-black text-warning">18+</span>
+                            {/if}
+                        </td>
                         <td class="items-col-status">
                             <span class="tag {item.isActive ? '!text-success' : '!text-danger'}">
                                 {item.isActive ? "Active" : "Deactivated"}
@@ -969,6 +991,7 @@
                     <div class="item-options-grid">
                         <TouchToggle bind:checked={currentItem.showInGoods} label="Show in Goods Menu" />
                         <TouchToggle bind:checked={currentItem.allowPriceOverride} label="Allow Cashier Price Override" />
+                        <TouchToggle bind:checked={currentItem.isAgeRestricted} label="Age Restricted (18+)" />
                         <TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" />
                     </div>
                 </section>
@@ -983,31 +1006,78 @@
 
     {#if showPricePad}
         <div
-            bind:this={pricePadOverlay}
             class="modal-overlay !z-[110]"
             role="presentation"
             tabindex="-1"
             on:click={(event) => handleBackdropClick(event, closePricePad)}
             on:keydown={(event) => handleBackdropKeydown(event, closePricePad)}
         >
-            <div class="flat-panel w-[320px] p-6 rounded-md flex flex-col gap-4 bg-bg-card" role="dialog" aria-modal="true" aria-label="Enter item price">
-                <div class="modal-header">
-                    <h3>Enter Price</h3>
-                    <button class="modal-close" on:click={() => (showPricePad = false)}>✕</button>
+            <div
+                bind:this={pricePadDialog}
+                class="item-price-pad-panel flat-panel"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="item-price-pad-title"
+                tabindex="-1"
+            >
+                <div class="item-price-pad-header">
+                    <div>
+                        <h3 id="item-price-pad-title">Selling Price</h3>
+                        <small>Enter the amount in pence</small>
+                    </div>
+                    <button
+                        type="button"
+                        class="item-price-pad-close"
+                        aria-label="Close selling price number pad"
+                        title="Close"
+                        on:click={closePricePad}
+                    >✕</button>
                 </div>
-                <div class="flat-card h-[60px] flex items-center justify-end px-4 text-[2rem] font-bold font-serif text-success">
-                    {formatMoney(parseInt(priceString || "0"))}
+                <div class="item-price-display-row">
+                    <div
+                        class="item-price-display"
+                        role="spinbutton"
+                        aria-live="polite"
+                        aria-label="Selling price"
+                        aria-valuemin="0"
+                        aria-valuemax={MAX_ITEM_PRICE_PENCE}
+                        aria-valuenow={parseInt(priceString || "0")}
+                        aria-valuetext={formatMoney(parseInt(priceString || "0"))}
+                    >
+                        {formatMoney(parseInt(priceString || "0"))}
+                    </div>
+                    <button
+                        type="button"
+                        class="item-price-clear"
+                        aria-label="Clear selling price"
+                        on:click={() => handlePricePadKey("C")}
+                    >Clear</button>
                 </div>
-                <div class="grid grid-cols-3 gap-3">
-                    {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "C", "ENTER"] as key}
+                <div class="item-price-key-grid" role="group" aria-label="Selling price number pad">
+                    {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "DELETE"] as key}
                         <button
-                            class="flat-card h-[60px] text-[1.5rem] font-semibold cursor-pointer text-text-main {key === 'ENTER' ? '!bg-success !text-white col-span-3' : ''} {key === 'C' ? '!text-danger' : ''}"
+                            type="button"
+                            class:item-price-delete={key === "DELETE"}
+                            class:item-price-double-zero={key === "00"}
+                            class="item-price-key"
+                            aria-label={key === "DELETE" ? "Delete last price digit" : key === "00" ? "Enter double zero" : `Enter ${key}`}
+                            title={key === "DELETE" ? "Delete last digit" : undefined}
                             on:click={() => handlePricePadKey(key)}
                         >
-                            {key}
+                            {#if key === "DELETE"}
+                                <DeleteIcon size={26} strokeWidth={2.35} aria-hidden="true" />
+                            {:else}
+                                {key}
+                            {/if}
                         </button>
                     {/each}
                 </div>
+                <button
+                    type="button"
+                    class="item-price-submit"
+                    aria-label="Confirm selling price"
+                    on:click={() => handlePricePadKey("ENTER")}
+                >Enter</button>
             </div>
         </div>
     {/if}
@@ -1029,20 +1099,20 @@
                 Select up to 10 active items to appear in the Goods menu.
                 <strong class="text-text-main">Selected: {goodsMenuSelected.length}/10</strong>
             </p>
-            <div class="goods-menu-columns grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-hidden">
-                <div class="flex flex-col gap-2 h-full">
+            <div class="shrink-0">
+                <SearchField
+                    id="goods-menu-search"
+                    placeholder="Search name, SKU, barcode, PLU..."
+                    bind:value={goodsMenuSearch}
+                    ariaLabel="Search available Goods Menu items"
+                    keyboardLabel="Open Goods Menu search keyboard"
+                    clearLabel="Clear Goods Menu search"
+                    onClear={() => (goodsMenuSearch = "")}
+                />
+            </div>
+            <div class="goods-menu-columns grid grid-cols-2 gap-4 flex-1 min-h-0">
+                <div class="goods-menu-column flex flex-col gap-2 min-h-0">
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Available Items</h3>
-                    <div class="relative shrink-0">
-                        <input
-                            id="goods-menu-search"
-                            type="text"
-                            data-touch-keyboard="button"
-                            class="search-input !min-h-10 min-w-0 !pr-12"
-                            placeholder="Search name, SKU, barcode, PLU..."
-                            bind:value={goodsMenuSearch}
-                        />
-                        <TouchKeyboardButton targetId="goods-menu-search" label="Open Goods Menu search keyboard" embedded />
-                    </div>
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
                         {#if goodsMenuLoading && availableGoodsDraft.length === 0}
                             <p class="text-center text-text-muted p-4 text-sm shrink-0">Loading items...</p>
@@ -1066,7 +1136,7 @@
                         {/if}
                     </div>
                 </div>
-                <div class="flex flex-col gap-2 h-full">
+                <div class="goods-menu-column flex flex-col gap-2 min-h-0">
                     <h3 class="font-semibold text-sm uppercase tracking-wider text-text-muted shrink-0">Selected Order</h3>
                     <div class="flex-1 overflow-y-auto flex flex-col gap-1 min-h-0">
                         {#each goodsMenuSelected as item, i}
@@ -1119,7 +1189,6 @@
         color: var(--text-main);
     }
 
-    .items-filter-toolbar,
     .items-table-panel {
         min-width: 0;
     }
@@ -1128,27 +1197,15 @@
         overscroll-behavior: contain;
     }
 
-    .items-filter-toolbar {
-        display: grid;
-        grid-template-columns: minmax(280px, 1fr) minmax(190px, .46fr) minmax(170px, .42fr) 104px 104px;
-        align-items: stretch;
-        gap: 0.65rem;
-        margin-bottom: 0.75rem;
-        padding: 0.65rem;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.5rem;
-        background: var(--bg-panel);
+    .items-search-query {
+        min-width: 0;
+        display: contents;
     }
 
-    .items-search,
-    .items-category-filter,
-    .items-status-filter,
     .items-pagination-nav .btn {
         min-width: 0;
     }
 
-    .items-search .search-input,
-    .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
     .items-command-btn {
         width: 100%;
         height: 48px;
@@ -1157,18 +1214,6 @@
         font-size: 0.96rem;
         letter-spacing: 0;
         box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 8px 18px var(--shadow);
-    }
-
-    .items-search .search-input {
-        background: var(--bg-card);
-        padding-block: 0.65rem;
-        font-weight: 700;
-    }
-
-    .items-filter-toolbar :global(button[aria-haspopup="listbox"]) {
-        background: var(--bg-card);
-        padding-block: 0.65rem;
-        font-weight: 900;
     }
 
     .items-command-btn {
@@ -1292,6 +1337,227 @@
         max-width: min(800px, calc(100vw - 1.5rem));
     }
 
+    .goods-menu-columns {
+        overflow: hidden;
+    }
+
+    .goods-menu-column {
+        height: 100%;
+    }
+
+    .item-price-pad-panel {
+        width: min(360px, calc(100vw - 1rem));
+        max-height: calc(100vh - 1rem);
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.7rem;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        border-radius: 0.55rem;
+        background: var(--bg-card);
+    }
+
+    .item-price-pad-header {
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+    }
+
+    .item-price-pad-header h3 {
+        margin: 0;
+        color: var(--text-main);
+        font-size: 1rem;
+        font-weight: 900;
+    }
+
+    .item-price-pad-header small {
+        display: block;
+        margin-top: 0.15rem;
+        color: var(--text-muted);
+        font-size: 0.72rem;
+        font-weight: 700;
+    }
+
+    .item-price-pad-close {
+        width: 44px;
+        height: 44px;
+        min-width: 44px;
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+        color: var(--text-muted);
+        border: 1px solid var(--border-flat);
+        border-radius: 0.45rem;
+        background: var(--bg-panel);
+        font-size: 1rem;
+        font-weight: 900;
+    }
+
+    .item-price-display-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 72px;
+        gap: 0.6rem;
+    }
+
+    .item-price-display {
+        height: 64px;
+        min-width: 0;
+        padding-inline: 1rem;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        overflow: hidden;
+        color: var(--text-main);
+        border: 1px solid color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat));
+        border-radius: 0.45rem;
+        background: var(--bg-panel);
+        font-family: var(--app-font-mono);
+        font-size: clamp(1.35rem, 7vw, 2rem);
+        font-weight: 900;
+        line-height: 1;
+        letter-spacing: 0.015em;
+        white-space: nowrap;
+    }
+
+    .item-price-clear {
+        min-width: 0;
+        min-height: 44px;
+        height: 64px;
+        cursor: pointer;
+        color: var(--danger);
+        border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border-flat));
+        border-radius: 0.45rem;
+        background: color-mix(in srgb, var(--danger) 7%, var(--bg-card));
+        font-size: 0.78rem;
+        font-weight: 900;
+    }
+
+    .item-price-key-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: repeat(4, minmax(56px, 1fr));
+        gap: 0.6rem;
+    }
+
+    .item-price-key {
+        min-width: 0;
+        min-height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        color: var(--text-main);
+        border: 1px solid color-mix(in srgb, var(--border-flat) 80%, var(--text-muted));
+        border-radius: 0.55rem;
+        background: color-mix(in srgb, var(--bg-card) 76%, var(--bg-panel));
+        box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--border-flat) 72%, transparent);
+        font-family: var(--app-font-mono);
+        font-size: 1.4rem;
+        font-weight: 900;
+        touch-action: manipulation;
+        user-select: none;
+    }
+
+    .item-price-double-zero {
+        font-size: 1.2rem;
+    }
+
+    .item-price-delete {
+        color: var(--warning);
+        border-color: color-mix(in srgb, var(--warning) 42%, var(--border-flat));
+        background: color-mix(in srgb, var(--warning) 8%, var(--bg-card));
+    }
+
+    .item-price-submit {
+        width: 100%;
+        min-height: 54px;
+        cursor: pointer;
+        color: white;
+        border: 1px solid var(--success);
+        border-radius: 0.55rem;
+        background: var(--success);
+        font-size: 1rem;
+        font-weight: 900;
+        text-transform: uppercase;
+        letter-spacing: 0.025em;
+    }
+
+    .item-price-pad-close:hover,
+    .item-price-pad-close:focus-visible,
+    .item-price-key:hover,
+    .item-price-key:focus-visible {
+        color: var(--text-main);
+        border-color: var(--accent-primary);
+        background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-card));
+    }
+
+    .item-price-clear:hover,
+    .item-price-clear:focus-visible {
+        color: white;
+        border-color: var(--danger);
+        background: var(--danger);
+    }
+
+    .item-price-delete:hover,
+    .item-price-delete:focus-visible {
+        color: var(--warning);
+        border-color: var(--warning);
+        background: color-mix(in srgb, var(--warning) 15%, var(--bg-card));
+    }
+
+    .item-price-submit:hover,
+    .item-price-submit:focus-visible {
+        filter: brightness(1.08);
+    }
+
+    .item-price-pad-close:focus-visible,
+    .item-price-clear:focus-visible,
+    .item-price-key:focus-visible,
+    .item-price-submit:focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent-primary) 35%, transparent);
+        outline-offset: 2px;
+    }
+
+    .item-price-pad-close:active,
+    .item-price-clear:active,
+    .item-price-key:active,
+    .item-price-submit:active {
+        translate: 0 1px;
+    }
+
+    @media (max-height: 620px) {
+        .item-price-pad-panel {
+            gap: 0.45rem;
+            padding: 0.65rem;
+        }
+
+        .item-price-pad-header small {
+            display: none;
+        }
+
+        .item-price-display,
+        .item-price-clear {
+            height: 50px;
+        }
+
+        .item-price-key-grid {
+            grid-template-rows: repeat(4, minmax(46px, 1fr));
+            gap: 0.4rem;
+        }
+
+        .item-price-key {
+            min-height: 46px;
+            font-size: 1.2rem;
+        }
+
+        .item-price-submit {
+            min-height: 46px;
+        }
+    }
+
     .item-inventory-section {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1320,7 +1586,7 @@
 
     .item-options-grid {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 0.75rem;
     }
 
@@ -1336,25 +1602,6 @@
             padding: var(--app-page-gutter, 1.5rem) !important;
         }
 
-        .items-filter-toolbar {
-            grid-template-columns: minmax(240px, 1fr) minmax(150px, .45fr) minmax(140px, .42fr) 88px 88px;
-            gap: 0.55rem;
-            padding: 0.55rem;
-        }
-
-        .items-category-filter,
-        .items-status-filter {
-            min-width: 0;
-        }
-
-        .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
-        .items-filter-toolbar .search-input {
-            min-height: 48px !important;
-            height: 48px;
-            font-size: 0.9rem;
-        }
-
-        .items-filter-toolbar .items-command-btn,
         .items-pagination-nav .items-command-btn {
             width: 100%;
             min-width: 0;
@@ -1511,29 +1758,24 @@
             padding: var(--app-page-gutter, 1.5rem) !important;
         }
 
-        .items-filter-toolbar {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 0.55rem;
-            padding: 0.55rem;
+        .items-search-controls {
+            flex-wrap: wrap;
         }
 
-        .items-search {
-            grid-column: 1 / -1;
+        .items-search-query {
+            min-width: 100%;
+            display: flex;
+            flex: 1 0 100%;
+            align-items: flex-end;
+            gap: .625rem;
         }
 
-        .items-category-filter,
-        .items-status-filter {
+        .items-search-query .search-primary {
             min-width: 0;
+            max-width: 32.5rem;
+            flex: 1 1 20rem;
         }
 
-        .items-filter-toolbar :global(button[aria-haspopup="listbox"]),
-        .items-filter-toolbar .search-input {
-            min-height: 46px !important;
-            height: 46px;
-            font-size: 0.9rem;
-        }
-
-        .items-filter-toolbar .items-command-btn,
         .items-pagination-nav .items-command-btn {
             width: 100%;
             min-width: 0;
@@ -1650,6 +1892,16 @@
         .item-image-editor,
         .goods-menu-columns {
             grid-template-columns: minmax(0, 1fr);
+        }
+
+        .goods-menu-columns {
+            align-content: start;
+            overflow-y: auto;
+        }
+
+        .goods-menu-column {
+            height: auto;
+            min-height: 16rem;
         }
 
         .item-image-preview {

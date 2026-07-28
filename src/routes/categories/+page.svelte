@@ -3,6 +3,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
     import { categoriesDB, settingsDB, type Category, uuid, now } from '$lib/stores/db';
@@ -173,21 +174,26 @@
 
 <MgmtPage title="Categories">
     <button slot="actions" class="btn btn-primary" on:click={add}><Plus size={19} strokeWidth={2.5} />Add Category</button>
-    <div class="p-4 border-b border-border-flat bg-bg-panel">
-        <div class="flex items-center gap-3">
-            <div class="relative min-w-0 flex-1">
-                <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20">
-                    <circle cx="11" cy="11" r="8"></circle>
-                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                </svg>
-                <input class="search-input !pl-12" bind:value={searchQuery} placeholder="Search categories..." />
+    <div class="search-strip">
+        <div class="search-strip-intro">
+            <strong class="block text-sm font-black text-text-main">Find categories</strong>
+            <span class="mt-1 block text-xs text-text-muted">Search category names and review how many items use each category.</span>
+        </div>
+        <div class="search-controls">
+            <div class="search-primary">
+                <SearchField
+                    id="category-search"
+                    bind:value={searchQuery}
+                    placeholder="Search categories..."
+                    ariaLabel="Search categories"
+                    keyboardLabel="Open category search keyboard"
+                    clearLabel="Clear category search"
+                    onClear={() => (searchQuery = '')}
+                />
             </div>
-            <span class="min-w-[92px] text-center text-sm font-bold text-text-muted">
+            <span class="search-meta">
                 {filteredCategories.length} / {$categoriesDB.length}
             </span>
-            {#if searchQuery}
-                <button class="btn btn-secondary" on:click={() => searchQuery = ''}>Clear</button>
-            {/if}
         </div>
     </div>
     <table class="tbl">

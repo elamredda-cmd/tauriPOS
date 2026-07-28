@@ -5,11 +5,12 @@
     import { now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
 
-    const themes: { id: Theme; name: string; color1: string; color2: string; desc: string }[] = [
+    const themes: { id: Theme; name: string; color1: string; color2: string; desc: string; light?: boolean }[] = [
         { id: 'midnight', name: 'Midnight', color1: '#080f1e', color2: '#3b82f6', desc: 'Classic dark blue, high contrast.' },
         { id: 'forest', name: 'Forest', color1: '#0a1a12', color2: '#10b981', desc: 'Earthy greens, easy on the eyes.' },
-        { id: 'snow', name: 'Snow', color1: '#f8fafc', color2: '#3b82f6', desc: 'Bright, clean light theme.' },
-        { id: 'linen', name: 'Linen & Walnut', color1: '#f7f5f1', color2: '#76543c', desc: 'Soft warm surfaces with clear walnut accents.' },
+        { id: 'snow', name: 'Snow', color1: '#f8fafc', color2: '#3b82f6', desc: 'Bright, clean light theme.', light: true },
+        { id: 'linen', name: 'Linen & Walnut', color1: '#f7f5f1', color2: '#76543c', desc: 'Soft warm surfaces with clear walnut accents.', light: true },
+        { id: 'sage', name: 'Sage Slate', color1: '#e7ece7', color2: '#315f6f', desc: 'Muted sage surfaces with calm slate accents.', light: true },
         { id: 'coffee', name: 'Coffee', color1: '#1c1917', color2: '#d97706', desc: 'Warm browns and tan accents.' },
         { id: 'sunset', name: 'Sunset', color1: '#1a0b1e', color2: '#f43f5e', desc: 'Deep purple and vibrant rose.' }
     ];
@@ -35,9 +36,10 @@
             {#each themes as theme}
                 <button
                     class="theme-card settings-action-card {$activeTheme === theme.id ? 'active' : ''}"
+                    aria-pressed={$activeTheme === theme.id}
                     on:click={() => selectTheme(theme.id)}
                 >
-                    <div class="theme-preview" style="background: {theme.color1}">
+                    <div class:light-preview={theme.light} class="theme-preview" style="background: {theme.color1}">
                         <div class="preview-header"></div>
                         <div class="preview-content">
                             <div class="preview-item" style="background: {theme.color2}"></div>
@@ -112,6 +114,11 @@
     .preview-item {
         background: rgba(255,255,255,0.1);
         border-radius: 10px;
+    }
+
+    .theme-preview.light-preview .preview-header,
+    .theme-preview.light-preview .preview-item {
+        background: rgba(30, 42, 35, .11);
     }
 
     .theme-info {

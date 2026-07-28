@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import {
         suppliersDB,
         formatMoney,
@@ -76,6 +77,13 @@
     function handleProductSearchKeydown(event: KeyboardEvent) {
         if (event.key !== 'Enter') return;
         event.preventDefault();
+        if (productSearchTimer) clearTimeout(productSearchTimer);
+        productSearchTimer = null;
+        void loadAvailableProducts();
+    }
+
+    function clearProductSearch() {
+        search = '';
         if (productSearchTimer) clearTimeout(productSearchTimer);
         productSearchTimer = null;
         void loadAvailableProducts();
@@ -214,12 +222,22 @@
                     </div>
                 </div>
 
-                <div class="mb-4 grid gap-3 md:grid-cols-[1fr_180px]">
-                    <div class="field">
+                <div class="mb-4 search-controls search-controls-fill">
+                    <div class="field search-primary">
                         <label for="stock-product-search">Find Product</label>
-                        <input id="stock-product-search" class="search-input !min-h-11" bind:value={search} on:input={scheduleProductSearch} on:keydown={handleProductSearchKeydown} placeholder="Search name, SKU, barcode, PLU..." />
+                        <SearchField
+                            id="stock-product-search"
+                            bind:value={search}
+                            placeholder="Search name, SKU, barcode, PLU..."
+                            ariaLabel="Find product to receive"
+                            keyboardLabel="Open product search keyboard"
+                            clearLabel="Clear product search"
+                            onInput={scheduleProductSearch}
+                            onKeydown={handleProductSearchKeydown}
+                            onClear={clearProductSearch}
+                        />
                     </div>
-                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3 text-right">
+                    <div class="search-control w-[180px] flex-[0_0_180px] rounded-lg border border-border-flat bg-bg-panel p-3 text-right max-[700px]:w-full max-[700px]:flex-1">
                         <span class="block text-xs font-black uppercase tracking-[0.14em] text-text-muted">Receipt Total Cost</span>
                         <strong class="text-2xl text-success">{formatMoney(totalCost)}</strong>
                     </div>

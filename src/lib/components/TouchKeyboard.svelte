@@ -239,7 +239,7 @@
         height: .42rem;
         border-radius: 999px;
         background: var(--accent-primary);
-        box-shadow: 0 0 0 4px rgba(59, 130, 246, .15);
+        box-shadow: 0 0 0 4px rgba(var(--accent-primary-rgb), .15);
     }
 
     .cursor-toolbar {
@@ -293,7 +293,7 @@
 
     .cursor-key:focus-visible,
     .keyboard-key:focus-visible {
-        outline: 3px solid rgba(59, 130, 246, .34);
+        outline: 3px solid var(--border-focus);
         outline-offset: 2px;
     }
 
@@ -318,7 +318,7 @@
         color: var(--text-main);
         font-size: 1.05rem;
         font-weight: 750;
-        box-shadow: inset 0 2px 7px rgba(0, 0, 0, .22), 0 0 0 4px rgba(59, 130, 246, .12);
+        box-shadow: inset 0 2px 7px rgba(0, 0, 0, .22), 0 0 0 4px rgba(var(--accent-primary-rgb), .12);
         scrollbar-width: thin;
     }
 

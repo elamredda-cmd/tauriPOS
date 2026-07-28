@@ -3,6 +3,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import SearchField from '$lib/components/SearchField.svelte';
     import { settingsDB, storeDB, formatMoney, type Product } from '$lib/stores/db';
     import { getProductsPage } from '$lib/stores/database';
     import { getLabelDesign } from '$lib/labels';
@@ -10,7 +11,7 @@
     import { getLabelPrinterConfig, printProductLabels } from '$lib/printers';
 
     let search = '';
-    let searchInput: HTMLInputElement;
+    let searchInput: HTMLInputElement | null = null;
     let selected = new Map<string, { product: Product; quantity: number }>();
     let matches: Product[] = [];
     let productsLoading = true;
@@ -103,6 +104,11 @@
     function handleSearchInput(event: Event) {
         search = (event.currentTarget as HTMLInputElement).value;
         scheduleProductSearch(search);
+    }
+
+    function clearProductSearch() {
+        search = '';
+        scheduleProductSearch('', 0);
     }
 
     function selectProduct(product: Product) {
@@ -263,18 +269,23 @@
                 <h3 class="settings-section-title !mb-0">Scan or Find Items</h3>
                 <p class="text-sm text-text-muted">Search by name, SKU, barcode, or PLU. Press Enter to add the first match.</p>
             </div>
-            <div class="relative mt-4">
-                <svg class="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <input
-                    class="search-input !min-h-[56px] !pl-12 !pr-4"
-                    bind:this={searchInput}
-                    value={search}
-                    data-touch-keyboard="off"
-                    disabled={printingLabels}
-                    on:input={handleSearchInput}
-                    on:keydown={handleSearchKeydown}
-                    placeholder="Scan or type, then press Enter..."
-                />
+            <div class="mt-4 search-controls search-controls-fill">
+                <div class="search-primary">
+                    <SearchField
+                        id="label-print-search"
+                        bind:value={search}
+                        bind:inputElement={searchInput}
+                        placeholder="Scan or type, then press Enter..."
+                        ariaLabel="Scan or find an item to print"
+                        clearLabel="Clear item search"
+                        showKeyboard={false}
+                        touchKeyboard="off"
+                        disabled={printingLabels}
+                        onInput={handleSearchInput}
+                        onKeydown={handleSearchKeydown}
+                        onClear={clearProductSearch}
+                    />
+                </div>
             </div>
             <div class="mt-3 min-h-0 flex-1 overflow-y-auto rounded-lg border border-border-flat">
                 {#if productsLoading}

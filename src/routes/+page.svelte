@@ -4,7 +4,7 @@
     import { goto } from "$app/navigation";
     import { isTauri } from "@tauri-apps/api/core";
     import { getCurrentWindow } from "@tauri-apps/api/window";
-    import { ChevronRight, LockKeyhole, Maximize2, Minimize2, ScanLine, Search, ShieldCheck, UsersRound, X } from "@lucide/svelte";
+    import { ChevronRight, Delete as DeleteIcon, LockKeyhole, Maximize2, Minimize2, ScanLine, ShieldAlert, ShieldCheck, UsersRound, X } from "@lucide/svelte";
     import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
     import { randomTileColor } from "$lib/tileColors";
     import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
@@ -41,7 +41,7 @@
         weighableProductById,
         weighableProducts,
         type Customer,
-        type AuditLog,
+        type CustomerAccount,
         type Discount,
         type Employee,
         type Order,
@@ -72,6 +72,7 @@
         getLatestTillReceipt,
         getProductsByIds,
         getPaymentCustomer,
+        getCustomerAccount,
         getOrderDetails,
         getOrderReversalContext,
         claimHeldOrder,
@@ -91,7 +92,7 @@
     import { getScaleSaleDisplay } from "$lib/scaleSale";
     import { getLoyaltyConfig, loyaltyCredit, pointsForCredit, pointsForSpend } from "$lib/loyalty";
     import TouchDigitPad from "$lib/components/TouchDigitPad.svelte";
-    import TouchKeyboardButton from "$lib/components/TouchKeyboardButton.svelte";
+    import SearchField from "$lib/components/SearchField.svelte";
     import SupportAccessPanel from "$lib/components/SupportAccessPanel.svelte";
     import type { SupportSessionGrant } from "$lib/supportAccess";
     import { broadcastCustomerDisplay, type CustomerDisplayPromotion, type CustomerDisplayState } from "$lib/customerDisplay";
@@ -102,6 +103,7 @@
     import { getLabelDesign } from "$lib/labels";
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { requireManualSaleAccess } from "$lib/licensing";
+    import { requiresAgeVerification } from "$lib/ageRestriction";
     import { canAccessPath, hasPermission, permissionForPath, permissionLabels, roleLabels, type PermissionKey } from "$lib/permissions";
     import {
         acquireSumupLock,
@@ -154,6 +156,26 @@
         customerName?: string;
     };
 
+    type AddToCartProduct = {
+        id: string;
+        name: string;
+        price: number;
+        isAgeRestricted?: boolean;
+        forceSeparateLine?: boolean;
+        isPriceOverride?: boolean;
+        originalPrice?: number;
+        sourceBarcode?: string;
+        quantityLocked?: boolean;
+        skipStockAdjustment?: boolean;
+        note?: string;
+    };
+
+    type PendingAgeRestrictedAdd = {
+        product: AddToCartProduct;
+        feedback: "item" | "scan";
+        onAdded?: () => void;
+    };
+
     let activePageId = "";
     let currentPageIndex = 0;
     let searchQuery = "";
@@ -193,8 +215,10 @@
     let heldOrderView: "this" | "other" = "this";
     let showPaymentModal = false;
     let showDiscountModal = false;
+    let pendingAgeRestrictedAdd: PendingAgeRestrictedAdd | null = null;
+    let ageRestrictedConfirmButton: HTMLButtonElement;
     let selectedManualDiscountId = "";
-    let paymentMethod: "cash" | "card" = "cash";
+    let paymentMethod: "cash" | "card" | "account" = "cash";
     let amountTenderedString = "0";
     let hasTypedPayment = false;
     let terminalPaymentStage: "idle" | "reserving" | "sending" | "waiting" | "cancelling" | "approved" | "saving" = "idle";
@@ -208,6 +232,10 @@
     let lastCartScrollIndex = -1;
     let customerSearch = "";
     let selectedCustomerId = "";
+    let selectedCustomerAccount: CustomerAccount | null = null;
+    let customerAccountBusy = false;
+    let customerAccountLoadError = false;
+    let customerAccountLoadToken = 0;
     let useLoyaltyCredit = false;
     let loyaltyCreditBusy = false;
     let customerSearchInput: HTMLInputElement;
@@ -218,6 +246,18 @@
     $: loyaltyCreditUsed = useLoyaltyCredit ? Math.min(total, availableLoyaltyCredit) : 0;
     $: loyaltyPointsRedeemed = pointsForCredit(loyaltyCreditUsed, loyaltyConfig);
     $: paymentDue = Math.max(0, total - loyaltyCreditUsed);
+    $: accountBalanceAfterSale = (selectedCustomerAccount?.balancePence || 0) + paymentDue;
+    $: accountLimitAllowsSale = !selectedCustomerAccount
+        || selectedCustomerAccount.creditLimitPence <= 0
+        || accountBalanceAfterSale <= selectedCustomerAccount.creditLimitPence;
+    $: accountSaleAvailable = Boolean(
+        selectedCustomer
+        && selectedCustomerAccount?.isEnabled
+        && paymentDue > 0
+        && accountLimitAllowsSale
+        && ($connectionState.mode !== "multi" || $connectionState.mysqlOnline)
+        && hasPermission($currentEmployee, "charge_customer_account", $settingsDB)
+    );
     $: loyaltyPointsEarned = selectedCustomer && loyaltyConfig.enabled ? pointsForSpend(paymentDue, loyaltyConfig) : 0;
     $: paymentInputAmount = parseInt(amountTenderedString) || 0;
     $: cardCashPartInvalid = paymentMethod === "card" && paymentInputAmount > 0 && paymentInputAmount >= paymentDue;
@@ -237,7 +277,8 @@
         isCompletingSale ||
         (paymentMethod === "cash" && paymentInputAmount < paymentDue) ||
         cardCashPartInvalid ||
-        (paymentMethod === "card" && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline));
+        (paymentMethod === "card" && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)) ||
+        (paymentMethod === "account" && (!accountSaleAvailable || customerAccountBusy));
     $: customerMatches = customerSearch.trim()
         ? $customersDB.filter((customer) => {
             const query = customerSearch.trim().toLowerCase();
@@ -312,6 +353,13 @@
         void tick().then(() => {
             if (showNotFoundModal && scanAgainButton?.isConnected) {
                 scanAgainButton.focus({ preventScroll: true });
+            }
+        });
+    }
+    $: if (pendingAgeRestrictedAdd && ageRestrictedConfirmButton) {
+        void tick().then(() => {
+            if (pendingAgeRestrictedAdd && ageRestrictedConfirmButton?.isConnected) {
+                ageRestrictedConfirmButton.focus({ preventScroll: true });
             }
         });
     }
@@ -465,6 +513,7 @@
             showScaleModal ||
             showClearConfirm ||
             showReversalConfirm ||
+            Boolean(pendingAgeRestrictedAdd) ||
             showManagerApprovalModal ||
             showPartialRefundPad ||
             showRecentTransactions ||
@@ -584,6 +633,7 @@
             ...product,
             trackStock: asBoolean(product.trackStock),
             allowPriceOverride: asBoolean(product.allowPriceOverride),
+            isAgeRestricted: asBoolean(product.isAgeRestricted),
             isWeighable: asBoolean(product.isWeighable),
             showInGoods: asBoolean(product.showInGoods),
             isActive: asBoolean(product.isActive, true),
@@ -1304,6 +1354,8 @@
     function handleNumpadKey(key: string) {
         if (key === "C") {
             numpadValue = "";
+        } else if (key === "DEL" || key === "⌫") {
+            numpadValue = numpadValue.slice(0, -1);
         } else if (key === "ENTER") {
             if (numpadValue !== "" && cart[selectedCartIndex] && !cart[selectedCartIndex].quantityLocked) {
                 const quantity = parseInt(numpadValue);
@@ -1341,23 +1393,12 @@
             selectedCartIndex = Math.max(0, cart.length - 1);
     }
 
-    function addToCart(product: {
-        id: string;
-        name: string;
-        price: number;
-        forceSeparateLine?: boolean;
-        isPriceOverride?: boolean;
-        originalPrice?: number;
-        sourceBarcode?: string;
-        quantityLocked?: boolean;
-        skipStockAdjustment?: boolean;
-        note?: string;
-    }, feedback: "item" | "scan" = "item") {
+    function commitAddToCart(product: AddToCartProduct, feedback: "item" | "scan" = "item"): boolean {
         const existing = product.forceSeparateLine ? -1 : cart.findIndex((i) => i.id === product.id);
         if (existing >= 0) {
             if (cart[existing].quantity >= MAX_CART_QUANTITY) {
                 toast(`Quantity cannot be more than ${MAX_CART_QUANTITY.toLocaleString()}`, "error");
-                return;
+                return false;
             }
             cart[existing].quantity++;
             selectedCartIndex = existing;
@@ -1380,6 +1421,35 @@
         if (feedback === "scan") playScanSuccessSound();
         else playItemAddedSound();
         sendCctvCartProductName(cart[selectedCartIndex]);
+        return true;
+    }
+
+    function addToCart(
+        product: AddToCartProduct,
+        feedback: "item" | "scan" = "item",
+        onAdded?: () => void,
+    ): boolean {
+        const catalogProduct = $productById.get(product.id) || product;
+        if (requiresAgeVerification(catalogProduct, $settingsDB)) {
+            pendingAgeRestrictedAdd = { product, feedback, onAdded };
+            playErrorSound();
+            return false;
+        }
+        const added = commitAddToCart(product, feedback);
+        if (added) onAdded?.();
+        return added;
+    }
+
+    function confirmAgeRestrictedAdd() {
+        const pending = pendingAgeRestrictedAdd;
+        pendingAgeRestrictedAdd = null;
+        if (!pending) return;
+        const added = commitAddToCart(pending.product, pending.feedback);
+        if (added) pending.onAdded?.();
+    }
+
+    function cancelAgeRestrictedAdd() {
+        pendingAgeRestrictedAdd = null;
     }
 
     function scaleInputFromReading(reading: ScaleWeightReading): string {
@@ -1487,9 +1557,10 @@
             quantityLocked: true,
             skipStockAdjustment: true,
             note: `Manual scale: ${grams} g at ${formatMoney(selectedScaleProduct.price)}/kg`,
+        }, "item", () => {
+            closeScaleModal();
+            toast(`${selectedScaleProduct.name} added from scale`, "success");
         });
-        closeScaleModal();
-        toast(`${selectedScaleProduct.name} added from scale`, "success");
     }
 
     async function handleSearch() {
@@ -1588,6 +1659,8 @@
     function handleQuickAddPriceKey(key: string) {
         if (key === "C") {
             quickAddPrice = "0";
+        } else if (key === "DEL" || key === "⌫") {
+            quickAddPrice = quickAddPrice.length > 1 ? quickAddPrice.slice(0, -1) : "0";
         } else if (key === "00") {
             if (quickAddPrice !== "0" && quickAddPrice.length <= 7) quickAddPrice += "00";
         } else if (quickAddPrice.length < 9) {
@@ -1624,6 +1697,7 @@
             costPrice: 0,
             stockLevel: 0,
             trackStock: false,
+            isAgeRestricted: false,
             isWeighable: false,
             showInGoods: false,
             goodsSortOrder: 0,
@@ -2002,7 +2076,7 @@
     function handleGoodsPadKey(key: string) {
         if (key === "C") {
             goodsPriceString = "0";
-        } else if (key === "DEL") {
+        } else if (key === "DEL" || key === "⌫") {
             goodsPriceString = goodsPriceString.length > 1 ? goodsPriceString.slice(0, -1) : "0";
         } else if (key === "00") {
             if (goodsPriceString !== "0" && goodsPriceString.length <= 7) goodsPriceString += "00";
@@ -2019,19 +2093,16 @@
             return;
         }
 
-        cart.push({
+        addToCart({
             id: product.id,
             name: product.name,
             price: newPence,
-            quantity: 1,
+            forceSeparateLine: true,
             note: "",
+        }, "item", () => {
+            showGoodsModal = false;
+            goodsPriceString = "0";
         });
-        selectedCartIndex = cart.length - 1;
-        cart = [...cart];
-        playItemAddedSound();
-
-        showGoodsModal = false;
-        goodsPriceString = "0";
     }
     let heldOrdersForTill: PosOrderSummary[] = [];
     let heldOrderLinesByOrder = new Map<string, OrderLine[]>();
@@ -2156,6 +2227,7 @@
         showScaleModal ||
         showClearConfirm ||
         showReversalConfirm ||
+        Boolean(pendingAgeRestrictedAdd) ||
         showManagerApprovalModal ||
         showPartialRefundPad ||
         showRecentTransactions ||
@@ -2451,6 +2523,13 @@
             };
         });
         const paymentAllocation = allocateRefundPayment(refundAmount, originalPayments, previousReversalPayments);
+        const refundCustomerAccount = paymentAllocation.accountAmount > 0 && original.customerId
+            ? await getCustomerAccount(original.customerId)
+            : null;
+        if (paymentAllocation.accountAmount > 0 && !refundCustomerAccount) {
+            toast("The customer account for this Pay later refund could not be found", "error");
+            return;
+        }
         const payment = {
             id: uuid(),
             orderId: reversalId,
@@ -2458,6 +2537,8 @@
             amount: -refundAmount,
             cashAmount: -paymentAllocation.cashAmount,
             cardAmount: -paymentAllocation.cardAmount,
+            loyaltyAmount: -paymentAllocation.loyaltyAmount,
+            accountAmount: -paymentAllocation.accountAmount,
             reference: voiding ? "VOID" : "REFUND",
             changeGiven: 0,
             createdAt: timestamp,
@@ -2488,7 +2569,14 @@
         } else if (dojoRefundAmount > 0) {
             payment.method = paymentAllocation.cashAmount > 0 ? "split+dojo" : "dojo";
         }
-        reversalOrder.paymentMethod = payment.method;
+        // Keep the accounting method on the payment row, but make the receipt
+        // explicit when part of the refund is credited back to Pay Later or
+        // loyalty value. Mixed refunds would otherwise print only "SPLIT".
+        reversalOrder.paymentMethod = [
+            payment.method,
+            paymentAllocation.loyaltyAmount > 0 && !String(payment.method).includes('loyalty') ? 'loyalty' : '',
+            paymentAllocation.accountAmount > 0 && !String(payment.method).includes('account') ? 'account' : '',
+        ].filter(Boolean).join('+');
         const originalStockMovements = reversalContext.originalStockMovements;
         const stockChanges = partial ? [] : originalStockMovements.map((soldMovement) => ({
                 productId: soldMovement.productId,
@@ -2509,12 +2597,34 @@
                 reason: "refund_adjustment",
                 createdAt: timestamp,
             }];
+        const accountChanges = paymentAllocation.accountAmount > 0 && refundCustomerAccount ? [{
+            id: uuid(),
+            accountId: refundCustomerAccount.id,
+            customerId: original.customerId,
+            orderId: reversalId,
+            entryType: 'refund' as const,
+            amountPence: -paymentAllocation.accountAmount,
+            paymentMethod: '' as const,
+            reference: `Refund of receipt ${original.orderNumber}`,
+            description: `${voiding ? 'Void' : 'Refund'} credited to customer account`,
+            receiptNumber: 0,
+            receiptKey: '',
+            employeeId: $currentEmployee?.id || '',
+            tillNumber: tillId,
+            shiftId: $currentShiftId,
+            idempotencyKey: `refund-account:${reversalId}`,
+            reversesEntryId: '',
+            balanceAfterPence: 0,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+        }] : [];
         const reversalBundle: SaleBundle = {
             order: reversalOrder,
             lines: reversalLines,
             payment,
             stockChanges,
             loyaltyChanges,
+            accountChanges,
             audit: {
                 id: uuid(),
                 employeeId: $currentEmployee?.id || "",
@@ -2522,7 +2632,7 @@
                 entityType: "order",
                 entityId: original.id,
                 oldData: JSON.stringify({ status: original.status }),
-                newData: JSON.stringify({ status, refundAmount, reversalId }),
+                newData: JSON.stringify({ status, refundAmount, reversalId, accountRefund: paymentAllocation.accountAmount }),
                 createdAt: timestamp,
             },
             originalOrderToUpdate: original.id,
@@ -2575,7 +2685,9 @@
             } else if (managedRefundApproved === "dojo") {
                 await updateDojoAttempt(reversalId, "completed", { saleBundle: committedReversal });
             }
-            applyCompletedSaleToStores(committedReversal);
+            // Browser preview commits directly into its in-memory stores;
+            // native commits return a bundle for the UI stores to apply.
+            if (isTauri()) applyCompletedSaleToStores(committedReversal);
             if (paymentAllocation.cashAmount > 0) {
                 void openDrawerAfterSuccessfulPayment(paymentAllocation.cashAmount, voiding ? "Void" : "Refund");
             }
@@ -2682,6 +2794,10 @@
         terminalCancelRequested = false;
         customerSearch = "";
         selectedCustomerId = "";
+        selectedCustomerAccount = null;
+        customerAccountLoadToken += 1;
+        customerAccountBusy = false;
+        customerAccountLoadError = false;
         useLoyaltyCredit = false;
         calculateQuickAmounts(total);
         showPaymentModal = true;
@@ -2690,6 +2806,9 @@
 
     function closePayment() {
         if (isCompletingSale) return;
+        customerAccountLoadToken += 1;
+        customerAccountBusy = false;
+        customerAccountLoadError = false;
         showPaymentModal = false;
     }
 
@@ -2708,6 +2827,10 @@
     }
 
     function closeTopPosModal(): boolean {
+        if (pendingAgeRestrictedAdd) {
+            cancelAgeRestrictedAdd();
+            return true;
+        }
         if (showManagerApprovalModal) {
             cancelManagerApproval();
             return true;
@@ -2765,6 +2888,27 @@
 
     function handleModalKeydown(event: KeyboardEvent) {
         if (handleLoginKeydown(event)) return;
+        if (
+            showPaymentModal &&
+            paymentMethod === "cash" &&
+            !isCompletingSale &&
+            !event.defaultPrevented &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !(event.target as HTMLElement | null)?.matches("input, textarea, select, [contenteditable='true']")
+        ) {
+            if (/^\d$/.test(event.key)) {
+                event.preventDefault();
+                handlePaymentPadKey(event.key);
+                return;
+            }
+            if (event.key === "Backspace" || event.key === "Delete") {
+                event.preventDefault();
+                handlePaymentPadKey("⌫");
+                return;
+            }
+        }
         if (event.key !== "Escape" || event.defaultPrevented) return;
         if (!closeTopPosModal()) return;
         event.preventDefault();
@@ -2777,14 +2921,33 @@
         if (closeTopPosModal()) event.preventDefault();
     }
 
-    function selectPaymentCustomer(customer: Customer) {
+    async function selectPaymentCustomer(customer: Customer) {
+        const customerId = customer.id;
+        const loadToken = ++customerAccountLoadToken;
         selectedCustomerId = customer.id;
+        selectedCustomerAccount = null;
+        customerAccountLoadError = false;
         customerSearch = "";
         document.dispatchEvent(new Event("close-touch-keyboard"));
         useLoyaltyCredit = false;
         amountTenderedString = "0";
         hasTypedPayment = false;
         calculateQuickAmounts(total);
+        customerAccountBusy = true;
+        try {
+            const account = await getCustomerAccount(customerId);
+            if (loadToken !== customerAccountLoadToken || selectedCustomerId !== customerId) return;
+            selectedCustomerAccount = account;
+        } catch (error) {
+            if (loadToken !== customerAccountLoadToken || selectedCustomerId !== customerId) return;
+            customerAccountLoadError = true;
+            console.warn("Could not load customer account:", error);
+            toast(`Could not load customer account: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            if (loadToken === customerAccountLoadToken && selectedCustomerId === customerId) {
+                customerAccountBusy = false;
+            }
+        }
     }
 
     function handleCustomerSearchKeydown(event: KeyboardEvent) {
@@ -2797,7 +2960,7 @@
             customer.loyaltyCode?.toLowerCase() === loyaltyCode,
         );
         if (exact) {
-            selectPaymentCustomer(exact);
+            void selectPaymentCustomer(exact);
             input.value = "";
         }
     }
@@ -2836,7 +2999,12 @@
     }
 
     function removePaymentCustomer() {
+        customerAccountLoadToken += 1;
         selectedCustomerId = "";
+        selectedCustomerAccount = null;
+        customerAccountBusy = false;
+        customerAccountLoadError = false;
+        if (paymentMethod === "account") paymentMethod = "cash";
         useLoyaltyCredit = false;
         amountTenderedString = "0";
         hasTypedPayment = false;
@@ -2892,10 +3060,21 @@
         }
     }
 
-    function selectPaymentMethod(method: "cash" | "card") {
+    function selectPaymentMethod(method: "cash" | "card" | "account") {
         if (isCompletingSale) return;
+        if (method === "account" && !accountSaleAvailable) {
+            if (!selectedCustomer) toast("Select a customer before using Pay later", "info");
+            else if (customerAccountBusy) toast("Wait while the customer account is checked", "info");
+            else if (customerAccountLoadError) toast("The customer account could not be verified. Remove and select the customer again to retry", "error");
+            else if (paymentDue <= 0) toast("Nothing remains to charge to the customer account", "info");
+            else if (!selectedCustomerAccount?.isEnabled) toast("Pay later is not enabled for this customer", "error");
+            else if (!accountLimitAllowsSale) toast("This sale would exceed the customer's account limit", "error");
+            else if ($connectionState.mode === "multi" && !$connectionState.mysqlOnline) toast("MariaDB must be online for Pay later", "error");
+            else if (!hasPermission($currentEmployee, "charge_customer_account", $settingsDB)) toast("You do not have permission to charge customer accounts", "error");
+            return;
+        }
         paymentMethod = method;
-        if (method === "card" && paymentInputAmount >= paymentDue) {
+        if (method === "account" || (method === "card" && paymentInputAmount >= paymentDue)) {
             amountTenderedString = "0";
             hasTypedPayment = false;
         }
@@ -3664,6 +3843,24 @@
             toast("For split payment, the cash part must be less than the amount due", "error");
             return;
         }
+        if (paymentMethod === "account") {
+            if (!selectedCustomer || !selectedCustomerAccount?.isEnabled) {
+                toast("Select a customer with Pay later enabled", "error");
+                return;
+            }
+            if (!hasPermission($currentEmployee, "charge_customer_account", $settingsDB)) {
+                toast("You do not have permission to charge customer accounts", "error");
+                return;
+            }
+            if ($connectionState.mode === "multi" && !$connectionState.mysqlOnline) {
+                toast("MariaDB must be online for Pay later", "error");
+                return;
+            }
+            if (!accountLimitAllowsSale) {
+                toast("This sale would exceed the customer's account limit", "error");
+                return;
+            }
+        }
         const tendered =
             paymentMethod === "cash"
                 ? paymentInputAmount
@@ -3683,8 +3880,9 @@
             // Determine split amounts
             let cashAmount = 0;
             let cardAmount = 0;
+            let accountAmount = 0;
             let change = 0;
-            let method: 'cash' | 'card' | 'split' | 'loyalty' = paymentMethod;
+            let method: 'cash' | 'card' | 'split' | 'loyalty' | 'account' = paymentMethod;
 
             if (paymentMethod === "cash") {
                 cashAmount = paymentDue;
@@ -3705,6 +3903,11 @@
                     cardAmount = paymentDue;
                     change = 0;
                 }
+            } else if (paymentMethod === "account") {
+                accountAmount = paymentDue;
+                cashAmount = 0;
+                cardAmount = 0;
+                change = 0;
             }
             if (loyaltyCreditUsed > 0 && paymentDue === 0) {
                 method = 'loyalty';
@@ -3799,7 +4002,11 @@
             amount: total,
             cashAmount,
             cardAmount,
-            reference: loyaltyCreditUsed > 0 ? `Loyalty credit ${formatMoney(loyaltyCreditUsed)}` : "",
+            loyaltyAmount: loyaltyCreditUsed,
+            accountAmount,
+            reference: accountAmount > 0
+                ? `Pay later · ${selectedCustomer?.name || "Customer"}`
+                : loyaltyCreditUsed > 0 ? `Loyalty value ${formatMoney(loyaltyCreditUsed)}` : "",
             changeGiven: paymentMethod === "cash" ? Math.max(0, change) : 0,
             createdAt: timestamp,
             updatedAt: timestamp,
@@ -3835,6 +4042,7 @@
                     loyaltyPointsEarned,
                     cashAmount,
                     cardAmount,
+                    accountAmount,
                     changeGiven: paymentMethod === "cash" ? Math.max(0, change) : 0,
                 }),
                 createdAt: timestamp,
@@ -3851,19 +4059,39 @@
                 }] : []),
             ] : [];
 
+            const accountChanges = accountAmount > 0 && selectedCustomer && selectedCustomerAccount ? [{
+                id: uuid(),
+                accountId: selectedCustomerAccount.id,
+                customerId: selectedCustomer.id,
+                orderId,
+                entryType: 'charge' as const,
+                amountPence: accountAmount,
+                paymentMethod: '' as const,
+                reference: '',
+                description: `Pay later sale for ${selectedCustomer.name}`,
+                receiptNumber: 0,
+                receiptKey: '',
+                employeeId: newOrder.employeeId,
+                tillNumber: tillId,
+                shiftId: $currentShiftId,
+                idempotencyKey: `sale-account:${orderId}`,
+                reversesEntryId: '',
+                balanceAfterPence: 0,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+            }] : [];
+
             const saleBundle: SaleBundle = {
                 order: newOrder,
                 lines,
                 payment,
                 stockChanges,
                 loyaltyChanges,
+                accountChanges,
                 audit,
             };
 
-            if (trainingModeEnabled || !isTauri()) {
-                if (!isTauri()) {
-                    auditLogDB.update((entries) => [saleBundle.audit as AuditLog, ...entries]);
-                }
+            if (trainingModeEnabled) {
                 cart = [];
                 selectedCartIndex = 0;
                 showPaymentModal = false;
@@ -3876,10 +4104,33 @@
                 selectedCustomerId = "";
                 useLoyaltyCredit = false;
                 playSuccessSound();
+                toast("Training sale completed. Nothing was saved.", "success");
+                return;
+            }
+
+            if (!isTauri()) {
+                const previewCustomerName = selectedCustomer?.name || 'Customer';
+                const committedPreview = await commitSale(saleBundle);
+                const previewBalance = committedPreview.accountChanges?.at(-1)?.balanceAfterPence;
+                cart = [];
+                selectedCartIndex = 0;
+                showPaymentModal = false;
+                customerDisplayChange = paymentMethod === "cash" ? Math.max(0, change) : 0;
+                customerDisplayCompleteUntil = Date.now() + 8000;
+                setTimeout(() => {
+                    customerDisplayCompleteUntil = 0;
+                    customerDisplayChange = 0;
+                }, 8000);
+                customerAccountLoadToken += 1;
+                selectedCustomerId = "";
+                selectedCustomerAccount = null;
+                customerAccountBusy = false;
+                useLoyaltyCredit = false;
+                playSuccessSound();
                 toast(
-                    trainingModeEnabled
-                        ? "Training sale completed. Nothing was saved."
-                        : "Preview sale completed. Nothing was saved.",
+                    accountAmount > 0
+                        ? `Preview sale charged to ${previewCustomerName}. Now owes ${formatMoney(previewBalance ?? accountBalanceAfterSale)}.`
+                        : "Preview sale completed and added to the browser report.",
                     "success",
                 );
                 return;
@@ -3904,6 +4155,7 @@
             }
 
             const committedSale = await commitSale(saleBundle);
+            const completedAccountCustomerName = selectedCustomer?.name || 'Customer';
             if (approvedManagedBundle && approvedManagedProvider) {
                 if (approvedManagedProvider === "dojo") {
                     await updateDojoAttempt(approvedManagedBundle.order.id, "completed", { saleBundle: committedSale });
@@ -3927,11 +4179,16 @@
                 customerDisplayCompleteUntil = 0;
                 customerDisplayChange = 0;
             }, 8000);
+            customerAccountLoadToken += 1;
             selectedCustomerId = "";
+            selectedCustomerAccount = null;
+            customerAccountBusy = false;
             useLoyaltyCredit = false;
             playSuccessSound();
             toast(
-                paymentMethod === "cash" && change > 0
+                paymentMethod === "account"
+                    ? `Sale completed. ${formatMoney(accountAmount)} charged to ${completedAccountCustomerName}.`
+                    : paymentMethod === "cash" && change > 0
                     ? `Sale completed. Change: ${formatMoney(change)}`
                     : "Sale completed successfully",
                 "success",
@@ -4778,7 +5035,19 @@
                             </button>
                         {/each}
                     </div>
-                    <input class="search-input" value={scaleSearch} on:input={(event) => { scaleSearch = event.currentTarget.value; scalePage = 0; }} placeholder="Search weighable products, SKU, barcode, or PLU..." />
+                    <div class="search-controls search-controls-fill">
+                        <div class="search-primary">
+                            <SearchField
+                                id="pos-scale-product-search"
+                                bind:value={scaleSearch}
+                                placeholder="Search weighable products, SKU, barcode, or PLU..."
+                                ariaLabel="Search weighable products"
+                                keyboardLabel="Open scale product search keyboard"
+                                onInput={() => (scalePage = 0)}
+                                onClear={() => (scalePage = 0)}
+                            />
+                        </div>
+                    </div>
                     {#if visibleScaleProducts.length}
                         <div class="scale-product-grid">
                             {#each pagedScaleProducts as product}
@@ -4882,7 +5151,7 @@
         data-pos-modal-overlay
     >
         <div
-            class="w-80 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            class="quantity-pad-modal w-80 max-w-[95vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="quantity-dialog-title"
@@ -4890,31 +5159,56 @@
             <div class="flex justify-between items-center">
                 <h3 id="quantity-dialog-title" class="m-0 text-lg font-semibold">Enter Quantity</h3>
                 <button
-                    class="text-text-muted text-xl hover:text-text-main transition-colors"
+                    type="button"
+                    class="modal-close"
                     aria-label="Close quantity dialog"
                     on:click={() => (showNumpad = false)}>✕</button
                 >
             </div>
             <div
-                class="h-12 md:h-16 flex items-center justify-end px-4 text-2xl md:text-3xl font-bold bg-bg-panel border border-border-flat rounded-md font-serif"
+                class="np-display payment-display quantity-pad-display"
+                role="spinbutton"
+                aria-live="polite"
+                aria-label="Selected quantity"
+                aria-valuemin="0"
+                aria-valuemax={MAX_CART_QUANTITY}
+                aria-valuenow={parseInt(numpadValue) || 0}
+                tabindex="0"
             >
                 {numpadValue || "0"}
             </div>
-            <div class="grid grid-cols-3 gap-3">
-                {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "ENTER"] as key}
+            <div
+                class="np-grid payment-np-grid quantity-np-grid"
+                role="group"
+                aria-label="Quantity number pad"
+            >
+                {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "⌫"] as key}
                     <button
-                        class="h-10 md:h-12 lg:h-14 flex items-center justify-center text-base md:text-xl font-bold rounded-md transition-colors border border-border-flat {key ===
-                        'ENTER'
-                            ? 'col-span-2 bg-success text-white hover:brightness-110'
-                            : key === 'C'
-                              ? 'text-danger bg-bg-panel hover:bg-danger hover:text-white'
-                              : 'bg-bg-panel text-text-main hover:bg-bg-card-hover'}"
+                        type="button"
+                        class="np-btn payment-np-button"
+                        class:pos-pad-clear={key === "C"}
+                        class:is-delete={key === "⌫"}
+                        aria-label={key === "C" ? "Clear quantity" : key === "⌫" ? "Delete last quantity digit" : `Enter ${key}`}
+                        title={key === "⌫" ? "Delete last digit" : undefined}
                         on:click={() => handleNumpadKey(key)}
                     >
-                        {key}
+                        {#if key === "⌫"}
+                            <DeleteIcon size={26} strokeWidth={2.35} aria-hidden="true" />
+                        {:else if key === "C"}
+                            Clear
+                        {:else}
+                            {key}
+                        {/if}
                     </button>
                 {/each}
             </div>
+            <button
+                type="button"
+                class="btn btn-success quantity-pad-enter"
+                on:click={() => handleNumpadKey("ENTER")}
+            >
+                Enter Quantity
+            </button>
         </div>
     </div>
 {/if}
@@ -4987,13 +5281,16 @@
             >
                 <div class="p-5 border-b border-border-flat bg-bg-panel">
                     <h3 class="m-0 text-[1.2rem]">Select Department</h3>
-                    <div class="mt-2">
-                        <input
-                            type="text"
-                            class="w-full px-3 py-2 bg-bg-panel border border-border-flat rounded-sm text-text-main text-[0.85rem] outline-none focus:border-accent-primary"
-                            bind:value={goodsSearchQuery}
-                            placeholder="Filter..."
-                        />
+                    <div class="search-controls search-controls-fill mt-2">
+                        <div class="search-primary">
+                            <SearchField
+                                id="goods-department-search"
+                                bind:value={goodsSearchQuery}
+                                placeholder="Filter departments..."
+                                ariaLabel="Filter goods departments"
+                                keyboardLabel="Open goods filter keyboard"
+                            />
+                        </div>
                     </div>
                 </div>
                 <div
@@ -5027,32 +5324,59 @@
             </div>
 
             <!-- Right Side: Numpad -->
-            <div class="w-[340px] p-6 flex flex-col bg-bg-card">
+            <div class="goods-price-pad w-full md:w-[340px] p-4 sm:p-6 flex flex-col bg-bg-card">
                 <div class="modal-header">
                     <h3>Enter Price</h3>
                     <button
+                        type="button"
                         class="modal-close"
+                        aria-label="Close goods price dialog"
                         on:click={() => (showGoodsModal = false)}>✕</button
                     >
                 </div>
-                <div class="np-display !justify-between gap-3 mb-4 mt-2">
+                <div class="payment-display-row mb-4 mt-2">
+                    <div
+                        class="np-display payment-display goods-price-display"
+                        role="spinbutton"
+                        aria-live="polite"
+                        aria-label="Goods price"
+                        aria-valuemin="0"
+                        aria-valuenow={parseInt(goodsPriceString || "0")}
+                        aria-valuetext={formatMoney(parseInt(goodsPriceString || "0"))}
+                        tabindex="0"
+                    >
+                        {formatMoney(parseInt(goodsPriceString || "0"))}
+                    </div>
                     <button
                         type="button"
-                        class="h-10 min-w-[76px] rounded-md border border-border-flat bg-bg-card px-3 text-sm font-bold text-danger hover:border-danger hover:bg-danger hover:text-white"
-                        aria-label="Delete last price digit"
-                        on:click={() => handleGoodsPadKey("DEL")}
+                        class="payment-clear-button"
+                        aria-label="Clear goods price"
+                        title="Clear price"
+                        on:click={() => handleGoodsPadKey("C")}
                     >
-                        Delete
+                        Clear
                     </button>
-                    <span>{formatMoney(parseInt(goodsPriceString || "0"))}</span>
                 </div>
-                <div class="np-grid">
-                    {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "C"] as key}
+                <div
+                    class="np-grid payment-np-grid goods-np-grid"
+                    role="group"
+                    aria-label="Goods price number pad"
+                >
+                    {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                         <button
-                            class="np-btn {key === 'C' ? 'np-clear' : ''}"
+                            type="button"
+                            class="np-btn payment-np-button"
+                            class:is-delete={key === "⌫"}
+                            class:is-double-zero={key === "00"}
+                            aria-label={key === "⌫" ? "Delete last goods price digit" : key === "00" ? "Enter double zero" : `Enter ${key}`}
+                            title={key === "⌫" ? "Delete last digit" : undefined}
                             on:click={() => handleGoodsPadKey(key)}
                         >
-                            {key}
+                            {#if key === "⌫"}
+                                <DeleteIcon size={28} strokeWidth={2.35} aria-hidden="true" />
+                            {:else}
+                                {key}
+                            {/if}
                         </button>
                     {/each}
                 </div>
@@ -5083,25 +5407,24 @@
                 >
             </div>
 
-            {#if loyaltyConfig.enabled}
-                <section class="payment-loyalty p-2.5 rounded-md border border-border-flat bg-bg-panel">
+            <section class="payment-loyalty p-2.5 rounded-md border border-border-flat bg-bg-panel">
                     <div class="payment-loyalty-search">
                         <div class="payment-loyalty-heading">
                             <ScanLine size={18} strokeWidth={2.3} aria-hidden="true" />
-                            <label for="payment-customer-search">Customer &amp; loyalty</label>
-                            <span class="payment-loyalty-subtitle">Scan card or find customer</span>
+                            <label for="payment-customer-search">Customer account &amp; loyalty</label>
+                            <span class="payment-loyalty-subtitle">Find a customer for Pay later or rewards</span>
                         </div>
-                        <div class="payment-customer-search-row">
-                            <div class="payment-customer-search-field">
-                                <Search size={18} strokeWidth={2.3} aria-hidden="true" />
-                                <input
+                        <div class="payment-customer-search-row search-controls search-controls-fill">
+                            <div class="payment-customer-search-field search-primary">
+                                <SearchField
                                     id="payment-customer-search"
-                                    bind:this={customerSearchInput}
-                                    class="flat-input payment-customer-input w-full"
+                                    bind:inputElement={customerSearchInput}
                                     bind:value={customerSearch}
-                                    on:keydown={handleCustomerSearchKeydown}
-                                    data-touch-keyboard="button"
                                     placeholder="Name, loyalty code, phone or postcode"
+                                    ariaLabel="Search customer accounts and loyalty"
+                                    keyboardLabel="Open customer search keyboard"
+                                    clearLabel="Clear customer search"
+                                    onKeydown={handleCustomerSearchKeydown}
                                 />
                                 {#if customerMatches.length > 0}
                                     <div class="payment-customer-results">
@@ -5114,15 +5437,10 @@
                                     </div>
                                 {/if}
                             </div>
-                            <TouchKeyboardButton
-                                targetId="payment-customer-search"
-                                label="Open customer search keyboard"
-                                className="payment-customer-keyboard"
-                            />
                         </div>
                     </div>
                     {#if selectedCustomer}
-                        <div class="payment-customer-card" aria-live="polite">
+                        <div class="payment-customer-card" aria-live="polite" aria-busy={customerAccountBusy}>
                             <div class="payment-customer-details">
                                 <span class="payment-customer-avatar" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
                                 <div class="payment-customer-identity">
@@ -5131,20 +5449,36 @@
                                 </div>
                             </div>
                             <div class="payment-customer-balance">
-                                <span><small>Points</small><b>{Number(selectedCustomer.loyaltyPoints || 0).toLocaleString()}</b></span>
-                                <span><small>Credit</small><b>{formatMoney(availableLoyaltyCredit)}</b></span>
-                                <span><small>This sale</small><b class="is-earned">+{loyaltyPointsEarned}</b></span>
+                                {#if loyaltyConfig.enabled}
+                                    <span><small>Points</small><b>{Number(selectedCustomer.loyaltyPoints || 0).toLocaleString()}</b></span>
+                                    <span><small>Loyalty value</small><b>{formatMoney(availableLoyaltyCredit)}</b></span>
+                                {/if}
+                                {#if customerAccountBusy}
+                                    <span><small>Account</small><b>Checking…</b></span>
+                                    <span><small>Pay later</small><b>Checking…</b></span>
+                                {:else if customerAccountLoadError}
+                                    <span><small>Account</small><b class="account-unavailable">Unavailable</b></span>
+                                    <span><small>Pay later</small><b class="account-unavailable">Unavailable</b></span>
+                                {:else if (selectedCustomerAccount?.balancePence || 0) < 0}
+                                    <span><small>Account credit</small><b class="is-earned">{formatMoney(Math.abs(selectedCustomerAccount?.balancePence || 0))}</b></span>
+                                    <span><small>Pay later</small><b>{selectedCustomerAccount?.isEnabled ? 'Enabled' : 'Not enabled'}</b></span>
+                                {:else}
+                                    <span><small>Amount owed</small><b class:account-owed={(selectedCustomerAccount?.balancePence || 0) > 0}>{formatMoney(selectedCustomerAccount?.balancePence || 0)}</b></span>
+                                    <span><small>Pay later</small><b>{selectedCustomerAccount?.isEnabled ? 'Enabled' : 'Not enabled'}</b></span>
+                                {/if}
                             </div>
                             <div class="payment-customer-actions">
-                                <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale} on:click={toggleLoyaltyCredit}>
-                                    {loyaltyCreditBusy
-                                        ? 'Checking...'
-                                        : useLoyaltyCredit
-                                            ? `Using ${formatMoney(loyaltyCreditUsed)}`
-                                            : availableLoyaltyCredit > 0
-                                                ? loyaltyRedemptionAvailable ? 'Use Credit' : 'Reconnect & Use'
-                                                : 'Check Credit'}
-                                </button>
+                                {#if loyaltyConfig.enabled}
+                                    <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale} on:click={toggleLoyaltyCredit}>
+                                        {loyaltyCreditBusy
+                                            ? 'Checking...'
+                                            : useLoyaltyCredit
+                                                ? `Using ${formatMoney(loyaltyCreditUsed)}`
+                                                : availableLoyaltyCredit > 0
+                                                    ? loyaltyRedemptionAvailable ? `Use ${formatMoney(availableLoyaltyCredit)}` : 'Reconnect & use'
+                                                    : 'No loyalty value'}
+                                    </button>
+                                {/if}
                                 <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" on:click={removePaymentCustomer}>
                                     <X size={18} strokeWidth={2.4} aria-hidden="true" />
                                 </button>
@@ -5155,12 +5489,11 @@
                             <span class="payment-customer-avatar is-empty" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
                             <span>
                                 <strong>No customer selected</strong>
-                                <small>Scan or search to attach loyalty</small>
+                                <small>Search to use Pay later or loyalty rewards</small>
                             </span>
                         </div>
                     {/if}
-                </section>
-            {/if}
+            </section>
 
             <div class="payment-body flex flex-col md:flex-row gap-3 md:gap-4 min-h-0">
                 <div class="payment-summary flex-1 flex flex-col gap-3 min-h-0">
@@ -5204,6 +5537,30 @@
                             <span>{managedProviderName}</span>
                         </button
                         >
+                        <button
+                            type="button"
+                            disabled={isCompletingSale || customerAccountBusy}
+                            class:is-active={paymentMethod === "account"}
+                            aria-pressed={paymentMethod === "account"}
+                            title={!selectedCustomer
+                                ? 'Select a customer first'
+                                : customerAccountLoadError
+                                    ? 'The customer account could not be verified; select the customer again to retry'
+                                    : paymentDue <= 0
+                                        ? 'Nothing remains to charge to the customer account'
+                                : !selectedCustomerAccount?.isEnabled
+                                    ? 'Pay later is not enabled for this customer'
+                                    : !accountLimitAllowsSale
+                                        ? 'This sale exceeds the customer account limit'
+                                        : 'Charge the remaining amount to this customer'}
+                            on:click={() => selectPaymentMethod("account")}
+                        >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                                <path d="M4 5h16v14H4z"></path>
+                                <path d="M8 9h8M8 13h5"></path>
+                            </svg>
+                            <span>Pay later</span>
+                        </button>
                     </div>
 
                     {#if paymentMethod === "cash"}
@@ -5254,7 +5611,7 @@
                             {/each}
                             </div>
                         </div>
-                    {:else}
+                    {:else if paymentMethod === "card"}
                         <div class="payment-card-summary">
                             {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
                                 <div class="payment-card-amount">
@@ -5271,6 +5628,26 @@
                                     <span>Card payment</span>
                                     <strong>{formatMoney(paymentDue)}</strong>
                                 </div>
+                            {/if}
+                        </div>
+                    {:else}
+                        <div class="payment-account-summary" aria-live="polite">
+                            <div>
+                                <span>Charge to account</span>
+                                <strong>{formatMoney(paymentDue)}</strong>
+                            </div>
+                            {#if selectedCustomer && selectedCustomerAccount}
+                                <p>
+                                    <span>{selectedCustomerAccount.balancePence < 0 ? 'Account credit' : 'Currently owes'} <b>{formatMoney(Math.abs(selectedCustomerAccount.balancePence))}</b></span>
+                                    <span>{accountBalanceAfterSale < 0 ? 'Credit after sale' : 'After this sale'} <b>{formatMoney(Math.abs(accountBalanceAfterSale))}</b></span>
+                                </p>
+                                {#if selectedCustomerAccount.creditLimitPence > 0}
+                                    <small>Account limit {formatMoney(selectedCustomerAccount.creditLimitPence)}</small>
+                                {:else}
+                                    <small>No account limit set</small>
+                                {/if}
+                            {:else}
+                                <p>Select a customer with Pay later enabled.</p>
                             {/if}
                         </div>
                     {/if}
@@ -5300,6 +5677,28 @@
                                     Change: £0.00
                                 </div>
                             {/if}
+                        {:else if paymentMethod === "account"}
+                            <div
+                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-sm md:text-base font-black p-2 rounded-sm {accountSaleAvailable ? 'text-success bg-success/10' : 'text-danger bg-danger/10'}"
+                            >
+                                {customerAccountBusy
+                                    ? 'Checking customer account…'
+                                    : !selectedCustomer
+                                        ? 'Select a customer to use Pay later'
+                                        : customerAccountLoadError
+                                            ? 'The customer account could not be verified. Select the customer again to retry'
+                                            : paymentDue <= 0
+                                                ? 'Nothing remains to charge to the customer account'
+                                        : !selectedCustomerAccount?.isEnabled
+                                            ? 'Pay later is not enabled for this customer'
+                                            : !accountLimitAllowsSale
+                                                ? 'This sale exceeds the customer account limit'
+                                                : $connectionState.mode === 'multi' && !$connectionState.mysqlOnline
+                                                    ? 'MariaDB must be online for Pay later'
+                                                    : !hasPermission($currentEmployee, 'charge_customer_account', $settingsDB)
+                                                        ? 'Permission required to charge customer accounts'
+                                                        : `${formatMoney(paymentDue)} will be added to ${selectedCustomer.name}'s account`}
+                            </div>
                         {:else if managedCardEnabled && isCompletingSale}
                             <div
                                 class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-base md:text-lg font-black text-success p-2 bg-success/10 rounded-sm"
@@ -5341,7 +5740,9 @@
                         >
                             {isCompletingSale
                                 ? (managedCardEnabled && paymentMethod === 'card' ? `Processing ${managedProviderName}...` : 'Saving Sale...')
-                                : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : 'Complete Sale')}
+                                : paymentMethod === 'account'
+                                    ? 'Confirm Pay Later'
+                                    : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : 'Complete Sale')}
                         </button>
                     </div>
                 </div>
@@ -5353,7 +5754,18 @@
                             <small>Cash entry</small>
                         </div>
                         <div class="payment-display-row">
-                            <div class="np-display payment-display">
+                            <div
+                                class="np-display payment-display"
+                                role="spinbutton"
+                                aria-live="polite"
+                                aria-label="Amount received"
+                                aria-valuemin="0"
+                                aria-valuemax={MAX_ORDER_TOTAL_PENCE}
+                                aria-valuenow={paymentInputAmount}
+                                aria-valuetext={formatMoney(paymentInputAmount)}
+                                tabindex="0"
+                                title="Use the number keys or tap the pad to enter cash received"
+                            >
                                 {formatMoney(paymentInputAmount)}
                             </div>
                             <button
@@ -5364,18 +5776,31 @@
                                 on:click={clearPaymentInput}
                             >Clear</button>
                         </div>
-                        <div class="np-grid payment-np-grid {isCompletingSale ? 'opacity-35 pointer-events-none' : ''}">
+                        <div
+                            class="np-grid payment-np-grid {isCompletingSale ? 'opacity-35 pointer-events-none' : ''}"
+                            role="group"
+                            aria-label="Cash amount number pad"
+                        >
                             {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                                 <button
-                                    class="np-btn payment-np-button {key === '⌫' ? '!text-warning' : ''}"
+                                    type="button"
+                                    class="np-btn payment-np-button"
+                                    class:is-delete={key === "⌫"}
+                                    class:is-double-zero={key === "00"}
+                                    aria-label={key === "⌫" ? "Delete last amount digit" : key === "00" ? "Enter double zero" : `Enter ${key}`}
+                                    title={key === "⌫" ? "Delete last digit" : undefined}
                                     disabled={isCompletingSale}
                                     on:click={() => handlePaymentPadKey(key)}
                                 >
-                                    {key}
+                                    {#if key === "⌫"}
+                                        <DeleteIcon size={28} strokeWidth={2.35} aria-hidden="true" />
+                                    {:else}
+                                        {key}
+                                    {/if}
                                 </button>
                             {/each}
                         </div>
-                    {:else}
+                    {:else if paymentMethod === "card"}
                         <div class="payment-card-terminal">
                             <div class="payment-card-terminal-icon">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -5395,6 +5820,18 @@
                             {:else}
                                 <small>Complete the card transaction, then confirm the sale.</small>
                             {/if}
+                        </div>
+                    {:else}
+                        <div class="payment-card-terminal payment-account-terminal">
+                            <div class="payment-card-terminal-icon account-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                    <path d="M5 4h14v16H5z"></path>
+                                    <path d="M8 8h8M8 12h8M8 16h5"></path>
+                                </svg>
+                            </div>
+                            <span>Customer account</span>
+                            <strong>{formatMoney(paymentDue)}</strong>
+                            <small>This records a debt, not cash or card received.</small>
                         </div>
                     {/if}
                 </div>
@@ -5724,7 +6161,7 @@
 {#if showQuickAddModal}
     <div class="modal-overlay">
         <div
-            class="w-[920px] max-w-[97vw] max-h-[calc(100vh-1rem)] p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
+            class="quick-add-modal w-[920px] max-w-[97vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             role="dialog"
             aria-modal="true"
             aria-labelledby="quick-add-dialog-title"
@@ -5732,14 +6169,15 @@
             <div class="modal-header">
                 <h3 id="quick-add-dialog-title">Quick Add Product</h3>
                 <button
+                    type="button"
                     class="modal-close"
                     aria-label="Close quick add product dialog"
                     on:click={() => (showQuickAddModal = false)}>✕</button
                 >
             </div>
 
-            <div class="grid grid-cols-1 min-[700px]:grid-cols-[1fr_0.9fr] gap-6 min-h-0">
-                <div class="grid grid-cols-1 sm:grid-cols-2 min-[700px]:grid-cols-1 gap-4 content-start">
+            <div class="quick-add-content-grid grid grid-cols-1 min-[700px]:grid-cols-[1fr_0.9fr] gap-6 min-h-0">
+                <div class="quick-add-fields grid grid-cols-1 sm:grid-cols-2 min-[700px]:grid-cols-1 gap-4 content-start">
                     <div class="input-group">
                         <label for="qa-name">Product Name *</label>
                         <input
@@ -5785,26 +6223,60 @@
                     </div>
                 </div>
 
-                <div class="flex flex-col gap-2">
+                <div class="quick-add-price-section flex flex-col gap-2">
                     <span class="text-[0.9rem] font-semibold text-text-muted">Price *</span>
-                    <div class="h-16 flex items-center justify-end px-5 text-[2rem] font-bold font-serif bg-bg-panel border border-border-flat rounded-sm">
-                        {formatMoney(parseInt(quickAddPrice) || 0)}
+                    <div class="payment-display-row">
+                        <div
+                            class="np-display payment-display quick-add-price-display"
+                            role="spinbutton"
+                            aria-live="polite"
+                            aria-label="Quick add product price"
+                            aria-valuemin="0"
+                            aria-valuenow={parseInt(quickAddPrice) || 0}
+                            aria-valuetext={formatMoney(parseInt(quickAddPrice) || 0)}
+                            tabindex="0"
+                        >
+                            {formatMoney(parseInt(quickAddPrice) || 0)}
+                        </div>
+                        <button
+                            type="button"
+                            class="payment-clear-button"
+                            aria-label="Clear quick add product price"
+                            title="Clear price"
+                            on:click={() => handleQuickAddPriceKey("C")}
+                        >
+                            Clear
+                        </button>
                     </div>
-                    <div class="grid grid-cols-3 gap-3">
-                        {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "C", "0", "00"] as key}
+                    <div
+                        class="np-grid payment-np-grid quick-add-np-grid"
+                        role="group"
+                        aria-label="Quick add product price number pad"
+                    >
+                        {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "⌫"] as key}
                             <button
-                                class="h-14 flex items-center justify-center text-2xl font-semibold text-text-main bg-bg-panel border border-border-flat rounded-sm hover:bg-bg-card-hover transition-colors {key === 'C' ? 'np-clear' : ''}"
+                                type="button"
+                                class="np-btn payment-np-button"
+                                class:is-delete={key === "⌫"}
+                                class:is-double-zero={key === "00"}
+                                aria-label={key === "⌫" ? "Delete last quick add price digit" : key === "00" ? "Enter double zero" : `Enter ${key}`}
+                                title={key === "⌫" ? "Delete last digit" : undefined}
                                 on:click={() => handleQuickAddPriceKey(key)}
                             >
-                                {key}
+                                {#if key === "⌫"}
+                                    <DeleteIcon size={28} strokeWidth={2.35} aria-hidden="true" />
+                                {:else}
+                                    {key}
+                                {/if}
                             </button>
                         {/each}
                     </div>
                 </div>
             </div>
 
-            <div class="grid grid-cols-1 min-[700px]:grid-cols-2 gap-3">
+            <div class="quick-add-actions grid grid-cols-1 min-[700px]:grid-cols-2 gap-3">
                 <button
+                    type="button"
                     class="btn btn-success h-16 text-lg"
                     disabled={quickAddBusy}
                     on:click={() => saveQuickProduct(false)}
@@ -5812,11 +6284,56 @@
                     {quickAddBusy ? "Saving..." : "Save & Add to Cart"}
                 </button>
                 <button
+                    type="button"
                     class="btn btn-primary h-16 text-lg"
                     disabled={quickAddBusy}
                     on:click={() => saveQuickProduct(true)}
                 >
                     {quickAddBusy ? "Saving..." : "Save, Add & Print Label"}
+                </button>
+            </div>
+        </div>
+    </div>
+{/if}
+
+{#if pendingAgeRestrictedAdd}
+    <div class="modal-overlay">
+        <div
+            class="w-[520px] max-w-[95vw] rounded-2xl border border-warning/40 bg-bg-card p-5 text-text-main shadow-[0_24px_70px_var(--shadow)] sm:p-6"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="age-restriction-dialog-title"
+            aria-describedby="age-restriction-dialog-description"
+        >
+            <div class="flex items-start gap-4">
+                <span class="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-warning/30 bg-warning/15 text-warning" aria-hidden="true">
+                    <ShieldAlert size={30} strokeWidth={2.4} />
+                </span>
+                <div class="min-w-0 flex-1">
+                    <span class="text-[0.72rem] font-black uppercase tracking-[0.14em] text-warning">18+ item</span>
+                    <h2 id="age-restriction-dialog-title" class="m-0 mt-1 text-2xl font-black leading-tight">Age verification required</h2>
+                    <p id="age-restriction-dialog-description" class="mb-0 mt-3 leading-relaxed text-text-muted">
+                        Check valid photo ID and confirm the customer is aged 18 or over before adding this item.
+                    </p>
+                </div>
+            </div>
+
+            <div class="mt-5 rounded-xl border border-border-flat bg-bg-panel px-4 py-3">
+                <small class="block text-[0.7rem] font-black uppercase tracking-[0.1em] text-text-muted">Restricted product</small>
+                <strong class="mt-1 block text-lg">{pendingAgeRestrictedAdd.product.name}</strong>
+            </div>
+
+            <div class="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <button type="button" class="btn btn-secondary h-14" on:click={cancelAgeRestrictedAdd}>
+                    Do Not Add
+                </button>
+                <button
+                    bind:this={ageRestrictedConfirmButton}
+                    type="button"
+                    class="btn btn-primary h-14"
+                    on:click={confirmAgeRestrictedAdd}
+                >
+                    ID Checked — Add Item
                 </button>
             </div>
         </div>
@@ -5925,6 +6442,62 @@
 />
 
 <style>
+    .pos-pad-clear {
+        color: var(--danger) !important;
+        border-color: color-mix(in srgb, var(--danger) 42%, var(--border-flat)) !important;
+        background: color-mix(in srgb, var(--danger) 7%, var(--bg-card)) !important;
+        font-size: .9rem !important;
+    }
+    .pos-pad-clear:hover,
+    .pos-pad-clear:focus-visible {
+        color: #fff !important;
+        border-color: var(--danger) !important;
+        background: var(--danger) !important;
+    }
+    .quantity-pad-display,
+    .goods-price-display,
+    .quick-add-price-display {
+        min-width: 0;
+    }
+    .quantity-pad-enter {
+        min-height: 56px;
+        font-size: 1rem;
+        font-weight: 900;
+        touch-action: manipulation;
+    }
+    .goods-np-grid,
+    .quick-add-np-grid,
+    .quantity-np-grid {
+        grid-auto-flow: row;
+    }
+    @media (max-height: 700px) {
+        .quantity-pad-modal {
+            gap: .6rem;
+            padding: .75rem;
+        }
+        .quantity-pad-enter {
+            min-height: 48px;
+        }
+        .quick-add-modal {
+            gap: .7rem;
+            padding: .75rem 1rem;
+        }
+        .quick-add-content-grid,
+        .quick-add-fields {
+            gap: .65rem;
+        }
+        .quick-add-price-section {
+            gap: .4rem;
+        }
+        .quick-add-actions {
+            gap: .5rem;
+        }
+        .quick-add-actions .btn {
+            height: 48px;
+            min-height: 48px;
+            font-size: .9rem;
+        }
+    }
     .login-overlay { position: fixed; z-index: 1000; inset: 0; padding: 1rem; display: grid; place-items: center; overflow: auto; background: var(--bg-base); }
     .login-form { width: min(780px, 100%); max-height: calc(100vh - 2rem); padding: 1.25rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); box-shadow: var(--shadow); }
     .login-form-picker { width: min(680px, 100%); }
@@ -5995,7 +6568,6 @@
     .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 38px; padding-bottom: .1rem; }
     .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
-    .scale-products .search-input { padding-top: .65rem; padding-bottom: .65rem; }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
     .scale-product i { position: absolute; z-index: 2; inset: 0 auto 0 0; width: 6px; background: var(--scale-color); }
@@ -6061,7 +6633,6 @@
         .scale-entry { padding: .5rem; grid-template-rows: 48px 38px 50px 50px minmax(160px, 1fr) 42px 44px; gap: .3rem; }
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
-        .scale-products .search-input { padding-top: .45rem; padding-bottom: .45rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
         .scale-numpad button { min-height: 38px; font-size: 1.05rem; }
         .scale-add { min-height: 42px; }

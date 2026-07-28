@@ -7,6 +7,7 @@
     import { storeDB, settingsDB, type Store, now, formatMoney } from '$lib/stores/db';
     import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import { AGE_RESTRICTION_SETTING_KEY, isAgeRestrictionEnabled } from '$lib/ageRestriction';
     import { appFontOptions, appFontSizeOptions, normalizeAppFontChoice } from '$lib/typography';
     import {
         BadgePercent,
@@ -26,6 +27,7 @@
         Printer,
         Save,
         Scale,
+        ShieldCheck,
         Smartphone,
         Store as StoreIcon,
         Type,
@@ -63,6 +65,7 @@
     let tillId = '';
 
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
+    $: ageRestrictionEnabled = isAgeRestrictionEnabled($settingsDB);
     $: loyaltyEnabled = ($settingsDB.find(s => s.key === 'loyalty_enabled')?.value ?? 'true') !== 'false';
     $: cashUpEnabled = ($settingsDB.find(s => s.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
@@ -94,6 +97,7 @@
             if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
             return [...settings, row];
         });
+        if (!isTauri()) return;
         await upsert('settings', row, 'key');
     }
 
@@ -124,6 +128,13 @@
     function setStockTracking(enabled: boolean) {
         updateSetting('stock_tracking_enabled', enabled ? 'true' : 'false');
         toast(enabled ? 'Stock tracking enabled' : 'Stock tracking disabled across the shop');
+    }
+
+    function setAgeRestrictionEnabled(enabled: boolean) {
+        updateSetting(AGE_RESTRICTION_SETTING_KEY, enabled ? 'true' : 'false');
+        toast(enabled
+            ? '18+ item alerts enabled across the shop'
+            : '18+ item alerts disabled across the shop');
     }
 
     function setCashUpEnabled(enabled: boolean) {
@@ -319,6 +330,20 @@
                                 aria-label="Stock tracking"
                                 on:click={() => setStockTracking(!stockTrackingEnabled)}
                             ><span>{stockTrackingEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                        </div>
+
+                        <div class="settings-operation-row">
+                            <span class="settings-operation-icon"><ShieldCheck size={20} /></span>
+                            <div><strong>18+ item alerts</strong><span>Ask the cashier to check ID before adding marked items. Shop-wide.</span></div>
+                            <button
+                                type="button"
+                                class="settings-switch-control"
+                                class:enabled={ageRestrictionEnabled}
+                                role="switch"
+                                aria-checked={ageRestrictionEnabled}
+                                aria-label="18+ item alerts"
+                                on:click={() => setAgeRestrictionEnabled(!ageRestrictionEnabled)}
+                            ><span>{ageRestrictionEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
                         </div>
 
                         <div class="settings-operation-row">

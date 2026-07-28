@@ -522,7 +522,7 @@
 
     async function purgeTransactions() {
         if (!purgeResponsibilityAccepted) {
-            purgeStatus = 'Confirm that you understand this action permanently deletes sales and transaction history.';
+            purgeStatus = 'Confirm that you understand this permanently deletes sales history. Customer account balances and statements are kept.';
             return;
         }
         if (!purgeFinalConfirmation) {
@@ -546,8 +546,8 @@
 
         busy = false;
         purgeProgressState = 'success';
-        purgeStatus = 'History deleted successfully. Returning to the main POS...';
-        toast('History deleted successfully', 'success');
+        purgeStatus = 'Sales history deleted. Customer account balances and statements were preserved. Returning to the main POS...';
+        toast('Sales history deleted; customer accounts were preserved', 'success');
         await new Promise(resolve => setTimeout(resolve, 900));
         try {
             await goto('/', { replaceState: true, invalidateAll: true });
@@ -813,6 +813,9 @@
             <p class="text-text-muted mb-3">
                 This permanently removes sales and transaction history from this database and every connected till. Are you sure you want to continue?
             </p>
+            <p class="purge-warning">
+                Customer account balances, Pay Later charges, repayments, and account statements are preserved so deleting receipts can never erase money owed.
+            </p>
             {#if $connectionState.mode === 'multi' && !$connectionState.mysqlOnline}
                 <p class="purge-warning">MariaDB must be online so every till receives the deletion instruction.</p>
             {/if}
@@ -833,7 +836,7 @@
                     purgeFinalConfirmation = false;
                 }}
             >
-                <span class="font-bold">I understand this permanently deletes database history from all tills. Are you sure you want to continue?</span>
+                <span class="font-bold">I understand sales history is permanently deleted from all tills, while customer account records are kept.</span>
                 <b class="shrink-0 text-xs uppercase tracking-[0.12em]">{purgeResponsibilityAccepted ? 'Accepted' : 'Required'}</b>
             </button>
             <button
@@ -858,7 +861,7 @@
                 <h3>{purgeProgressState === 'success' ? 'History deleted' : 'Deleting sales history'}</h3>
                 <p>
                     {purgeProgressState === 'success'
-                        ? 'The POS is ready. Returning to the main screen.'
+                        ? 'Customer account balances and statements were kept. Returning to the main screen.'
                         : 'Updating MariaDB and this till. Keep the app open until this finishes.'}
                 </p>
             </div>
@@ -872,7 +875,7 @@
 
 <style>
     .advanced-canvas { padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
-    .warning-banner { padding: 1rem 1.2rem; border: 1px solid var(--warning); border-radius: .8rem; background: rgba(245, 158, 11, .10); }
+    .warning-banner { padding: 1rem 1.2rem; border: 1px solid var(--warning); border-radius: .8rem; background: rgba(var(--warning-rgb), .10); }
     .warning-banner strong { color: var(--warning); }
     .warning-banner p, .status-text { margin: .3rem 0 0; color: var(--text-muted); }
     .status-card { margin-bottom: 1rem; padding: 1rem; display: flex; align-items: center; gap: .8rem; border: 1px solid var(--border-flat); border-radius: .7rem; background: var(--bg-panel); }
@@ -914,7 +917,7 @@
     .restore-file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .65rem; align-items: stretch; }
     .restore-file-row input { min-height: 46px; }
     .restore-progress-panel { margin-top: .9rem; display: grid; gap: .7rem; padding: .9rem 1rem; border: 1px solid var(--accent-primary); border-radius: .75rem; background: var(--bg-panel); }
-    .restore-progress-panel.restore-stopped { border-color: var(--danger); background: rgba(239, 68, 68, .08); }
+    .restore-progress-panel.restore-stopped { border-color: var(--danger); background: rgba(var(--danger-rgb), .08); }
     .restore-progress-panel.restore-success { border-color: var(--success); background: rgba(34, 197, 94, .08); }
     .restore-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .restore-progress-head strong { color: var(--text-main); }
@@ -933,8 +936,8 @@
     .conflict-list article div:first-child { min-width: 0; }
     .conflict-list span { display: block; color: var(--text-muted); font-size: .78rem; }
     .conflict-list p { margin: .3rem 0 0; color: var(--danger); overflow-wrap: anywhere; }
-    .danger-card { border-color: rgba(239, 68, 68, .55) !important; }
-    .purge-disclaimer { max-width: 760px; margin-bottom: .8rem; padding: .9rem 1rem; border: 1px solid var(--danger); border-radius: .7rem; background: rgba(239, 68, 68, .08); }
+    .danger-card { border-color: rgba(var(--danger-rgb), .55) !important; }
+    .purge-disclaimer { max-width: 760px; margin-bottom: .8rem; padding: .9rem 1rem; border: 1px solid var(--danger); border-radius: .7rem; background: rgba(var(--danger-rgb), .08); }
     .purge-disclaimer strong { color: var(--danger); }
     .purge-disclaimer p { margin: .3rem 0 0; color: var(--text-muted); }
     .purge-warning { color: var(--danger); }

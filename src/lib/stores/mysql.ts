@@ -19,6 +19,10 @@ import {
     normalizeLoyaltyCode,
     planCustomerLoyaltyCodeRepairs,
 } from '../customerLoyaltyCode';
+import type {
+    CustomerAccount,
+    CustomerAccountEntry,
+} from './db';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -114,6 +118,375 @@ async function closeDatabase(database: Database | null): Promise<void> {
     }
 }
 
+const CUSTOMER_ACCOUNT_SCHEMA_MIGRATION = '2026-07-customer-account-schema-v4';
+
+function mysqlSchemaIdentifier(value: string): string {
+    if (!/^[A-Za-z0-9_]+$/.test(value)) {
+        throw new Error(`Unsafe MariaDB schema identifier: ${value}`);
+    }
+    return `\`${value}\``;
+}
+
+async function mysqlTableIndexes(d: Database, table: string): Promise<any[]> {
+    return d.select<any[]>(
+        `SELECT INDEX_NAME AS indexName, NON_UNIQUE AS nonUnique,
+                SEQ_IN_INDEX AS sequenceNumber, COLUMN_NAME AS columnName
+         FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+         ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
+        [table],
+    );
+}
+
+function hasSingleColumnUniqueIndex(rows: any[], column: string): boolean {
+    const indexes = new Map<string, { unique: boolean; columns: string[] }>();
+    for (const row of rows) {
+        const name = String(row.indexName ?? row.INDEX_NAME ?? '');
+        if (!name) continue;
+        const index = indexes.get(name) || { unique: true, columns: [] };
+        index.unique = index.unique && Number(row.nonUnique ?? row.NON_UNIQUE ?? 1) === 0;
+        index.columns.push(String(row.columnName ?? row.COLUMN_NAME ?? ''));
+        indexes.set(name, index);
+    }
+    return [...indexes.values()].some((index) =>
+        index.unique && index.columns.length === 1 && index.columns[0] === column
+    );
+}
+
+async function ensureSingleColumnUniqueIndex(
+    d: Database,
+    table: string,
+    column: string,
+    indexName: string,
+    preferPrimaryKey = false,
+): Promise<void> {
+    let indexes = await mysqlTableIndexes(d, table);
+    if (hasSingleColumnUniqueIndex(indexes, column)) return;
+
+    const quotedTable = mysqlSchemaIdentifier(table);
+    const quotedColumn = mysqlSchemaIdentifier(column);
+    const duplicateRows = await d.select<any[]>(
+        `SELECT 1 AS duplicateFound
+         FROM ${quotedTable}
+         GROUP BY ${quotedColumn}
+         HAVING COUNT(*) > 1
+         LIMIT 1`,
+    );
+    if (duplicateRows.length > 0) {
+        throw new Error(
+            `MariaDB schema migration cannot make ${table}.${column} unique because duplicate values exist`,
+        );
+    }
+
+    const hasPrimaryKey = indexes.some((row) =>
+        String(row.indexName ?? row.INDEX_NAME ?? '').toUpperCase() === 'PRIMARY'
+    );
+    const sql = preferPrimaryKey && !hasPrimaryKey
+        ? `ALTER TABLE ${quotedTable} ADD PRIMARY KEY (${quotedColumn})`
+        : `CREATE UNIQUE INDEX ${mysqlSchemaIdentifier(indexName)} ON ${quotedTable} (${quotedColumn})`;
+    try {
+        await d.execute(sql);
+    } catch (error) {
+        // Another till may have completed the same idempotent migration while
+        // this one was checking INFORMATION_SCHEMA. Only suppress that race if
+        // the required constraint is now present.
+        indexes = await mysqlTableIndexes(d, table);
+        if (!hasSingleColumnUniqueIndex(indexes, column)) throw error;
+    }
+}
+
+async function hardenCustomerAccountTables(d: Database): Promise<void> {
+    const applied: any[] = await d.select(
+        `SELECT name FROM pos_schema_migrations WHERE name = ? LIMIT 1`,
+        [CUSTOMER_ACCOUNT_SCHEMA_MIGRATION],
+    );
+    if (applied.length > 0) return;
+
+    const stamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+
+    // Ownership and financial values are not safe to invent. Stop before any
+    // repair writes if a populated partial table did not retain enough data to
+    // identify the customer or the signed ledger amount.
+    const ownerlessAccounts: any[] = await d.select(`
+        SELECT 1 AS invalidRow
+        FROM customer_accounts
+        WHERE (id IS NULL OR TRIM(id) = '')
+          AND (customerId IS NULL OR TRIM(customerId) = '')
+        LIMIT 1
+    `);
+    if (ownerlessAccounts.length > 0) {
+        throw new Error(
+            'MariaDB customer account migration stopped: a customer_accounts row has no id or customerId, so customer ownership cannot be inferred',
+        );
+    }
+    const ownerlessEntries: any[] = await d.select(`
+        SELECT 1 AS invalidRow
+        FROM customer_account_entries
+        WHERE (accountId IS NULL OR TRIM(accountId) = '')
+          AND (customerId IS NULL OR TRIM(customerId) = '')
+        LIMIT 1
+    `);
+    if (ownerlessEntries.length > 0) {
+        throw new Error(
+            'MariaDB customer account migration stopped: a customer_account_entries row has no accountId or customerId, so customer ownership cannot be inferred',
+        );
+    }
+    const incompleteFinancialEntries: any[] = await d.select(`
+        SELECT 1 AS invalidRow
+        FROM customer_account_entries
+        WHERE amountPence IS NULL
+           OR balanceAfterPence IS NULL
+           OR TRIM(COALESCE(entryType, '')) = ''
+           OR TRIM(COALESCE(createdAt, '')) = ''
+           OR (
+               LOWER(TRIM(COALESCE(entryType, ''))) = 'payment'
+               AND TRIM(COALESCE(paymentMethod, '')) = ''
+           )
+        LIMIT 1
+    `);
+    if (incompleteFinancialEntries.length > 0) {
+        throw new Error(
+            'MariaDB customer account migration stopped: a ledger entry is missing required financial or audit data, so it cannot be repaired safely',
+        );
+    }
+
+    // A previous startup may have stopped after CREATE TABLE but before every
+    // account column was installed. Preserve those rows and fill only values
+    // that cannot satisfy the current schema.
+    await d.execute(`
+        UPDATE customer_accounts
+        SET id = TRIM(customerId)
+        WHERE (id IS NULL OR TRIM(id) = '')
+          AND customerId IS NOT NULL AND TRIM(customerId) <> ''
+          AND (
+              SELECT COUNT(*) FROM customers AS customer
+              WHERE customer.id = TRIM(customer_accounts.customerId)
+          ) = 1
+    `);
+    await d.execute(`
+        UPDATE customer_accounts
+        SET customerId = TRIM(id)
+        WHERE (customerId IS NULL OR TRIM(customerId) = '')
+          AND id IS NOT NULL AND TRIM(id) <> ''
+          AND (
+              SELECT COUNT(*) FROM customers AS customer
+              WHERE customer.id = TRIM(customer_accounts.id)
+          ) = 1
+    `);
+    const unmappedAccounts: any[] = await d.select(`
+        SELECT 1 AS invalidRow
+        FROM customer_accounts AS account
+        WHERE account.id IS NULL OR TRIM(account.id) = ''
+           OR account.customerId IS NULL OR TRIM(account.customerId) = ''
+           OR (
+               SELECT COUNT(*) FROM customers AS customer
+               WHERE customer.id = TRIM(account.customerId)
+           ) <> 1
+        LIMIT 1
+    `);
+    if (unmappedAccounts.length > 0) {
+        throw new Error(
+            'MariaDB customer account migration stopped: a customer account does not map to exactly one customer, so financial ownership cannot be inferred',
+        );
+    }
+    await d.execute(`
+        UPDATE customer_accounts
+        SET id = TRIM(id), customerId = TRIM(customerId),
+            isEnabled = COALESCE(isEnabled, 0),
+            creditLimitPence = COALESCE(creditLimitPence, 0),
+            createdAt = COALESCE(NULLIF(createdAt, ''), ${stamp}),
+            updatedAt = COALESCE(NULLIF(updatedAt, ''), NULLIF(createdAt, ''), ${stamp})
+        WHERE id <> TRIM(id) OR customerId <> TRIM(customerId)
+           OR isEnabled IS NULL OR creditLimitPence IS NULL
+           OR createdAt IS NULL OR createdAt = ''
+           OR updatedAt IS NULL OR updatedAt = ''
+    `);
+
+    await d.execute(`
+        UPDATE customer_account_entries SET id = UUID()
+        WHERE id IS NULL OR TRIM(id) = ''
+    `);
+    await d.execute(`
+        UPDATE customer_account_entries
+        JOIN customer_accounts ON customer_accounts.id = TRIM(customer_account_entries.accountId)
+        SET customer_account_entries.customerId = customer_accounts.customerId
+        WHERE (customer_account_entries.customerId IS NULL OR TRIM(customer_account_entries.customerId) = '')
+          AND customer_account_entries.accountId IS NOT NULL
+          AND TRIM(customer_account_entries.accountId) <> ''
+    `);
+    await d.execute(`
+        UPDATE customer_account_entries
+        JOIN customer_accounts ON customer_accounts.customerId = TRIM(customer_account_entries.customerId)
+        SET customer_account_entries.accountId = customer_accounts.id
+        WHERE (customer_account_entries.accountId IS NULL OR TRIM(customer_account_entries.accountId) = '')
+          AND customer_account_entries.customerId IS NOT NULL
+          AND TRIM(customer_account_entries.customerId) <> ''
+    `);
+    const inconsistentlyMappedEntries: any[] = await d.select(`
+        SELECT 1 AS invalidRow
+        FROM customer_account_entries AS ledger_entry
+        WHERE (
+            SELECT COUNT(*)
+            FROM customer_accounts AS account
+            WHERE account.id = TRIM(ledger_entry.accountId)
+              AND account.customerId = TRIM(ledger_entry.customerId)
+        ) <> 1
+        LIMIT 1
+    `);
+    if (inconsistentlyMappedEntries.length > 0) {
+        throw new Error(
+            'MariaDB customer account migration stopped: a ledger entry does not map consistently to exactly one customer account',
+        );
+    }
+    const missingBalances: any[] = await d.select(`
+        SELECT 1 AS missingBalance
+        FROM customer_accounts
+        WHERE balancePence IS NULL
+        LIMIT 1
+    `);
+    if (missingBalances.length > 0) {
+        const ledgerRows: any[] = await d.select(`
+            SELECT 1 AS ledgerRow FROM customer_account_entries LIMIT 1
+        `);
+        if (ledgerRows.length === 0) {
+            throw new Error(
+                'MariaDB customer account migration stopped: balancePence is missing for a populated account and there is no ledger from which to reconstruct it',
+            );
+        }
+        await d.execute(`
+            UPDATE customer_accounts AS account
+            LEFT JOIN (
+                SELECT customerId, SUM(amountPence) AS reconstructedBalance
+                FROM customer_account_entries
+                GROUP BY customerId
+            ) AS ledger ON ledger.customerId = account.customerId
+            SET account.balancePence = COALESCE(ledger.reconstructedBalance, 0)
+            WHERE account.balancePence IS NULL
+        `);
+    }
+    await d.execute(`
+        UPDATE customer_account_entries
+        SET id = TRIM(id), accountId = TRIM(accountId), customerId = TRIM(customerId),
+            orderId = COALESCE(orderId, ''),
+            paymentMethod = COALESCE(paymentMethod, ''),
+            reference = COALESCE(reference, ''),
+            description = COALESCE(description, ''),
+            receiptNumber = COALESCE(receiptNumber, 0),
+            receiptKey = COALESCE(receiptKey, ''),
+            employeeId = COALESCE(employeeId, ''),
+            tillNumber = COALESCE(tillNumber, ''),
+            shiftId = COALESCE(shiftId, ''),
+            idempotencyKey = COALESCE(NULLIF(TRIM(idempotencyKey), ''), CONCAT('legacy:', id)),
+            reversesEntryId = COALESCE(reversesEntryId, ''),
+            updatedAt = COALESCE(NULLIF(updatedAt, ''), NULLIF(createdAt, ''), ${stamp})
+        WHERE id <> TRIM(id) OR accountId <> TRIM(accountId) OR customerId <> TRIM(customerId)
+           OR orderId IS NULL OR paymentMethod IS NULL OR reference IS NULL
+           OR description IS NULL OR receiptNumber IS NULL OR receiptKey IS NULL
+           OR employeeId IS NULL OR tillNumber IS NULL OR shiftId IS NULL
+           OR idempotencyKey IS NULL OR TRIM(idempotencyKey) = ''
+           OR idempotencyKey <> TRIM(idempotencyKey) OR reversesEntryId IS NULL
+           OR updatedAt IS NULL OR updatedAt = ''
+    `);
+
+    const requiredDefinitions: Array<[string, string]> = [
+        ['customer_accounts', 'id VARCHAR(36) NOT NULL'],
+        ['customer_accounts', 'customerId VARCHAR(36) NOT NULL'],
+        ['customer_accounts', 'isEnabled INT NOT NULL DEFAULT 0'],
+        ['customer_accounts', 'creditLimitPence BIGINT NOT NULL DEFAULT 0'],
+        ['customer_accounts', 'balancePence BIGINT NOT NULL DEFAULT 0'],
+        ['customer_accounts', 'createdAt TEXT NOT NULL'],
+        ['customer_accounts', 'updatedAt TEXT NOT NULL'],
+        ['customer_account_entries', 'id VARCHAR(36) NOT NULL'],
+        ['customer_account_entries', 'accountId VARCHAR(36) NOT NULL'],
+        ['customer_account_entries', 'customerId VARCHAR(36) NOT NULL'],
+        ['customer_account_entries', "orderId VARCHAR(36) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', 'entryType VARCHAR(32) NOT NULL'],
+        ['customer_account_entries', 'amountPence BIGINT NOT NULL'],
+        ['customer_account_entries', "paymentMethod VARCHAR(16) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', 'reference TEXT NOT NULL'],
+        ['customer_account_entries', 'description TEXT NOT NULL'],
+        ['customer_account_entries', 'receiptNumber BIGINT NOT NULL DEFAULT 0'],
+        ['customer_account_entries', "receiptKey VARCHAR(100) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', "employeeId VARCHAR(36) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', "tillNumber VARCHAR(36) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', "shiftId VARCHAR(36) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', 'idempotencyKey VARCHAR(191) NOT NULL'],
+        ['customer_account_entries', "reversesEntryId VARCHAR(36) NOT NULL DEFAULT ''"],
+        ['customer_account_entries', 'balanceAfterPence BIGINT NOT NULL DEFAULT 0'],
+        ['customer_account_entries', 'createdAt TEXT NOT NULL'],
+        ['customer_account_entries', 'updatedAt TEXT NOT NULL'],
+    ];
+    for (const [table, definition] of requiredDefinitions) {
+        await d.execute(`ALTER TABLE ${mysqlSchemaIdentifier(table)} MODIFY COLUMN ${definition}`);
+    }
+
+    // Do not merge or discard financial rows to manufacture uniqueness. A
+    // duplicate stops startup with a useful error so it can be reviewed safely.
+    await ensureSingleColumnUniqueIndex(d, 'customer_accounts', 'id', 'uq_customer_accounts_id', true);
+    await ensureSingleColumnUniqueIndex(
+        d,
+        'customer_accounts',
+        'customerId',
+        'uq_customer_accounts_customer_id',
+    );
+    await ensureSingleColumnUniqueIndex(
+        d,
+        'customer_account_entries',
+        'id',
+        'uq_customer_account_entries_id',
+        true,
+    );
+    await ensureSingleColumnUniqueIndex(
+        d,
+        'customer_account_entries',
+        'idempotencyKey',
+        'uq_customer_account_entries_idempotency_key',
+    );
+    await d.execute(
+        `INSERT IGNORE INTO pos_schema_migrations (name, appliedAt)
+         VALUES (?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))`,
+        [CUSTOMER_ACCOUNT_SCHEMA_MIGRATION],
+    );
+}
+
+async function backfillLegacyPaymentAllocations(d: Database): Promise<void> {
+    const normalizedMethod = `LOWER(REPLACE(REPLACE(TRIM(COALESCE(method, '')), ' ', '_'), '-', '_'))`;
+    const cashAllocation = `CASE
+        WHEN COALESCE(cashAmount, 0) != 0 THEN cashAmount
+        WHEN ${normalizedMethod} = 'cash' THEN amount
+        ELSE 0
+    END`;
+    const cardAllocation = `CASE
+        WHEN COALESCE(cardAmount, 0) != 0 THEN cardAmount
+        WHEN ${normalizedMethod} IN ('card', 'sumup', 'dojo', 'mobile') THEN amount
+        ELSE 0
+    END`;
+    const legacyLoyaltyResidual = `(amount - (${cashAllocation}) - (${cardAllocation}))`;
+    await d.execute(`
+        UPDATE payments
+        SET loyaltyAmount = ${legacyLoyaltyResidual}
+        WHERE COALESCE(loyaltyAmount, 0) = 0
+          AND COALESCE(accountAmount, 0) = 0
+          AND ${legacyLoyaltyResidual} != 0
+          AND ${normalizedMethod} NOT LIKE '%gift_card%'
+          AND ${normalizedMethod} NOT LIKE '%giftcard%'
+          AND ${normalizedMethod} NOT LIKE '%store_credit%'
+          AND ${normalizedMethod} NOT LIKE '%storecredit%'
+          AND ${normalizedMethod} NOT LIKE '%account%'
+          AND ${normalizedMethod} NOT LIKE '%pay_later%'
+          AND ${normalizedMethod} NOT LIKE '%paylater%'
+          AND (
+              COALESCE(cashAmount, 0) != 0
+              OR COALESCE(cardAmount, 0) != 0
+              OR ${normalizedMethod} LIKE '%loyalty%'
+              OR ${normalizedMethod} IN (
+                  'cash', 'card', 'split', 'sumup', 'dojo', 'mobile',
+                  'split+sumup', 'split+dojo', 'split+mobile'
+              )
+          )
+    `);
+}
+
 // ─── Schema Initialisation ──────────────────────────────────────────────────
 
 /**
@@ -138,6 +511,12 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             INDEX idx_sync_change_time (changedAt)
         )
     `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_schema_migrations (
+            name VARCHAR(191) PRIMARY KEY,
+            appliedAt VARCHAR(40) NOT NULL
+        )
+    `);
 
     // 1. Products
     await d.execute(`
@@ -154,6 +533,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             stockLevel INT DEFAULT 0,
             trackStock INT DEFAULT 0,
             allowPriceOverride INT DEFAULT 0,
+            isAgeRestricted INT DEFAULT 0,
             isWeighable INT DEFAULT 0,
             showInGoods INT DEFAULT 0,
             goodsSortOrder INT DEFAULT 0,
@@ -230,6 +610,43 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             notes TEXT,
             createdAt TEXT,
             updatedAt TEXT
+        )
+    `);
+
+    // Durable receivables live outside receipt history so transaction purges
+    // cannot erase a customer's outstanding balance or audit trail.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS customer_accounts (
+            id VARCHAR(36) PRIMARY KEY,
+            customerId VARCHAR(36) NOT NULL UNIQUE,
+            isEnabled INT NOT NULL DEFAULT 0,
+            creditLimitPence BIGINT NOT NULL DEFAULT 0,
+            balancePence BIGINT NOT NULL DEFAULT 0,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL
+        )
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS customer_account_entries (
+            id VARCHAR(36) PRIMARY KEY,
+            accountId VARCHAR(36) NOT NULL,
+            customerId VARCHAR(36) NOT NULL,
+            orderId VARCHAR(36) NOT NULL DEFAULT '',
+            entryType VARCHAR(32) NOT NULL,
+            amountPence BIGINT NOT NULL,
+            paymentMethod VARCHAR(16) NOT NULL DEFAULT '',
+            reference TEXT NOT NULL,
+            description TEXT NOT NULL,
+            receiptNumber BIGINT NOT NULL DEFAULT 0,
+            receiptKey VARCHAR(100) NOT NULL DEFAULT '',
+            employeeId VARCHAR(36) NOT NULL DEFAULT '',
+            tillNumber VARCHAR(36) NOT NULL DEFAULT '',
+            shiftId VARCHAR(36) NOT NULL DEFAULT '',
+            idempotencyKey VARCHAR(191) NOT NULL UNIQUE,
+            reversesEntryId VARCHAR(36) NOT NULL DEFAULT '',
+            balanceAfterPence BIGINT NOT NULL DEFAULT 0,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL
         )
     `);
 
@@ -452,6 +869,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             amount BIGINT DEFAULT 0,
             cashAmount BIGINT DEFAULT 0,
             cardAmount BIGINT DEFAULT 0,
+            loyaltyAmount BIGINT DEFAULT 0,
+            accountAmount BIGINT DEFAULT 0,
             reference TEXT,
             changeGiven BIGINT DEFAULT 0,
             createdAt TEXT,
@@ -467,6 +886,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             tillNumber VARCHAR(36) NOT NULL DEFAULT '',
             cashTotal BIGINT DEFAULT 0,
             cardTotal BIGINT DEFAULT 0,
+            accountTotal BIGINT DEFAULT 0,
+            accountRepaymentsCash BIGINT DEFAULT 0,
+            accountRepaymentsCard BIGINT DEFAULT 0,
             totalSales BIGINT DEFAULT 0,
             transactionCount INT DEFAULT 0,
             updatedAt TEXT,
@@ -648,10 +1070,44 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cashAmount INT DEFAULT 0`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cardAmount INT DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS loyaltyAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS accountAmount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN amount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN cashAmount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN cardAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN loyaltyAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments MODIFY COLUMN accountAmount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN changeGiven BIGINT DEFAULT 0`,
+
+        // Customer accounts. Add nullable text/key fields first so an
+        // interrupted, populated table can be repaired before NOT NULL and
+        // uniqueness are enforced by hardenCustomerAccountTables().
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS id VARCHAR(36) NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS customerId VARCHAR(36) NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS isEnabled INT NULL DEFAULT 0`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS creditLimitPence BIGINT NULL DEFAULT 0`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS balancePence BIGINT NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS createdAt TEXT NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS updatedAt TEXT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS id VARCHAR(36) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS accountId VARCHAR(36) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS customerId VARCHAR(36) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS orderId VARCHAR(36) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS entryType VARCHAR(32) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS amountPence BIGINT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS paymentMethod VARCHAR(16) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS reference TEXT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS description TEXT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS receiptNumber BIGINT NULL DEFAULT 0`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS receiptKey VARCHAR(100) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS employeeId VARCHAR(36) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS tillNumber VARCHAR(36) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS shiftId VARCHAR(36) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS idempotencyKey VARCHAR(191) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS reversesEntryId VARCHAR(36) NULL DEFAULT ''`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS balanceAfterPence BIGINT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS createdAt TEXT NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS updatedAt TEXT NULL`,
 
         // Products
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT`,
@@ -667,6 +1123,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS stockLevel INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS trackStock INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS allowPriceOverride INT DEFAULT 0`,
+        `ALTER TABLE products ADD COLUMN IF NOT EXISTS isAgeRestricted INT DEFAULT 0`,
         `ALTER TABLE products ADD COLUMN IF NOT EXISTS updatedAt TEXT`,
         `ALTER TABLE products MODIFY COLUMN price BIGINT NOT NULL`,
         `ALTER TABLE products MODIFY COLUMN costPrice BIGINT DEFAULT 0`,
@@ -751,6 +1208,9 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE product_suppliers MODIFY COLUMN costPrice BIGINT DEFAULT 0`,
         `ALTER TABLE daily_sales_summary MODIFY COLUMN cashTotal BIGINT DEFAULT 0`,
         `ALTER TABLE daily_sales_summary MODIFY COLUMN cardTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountTotal BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountRepaymentsCash BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountRepaymentsCard BIGINT DEFAULT 0`,
         `ALTER TABLE daily_sales_summary MODIFY COLUMN totalSales BIGINT DEFAULT 0`
     ];
     const migrationFailures: string[] = [];
@@ -766,6 +1226,15 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     }
     // Bust the entire column cache after migrations so new columns are seen
     for (const k of Object.keys(tableColumnsCache)) delete tableColumnsCache[k];
+
+    await hardenCustomerAccountTables(d);
+
+    // HEAD stored loyalty as the residual after cash/card. Materialise only
+    // non-zero legacy residuals on every startup so rows arriving later from
+    // an older till are repaired exactly once. Gift card, store credit and
+    // customer-account methods remain unclassified rather than being silently
+    // relabelled as loyalty or Pay Later.
+    await backfillLegacyPaymentAllocations(d);
 
     // One-time-compatible migration from the legacy products.image column.
     // INSERT IGNORE protects a newer independently-synced image row.
@@ -819,6 +1288,13 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status(255))`,
         `CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customerId(255))`,
         `CREATE INDEX IF NOT EXISTS idx_loyalty_logs_customer ON loyalty_logs(customerId(255), createdAt(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_accounts_customer ON customer_accounts(customerId)`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_accounts_balance ON customer_accounts(balancePence)`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_account_entries_customer_created ON customer_account_entries(customerId, createdAt(255), id)`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_account_entries_shift_created ON customer_account_entries(shiftId, createdAt(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_account_entries_till_created ON customer_account_entries(tillNumber, createdAt(255))`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_account_entries_order ON customer_account_entries(orderId)`,
+        `CREATE INDEX IF NOT EXISTS idx_customer_account_entries_reverses ON customer_account_entries(reversesEntryId)`,
         `CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name(191), id)`,
         `CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method(255))`,
         `CREATE INDEX IF NOT EXISTS idx_daily_summary_date ON daily_sales_summary(date)`,
@@ -852,7 +1328,8 @@ const TIMESTAMP_SYNC_TABLES = [
     'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'registers',
+    'employees', 'settings', 'customers', 'customer_accounts',
+    'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
@@ -1814,6 +2291,81 @@ export async function mysqlSaveCustomerStrict(customer: any): Promise<void> {
     throw lastError;
 }
 
+function normalizeCustomerAccount(row: any, customerId = ''): CustomerAccount {
+    return {
+        id: String(row?.id || customerId),
+        customerId: String(row?.customerId || customerId),
+        isEnabled: Boolean(row?.isEnabled),
+        creditLimitPence: Number(row?.creditLimitPence || 0),
+        balancePence: Number(row?.balancePence || 0),
+        createdAt: String(row?.createdAt || ''),
+        updatedAt: String(row?.updatedAt || ''),
+    };
+}
+
+function normalizeCustomerAccountEntry(row: any): CustomerAccountEntry {
+    return {
+        id: String(row?.id || ''),
+        accountId: String(row?.accountId || row?.customerId || ''),
+        customerId: String(row?.customerId || ''),
+        orderId: String(row?.orderId || ''),
+        entryType: row?.entryType,
+        amountPence: Number(row?.amountPence || 0),
+        paymentMethod: row?.paymentMethod || '',
+        reference: String(row?.reference || ''),
+        description: String(row?.description || ''),
+        receiptNumber: Number(row?.receiptNumber || 0),
+        receiptKey: String(row?.receiptKey || ''),
+        employeeId: String(row?.employeeId || ''),
+        tillNumber: String(row?.tillNumber || ''),
+        shiftId: String(row?.shiftId || ''),
+        idempotencyKey: String(row?.idempotencyKey || ''),
+        reversesEntryId: String(row?.reversesEntryId || ''),
+        balanceAfterPence: Number(row?.balanceAfterPence || 0),
+        createdAt: String(row?.createdAt || ''),
+        updatedAt: String(row?.updatedAt || ''),
+    };
+}
+
+export async function mysqlGetCustomerAccount(customerId: string): Promise<CustomerAccount> {
+    const normalizedId = String(customerId || '').trim();
+    if (!normalizedId) throw new Error('Customer ID is required');
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT * FROM customer_accounts WHERE customerId = ? LIMIT 1`,
+        [normalizedId],
+    );
+    return normalizeCustomerAccount(rows[0], normalizedId);
+}
+
+export async function mysqlGetCustomerAccountEntries(
+    customerId: string,
+    options: { limit?: number; offset?: number } = {},
+): Promise<{ entries: CustomerAccountEntry[]; total: number }> {
+    const normalizedId = String(customerId || '').trim();
+    if (!normalizedId) throw new Error('Customer ID is required');
+    const limit = Math.max(1, Math.min(200, Math.floor(Number(options.limit || 50))));
+    const offset = Math.max(0, Math.floor(Number(options.offset || 0)));
+    const d = await getDb();
+    const [rows, countRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT * FROM customer_account_entries
+             WHERE customerId = ?
+             ORDER BY createdAt DESC, id DESC
+             LIMIT ? OFFSET ?`,
+            [normalizedId, limit, offset],
+        ),
+        d.select<any[]>(
+            `SELECT COUNT(*) AS count FROM customer_account_entries WHERE customerId = ?`,
+            [normalizedId],
+        ),
+    ]);
+    return {
+        entries: rows.map(normalizeCustomerAccountEntry),
+        total: Number(countRows[0]?.count || 0),
+    };
+}
+
 async function mysqlUpsertCustomerById(
     d: Database,
     customer: any,
@@ -2020,6 +2572,50 @@ function reportDateBounds(startDate: string, endDate: string): [string, string] 
     return [start.toISOString(), end.toISOString()];
 }
 
+async function mysqlGetAccountReportActivity(
+    d: Database,
+    startTime: string,
+    endTime: string,
+    _tillNumber?: string,
+): Promise<Pick<PaymentBreakdown,
+    'accountCharges' | 'accountRepaymentsCash' | 'accountRepaymentsCard' |
+    'accountAdjustments' | 'openingAccountOwed' | 'closingAccountOwed' |
+    'accountActivityScope'>> {
+    const activityParams: any[] = [startTime, endTime];
+    const [activityRows, openingRows, closingRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT
+                CAST(COALESCE(SUM(CASE WHEN entryType = 'charge' THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountCharges,
+                CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
+                CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
+                CAST(COALESCE(SUM(CASE WHEN entryType NOT IN ('charge', 'payment') THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountAdjustments
+             FROM customer_account_entries
+             WHERE createdAt >= ? AND createdAt < ?`,
+            activityParams,
+        ),
+        d.select<any[]>(
+            `SELECT CAST(COALESCE(SUM(amountPence), 0) AS SIGNED) AS balance
+             FROM customer_account_entries WHERE createdAt < ?`,
+            [startTime],
+        ),
+        d.select<any[]>(
+            `SELECT CAST(COALESCE(SUM(amountPence), 0) AS SIGNED) AS balance
+             FROM customer_account_entries WHERE createdAt < ?`,
+            [endTime],
+        ),
+    ]);
+    const activity = activityRows[0] || {};
+    return {
+        accountCharges: Number(activity.accountCharges || 0),
+        accountRepaymentsCash: Number(activity.accountRepaymentsCash || 0),
+        accountRepaymentsCard: Number(activity.accountRepaymentsCard || 0),
+        accountAdjustments: Number(activity.accountAdjustments || 0),
+        openingAccountOwed: Number(openingRows[0]?.balance || 0),
+        closingAccountOwed: Number(closingRows[0]?.balance || 0),
+        accountActivityScope: 'shop',
+    };
+}
+
 export async function mysqlGetSalesOverview(
     startDate: string, endDate: string, tillNumber?: string
 ): Promise<SalesOverview> {
@@ -2071,36 +2667,35 @@ export async function mysqlGetPaymentBreakdown(
 ): Promise<PaymentBreakdown> {
     const d = await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
-    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    const bounds = reportDateBounds(startDate, endDate);
+    const params: any[] = [...bounds];
     if (tillNumber) params.push(tillNumber);
 
-    const rows: any[] = await d.select(
+    const [rows, accountActivity] = await Promise.all([d.select<any[]>(
         `SELECT
             CAST(COALESCE(SUM(p.totalCash), 0) AS SIGNED) as totalCash,
             CAST(COALESCE(SUM(p.totalCard), 0) AS SIGNED) as totalCard,
             CAST(COALESCE(SUM(p.totalLoyalty), 0) AS SIGNED) as totalLoyalty,
+            CAST(COALESCE(SUM(p.totalAccount), 0) AS SIGNED) as totalAccount,
             CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) AS SIGNED) as unrecordedAmount,
             CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalAmount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cashTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cardTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as splitTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as loyaltyTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasAccount = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as accountTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) AS SIGNED) as unrecordedTxCount
          FROM orders o
          LEFT JOIN (
             SELECT orderId,
-                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
-                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
-                SUM(amount
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
-                ) as totalLoyalty,
-                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
-                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
-                MAX(CASE WHEN amount
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
-                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+                SUM(CASE WHEN COALESCE(cashAmount, 0) != 0 THEN cashAmount WHEN method = 'cash' THEN amount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN COALESCE(cardAmount, 0) != 0 THEN cardAmount WHEN method IN ('card', 'sumup', 'dojo', 'mobile') THEN amount ELSE 0 END) as totalCard,
+                SUM(COALESCE(loyaltyAmount, 0)) as totalLoyalty,
+                SUM(COALESCE(accountAmount, 0)) as totalAccount,
+                MAX(CASE WHEN COALESCE(cashAmount, 0) != 0 OR method = 'cash' THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN COALESCE(cardAmount, 0) != 0 OR method IN ('card', 'sumup', 'dojo', 'mobile') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN COALESCE(loyaltyAmount, 0) != 0 THEN 1 ELSE 0 END) as hasLoyalty,
+                MAX(CASE WHEN COALESCE(accountAmount, 0) != 0 THEN 1 ELSE 0 END) as hasAccount
             FROM payments GROUP BY orderId
          ) p ON o.id = p.orderId
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
@@ -2108,17 +2703,20 @@ export async function mysqlGetPaymentBreakdown(
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
            AND o.completedAt >= ? AND o.completedAt < ?${tillFilter}`,
         params
-    );
+    ), mysqlGetAccountReportActivity(d, bounds[0], bounds[1], tillNumber)]);
 
     const r = rows[0] || {};
     return {
         totalCash: r.totalCash || 0,
         totalCard: r.totalCard || 0,
         totalLoyalty: r.totalLoyalty || 0,
+        totalAccount: r.totalAccount || 0,
         cashTxCount: r.cashTxCount || 0,
         cardTxCount: r.cardTxCount || 0,
         splitTxCount: r.splitTxCount || 0,
         loyaltyTxCount: r.loyaltyTxCount || 0,
+        accountTxCount: r.accountTxCount || 0,
+        ...accountActivity,
         totalAmount: r.totalAmount || 0,
         unrecordedAmount: r.unrecordedAmount || 0,
         unrecordedTxCount: r.unrecordedTxCount || 0,
@@ -2175,13 +2773,15 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
     const rows: any[] = await d.select(
         `SELECT o.completedAt, COALESCE(o.tillNumber, '') as till, CAST(o.type AS CHAR) as type,
             CAST(COALESCE(SUM((SELECT SUM(CASE
-                WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount)
-                WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END)
+                WHEN COALESCE(p.cashAmount, 0) != 0 THEN p.cashAmount
+                WHEN p.method = 'cash' THEN p.amount ELSE 0 END)
                 FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cashTotal,
             CAST(COALESCE(SUM((SELECT SUM(CASE
-                WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount)
-                WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END)
+                WHEN COALESCE(p.cardAmount, 0) != 0 THEN p.cardAmount
+                WHEN p.method IN ('card', 'sumup', 'dojo', 'mobile') THEN p.amount ELSE 0 END)
                 FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cardTotal,
+            CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.accountAmount, 0))
+                FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as accountTotal,
             CAST(o.total AS SIGNED) as totalSales
          FROM orders o
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
@@ -2190,31 +2790,90 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
          GROUP BY o.id, o.completedAt, o.tillNumber, o.total`
     );
 
-    const grouped = new Map<string, { day: string; till: string; cashTotal: number; cardTotal: number; totalSales: number; txCount: number }>();
+    const grouped = new Map<string, {
+        day: string;
+        till: string;
+        cashTotal: number;
+        cardTotal: number;
+        accountTotal: number;
+        accountRepaymentsCash: number;
+        accountRepaymentsCard: number;
+        totalSales: number;
+        txCount: number;
+    }>();
     for (const row of rows) {
         const completed = new Date(row.completedAt);
         const day = `${completed.getFullYear()}-${String(completed.getMonth() + 1).padStart(2, '0')}-${String(completed.getDate()).padStart(2, '0')}`;
         if (date && day !== date) continue;
         const key = `${day}\u0000${row.till || ''}`;
-        const summary = grouped.get(key) || { day, till: row.till || '', cashTotal: 0, cardTotal: 0, totalSales: 0, txCount: 0 };
+        const summary = grouped.get(key) || {
+            day,
+            till: row.till || '',
+            cashTotal: 0,
+            cardTotal: 0,
+            accountTotal: 0,
+            accountRepaymentsCash: 0,
+            accountRepaymentsCard: 0,
+            totalSales: 0,
+            txCount: 0,
+        };
         summary.cashTotal += Number(row.cashTotal || 0);
         summary.cardTotal += Number(row.cardTotal || 0);
+        summary.accountTotal += Number(row.accountTotal || 0);
         summary.totalSales += Number(row.totalSales || 0);
         if (row.type !== 'return') summary.txCount++;
         grouped.set(key, summary);
     }
 
+    const collectionRows: any[] = await d.select(
+        `SELECT createdAt, CAST(COALESCE(tillNumber, '') AS CHAR) AS till,
+                CAST(paymentMethod AS CHAR) AS paymentMethod,
+                CAST(amountPence AS SIGNED) AS amountPence
+         FROM customer_account_entries
+         WHERE entryType = 'payment' AND amountPence < 0`,
+    );
+    for (const row of collectionRows) {
+        const created = new Date(row.createdAt);
+        const day = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, '0')}-${String(created.getDate()).padStart(2, '0')}`;
+        if (date && day !== date) continue;
+        const key = `${day}\u0000${row.till || ''}`;
+        const summary = grouped.get(key) || {
+            day,
+            till: row.till || '',
+            cashTotal: 0,
+            cardTotal: 0,
+            accountTotal: 0,
+            accountRepaymentsCash: 0,
+            accountRepaymentsCard: 0,
+            totalSales: 0,
+            txCount: 0,
+        };
+        if (row.paymentMethod === 'cash') summary.accountRepaymentsCash += -Number(row.amountPence || 0);
+        if (row.paymentMethod === 'card') summary.accountRepaymentsCard += -Number(row.amountPence || 0);
+        grouped.set(key, summary);
+    }
+
     for (const r of grouped.values()) {
         await d.execute(
-            `INSERT INTO daily_sales_summary (date, tillNumber, cashTotal, cardTotal, totalSales, transactionCount, updatedAt)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+            `INSERT INTO daily_sales_summary (
+                date, tillNumber, cashTotal, cardTotal, accountTotal,
+                accountRepaymentsCash, accountRepaymentsCard,
+                totalSales, transactionCount, updatedAt
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 cashTotal = VALUES(cashTotal),
                 cardTotal = VALUES(cardTotal),
+                accountTotal = VALUES(accountTotal),
+                accountRepaymentsCash = VALUES(accountRepaymentsCash),
+                accountRepaymentsCard = VALUES(accountRepaymentsCard),
                 totalSales = VALUES(totalSales),
                 transactionCount = VALUES(transactionCount),
                 updatedAt = VALUES(updatedAt)`,
-            [r.day, r.till, r.cashTotal, r.cardTotal, r.totalSales, r.txCount, nowStr]
+            [
+                r.day, r.till, r.cashTotal, r.cardTotal, r.accountTotal,
+                r.accountRepaymentsCash, r.accountRepaymentsCard,
+                r.totalSales, r.txCount, nowStr,
+            ]
         );
     }
 }
@@ -2324,7 +2983,7 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
     const d = await getDb();
     const options = await mysqlGetTillReportOptions();
     const bounds = reportDateBounds(startDate, endDate);
-    const rows: any[] = await d.select(
+    const [rows, collectionRows] = await Promise.all([d.select<any[]>(
         `SELECT CAST(o.tillNumber AS CHAR) as id,
             CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as netSales,
             CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
@@ -2334,12 +2993,10 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
             CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as transactions,
             CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) as refundTransactions,
             CAST(COALESCE(SUM((SELECT SUM(ol.quantity) FROM order_lines ol WHERE ol.orderId = o.id)), 0) AS SIGNED) as itemsSold,
-            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cashTotal,
-            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cardTotal,
-            CAST(COALESCE(SUM((SELECT SUM(p.amount
-                - CASE WHEN p.method = 'cash' THEN COALESCE(NULLIF(p.cashAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cashAmount ELSE 0 END
-                - CASE WHEN p.method = 'card' THEN COALESCE(NULLIF(p.cardAmount, 0), p.amount) WHEN p.method = 'split' THEN p.cardAmount ELSE 0 END
-            ) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as loyaltyTotal
+            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN COALESCE(p.cashAmount, 0) != 0 THEN p.cashAmount WHEN p.method = 'cash' THEN p.amount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cashTotal,
+            CAST(COALESCE(SUM((SELECT SUM(CASE WHEN COALESCE(p.cardAmount, 0) != 0 THEN p.cardAmount WHEN p.method IN ('card', 'sumup', 'dojo', 'mobile') THEN p.amount ELSE 0 END) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as cardTotal,
+            CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.loyaltyAmount, 0)) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as loyaltyTotal,
+            CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.accountAmount, 0)) FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) as accountTotal
          FROM orders o
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
@@ -2347,8 +3004,18 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
            AND o.completedAt >= ? AND o.completedAt < ?
          GROUP BY o.tillNumber ORDER BY netSales DESC`,
         bounds
-    );
+    ), d.select<any[]>(
+        `SELECT CAST(tillNumber AS CHAR) AS id,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard
+         FROM customer_account_entries
+         WHERE entryType = 'payment'
+           AND createdAt >= ? AND createdAt < ?
+         GROUP BY tillNumber`,
+        bounds,
+    )]);
     const byId = new Map(rows.map((row) => [String(row.id || ''), row]));
+    const collectionsById = new Map(collectionRows.map((row) => [String(row.id || ''), row]));
     return options.map((option) => {
         const row = byId.get(option.id) || {};
         return {
@@ -2364,6 +3031,9 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
             cashTotal: row.cashTotal || 0,
             cardTotal: row.cardTotal || 0,
             loyaltyTotal: row.loyaltyTotal || 0,
+            accountTotal: row.accountTotal || 0,
+            accountRepaymentsCash: Number(collectionsById.get(option.id)?.accountRepaymentsCash || 0),
+            accountRepaymentsCard: Number(collectionsById.get(option.id)?.accountRepaymentsCard || 0),
         };
     });
 }
@@ -2499,33 +3169,31 @@ export async function mysqlGetTillPeriodReport(
     };
 
     // Payment breakdown
-    const bRows: any[] = await d.select(
+    const [bRows, accountActivity] = await Promise.all([d.select<any[]>(
         `SELECT
             CAST(COALESCE(SUM(p.totalCash), 0) AS SIGNED) as totalCash,
             CAST(COALESCE(SUM(p.totalCard), 0) AS SIGNED) as totalCard,
             CAST(COALESCE(SUM(p.totalLoyalty), 0) AS SIGNED) as totalLoyalty,
+            CAST(COALESCE(SUM(p.totalAccount), 0) AS SIGNED) as totalAccount,
             CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) AS SIGNED) as unrecordedAmount,
             CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as totalAmount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cashTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCard = 1 AND p.hasCash = 0 THEN 1 ELSE 0 END), 0) AS SIGNED) as cardTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasCash = 1 AND p.hasCard = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as splitTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.hasLoyalty = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as loyaltyTxCount,
+            CAST(COALESCE(SUM(CASE WHEN p.hasAccount = 1 THEN 1 ELSE 0 END), 0) AS SIGNED) as accountTxCount,
             CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN 1 ELSE 0 END), 0) AS SIGNED) as unrecordedTxCount
          FROM orders o
          LEFT JOIN (
             SELECT orderId,
-                SUM(CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END) as totalCash,
-                SUM(CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END) as totalCard,
-                SUM(amount
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
-                ) as totalLoyalty,
-                MAX(CASE WHEN method IN ('cash', 'split') THEN 1 ELSE 0 END) as hasCash,
-                MAX(CASE WHEN method IN ('card', 'split') THEN 1 ELSE 0 END) as hasCard,
-                MAX(CASE WHEN amount
-                    - CASE WHEN method = 'cash' THEN COALESCE(NULLIF(cashAmount, 0), amount) WHEN method = 'split' THEN cashAmount ELSE 0 END
-                    - CASE WHEN method = 'card' THEN COALESCE(NULLIF(cardAmount, 0), amount) WHEN method = 'split' THEN cardAmount ELSE 0 END
-                    != 0 THEN 1 ELSE 0 END) as hasLoyalty
+                SUM(CASE WHEN COALESCE(cashAmount, 0) != 0 THEN cashAmount WHEN method = 'cash' THEN amount ELSE 0 END) as totalCash,
+                SUM(CASE WHEN COALESCE(cardAmount, 0) != 0 THEN cardAmount WHEN method IN ('card', 'sumup', 'dojo', 'mobile') THEN amount ELSE 0 END) as totalCard,
+                SUM(COALESCE(loyaltyAmount, 0)) as totalLoyalty,
+                SUM(COALESCE(accountAmount, 0)) as totalAccount,
+                MAX(CASE WHEN COALESCE(cashAmount, 0) != 0 OR method = 'cash' THEN 1 ELSE 0 END) as hasCash,
+                MAX(CASE WHEN COALESCE(cardAmount, 0) != 0 OR method IN ('card', 'sumup', 'dojo', 'mobile') THEN 1 ELSE 0 END) as hasCard,
+                MAX(CASE WHEN COALESCE(loyaltyAmount, 0) != 0 THEN 1 ELSE 0 END) as hasLoyalty,
+                MAX(CASE WHEN COALESCE(accountAmount, 0) != 0 THEN 1 ELSE 0 END) as hasAccount
             FROM payments GROUP BY orderId
          ) p ON o.id = p.orderId
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
@@ -2533,16 +3201,19 @@ export async function mysqlGetTillPeriodReport(
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
            ${tillFilter} AND o.completedAt >= ? AND o.completedAt < ?`,
         periodParams
-    );
+    ), mysqlGetAccountReportActivity(d, startTime, endTime, tillNumber)]);
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
         totalCash: b.totalCash || 0,
         totalCard: b.totalCard || 0,
         totalLoyalty: b.totalLoyalty || 0,
+        totalAccount: b.totalAccount || 0,
         cashTxCount: b.cashTxCount || 0,
         cardTxCount: b.cardTxCount || 0,
         splitTxCount: b.splitTxCount || 0,
         loyaltyTxCount: b.loyaltyTxCount || 0,
+        accountTxCount: b.accountTxCount || 0,
+        ...accountActivity,
         totalAmount: b.totalAmount || 0,
         unrecordedAmount: b.unrecordedAmount || 0,
         unrecordedTxCount: b.unrecordedTxCount || 0,
