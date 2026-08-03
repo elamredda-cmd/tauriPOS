@@ -14,6 +14,11 @@ import { getScaleSaleDisplay } from '$lib/scaleSale';
 import { printSystemReceipt, printSystemText } from '$lib/systemPrint';
 import { rasterizeMonochrome, type MonoRaster } from '$lib/labelRaster';
 import { executePrinterModuleRaw } from '$lib/printerModules';
+import {
+    receiptTenderBreakdown,
+    receiptTenderRows,
+    type ReceiptPayment,
+} from '$lib/receiptPayments';
 
 export type PrinterConnectionType = 'system' | 'network_escpos' | 'usb_raw' | 'serial' | 'bluetooth' | 'module';
 export type ReceiptPaperWidth = '58mm' | '80mm';
@@ -483,6 +488,7 @@ type ReceiptPayload = {
     store: Store;
     order: Order;
     lines: OrderLine[];
+    payments?: Array<Partial<ReceiptPayment>>;
     cashierName: string;
     tillName: string;
     design: ReceiptDesign;
@@ -552,13 +558,28 @@ export function buildEscposReceipt(payload: ReceiptPayload, config = getReceiptP
     }
     bytes.push(...commands.boldOn, ...line(textRow('TOTAL', money(payload.order.total), width), config.encoding), ...commands.boldOff);
     if (payload.design.showPayment) {
-        const hasAccountMovement = String(payload.order.paymentMethod || '').toLowerCase().includes('account');
         const isRefund = payload.order.type === 'return';
-        bytes.push(...line(textRow(receiptPaymentLabel(payload.order.paymentMethod, isRefund), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
-        if (hasAccountMovement) {
+        const payments = payload.payments || [];
+        const breakdown = receiptTenderBreakdown(payments);
+        if (payments.length > 0) {
+            for (const row of receiptTenderRows(payload.order, payments)) {
+                bytes.push(...line(textRow(row.label, money(row.amount), width), config.encoding));
+            }
+        } else {
+            bytes.push(...line(textRow(receiptPaymentLabel(payload.order.paymentMethod, isRefund), money(payload.order.amountTendered || payload.order.total), width), config.encoding));
+        }
+        const fallbackAccountMovement = String(payload.order.paymentMethod || '').toLowerCase().includes('account')
+            ? Number(payload.order.total || 0)
+            : 0;
+        const accountMovement = payments.length > 0 ? breakdown.account : fallbackAccountMovement;
+        if (accountMovement !== 0) {
             bytes.push(
                 ...commands.boldOn,
-                ...line(isRefund ? 'CUSTOMER ACCOUNT CREDITED' : 'CHARGED TO CUSTOMER ACCOUNT', config.encoding),
+                ...line(textRow(
+                    isRefund ? 'ACCOUNT CREDITED' : 'ACCOUNT DEBT ADDED',
+                    money(Math.abs(accountMovement)),
+                    width,
+                ), config.encoding),
                 ...commands.boldOff,
             );
         }

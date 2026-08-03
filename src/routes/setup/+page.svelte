@@ -13,6 +13,7 @@
         migrateLocalDataToServer,
         replaceMariaDbDataFromThisTill,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+        verifyDatabaseIdentityBeforeSchemaMutation,
         wipeAndPullFromServer
     } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
@@ -163,14 +164,6 @@
             );
     }
 
-    function shouldReplaceMariaDbFromRestoredTill(localCounts: ShopDataCounts, remoteCounts: ShopDataCounts): boolean {
-        if (!hasBusinessData(localCounts) || !hasBusinessData(remoteCounts)) return false;
-        const localHasMoreCatalogData = localCounts.products > remoteCounts.products
-            || localCounts.categories > remoteCounts.categories
-            || localCounts.customers > remoteCounts.customers;
-        return localHasMoreCatalogData && localCounts.orders >= remoteCounts.orders;
-    }
-
     async function countLocalShopData(): Promise<ShopDataCounts> {
         const local = await getDb();
         const rows: any[] = await local.select(
@@ -271,26 +264,26 @@
         connecting = true;
         try {
             const cfg = buildConfig();
-            setSetupProgress('running', 10, 'Connecting to MariaDB', 'Checking server and creating missing tables...');
-            await initMysqlDb(cfg);
+            setSetupProgress('running', 10, 'Checking shop identity', 'Verifying this database before making any server changes...');
             connectionState.set({ mode: 'multi', mysqlConfig: cfg, mysqlOnline: false, syncError: null });
-            await saveMode('multi', cfg);
-            setSetupProgress('running', 25, 'Checking shop identity', 'Making sure this till belongs to the correct shop database...');
-            await ensureDatabaseIdentityForSync();
+            await verifyDatabaseIdentityBeforeSchemaMutation();
+            setSetupProgress('running', 20, 'Preparing MariaDB', 'Creating or upgrading tables after identity verification...');
+            await initMysqlDb(cfg);
             const server = await getMysqlDb();
             if (!server) throw new Error('MariaDB connected during the test but could not be opened.');
+            const restoreNeedsMariaDbReplace = await hasRestorePendingMariaDbReplace();
+            if (!restoreNeedsMariaDbReplace) await ensureDatabaseIdentityForSync();
             connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
             setSetupProgress('running', 35, 'Checking shop data', 'Counting products, categories, orders, and customers...');
             const remoteCounts = await countRemoteShopData(server);
             const localCounts = await countLocalShopData();
-            const restoreNeedsMariaDbReplace = await hasRestorePendingMariaDbReplace();
 
-            if (restoreNeedsMariaDbReplace || shouldReplaceMariaDbFromRestoredTill(localCounts, remoteCounts)) {
+            if (restoreNeedsMariaDbReplace) {
                 setSetupProgress(
                     'running',
                     50,
                     'Replacing MariaDB from restored till',
-                    `This till has ${localCounts.products.toLocaleString()} products, MariaDB has ${remoteCounts.products.toLocaleString()}. Replacing MariaDB while keeping employees and settings...`
+                    `This confirmed restore has ${localCounts.products.toLocaleString()} products. Restoring its staff and shop settings while preserving this till's hardware identity...`
                 );
                 await replaceMariaDbDataFromThisTill();
                 const replacedCounts = await countRemoteShopData(server);

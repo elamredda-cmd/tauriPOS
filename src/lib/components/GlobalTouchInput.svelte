@@ -8,6 +8,7 @@
     let visible = false;
     let numeric = false;
     let decimal = false;
+    let phone = false;
     let masked = false;
     let title = "Enter text";
     let maxLength = 120;
@@ -54,8 +55,9 @@
         lastAppliedValue = value;
         selectionStart = element.selectionStart ?? value.length;
         selectionEnd = element.selectionEnd ?? selectionStart;
+        phone = element instanceof HTMLInputElement && element.type === "tel";
         numeric = element instanceof HTMLInputElement &&
-            (element.type === "number" || element.type === "tel" || element.inputMode === "numeric" || element.inputMode === "decimal");
+            (element.type === "number" || phone || element.inputMode === "numeric" || element.inputMode === "decimal");
         decimal = element instanceof HTMLInputElement &&
             (element.inputMode === "decimal" || element.type === "number" && (element.step === "any" || element.step.includes(".")));
         masked = element instanceof HTMLInputElement && element.type === "password";
@@ -98,6 +100,22 @@
         target = null;
         targetRectStyle = "";
         if (focusTimer) window.clearTimeout(focusTimer);
+    }
+
+    async function closeFromBackdrop(event?: Event) {
+        event?.preventDefault();
+        const finishedTarget = target;
+        const finishedSelectionStart = selectionStart;
+        const finishedSelectionEnd = selectionEnd;
+        done();
+        await tick();
+        if (!finishedTarget?.isConnected) return;
+        finishedTarget.focus({ preventScroll: true });
+        try {
+            finishedTarget.setSelectionRange(finishedSelectionStart, finishedSelectionEnd);
+        } catch {
+            // Some input types do not support text selection.
+        }
     }
 
     function keepTargetFocused(event: PointerEvent) {
@@ -190,6 +208,7 @@
         const handleKeydown = (event: KeyboardEvent) => {
             if (event.key === "Escape" && visible) {
                 event.preventDefault();
+                event.stopImmediatePropagation();
                 done();
             }
         };
@@ -224,8 +243,8 @@
         role="button"
         tabindex="0"
         aria-label="Close touch keyboard"
-        on:click={done}
-        on:keydown={(event) => (event.key === "Enter" || event.key === " ") && done()}
+        on:pointerdown={closeFromBackdrop}
+        on:keydown={(event) => (event.key === "Enter" || event.key === " ") && closeFromBackdrop(event)}
     ></div>
     {#if targetRectStyle}
         <div
@@ -264,7 +283,7 @@
         {#if numeric}
             <div class="touch-input-numeric-header flex items-center justify-between gap-2 px-[.8rem] pb-0 pt-[.7rem]">
                 <div class="flex min-w-0 flex-col">
-                    <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">Touch digit pad</span>
+                    <span class="text-[.65rem] font-black uppercase tracking-[.1em] text-accent-primary">{phone ? 'Touch phone pad' : 'Touch digit pad'}</span>
                     <strong class="truncate">{title}</strong>
                 </div>
                 <button
@@ -276,8 +295,11 @@
             <div class="touch-input-numeric-body mx-auto w-full p-[.65rem]">
                 <TouchDigitPad
                     bind:value
+                    bind:selectionStart
+                    bind:selectionEnd
                     {masked}
                     allowDecimal={decimal}
+                    allowPhoneSymbols={phone}
                     maxLength={target?.maxLength && target.maxLength > 0 ? target.maxLength : 32}
                     max={maxValue}
                     placeholder={title}

@@ -1,6 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { get, writable } from 'svelte/store';
-import type { SaleBundle } from '$lib/stores/database';
 import { connectionState } from '$lib/stores/connection';
 import {
     mysqlAcquirePaymentTerminalLock,
@@ -8,7 +7,14 @@ import {
     mysqlReleasePaymentTerminalLock,
     type MysqlPaymentTerminalLock,
 } from '$lib/stores/mysql';
-import { getDb as getSqliteDb } from '$lib/stores/sqlite';
+import {
+    getRecoverablePaymentTerminalAttempts,
+    preparePaymentTerminalAttempt,
+    prunePaymentTerminalAttempts,
+    updatePaymentTerminalAttempt,
+    type TerminalAttemptUpdate,
+    type TerminalPaymentAttempt,
+} from '$lib/terminalAttempts';
 
 export interface SumupConfig {
     enabled: boolean;
@@ -66,19 +72,9 @@ export interface SumupTransactionStatus {
     refundedAmount?: number;
 }
 
-export interface SumupPaymentAttempt {
-    id: string;
+export type SumupPaymentAttempt = TerminalPaymentAttempt & {
     provider: 'sumup';
-    terminalKey: string;
-    clientTransactionId: string;
-    amount: number;
-    currency: string;
-    status: 'prepared' | 'started' | 'approved' | 'commit_failed' | 'completed' | 'failed' | 'cancelled';
-    saleBundle: SaleBundle;
-    error: string;
-    createdAt: string;
-    updatedAt: string;
-}
+};
 
 export interface SumupLockResult {
     acquired: boolean;
@@ -196,94 +192,24 @@ export function releaseSumupLock(
     return mysqlReleasePaymentTerminalLock(sumupTerminalKey(config), tillId, paymentReference);
 }
 
-export async function saveSumupAttempt(attempt: SumupPaymentAttempt): Promise<void> {
-    const db = await getSqliteDb();
-    await db.execute(
-        `INSERT INTO payment_terminal_attempts
-            (id, provider, terminalKey, clientTransactionId, amount, currency, status, saleBundle, error, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            terminalKey = excluded.terminalKey,
-            clientTransactionId = excluded.clientTransactionId,
-            amount = excluded.amount,
-            currency = excluded.currency,
-            status = excluded.status,
-            saleBundle = excluded.saleBundle,
-            error = excluded.error,
-            updatedAt = excluded.updatedAt`,
-        [
-            attempt.id,
-            attempt.provider,
-            attempt.terminalKey,
-            attempt.clientTransactionId,
-            attempt.amount,
-            attempt.currency,
-            attempt.status,
-            JSON.stringify(attempt.saleBundle),
-            attempt.error,
-            attempt.createdAt,
-            attempt.updatedAt,
-        ],
-    );
+export async function saveSumupAttempt(attempt: SumupPaymentAttempt): Promise<SumupPaymentAttempt> {
+    return preparePaymentTerminalAttempt(attempt);
 }
 
 export async function updateSumupAttempt(
     id: string,
     status: SumupPaymentAttempt['status'],
-    values: { clientTransactionId?: string; error?: string; saleBundle?: SaleBundle } = {},
+    values: TerminalAttemptUpdate = {},
 ): Promise<void> {
-    const db = await getSqliteDb();
-    const updates = ['status = ?', 'updatedAt = ?'];
-    const parameters: unknown[] = [status, new Date().toISOString()];
-    if (values.clientTransactionId !== undefined) {
-        updates.push('clientTransactionId = ?');
-        parameters.push(values.clientTransactionId);
-    }
-    if (values.error !== undefined) {
-        updates.push('error = ?');
-        parameters.push(values.error);
-    }
-    if (values.saleBundle !== undefined) {
-        updates.push('saleBundle = ?');
-        parameters.push(JSON.stringify(values.saleBundle));
-    }
-    parameters.push(id);
-    await db.execute(`UPDATE payment_terminal_attempts SET ${updates.join(', ')} WHERE id = ?`, parameters);
+    await updatePaymentTerminalAttempt('sumup', id, status, values);
 }
 
 export async function getRecoverableSumupAttempts(): Promise<SumupPaymentAttempt[]> {
-    const db = await getSqliteDb();
-    const rows = await db.select<any[]>(
-        `SELECT * FROM payment_terminal_attempts
-         WHERE provider = 'sumup' AND status IN ('approved', 'commit_failed')
-         ORDER BY createdAt ASC`,
-    );
-    return rows.flatMap((row) => {
-        try {
-            return [{
-                ...row,
-                amount: Number(row.amount || 0),
-                saleBundle: JSON.parse(row.saleBundle),
-            } as SumupPaymentAttempt];
-        } catch {
-            return [];
-        }
-    });
-}
-
-export async function localOrderExists(orderId: string): Promise<boolean> {
-    const db = await getSqliteDb();
-    const rows = await db.select<{ id: string }[]>('SELECT id FROM orders WHERE id = ? LIMIT 1', [orderId]);
-    return rows.length > 0;
+    return getRecoverablePaymentTerminalAttempts('sumup') as Promise<SumupPaymentAttempt[]>;
 }
 
 export async function pruneSumupAttempts(): Promise<void> {
-    const db = await getSqliteDb();
-    await db.execute(
-        `DELETE FROM payment_terminal_attempts
-         WHERE status IN ('completed', 'failed', 'cancelled')
-           AND julianday(updatedAt) < julianday('now', '-30 days')`,
-    );
+    await prunePaymentTerminalAttempts('sumup');
 }
 
 export function delay(milliseconds: number): Promise<void> {

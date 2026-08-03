@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
     import QRCode from 'qrcode';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { storeDB } from '$lib/stores/db';
@@ -47,7 +48,9 @@
             void sendSnapshotNow();
         } catch (error) {
             console.error('Could not prepare owner-app pairing QR:', error);
-            errorMessage = String(error instanceof Error ? error.message : error);
+            errorMessage = isTauri()
+                ? String(error instanceof Error ? error.message : error)
+                : 'Open this page in the installed POS app to generate the shop QR.';
         } finally {
             loading = false;
         }
@@ -91,8 +94,11 @@
 
 <MgmtPage title="Owner App Pairing" backFallback="/settings">
     <div class="h-full overflow-y-auto p-4 sm:p-6">
-        <div class="mx-auto grid max-w-5xl gap-5 lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)]">
-            <section class="flex min-h-[440px] flex-col items-center justify-center rounded-md border border-border-flat bg-white p-5 text-center shadow-[0_16px_36px_var(--shadow)]">
+        <div class="mx-auto grid max-w-5xl items-start gap-5 lg:grid-cols-[minmax(300px,0.85fr)_minmax(0,1.15fr)]">
+            <section
+                class="owner-qr-card flex min-h-[440px] flex-col items-center justify-center rounded-md border border-border-flat p-5 text-center shadow-[0_16px_36px_var(--shadow)]"
+                class:owner-qr-card-error={!!errorMessage}
+            >
                 {#if loading}
                     <span class="h-10 w-10 animate-spin rounded-full border-4 border-[#d7e2ea] border-t-[#087e8b]" aria-label="Preparing pairing QR"></span>
                     <strong class="mt-4 text-[#17324d]">Preparing shop QR...</strong>
@@ -164,6 +170,16 @@
 </MgmtPage>
 
 <style>
+    .owner-qr-card {
+        background: #fff;
+    }
+
+    .owner-qr-card-error {
+        min-height: 260px;
+        background: var(--bg-card);
+        box-shadow: none;
+    }
+
     .status-live {
         border-color: color-mix(in srgb, var(--success) 55%, transparent);
         background: color-mix(in srgb, var(--success) 10%, var(--bg-card));

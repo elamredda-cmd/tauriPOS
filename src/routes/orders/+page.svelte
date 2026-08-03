@@ -16,6 +16,7 @@
     import { getOrdersPage, getProductsByIds } from '$lib/stores/database';
     import { getScaleSaleDisplay } from '$lib/scaleSale';
     import { getReceiptDesign } from '$lib/receipt';
+    import { paymentAllocationLabels, receiptTenderBreakdown } from '$lib/receiptPayments';
     import { getReceiptPrinterConfig, printEscposReceipt } from '$lib/printers';
     import { toast } from '$lib/stores/toast';
 
@@ -249,19 +250,16 @@
     }
 
     function paymentMethods(order: Order): string[] {
-        const methods: string[] = [];
-        for (const payment of getPayments(order.id)) {
-            if (payment.method === 'split') {
-                if (payment.cashAmount) methods.push('Cash');
-                if (payment.cardAmount) methods.push('Card');
-            } else {
-                methods.push(paymentMethodName(payment.method));
-            }
-        }
+        const methods = paymentAllocationLabels(getPayments(order.id));
         if (methods.length === 0 && order.paymentMethod) {
             methods.push(paymentMethodName(order.paymentMethod));
         }
         return [...new Set(methods)];
+    }
+
+    function paymentRecordMethods(payment: Payment): string[] {
+        const methods = paymentAllocationLabels([payment]);
+        return methods.length > 0 ? methods : [paymentMethodName(payment.method)];
     }
 
     function paymentMethodSummary(order: Order): string {
@@ -270,10 +268,16 @@
     }
 
     function paymentBadgeTone(order: Order): string {
-        const methods = paymentMethods(order).map((method) => method.toLowerCase());
-        if (methods.includes('cash') && methods.includes('card')) return 'split';
+        return paymentBadgeToneForMethods(paymentMethods(order));
+    }
+
+    function paymentBadgeToneForMethods(methodNames: string[]): string {
+        const methods = methodNames.map((method) => method.toLowerCase());
+        if (methods.length > 1) return 'split';
         if (methods.includes('card')) return 'card';
         if (methods.includes('cash')) return 'cash';
+        if (methods.includes('loyalty')) return 'loyalty';
+        if (methods.includes('pay later')) return 'account';
         return 'other';
     }
 
@@ -307,6 +311,7 @@
                     ...line,
                     sku: skuByProductId.get(line.productId) || '',
                 })),
+                payments: getPayments(order.id),
                 cashierName: cashierName(order),
                 tillName: tillName(order),
                 design: receiptDesign,
@@ -506,8 +511,10 @@
                             <tr>
                                 <th>Method</th>
                                 <th>Paid</th>
-                                <th>Cash Received</th>
-                                <th>Card Charged</th>
+                                <th>Cash Allocated</th>
+                                <th>Card Allocated</th>
+                                <th>Loyalty</th>
+                                <th>Pay Later</th>
                                 <th>Change</th>
                                 <th>Reference</th>
                                 <th>Time</th>
@@ -515,18 +522,22 @@
                         </thead>
                         <tbody>
                             {#each getPayments(selectedOrder.id) as payment}
+                                {@const allocation = receiptTenderBreakdown([payment])}
+                                {@const methods = paymentRecordMethods(payment)}
                                 <tr>
-                                    <td><span class="payment-badge {payment.method}">{paymentMethodName(payment.method)}</span></td>
+                                    <td><span class="payment-badge {paymentBadgeToneForMethods(methods)}">{methods.join(' + ')}</span></td>
                                     <td class="money {payment.amount < 0 ? '!text-danger' : ''}">{formatMoney(payment.amount)}</td>
-                                    <td>{payment.cashAmount ? formatMoney(payment.cashAmount) : '-'}</td>
-                                    <td>{payment.cardAmount ? formatMoney(payment.cardAmount) : '-'}</td>
+                                    <td>{allocation.cash ? formatMoney(allocation.cash) : '-'}</td>
+                                    <td>{allocation.card ? formatMoney(allocation.card) : '-'}</td>
+                                    <td>{allocation.loyalty ? formatMoney(allocation.loyalty) : '-'}</td>
+                                    <td>{allocation.account ? formatMoney(allocation.account) : '-'}</td>
                                     <td>{payment.changeGiven ? formatMoney(payment.changeGiven) : '-'}</td>
                                     <td class="mono">{payment.reference || '-'}</td>
                                     <td>{formatDate(payment.createdAt)}</td>
                                 </tr>
                             {/each}
                             {#if getPayments(selectedOrder.id).length === 0}
-                                <tr class="empty-row"><td colspan="7">No payments were recorded for this order.</td></tr>
+                                <tr class="empty-row"><td colspan="9">No payments were recorded for this order.</td></tr>
                             {/if}
                         </tbody>
                     </table>
@@ -581,13 +592,15 @@
     .payment-badge { width: fit-content; max-width: 100%; min-height: 1.75rem; padding: .25rem .55rem; display: inline-flex; align-items: center; overflow: hidden; color: var(--text-main); font-size: .7rem; font-weight: 900; line-height: 1.1; white-space: nowrap; text-overflow: ellipsis; border: 1px solid var(--border-flat); border-radius: .35rem; background: var(--bg-panel); }
     .payment-badge.cash { color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, var(--border-flat)); background: color-mix(in srgb, var(--success) 10%, var(--bg-card)); }
     .payment-badge.card { color: var(--accent-primary); border-color: color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat)); background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card)); }
+    .payment-badge.loyalty { color: var(--accent-primary); border-color: color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat)); background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card)); }
+    .payment-badge.account { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, var(--border-flat)); background: color-mix(in srgb, var(--warning) 10%, var(--bg-card)); }
     .payment-badge.split { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 50%, var(--border-flat)); background: color-mix(in srgb, var(--warning) 10%, var(--bg-card)); }
     .order-overview-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .65rem; }
     .payment-overview .payment-badge { margin-top: .45rem; }
     .order-line-product strong, .order-line-product small { display: block; }
     .order-line-product small { max-width: 320px; margin-top: .18rem; overflow: hidden; color: var(--text-muted); font-size: .68rem; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
     .payment-table-wrap { overflow: auto; border: 1px solid var(--border-flat); border-radius: .4rem; }
-    .payment-detail-table { min-width: 900px; }
+    .payment-detail-table { min-width: 1120px; }
     .payment-detail-table th { background: var(--bg-panel); }
     .transaction-record { margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border-flat); border-radius: .4rem; overflow: hidden; }
     .transaction-record > div { min-width: 0; padding: .7rem .8rem; border-right: 1px solid var(--border-flat); background: var(--bg-card); }

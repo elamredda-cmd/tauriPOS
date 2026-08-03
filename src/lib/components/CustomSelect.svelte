@@ -11,6 +11,7 @@
     export let emptyText = "No options available";
     export let menuMinWidth = "100%";
     export let largeOptions = false;
+    export let disabled = false;
 
     let isOpen = false;
     let triggerButton: HTMLButtonElement;
@@ -19,6 +20,7 @@
     const dispatch = createEventDispatcher();
 
     $: selectedLabel = options.find(o => o.value === value)?.label || placeholder;
+    $: if (disabled) isOpen = false;
 
     function select(option: SelectOption) {
         if (option.disabled) return;
@@ -29,6 +31,7 @@
     }
 
     function toggle() {
+        if (disabled) return;
         if (isOpen) {
             isOpen = false;
             return;
@@ -52,6 +55,7 @@
         class="w-full h-12 px-4 flex items-center justify-between gap-3 bg-bg-panel border rounded-lg text-text-main text-base cursor-pointer text-left transition-all duration-150 shadow-[0_8px_18px_var(--shadow)] {isOpen ? 'border-accent-primary bg-bg-card' : 'border-border-flat hover:border-accent-primary hover:bg-bg-card'}" 
         aria-expanded={isOpen}
         aria-haspopup="listbox"
+        {disabled}
         on:click={toggle}
     >
         <span class="truncate">{selectedLabel}</span>

@@ -41,6 +41,11 @@ description = "Enables the dojo_payment_intent_status command without any pre-co
 commands.allow = ["dojo_payment_intent_status"]
 
 [[permission]]
+identifier = "allow-dojo-payment-intent-by-reference"
+description = "Enables the dojo_payment_intent_by_reference command without any pre-configured scope."
+commands.allow = ["dojo_payment_intent_by_reference"]
+
+[[permission]]
 identifier = "allow-dojo-cancel-terminal-session"
 description = "Enables the dojo_cancel_terminal_session command without any pre-configured scope."
 commands.allow = ["dojo_cancel_terminal_session"]

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
@@ -7,17 +7,19 @@
     import { toast } from '$lib/stores/toast';
     import { currentEmployee } from '$lib/stores/session';
     import { hasPermission } from '$lib/permissions';
+    import { isMultiMode } from '$lib/stores/connection';
     import { getReceiptPrinterConfig, printEscposTextReport } from '$lib/printers';
     import {
         getReportSnapshot,
         getLastReportMarker,
-        getLiveLastReportMarker,
         saveReportMarker,
-        saveLiveReportMarker,
+        beginWholeSystemClose,
+        finishWholeSystemClose,
+        abortWholeSystemClose,
         getTillPeriodReport,
-        getLiveTillPeriodReport,
         getTillName,
         getOrCreateTillId,
+        type WholeSystemCloseSession,
         type SalesOverview,
         type PaymentBreakdown,
         type TopProduct,
@@ -60,7 +62,8 @@
     const emptyPaymentBreakdown = (): PaymentBreakdown => ({
         totalCash: 0, totalCard: 0, totalLoyalty: 0, totalAccount: 0,
         cashTxCount: 0, cardTxCount: 0, splitTxCount: 0, loyaltyTxCount: 0, accountTxCount: 0,
-        accountCharges: 0, accountRepaymentsCash: 0, accountRepaymentsCard: 0, accountAdjustments: 0,
+        accountCharges: 0, accountRepaymentsCash: 0, accountRepaymentsCard: 0,
+        accountRepaymentsOther: 0, accountAdjustments: 0,
         openingAccountOwed: 0, closingAccountOwed: 0,
         accountActivityScope: 'shop',
         totalAmount: 0, unrecordedAmount: 0, unrecordedTxCount: 0,
@@ -106,6 +109,8 @@
     let closeReportTillNumber = '';
     let closeReportStart = '';
     let closeReportEnd = '';
+    let closeReportExpectedMarker: string | null = null;
+    let wholeSystemCloseSession: WholeSystemCloseSession | null = null;
     let closeReportText = '';
     let closeReportCanEnd = false;
     let closeReportConfirming = false;
@@ -242,11 +247,12 @@
             ['New Pay Later Charges', pounds(breakdown.accountCharges)],
             ['Cash Payments Received', pounds(breakdown.accountRepaymentsCash)],
             ['Card Payments Received', pounds(breakdown.accountRepaymentsCard)],
+            ['Other Payments Received', pounds(breakdown.accountRepaymentsOther)],
             ['Adjustments / Refunds', pounds(breakdown.accountAdjustments)],
             ['Closing Account Balance', pounds(breakdown.closingAccountOwed)],
             [],
-            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash Sales', 'Card Sales', 'Loyalty Value', 'Pay Later', 'Account Cash Collected', 'Account Card Collected'],
-            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal), pounds(till.accountTotal), pounds(till.accountRepaymentsCash), pounds(till.accountRepaymentsCard)]),
+            ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash Sales', 'Card Sales', 'Loyalty Value', 'Pay Later', 'Account Cash Collected', 'Account Card Collected', 'Account Other Collected'],
+            ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal), pounds(till.accountTotal), pounds(till.accountRepaymentsCash), pounds(till.accountRepaymentsCard), pounds(till.accountRepaymentsOther)]),
             [],
             ['Employee', 'Net Sales', 'Gross Sales', 'Refunds', 'Sales', 'Refund Transactions', 'Average Transaction'],
             ...employeeSales.map(employee => [employee.employeeName, pounds(employee.netSales), pounds(employee.grossSales), pounds(employee.refunds), employee.transactions, employee.refundTransactions, pounds(employee.avgTransaction)]),
@@ -296,6 +302,7 @@
             `New charges: ${formatMoney(breakdown.accountCharges)}`,
             `Cash collected: ${formatMoney(breakdown.accountRepaymentsCash)}`,
             `Card collected: ${formatMoney(breakdown.accountRepaymentsCard)}`,
+            `Other collected: ${formatMoney(breakdown.accountRepaymentsOther)}`,
             `Adjustments: ${formatMoney(breakdown.accountAdjustments)}`,
             `Closing account: ${formatAccountPosition(breakdown.closingAccountOwed)}`,
         ];
@@ -392,6 +399,7 @@
             `New charges: ${formatMoney(data.breakdown.accountCharges)}`,
             `Cash collected: ${formatMoney(data.breakdown.accountRepaymentsCash)}`,
             `Card collected: ${formatMoney(data.breakdown.accountRepaymentsCard)}`,
+            `Other collected: ${formatMoney(data.breakdown.accountRepaymentsOther)}`,
             `Adjustments: ${formatMoney(data.breakdown.accountAdjustments)}`,
             `Closing account: ${formatAccountPosition(data.breakdown.closingAccountOwed)}`,
         ];
@@ -415,15 +423,17 @@
             const markerTill = scope === 'system' ? '' : tillId;
             const title = scope === 'system' ? 'Whole System Period Close Report' : `${tillName} Period Close Report`;
             const strictWholeSystemClose = scope === 'system' && closePeriod;
-            const lastMarker = strictWholeSystemClose
-                ? await getLiveLastReportMarker(markerTill)
-                : await getLastReportMarker(markerTill);
-            const nowStr = new Date().toISOString();
-            const periodStart = lastMarker || '2000-01-01T00:00:00.000Z';
+            const coordinatedWholeSystemClose = strictWholeSystemClose && isMultiMode();
+            if (coordinatedWholeSystemClose && !hasPermission($currentEmployee, 'end_day_close', $settingsDB)) {
+                throw new Error('Manager permission is required to start a whole-system close');
+            }
 
-            const data = strictWholeSystemClose
-                ? await getLiveTillPeriodReport(markerTill, periodStart, nowStr)
-                : await getTillPeriodReport(markerTill, periodStart, nowStr);
+            const session = coordinatedWholeSystemClose ? await beginWholeSystemClose() : null;
+            wholeSystemCloseSession = session;
+            const lastMarker = session ? session.expectedLastMarker : await getLastReportMarker(markerTill);
+            const nowStr = session?.cutoffAt ?? new Date().toISOString();
+            const periodStart = session?.periodStart ?? lastMarker ?? '2000-01-01T00:00:00.000Z';
+            const data = session?.report ?? await getTillPeriodReport(markerTill, periodStart, nowStr);
             const period = lastMarker
                 ? `${new Date(lastMarker).toLocaleString('en-GB')} → ${new Date(nowStr).toLocaleString('en-GB')}`
                 : `All time → ${new Date(nowStr).toLocaleString('en-GB')}`;
@@ -433,11 +443,15 @@
             closeReportTillNumber = markerTill;
             closeReportStart = periodStart;
             closeReportEnd = nowStr;
+            closeReportExpectedMarker = lastMarker;
             closeReportText = buildCloseReportText(title, period, data);
             closeReportCanEnd = closePeriod;
             closeReportConfirming = false;
             showTillReport = true;
         } catch (e) {
+            const session = wholeSystemCloseSession;
+            wholeSystemCloseSession = null;
+            if (session) await abortWholeSystemClose(session.token).catch(() => undefined);
             console.error(e);
             toast(`Failed to generate report: ${e}`, 'error');
         } finally {
@@ -474,12 +488,18 @@
         }
         closeReportSaving = true;
         try {
-            const saveMarker = closeReportTillNumber ? saveReportMarker : saveLiveReportMarker;
-            const marker = await saveMarker(closeReportTillNumber, closeReportStart, closeReportEnd, {
+            const markerDetails = {
                 employeeId: $currentEmployee?.id || '',
                 reportText: closeReportText,
                 reportTotal: tillReportData.overview.totalRevenue,
-            });
+            };
+            let marker: any;
+            if (wholeSystemCloseSession) {
+                marker = await finishWholeSystemClose(wholeSystemCloseSession, markerDetails);
+                wholeSystemCloseSession = null;
+            } else {
+                marker = await saveReportMarker(closeReportTillNumber, closeReportStart, closeReportEnd, markerDetails);
+            }
             let sentToOwnerApp = false;
             try {
                 const { queueOwnerClosedReport } = await import('$lib/ownerCloudReporter');
@@ -503,6 +523,7 @@
             }
             closeReportCanEnd = false;
             closeReportConfirming = false;
+            closeReportExpectedMarker = String(marker.markerTime || closeReportEnd);
             toast(
                 sentToOwnerApp
                     ? 'Report period ended and sent to the owner app'
@@ -510,11 +531,39 @@
                 sentToOwnerApp ? 'success' : 'info',
             );
         } catch (error) {
+            if (wholeSystemCloseSession) {
+                const session = wholeSystemCloseSession;
+                try {
+                    await abortWholeSystemClose(session.token);
+                    wholeSystemCloseSession = null;
+                } catch (abortError) {
+                    console.warn('Could not immediately release the whole-system close barrier:', abortError);
+                }
+            }
             toast(`Could not end report period: ${error}`, 'error');
         } finally {
             closeReportSaving = false;
         }
     }
+
+    async function closePeriodReportModal() {
+        if (closeReportSaving) return;
+        showTillReport = false;
+        closeReportConfirming = false;
+        if (!wholeSystemCloseSession) return;
+        const session = wholeSystemCloseSession;
+        try {
+            await abortWholeSystemClose(session.token);
+            wholeSystemCloseSession = null;
+        } catch (error) {
+            console.warn('Could not immediately release the whole-system close barrier:', error);
+            toast('Could not release the close lock yet. It will expire automatically if MariaDB stays offline.', 'error');
+        }
+    }
+
+    onDestroy(() => {
+        if (wholeSystemCloseSession) void abortWholeSystemClose(wholeSystemCloseSession.token).catch(() => undefined);
+    });
 
     onMount(async () => {
         previewMode = !isTauri();
@@ -560,6 +609,7 @@
     $: tillAccountTotal = tillTotals.reduce((sum, till) => sum + till.accountTotal, 0);
     $: tillAccountRepaymentsCash = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCash, 0);
     $: tillAccountRepaymentsCard = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCard, 0);
+    $: tillAccountRepaymentsOther = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsOther, 0);
     $: maxTillNetSales = Math.max(1, ...tillTotals.map((till) => Math.abs(till.netSales)));
     $: summaryCards = [
         { label: 'Net Sales', value: formatMoney(business.netSales), detail: 'After refunds and discounts', tone: 'text-success' },
@@ -760,6 +810,10 @@
                                     <span class="block">Account card collected</span>
                                     <strong class="text-accent-primary">{formatMoney(till.accountRepaymentsCard)}</strong>
                                 </div>
+                                <div class="rounded-md bg-bg-card px-2 py-1.5">
+                                    <span class="block">Account other collected</span>
+                                    <strong class="text-text-main">{formatMoney(till.accountRepaymentsOther)}</strong>
+                                </div>
                             </div>
                         </article>
                     {/each}
@@ -783,6 +837,7 @@
                                 <th>Pay Later</th>
                                 <th>Account Cash</th>
                                 <th>Account Card</th>
+                                <th>Account Other</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -802,6 +857,7 @@
                                     <td>{formatMoney(till.accountTotal)}</td>
                                     <td>{formatMoney(till.accountRepaymentsCash)}</td>
                                     <td>{formatMoney(till.accountRepaymentsCard)}</td>
+                                    <td>{formatMoney(till.accountRepaymentsOther)}</td>
                                 </tr>
                             {/each}
                             <tr class="bg-bg-panel font-extrabold">
@@ -819,6 +875,7 @@
                                 <td>{formatMoney(tillAccountTotal)}</td>
                                 <td>{formatMoney(tillAccountRepaymentsCash)}</td>
                                 <td>{formatMoney(tillAccountRepaymentsCard)}</td>
+                                <td>{formatMoney(tillAccountRepaymentsOther)}</td>
                             </tr>
                         </tbody>
                     </table>
@@ -961,6 +1018,10 @@
                         <div class="mt-1 font-serif text-xl font-extrabold text-accent-primary">{formatMoney(breakdown.accountRepaymentsCard)}</div>
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                        <div class="text-xs font-bold text-text-muted">Other Collected</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountRepaymentsOther)}</div>
+                    </div>
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Refunds / Adjustments</div>
                         <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountAdjustments)}</div>
                     </div>
@@ -1083,14 +1144,14 @@
 <!-- Till Report Modal -->
 {#if showTillReport && tillReportData}
     <div class="fixed inset-0 flex items-center justify-center z-[100] bg-[var(--overlay)] p-2">
-        <button type="button" class="absolute inset-0 cursor-default" aria-label="Close till report" on:click={() => showTillReport = false}></button>
+        <button type="button" class="absolute inset-0 cursor-default" aria-label="Close till report" on:click={closePeriodReportModal}></button>
         <div class="relative z-10 w-[760px] max-w-[calc(100vw-1rem)] max-h-[calc(100vh-1rem)] overflow-y-auto rounded-md bg-bg-card border border-border-flat flex flex-col">
             <div class="sticky top-0 z-10 flex justify-between items-center gap-3 border-b border-border-flat bg-bg-card p-3 md:p-4">
                 <div class="min-w-0">
                     <h3 class="m-0 truncate text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
                     <div class="mt-1 text-xs text-text-muted">{tillReportPeriod}</div>
                 </div>
-                <button class="btn-icon shrink-0" aria-label="Close report preview" title="Close report preview" on:click={() => showTillReport = false}>
+                <button class="btn-icon shrink-0" aria-label="Close report preview" title="Close report preview" on:click={closePeriodReportModal}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
                 </button>
             </div>
@@ -1102,7 +1163,11 @@
             {/if}
             {#if closeReportCanEnd}
                 <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
-                    This is only a preview. Press <strong>Close Period</strong> to close this report period and make the next report start from now.
+                    {#if wholeSystemCloseSession}
+                        Whole-system financial writes are paused while this frozen snapshot is open. Press <strong>Close Period</strong> to save it, or close this window to release the pause.
+                    {:else}
+                        This is only a preview. Press <strong>Close Period</strong> to close this report period and make the next report start from now.
+                    {/if}
                 </div>
                 {#if !hasPermission($currentEmployee, 'end_day_close', $settingsDB)}
                     <div class="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
@@ -1173,6 +1238,7 @@
                     <span>New charges <b class="block">{formatMoney(tillReportData.breakdown.accountCharges)}</b></span>
                     <span>Cash collected <b class="block text-success">{formatMoney(tillReportData.breakdown.accountRepaymentsCash)}</b></span>
                     <span>Card collected <b class="block text-accent-primary">{formatMoney(tillReportData.breakdown.accountRepaymentsCard)}</b></span>
+                    <span>Other collected <b class="block">{formatMoney(tillReportData.breakdown.accountRepaymentsOther)}</b></span>
                     <span>Adjustments <b class="block">{formatMoney(tillReportData.breakdown.accountAdjustments)}</b></span>
                     <span>Closing account <b class="block text-warning">{formatAccountPosition(tillReportData.breakdown.closingAccountOwed)}</b></span>
                 </div>
@@ -1210,7 +1276,7 @@
                 <button class="btn btn-secondary" disabled={closeReportPrintBusy} on:click={printCloseReport}>
                     {closeReportPrintBusy ? 'Printing...' : 'Print'}
                 </button>
-                <button class="btn btn-primary" on:click={() => showTillReport = false}>Close</button>
+                <button class="btn btn-primary" disabled={closeReportSaving} on:click={closePeriodReportModal}>Close</button>
             </div>
         </div>
     </div>

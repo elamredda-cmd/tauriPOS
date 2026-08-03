@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-begin-whole-system-close"
+description = "Enables the begin_whole_system_close command without any pre-configured scope."
+commands.allow = ["begin_whole_system_close"]
+
+[[permission]]
+identifier = "deny-begin-whole-system-close"
+description = "Denies the begin_whole_system_close command without any pre-configured scope."
+commands.deny = ["begin_whole_system_close"]

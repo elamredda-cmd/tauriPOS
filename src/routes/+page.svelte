@@ -49,7 +49,7 @@
         type Payment,
         type Product,
     } from "$lib/stores/db";
-    import { toast } from "$lib/stores/toast";
+    import { toast, toasts } from "$lib/stores/toast";
     import {
         searchProduct,
         searchProductByScalePlu,
@@ -82,6 +82,7 @@
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
     import { calculateCartTotals, calculateTaxLine } from "$lib/utils/commerceMath";
+    import { SequentialQueue } from "$lib/utils/sequentialQueue";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
@@ -92,6 +93,7 @@
     import { getScaleSaleDisplay } from "$lib/scaleSale";
     import { getLoyaltyConfig, loyaltyCredit, pointsForCredit, pointsForSpend } from "$lib/loyalty";
     import TouchDigitPad from "$lib/components/TouchDigitPad.svelte";
+    import { modalFocusTrap } from "$lib/actions/modalFocusTrap";
     import SearchField from "$lib/components/SearchField.svelte";
     import SupportAccessPanel from "$lib/components/SupportAccessPanel.svelte";
     import type { SupportSessionGrant } from "$lib/supportAccess";
@@ -109,13 +111,10 @@
         acquireSumupLock,
         createSumupCheckout,
         delay,
-        getRecoverableSumupAttempts,
         getSumupReaderStatus,
         getSumupTransactionByReference,
         getSumupTransactionStatus,
         loadSumupConfig,
-        localOrderExists,
-        pruneSumupAttempts,
         refreshSumupLock,
         releaseSumupLock,
         refundSumupTransaction,
@@ -136,9 +135,7 @@
         dojoTerminalKey,
         getDojoPaymentIntentStatus,
         getDojoTerminalSessionStatus,
-        getRecoverableDojoAttempts,
         loadDojoConfig,
-        pruneDojoAttempts,
         refreshDojoLock,
         refundDojoPaymentIntent,
         releaseDojoLock,
@@ -149,6 +146,11 @@
         type DojoPaymentAttempt,
         type DojoPaymentIntentStatus,
     } from "$lib/dojo";
+    import {
+        assertPaymentTerminalAttemptReady,
+        requirePreparedSaleBundle,
+    } from "$lib/terminalAttempts";
+    import { runTerminalRecovery } from "$lib/terminalRecovery";
 
     type PosOrderSummary = Order & {
         cashierName?: string;
@@ -184,6 +186,9 @@
     let scannerBuffer = "";
     let scannerLastKeyAt = 0;
     let scannerBufferTimer: ReturnType<typeof setTimeout> | undefined;
+    let scanFlowWaiters: Array<() => void> = [];
+    let posDestroyed = false;
+    const scanQueue = new SequentialQueue<string>(performProductSearch, waitForScannerReady);
     let hasStartedTypingPrice = false;
 
     // Cart
@@ -309,6 +314,8 @@
     let quickAddPrice = "0";
     let quickAddCategoryId = "";
     let quickAddTaxRateId = "";
+    let quickAddAgeRestricted = false;
+    let quickAddAuthorized = false;
     let quickAddBusy = false;
     let showClearConfirm = false;
     let showReversalConfirm = false;
@@ -340,6 +347,7 @@
     let managerApprovalAction: (() => Promise<void> | void) | null = null;
     let pendingShiftEmployee: Employee | null = null;
     let openingFloatString = "0";
+    let openingShiftBusy = false;
     let lastRevokedEmployeeId = "";
     let rememberedSessionChecked = false;
     let restoringRememberedSession = false;
@@ -502,6 +510,7 @@
     function scannerFocusBlocked(): boolean {
         if (typeof document === "undefined") return true;
         return !$currentEmployee ||
+            $toasts.length > 0 ||
             showNumpad ||
             showChangePricePad ||
             showGoodsModal ||
@@ -520,6 +529,17 @@
             isHoldingOrder ||
             isCompletingSale ||
             Boolean(document.querySelector(".touch-input-backdrop"));
+    }
+
+    function releaseScanFlowWaiters() {
+        if (scannerFocusBlocked()) return;
+        const waiters = scanFlowWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+    }
+
+    function waitForScannerReady(): Promise<void> {
+        if (!scannerFocusBlocked() || posDestroyed) return Promise.resolve();
+        return new Promise((resolve) => scanFlowWaiters.push(resolve));
     }
 
     function focusScannerSoon(force = false) {
@@ -1043,6 +1063,9 @@
     });
 
     onDestroy(() => {
+        posDestroyed = true;
+        for (const resolve of scanFlowWaiters.splice(0)) resolve();
+        scanQueue.destroy();
         if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
         if (terminalPaymentStage !== "idle") {
             terminalCancelRequested = true;
@@ -1139,6 +1162,7 @@
         if (!existingShiftId && cashUpEnabled && openingFloatRequired) {
             pendingShiftEmployee = employee;
             openingFloatString = "0";
+            openingShiftBusy = false;
             loginPin = "";
             loginError = "";
             return;
@@ -1165,25 +1189,31 @@
     }
 
     async function openShiftWithFloat() {
-        if (!pendingShiftEmployee) return;
+        const employee = pendingShiftEmployee;
+        if (!employee || openingShiftBusy) return;
+        const openingFloat = Math.max(0, parseInt(openingFloatString) || 0);
+        openingShiftBusy = true;
         try {
             const registerId = tillId || await getOrCreateTillId();
             tillId = registerId;
             currentShiftId.set(await ensureOpenShift(
-                pendingShiftEmployee.id,
+                employee.id,
                 registerId,
-                Math.max(0, parseInt(openingFloatString) || 0),
+                openingFloat,
             ));
-            pendingShiftEmployee = null;
+            if (pendingShiftEmployee?.id === employee.id) pendingShiftEmployee = null;
             openingFloatString = "0";
             toast("Till shift opened", "success");
         } catch (error) {
             console.error("Could not open till shift:", error);
             toast("Could not open the till shift. Check the database connection and try again.", "error");
+        } finally {
+            openingShiftBusy = false;
         }
     }
 
     function cancelOpeningShift() {
+        if (openingShiftBusy) return;
         pendingShiftEmployee = null;
         openingFloatString = "0";
         logout();
@@ -1202,6 +1232,15 @@
         if (loginBusy) return;
         chooseLoginEmployee("");
         showSupportAccess = true;
+    }
+
+    function dismissLoginDialog() {
+        if (loginBusy) return;
+        if (showSupportAccess) {
+            showSupportAccess = false;
+            return;
+        }
+        if (selectedLoginEmployee) chooseLoginEmployee("");
     }
 
     async function activateSupportSession(grant: SupportSessionGrant) {
@@ -1381,6 +1420,7 @@
         cart = [...cart];
         if (selectedCartIndex >= cart.length)
             selectedCartIndex = Math.max(0, cart.length - 1);
+        if (cart.length === 0) clearTrolleyCustomer();
     }
 
     function deleteItem(index: number) {
@@ -1391,6 +1431,7 @@
         cart = [...cart];
         if (selectedCartIndex >= cart.length)
             selectedCartIndex = Math.max(0, cart.length - 1);
+        if (cart.length === 0) clearTrolleyCustomer();
     }
 
     function commitAddToCart(product: AddToCartProduct, feedback: "item" | "scan" = "item"): boolean {
@@ -1563,13 +1604,7 @@
         });
     }
 
-    async function handleSearch() {
-        const query = searchQuery.trim();
-        if (!query) return;
-        // Clear immediately so a second fast scan cannot be overwritten when
-        // this asynchronous lookup finishes.
-        searchQuery = "";
-
+    async function performProductSearch(query: string) {
         try {
             const cachedProduct = $productByBarcode.get(normalizeLookupCode(query));
             const found = cachedProduct || await searchProduct(query);
@@ -1644,16 +1679,61 @@
         }
     }
 
-    function openQuickAdd() {
+    function handleSearch(): Promise<void> {
+        const query = searchQuery.trim();
+        searchQuery = "";
+        if (!query || scannerFocusBlocked()) return Promise.resolve();
+
+        return scanQueue.enqueue(query);
+    }
+
+    function dismissNotFoundModal() {
+        showNotFoundModal = false;
+        searchQuery = "";
+        notFoundBarcode = "";
+        focusScannerSoon(true);
+    }
+
+    function showAuthorizedQuickAdd() {
         showNotFoundModal = false;
         quickAddName = "";
         quickAddSku = "";
         quickAddPrice = "0";
+        quickAddAgeRestricted = false;
+        quickAddAuthorized = true;
         quickAddBusy = false;
         quickAddCategoryId = getDefaultProductCategoryId($activeCategories, $settingsDB);
         quickAddTaxRateId =
             get(taxRatesDB).find((t: any) => t.isDefault)?.id || "tax-standard-vat";
         showQuickAddModal = true;
+    }
+
+    function openQuickAdd() {
+        void requirePermission(
+            "open_items",
+            "Quick add product",
+            showAuthorizedQuickAdd,
+            "product",
+            notFoundBarcode,
+            `Create product from unknown barcode ${notFoundBarcode}`,
+        );
+    }
+
+    function finishQuickAdd() {
+        showQuickAddModal = false;
+        quickAddAuthorized = false;
+        searchQuery = "";
+        notFoundBarcode = "";
+        focusScannerSoon(true);
+    }
+
+    function closeQuickAdd() {
+        if (quickAddBusy) return;
+        finishQuickAdd();
+    }
+
+    function handleQuickAddBackdrop(event: MouseEvent) {
+        if (event.target === event.currentTarget) closeQuickAdd();
     }
 
     function handleQuickAddPriceKey(key: string) {
@@ -1671,6 +1751,11 @@
 
     async function saveQuickProduct(printLabel = false) {
         if (quickAddBusy) return;
+        if (!quickAddAuthorized) {
+            finishQuickAdd();
+            toast("Quick Add requires Items permission or manager approval", "error");
+            return;
+        }
         if (!quickAddName.trim()) {
             toast("Item Name is required", "error");
             return;
@@ -1697,7 +1782,7 @@
             costPrice: 0,
             stockLevel: 0,
             trackStock: false,
-            isAgeRestricted: false,
+            isAgeRestricted: quickAddAgeRestricted,
             isWeighable: false,
             showInGoods: false,
             goodsSortOrder: 0,
@@ -1712,8 +1797,10 @@
         try {
             await addProduct(newProduct);
             productsDB.update((ps) => [...ps, newProduct]);
-            addToCart(newProduct);
-            showQuickAddModal = false;
+            const addedToCart = addToCart(newProduct, "item", () => {
+                if (!printLabel) toast("Product added and added to cart", "success");
+            });
+            finishQuickAdd();
             if (printLabel) {
                 try {
                     const labelPrinter = getLabelPrinterConfig($settingsDB);
@@ -1723,12 +1810,15 @@
                         design: getLabelDesign($settingsDB),
                         quantity: 1,
                     }, labelPrinter);
-                    toast("Product added and label sent to printer", "success");
+                    toast(
+                        addedToCart
+                            ? "Product added and label sent to printer"
+                            : "Product saved and label sent. Confirm a valid ID to add it to the cart",
+                        addedToCart ? "success" : "info",
+                    );
                 } catch (printError) {
                     toast(`Product added, but label did not print: ${String(printError).replace(/^Error:\s*/, "")}`, "error");
                 }
-            } else {
-                toast("Product added and added to cart", "success");
             }
         } catch (error) {
             toast(String(error).replace(/^Error:\s*/, ""), "error");
@@ -1750,6 +1840,7 @@
         }
         cart = [];
         selectedCartIndex = 0;
+        clearTrolleyCustomer();
         showClearConfirm = false;
         showTrolleyFeedback("Cart cleared", "success");
     }
@@ -1778,7 +1869,7 @@
         const newOrder = {
             id: orderId,
             shiftId: $currentShiftId,
-            customerId: "",
+            customerId: selectedCustomerId,
             employeeId: $currentEmployee?.id || "",
             orderNumber: 0,
             type: "sale" as const,
@@ -1844,6 +1935,7 @@
             });
             cart = [];
             selectedCartIndex = 0;
+            clearTrolleyCustomer();
             toast(
                 $connectionState.mode === "multi"
                     ? sharedAcrossTills
@@ -1924,6 +2016,8 @@
             retrievingHeldOrderId = "";
         }
         cart = restoredCart;
+        clearTrolleyCustomer();
+        selectedCustomerId = heldOrder?.customerId || "";
         sendCctvAction({
             action: "RETRIEVE TROLLEY",
             name: `${restoredCart.length} ${restoredCart.length === 1 ? "line" : "lines"}`,
@@ -2123,6 +2217,16 @@
         return grouped;
     }
 
+    function groupPaymentsByOrderId(payments: Payment[]): Map<string, Payment[]> {
+        const grouped = new Map<string, Payment[]>();
+        for (const payment of payments) {
+            const existing = grouped.get(payment.orderId) || [];
+            existing.push(payment);
+            grouped.set(payment.orderId, existing);
+        }
+        return grouped;
+    }
+
     function enrichOrderSummary(order: Order): PosOrderSummary {
         return {
             ...order,
@@ -2156,10 +2260,6 @@
 
     async function refreshLatestTillReceipt() {
         if (!tillId) return;
-        if (!isTauri()) {
-            latestTillReceiptOrder = null;
-            return;
-        }
         const token = ++latestReceiptLoadToken;
         try {
             const latestReceipt = await getLatestTillReceipt(tillId);
@@ -2213,9 +2313,11 @@
     let recentTransactionsLoading = false;
     let recentOrders: PosOrderSummary[] = [];
     let recentOrderLinesByOrder = new Map<string, OrderLine[]>();
+    let recentPaymentsByOrder = new Map<string, Payment[]>();
     let recentLoadToken = 0;
     const RECENT_RECEIPT_LIMIT = 10;
     $: scannerOverlayOpen =
+        $toasts.length > 0 ||
         showNumpad ||
         showChangePricePad ||
         showGoodsModal ||
@@ -2233,7 +2335,10 @@
         showRecentTransactions ||
         isHoldingOrder ||
         isCompletingSale;
-    $: if (!scannerOverlayOpen && $currentEmployee) focusScannerSoon();
+    $: if (!scannerOverlayOpen && $currentEmployee) {
+        releaseScanFlowWaiters();
+        focusScannerSoon();
+    }
     $: receiptDesign = getReceiptDesign($settingsDB);
 
     $: if (
@@ -2252,6 +2357,7 @@
             if (token !== recentLoadToken) return;
             recentOrders = result.orders as PosOrderSummary[];
             recentOrderLinesByOrder = groupLinesByOrderId(result.lines as OrderLine[]);
+            recentPaymentsByOrder = groupPaymentsByOrderId(result.payments as Payment[]);
             selectedRecentOrderId = recentOrders[0]?.id || null;
         } catch (error) {
             console.warn("Could not load recent receipts:", error);
@@ -2275,23 +2381,35 @@
         return recentOrderLinesByOrder.get(orderId) || heldOrderLinesByOrder.get(orderId) || [];
     }
 
-    async function getReceiptLines(orderId: string): Promise<OrderLine[]> {
-        const cached = getCachedReceiptLines(orderId);
-        if (cached.length > 0) return cached;
+    function getCachedReceiptPayments(orderId: string): Payment[] {
+        return recentPaymentsByOrder.get(orderId)
+            || $paymentsDB.filter((payment) => payment.orderId === orderId);
+    }
+
+    async function getReceiptPrintData(orderId: string): Promise<{ lines: OrderLine[]; payments: Payment[] }> {
+        const cachedLines = getCachedReceiptLines(orderId);
+        const cachedPayments = getCachedReceiptPayments(orderId);
+        if (cachedLines.length > 0 && cachedPayments.length > 0) {
+            return { lines: cachedLines, payments: cachedPayments };
+        }
         const details = await getOrderDetails(orderId);
-        return details.lines as OrderLine[];
+        return {
+            lines: cachedLines.length > 0 ? cachedLines : details.lines as OrderLine[],
+            payments: cachedPayments.length > 0 ? cachedPayments : details.payments as Payment[],
+        };
     }
 
     async function printStoredReceipt(selectedOrder: any, successMessage = "Receipt sent to printer") {
         try {
-            const receiptLines = await getReceiptLines(selectedOrder.id);
+            const receiptData = await getReceiptPrintData(selectedOrder.id);
             await printEscposReceipt({
                 store: $storeDB,
                 order: selectedOrder,
-                lines: receiptLines.map((line) => ({
+                lines: receiptData.lines.map((line) => ({
                     ...line,
                     sku: $productById.get(line.productId)?.sku || "",
                 })),
+                payments: receiptData.payments,
                 cashierName: selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || "",
                 tillName: selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || tillName,
                 design: receiptDesign,
@@ -2339,6 +2457,7 @@
                     ...line,
                     sku: line.sku || $productById.get(line.productId)?.sku || "",
                 })),
+                payments: [bundle.payment],
                 cashierName: employeeById.get(bundle.order.employeeId)?.name || $currentEmployee?.name || "",
                 tillName: registerById.get(bundle.order.tillNumber)?.name || tillName,
                 design: receiptDesign,
@@ -2618,7 +2737,7 @@
             createdAt: timestamp,
             updatedAt: timestamp,
         }] : [];
-        const reversalBundle: SaleBundle = {
+        let reversalBundle: SaleBundle = {
             order: reversalOrder,
             lines: reversalLines,
             payment,
@@ -2649,7 +2768,7 @@
                 if (!activeSumupConfig.enabled || !activeSumupConfig.ready) {
                     throw new Error("This sale used SumUp. Enable the correct SumUp merchant on this till before refunding it.");
                 }
-                await processManagedSumupRefund(
+                reversalBundle = await processManagedSumupRefund(
                     activeSumupConfig,
                     reversalBundle,
                     original.id,
@@ -2668,7 +2787,7 @@
                 if (!paymentIntentId) {
                     throw new Error("The original Dojo payment-intent ID is missing. No refund was sent.");
                 }
-                await processManagedDojoRefund(
+                reversalBundle = await processManagedDojoRefund(
                     activeDojoConfig,
                     reversalBundle,
                     paymentIntentId,
@@ -2786,6 +2905,7 @@
             toast("Cart is empty", "error");
             return;
         }
+        const retainedCustomer = selectedCustomer;
         amountTenderedString = "0";
         paymentMethod = "cash";
         hasTypedPayment = false;
@@ -2793,7 +2913,6 @@
         terminalPaymentMessage = "";
         terminalCancelRequested = false;
         customerSearch = "";
-        selectedCustomerId = "";
         selectedCustomerAccount = null;
         customerAccountLoadToken += 1;
         customerAccountBusy = false;
@@ -2801,7 +2920,12 @@
         useLoyaltyCredit = false;
         calculateQuickAmounts(total);
         showPaymentModal = true;
-        tick().then(() => customerSearchInput?.focus({ preventScroll: true }));
+        if (retainedCustomer) {
+            void selectPaymentCustomer(retainedCustomer);
+        } else {
+            if (selectedCustomerId) clearTrolleyCustomer();
+            tick().then(() => customerSearchInput?.focus({ preventScroll: true }));
+        }
     }
 
     function closePayment() {
@@ -2842,11 +2966,11 @@
         }
         if (showQuickAddModal) {
             if (quickAddBusy) return false;
-            showQuickAddModal = false;
+            closeQuickAdd();
             return true;
         }
         if (showNotFoundModal) {
-            showNotFoundModal = false;
+            dismissNotFoundModal();
             return true;
         }
         if (showPaymentModal) {
@@ -2998,14 +3122,20 @@
         calculateQuickAmounts(enabling ? Math.max(0, total - Math.min(total, availableLoyaltyCredit)) : total);
     }
 
-    function removePaymentCustomer() {
+    function clearTrolleyCustomer() {
         customerAccountLoadToken += 1;
+        customerSearch = "";
         selectedCustomerId = "";
         selectedCustomerAccount = null;
         customerAccountBusy = false;
         customerAccountLoadError = false;
-        if (paymentMethod === "account") paymentMethod = "cash";
         useLoyaltyCredit = false;
+        loyaltyCreditBusy = false;
+    }
+
+    function removePaymentCustomer() {
+        clearTrolleyCustomer();
+        if (paymentMethod === "account") paymentMethod = "cash";
         amountTenderedString = "0";
         hasTypedPayment = false;
         calculateQuickAmounts(total);
@@ -3173,6 +3303,7 @@
                 ...recentOrders.filter((existing) => existing.id !== order.id),
             ].slice(0, RECENT_RECEIPT_LIMIT);
             recentOrderLinesByOrder = new Map(recentOrderLinesByOrder).set(order.id, bundle.lines as OrderLine[]);
+            recentPaymentsByOrder = new Map(recentPaymentsByOrder).set(order.id, [bundle.payment as Payment]);
             if (order.tillNumber === tillId) latestTillReceiptOrder = summary;
         }
     }
@@ -3245,25 +3376,32 @@
         config: DojoConfig,
         bundle: SaleBundle,
         amount: number,
-    ): Promise<void> {
+    ): Promise<SaleBundle> {
         const reference = bundle.order.id;
         const attempt: DojoPaymentAttempt = {
             id: reference,
             provider: "dojo",
             terminalKey: dojoTerminalKey(config),
             clientTransactionId: "",
+            terminalSessionId: "",
+            operationKind: "sale",
             amount,
+            expectedProviderAmount: amount,
             currency: config.currency,
             status: "prepared",
             saleBundle: bundle,
+            providerReference: "",
             error: "",
+            tillId,
             createdAt: now(),
             updatedAt: now(),
         };
-        await saveDojoAttempt(attempt);
+        bundle = requirePreparedSaleBundle(await saveDojoAttempt(attempt));
 
         let lockHeld = false;
         let approved = false;
+        let finalized = false;
+        let networkStarted = false;
         let paymentIntentId = "";
         let terminalSessionId = "";
         let signatureHandled = false;
@@ -3281,11 +3419,17 @@
             terminalPaymentStage = "sending";
             terminalPaymentMessage = `Sending ${formatMoney(amount)} to ${config.terminalName || "Dojo terminal"}`;
 
+            await updateDojoAttempt(reference, "started");
+            await assertPaymentTerminalAttemptReady("dojo", reference);
+            networkStarted = true;
             const payment = await createDojoPayment(amount, reference, `Sale from ${tillName || "POS"}`);
             paymentIntentId = payment.paymentIntentId;
             terminalSessionId = payment.terminalSessionId;
             activeDojoSessionId = terminalSessionId;
-            await updateDojoAttempt(reference, "started", { clientTransactionId: paymentIntentId });
+            await updateDojoAttempt(reference, "started", {
+                clientTransactionId: paymentIntentId,
+                terminalSessionId,
+            });
             terminalPaymentStage = "waiting";
             terminalPaymentMessage = "Ask the customer to tap or insert their card";
 
@@ -3322,26 +3466,50 @@
                     terminalPaymentMessage = "Card approved. Saving the sale";
                     await updateDojoAttempt(reference, "approved", {
                         clientTransactionId: paymentIntentId,
+                        terminalSessionId,
+                        providerReference: `Dojo ${terminalReference} [id:${paymentIntentId}]`,
                         saleBundle: bundle,
                     }).catch((error) => {
                         console.error("Could not update the approved Dojo recovery journal:", error);
                     });
-                    return;
+                    return bundle;
                 }
 
                 if (["Canceled", "Declined", "SignatureVerificationRejected"].includes(session.status)) {
                     const cancelled = session.status === "Canceled";
                     await updateDojoAttempt(reference, cancelled ? "cancelled" : "failed", {
                         clientTransactionId: paymentIntentId,
+                        terminalSessionId,
                         error: `Dojo status: ${session.status}`,
                     });
+                    finalized = true;
                     throw new Error(cancelled ? "The Dojo payment was cancelled" : "The card payment was not approved");
                 }
                 if (session.status === "Expired") {
-                    await updateDojoAttempt(reference, "failed", {
-                        clientTransactionId: paymentIntentId,
-                        error: "Dojo terminal session expired with an uncertain result",
-                    });
+                    const paymentStatus = await getDojoPaymentIntentStatus(paymentIntentId);
+                    if (paymentStatus.status === "Captured") {
+                        verifyDojoApproval(paymentStatus, paymentIntentId, reference, amount, config.currency);
+                        const terminalReference = paymentStatus.transactionId || paymentIntentId;
+                        const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
+                        bundle.payment.reference = `Dojo ${terminalReference} [id:${paymentIntentId}]${loyaltyReference}`;
+                        approved = true;
+                        await updateDojoAttempt(reference, "approved", {
+                            clientTransactionId: paymentIntentId,
+                            terminalSessionId,
+                            providerReference: `Dojo ${terminalReference} [id:${paymentIntentId}]`,
+                            saleBundle: bundle,
+                        }).catch(() => undefined);
+                        return bundle;
+                    }
+                    if (["Canceled", "Reversed"].includes(paymentStatus.status)) {
+                        await updateDojoAttempt(reference, "cancelled", {
+                            clientTransactionId: paymentIntentId,
+                            terminalSessionId,
+                            error: `Dojo session expired; payment intent is ${paymentStatus.status}`,
+                        });
+                        finalized = true;
+                        throw new Error("The Dojo session expired without taking payment");
+                    }
                     throw new Error("The Dojo session expired. Check the terminal screen or Dojo portal before retrying, because the result may be uncertain.");
                 }
                 if (session.status === "Authorized") {
@@ -3359,16 +3527,18 @@
             }
 
             await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-            await updateDojoAttempt(reference, "failed", {
+            await updateDojoAttempt(reference, "uncertain", {
                 clientTransactionId: paymentIntentId,
+                terminalSessionId,
                 error: "Timed out waiting for the terminal result",
-            });
+            }).catch(() => undefined);
             throw new Error("Dojo did not return a final result in time. Check the terminal and Dojo portal before retrying.");
         } catch (error) {
-            if (!approved) {
+            if (!approved && !finalized) {
                 const message = String(error);
-                await updateDojoAttempt(reference, message.toLowerCase().includes("cancel") ? "cancelled" : "failed", {
+                await updateDojoAttempt(reference, networkStarted ? "uncertain" : "cancelled", {
                     clientTransactionId: paymentIntentId,
+                    terminalSessionId,
                     error: message,
                 }).catch(() => undefined);
             }
@@ -3387,25 +3557,32 @@
         config: SumupConfig,
         bundle: SaleBundle,
         amount: number,
-    ): Promise<void> {
+    ): Promise<SaleBundle> {
         const reference = bundle.order.id;
         const attempt: SumupPaymentAttempt = {
             id: reference,
             provider: "sumup",
             terminalKey: sumupTerminalKey(config),
             clientTransactionId: "",
+            terminalSessionId: "",
+            operationKind: "sale",
             amount,
+            expectedProviderAmount: amount,
             currency: config.currency,
             status: "prepared",
             saleBundle: bundle,
+            providerReference: "",
             error: "",
+            tillId,
             createdAt: now(),
             updatedAt: now(),
         };
-        await saveSumupAttempt(attempt);
+        bundle = requirePreparedSaleBundle(await saveSumupAttempt(attempt));
 
         let lockHeld = false;
         let approved = false;
+        let finalized = false;
+        let networkStarted = false;
         let clientTransactionId = "";
         terminalCancelRequested = false;
         terminalPaymentStage = "reserving";
@@ -3421,6 +3598,9 @@
             terminalPaymentStage = "sending";
             terminalPaymentMessage = `Sending ${formatMoney(amount)} to ${config.readerName || "SumUp Solo"}`;
 
+            await updateSumupAttempt(reference, "started");
+            await assertPaymentTerminalAttemptReady("sumup", reference);
+            networkStarted = true;
             const checkout = await createSumupCheckout(
                 amount,
                 reference,
@@ -3456,18 +3636,20 @@
                     terminalPaymentMessage = "Card approved. Saving the sale";
                     await updateSumupAttempt(reference, "approved", {
                         clientTransactionId,
+                        providerReference: `SumUp ${terminalReference} [id:${status.transactionId}]`,
                         saleBundle: bundle,
                     }).catch((error) => {
                         console.error("Could not update the approved SumUp recovery journal:", error);
                     });
-                    return;
+                    return bundle;
                 }
-                if (["FAILED", "CANCELLED", "CANCEL_FAILED", "NON_COLLECTION"].includes(outcome)) {
+                if (["FAILED", "CANCELLED", "NON_COLLECTION"].includes(outcome)) {
                     const failedStatus = outcome === "CANCELLED" ? "cancelled" : "failed";
                     await updateSumupAttempt(reference, failedStatus, {
                         clientTransactionId,
                         error: `SumUp status: ${outcome}`,
                     });
+                    finalized = true;
                     throw new Error(outcome === "CANCELLED" ? "The SumUp payment was cancelled" : "The card payment was not approved");
                 }
 
@@ -3497,6 +3679,7 @@
                             clientTransactionId,
                             error: "Cancelled by the operator before card approval",
                         });
+                        finalized = true;
                         throw new Error("SumUp payment cancelled");
                     }
                 }
@@ -3511,16 +3694,15 @@
             }
 
             await terminateSumupCheckout().catch(() => undefined);
-            await updateSumupAttempt(reference, "failed", {
+            await updateSumupAttempt(reference, "uncertain", {
                 clientTransactionId,
                 error: "Timed out waiting for the terminal result",
-            });
+            }).catch(() => undefined);
             throw new Error("SumUp did not return a final result in time. Check the Solo and SumUp transactions before retrying.");
         } catch (error) {
-            if (!approved) {
+            if (!approved && !finalized) {
                 const message = String(error);
-                const cancelled = message.toLowerCase().includes("cancel");
-                await updateSumupAttempt(reference, cancelled ? "cancelled" : "failed", {
+                await updateSumupAttempt(reference, networkStarted ? "uncertain" : "cancelled", {
                     clientTransactionId,
                     error: message,
                 }).catch(() => undefined);
@@ -3543,25 +3725,31 @@
         previouslyRefundedAmount: number,
         refundAmount: number,
         voiding: boolean,
-    ): Promise<void> {
+    ): Promise<SaleBundle> {
         const reference = bundle.order.id;
         const attempt: SumupPaymentAttempt = {
             id: reference,
             provider: "sumup",
             terminalKey: sumupTerminalKey(config),
             clientTransactionId: "",
+            terminalSessionId: "",
+            operationKind: "refund",
             amount: refundAmount,
+            expectedProviderAmount: previouslyRefundedAmount + refundAmount,
             currency: config.currency,
             status: "prepared",
             saleBundle: bundle,
+            providerReference: "",
             error: "",
+            tillId,
             createdAt: now(),
             updatedAt: now(),
         };
-        await saveSumupAttempt(attempt);
+        bundle = requirePreparedSaleBundle(await saveSumupAttempt(attempt));
 
         let lockHeld = false;
         let approved = false;
+        let networkStarted = false;
         let transactionId = "";
         try {
             const lockResult = await acquireSumupLock(config, tillId, tillName, reference);
@@ -3598,34 +3786,42 @@
             bundle.payment.reference = `${voiding ? "SumUp void" : "SumUp refund"} ${terminalReference} [id:${transactionId}]`;
             await updateSumupAttempt(reference, "started", {
                 clientTransactionId: transactionId,
+                providerReference: `${voiding ? "SumUp void" : "SumUp refund"} ${terminalReference} [id:${transactionId}]`,
                 saleBundle: bundle,
             });
 
+            await assertPaymentTerminalAttemptReady("sumup", reference);
+            networkStarted = true;
+            let requestError: unknown = null;
             try {
                 await refundSumupTransaction(transactionId, refundAmount);
             } catch (error) {
-                // A lost HTTP response can hide an accepted refund. Re-read the
-                // authoritative transaction before allowing the operator to retry.
-                await delay(1_500);
+                requestError = error;
+            }
+            let confirmedRefunded = -1;
+            for (let check = 0; check < 6; check++) {
                 const checked = await getSumupTransactionByReference(originalOrderId).catch(() => null);
-                const checkedRefunded = checked?.refundedAmount === undefined
+                confirmedRefunded = checked?.refundedAmount === undefined
                     ? -1
                     : Math.round(checked.refundedAmount * 100);
-                if (checkedRefunded < previouslyRefundedAmount + refundAmount) {
-                    throw new Error(`${error}. The refund result is uncertain; check SumUp before retrying.`);
-                }
+                if (confirmedRefunded === previouslyRefundedAmount + refundAmount) break;
+                await delay(700);
+            }
+            if (confirmedRefunded !== previouslyRefundedAmount + refundAmount) {
+                throw new Error(`${requestError || "SumUp has not confirmed the refund"}. The refund result is uncertain; do not retry.`);
             }
 
             approved = true;
             await updateSumupAttempt(reference, "approved", {
                 clientTransactionId: transactionId,
+                providerReference: `${voiding ? "SumUp void" : "SumUp refund"} ${terminalReference} [id:${transactionId}]`,
                 saleBundle: bundle,
             }).catch((error) => {
                 console.error("Could not update the approved SumUp refund journal:", error);
             });
         } catch (error) {
             if (!approved) {
-                await updateSumupAttempt(reference, "failed", {
+                await updateSumupAttempt(reference, networkStarted ? "uncertain" : "cancelled", {
                     clientTransactionId: transactionId,
                     error: String(error),
                     saleBundle: bundle,
@@ -3639,6 +3835,7 @@
                 });
             }
         }
+        return bundle;
     }
 
     async function processManagedDojoRefund(
@@ -3649,25 +3846,31 @@
         previouslyRefundedAmount: number,
         refundAmount: number,
         voiding: boolean,
-    ): Promise<void> {
+    ): Promise<SaleBundle> {
         const reference = bundle.order.id;
         const attempt: DojoPaymentAttempt = {
             id: reference,
             provider: "dojo",
             terminalKey: dojoTerminalKey(config),
             clientTransactionId: paymentIntentId,
+            terminalSessionId: "",
+            operationKind: "refund",
             amount: refundAmount,
+            expectedProviderAmount: previouslyRefundedAmount + refundAmount,
             currency: config.currency,
             status: "prepared",
             saleBundle: bundle,
+            providerReference: "",
             error: "",
+            tillId,
             createdAt: now(),
             updatedAt: now(),
         };
-        await saveDojoAttempt(attempt);
+        bundle = requirePreparedSaleBundle(await saveDojoAttempt(attempt));
 
         let lockHeld = false;
         let approved = false;
+        let networkStarted = false;
         try {
             const lockResult = await acquireDojoLock(config, tillId, tillName, reference);
             if (!lockResult.acquired) {
@@ -3701,19 +3904,17 @@
             bundle.payment.reference = `${voiding ? "Dojo void" : "Dojo refund"} ${terminalReference} [id:${paymentIntentId}]`;
             await updateDojoAttempt(reference, "started", {
                 clientTransactionId: paymentIntentId,
+                providerReference: `${voiding ? "Dojo void" : "Dojo refund"} ${terminalReference} [id:${paymentIntentId}]`,
                 saleBundle: bundle,
             });
 
+            await assertPaymentTerminalAttemptReady("dojo", reference);
+            networkStarted = true;
+            let requestError: unknown = null;
             try {
                 await refundDojoPaymentIntent(paymentIntentId, refundAmount, reference);
             } catch (error) {
-                // The idempotency key makes an exact retry safe, but first read
-                // Dojo so a lost successful response is not treated as failure.
-                await delay(1_500);
-                const checked = await getDojoPaymentIntentStatus(paymentIntentId).catch(() => null);
-                if ((checked?.refundedAmount ?? -1) < previouslyRefundedAmount + refundAmount) {
-                    throw new Error(`${error}. The refund result is uncertain; check Dojo before retrying.`);
-                }
+                requestError = error;
             }
 
             let confirmed: DojoPaymentIntentStatus | null = null;
@@ -3722,19 +3923,20 @@
                 if ((confirmed.refundedAmount ?? -1) >= previouslyRefundedAmount + refundAmount) break;
                 await delay(500);
             }
-            if ((confirmed?.refundedAmount ?? -1) < previouslyRefundedAmount + refundAmount) {
-                throw new Error("Dojo accepted the refund request but has not confirmed the refunded amount. Check the Dojo portal before retrying.");
+            if ((confirmed?.refundedAmount ?? -1) !== previouslyRefundedAmount + refundAmount) {
+                throw new Error(`${requestError || "Dojo has not confirmed the refund"}. The refund result is uncertain; do not retry.`);
             }
             approved = true;
             await updateDojoAttempt(reference, "approved", {
                 clientTransactionId: paymentIntentId,
+                providerReference: `${voiding ? "Dojo void" : "Dojo refund"} ${terminalReference} [id:${paymentIntentId}]`,
                 saleBundle: bundle,
             }).catch((error) => {
                 console.error("Could not update the approved Dojo refund journal:", error);
             });
         } catch (error) {
             if (!approved) {
-                await updateDojoAttempt(reference, "failed", {
+                await updateDojoAttempt(reference, networkStarted ? "uncertain" : "cancelled", {
                     clientTransactionId: paymentIntentId,
                     error: String(error),
                     saleBundle: bundle,
@@ -3748,6 +3950,7 @@
                 });
             }
         }
+        return bundle;
     }
 
     async function cancelManagedTerminalPayment() {
@@ -3761,30 +3964,13 @@
         if (recoveringSumupPayments) return;
         recoveringSumupPayments = true;
         try {
-            const attempts = await getRecoverableSumupAttempts();
-            for (const attempt of attempts) {
-                try {
-                    if (await localOrderExists(attempt.saleBundle.order.id)) {
-                        await updateSumupAttempt(attempt.id, "completed");
-                        continue;
-                    }
-                    const recovered = await commitSale(attempt.saleBundle);
-                    applyCompletedSaleToStores(recovered);
-                    await updateSumupAttempt(attempt.id, "completed", { saleBundle: recovered });
-                    const isRefund = recovered.order.type === "return";
-                    const recoveryLabel = isRefund ? "SumUp refund" : "SumUp sale";
-                    toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
-                    if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
-                        void openDrawerAfterSuccessfulPayment(Math.abs(Number(recovered.payment.cashAmount || 0)), "Recovered refund");
-                    }
-                    void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
-                    sendCompletedBundleToCctv(recovered, isRefund ? "RECOVERED REFUND" : "");
-                } catch (error) {
-                    await updateSumupAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
-                    toast("An approved SumUp payment still needs to be saved. Keep this till open and check the database connection.", "error");
-                }
+            const result = await runTerminalRecovery("sumup");
+            if (result.completed > 0) {
+                toast(`Recovered ${result.completed} SumUp terminal transaction${result.completed === 1 ? "" : "s"}`, "success");
             }
-            await pruneSumupAttempts();
+            if (result.stillUncertain > 0) {
+                toast(`${result.stillUncertain} SumUp result${result.stillUncertain === 1 ? " is" : "s are"} still being reconciled. Do not retry the card.`, "error");
+            }
         } finally {
             recoveringSumupPayments = false;
         }
@@ -3794,30 +3980,13 @@
         if (recoveringDojoPayments) return;
         recoveringDojoPayments = true;
         try {
-            const attempts = await getRecoverableDojoAttempts();
-            for (const attempt of attempts) {
-                try {
-                    if (await localOrderExists(attempt.saleBundle.order.id)) {
-                        await updateDojoAttempt(attempt.id, "completed");
-                        continue;
-                    }
-                    const recovered = await commitSale(attempt.saleBundle);
-                    applyCompletedSaleToStores(recovered);
-                    await updateDojoAttempt(attempt.id, "completed", { saleBundle: recovered });
-                    const isRefund = recovered.order.type === "return";
-                    const recoveryLabel = isRefund ? "Dojo refund" : "Dojo sale";
-                    toast(`Recovered approved ${recoveryLabel} ${recovered.order.orderNumber || ""}`.trim(), "success");
-                    if (isRefund && Math.abs(Number(recovered.payment.cashAmount || 0)) > 0) {
-                        void openDrawerAfterSuccessfulPayment(Math.abs(Number(recovered.payment.cashAmount || 0)), "Recovered refund");
-                    }
-                    void printReceiptAfterSuccessfulPayment(recovered, `Recovered ${recoveryLabel}`);
-                    sendCompletedBundleToCctv(recovered, isRefund ? "RECOVERED REFUND" : "");
-                } catch (error) {
-                    await updateDojoAttempt(attempt.id, "commit_failed", { error: String(error) }).catch(() => undefined);
-                    toast("An approved Dojo payment still needs to be saved. Keep this till open and check the database connection.", "error");
-                }
+            const result = await runTerminalRecovery("dojo");
+            if (result.completed > 0) {
+                toast(`Recovered ${result.completed} Dojo terminal transaction${result.completed === 1 ? "" : "s"}`, "success");
             }
-            await pruneDojoAttempts();
+            if (result.stillUncertain > 0) {
+                toast(`${result.stillUncertain} Dojo result${result.stillUncertain === 1 ? " is" : "s are"} still being reconciled. Do not retry the card.`, "error");
+            }
         } finally {
             recoveringDojoPayments = false;
         }
@@ -4081,7 +4250,7 @@
                 updatedAt: timestamp,
             }] : [];
 
-            const saleBundle: SaleBundle = {
+            let saleBundle: SaleBundle = {
                 order: newOrder,
                 lines,
                 payment,
@@ -4094,6 +4263,8 @@
             if (trainingModeEnabled) {
                 cart = [];
                 selectedCartIndex = 0;
+                searchQuery = "";
+                notFoundBarcode = "";
                 showPaymentModal = false;
                 customerDisplayChange = paymentMethod === "cash" ? Math.max(0, change) : 0;
                 customerDisplayCompleteUntil = Date.now() + 8000;
@@ -4112,8 +4283,11 @@
                 const previewCustomerName = selectedCustomer?.name || 'Customer';
                 const committedPreview = await commitSale(saleBundle);
                 const previewBalance = committedPreview.accountChanges?.at(-1)?.balanceAfterPence;
+                await refreshLatestTillReceipt();
                 cart = [];
                 selectedCartIndex = 0;
+                searchQuery = "";
+                notFoundBarcode = "";
                 showPaymentModal = false;
                 customerDisplayChange = paymentMethod === "cash" ? Math.max(0, change) : 0;
                 customerDisplayCompleteUntil = Date.now() + 8000;
@@ -4141,13 +4315,13 @@
             }
 
             if (usesManagedSumup) {
-                await processManagedSumupPayment(activeSumupConfig, saleBundle, cardAmount);
+                saleBundle = await processManagedSumupPayment(activeSumupConfig, saleBundle, cardAmount);
                 approvedManagedBundle = saleBundle;
                 approvedManagedProvider = "sumup";
                 terminalPaymentStage = "saving";
                 terminalPaymentMessage = "Card approved. Saving the sale";
             } else if (usesManagedDojo) {
-                await processManagedDojoPayment(activeDojoConfig, saleBundle, cardAmount);
+                saleBundle = await processManagedDojoPayment(activeDojoConfig, saleBundle, cardAmount);
                 approvedManagedBundle = saleBundle;
                 approvedManagedProvider = "dojo";
                 terminalPaymentStage = "saving";
@@ -4172,6 +4346,8 @@
 
             cart = [];
             selectedCartIndex = 0;
+            searchQuery = "";
+            notFoundBarcode = "";
             showPaymentModal = false;
             customerDisplayChange = paymentMethod === "cash" ? Math.max(0, change) : 0;
             customerDisplayCompleteUntil = Date.now() + 8000;
@@ -4206,6 +4382,8 @@
                 }).catch(() => undefined);
                 cart = [];
                 selectedCartIndex = 0;
+                searchQuery = "";
+                notFoundBarcode = "";
                 showPaymentModal = false;
                 selectedCustomerId = "";
                 useLoyaltyCredit = false;
@@ -4230,6 +4408,10 @@
 
 {#if !$currentEmployee && $employeesDB.length > 0}
     <div
+        use:modalFocusTrap={{
+            dismiss: dismissLoginDialog,
+            dismissDisabled: loginBusy || (!showSupportAccess && !selectedLoginEmployee),
+        }}
         class="login-overlay"
         role="dialog"
         aria-modal="true"
@@ -4333,18 +4515,31 @@
 
 {#if restoringRememberedSession}
     <div class="fixed inset-0 z-[1050] bg-bg-base/90 flex items-center justify-center p-4">
-        <div class="bg-bg-card border border-border-flat rounded-md px-5 py-4 shadow-[var(--shadow)] text-center">
-            <strong class="block text-text-main">Reopening staff session</strong>
-            <span class="block text-sm text-text-muted mt-1">Checking the till shift...</span>
+        <div
+            use:modalFocusTrap={{ dismissDisabled: true }}
+            class="bg-bg-card border border-border-flat rounded-md px-5 py-4 shadow-[var(--shadow)] text-center"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="restoring-session-dialog-title"
+            aria-describedby="restoring-session-dialog-description"
+        >
+            <strong id="restoring-session-dialog-title" class="block text-text-main">Reopening staff session</strong>
+            <span id="restoring-session-dialog-description" class="block text-sm text-text-muted mt-1">Checking the till shift...</span>
         </div>
     </div>
 {/if}
 
 {#if pendingShiftEmployee}
     <div class="fixed inset-0 z-[1100] bg-bg-base flex items-center justify-center p-3 md:p-5">
-        <div class="w-full max-w-[520px] max-h-[96vh] overflow-y-auto bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]">
+        <div
+            use:modalFocusTrap={{ dismiss: cancelOpeningShift, dismissDisabled: openingShiftBusy }}
+            class="w-full max-w-[520px] max-h-[96vh] overflow-y-auto bg-bg-card border border-border-flat rounded-md p-5 md:p-7 flex flex-col gap-4 shadow-[var(--shadow)]"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="opening-shift-dialog-title"
+        >
             <div>
-                <h1 class="text-2xl font-bold">Open Till Shift</h1>
+                <h1 id="opening-shift-dialog-title" class="text-2xl font-bold">Open Till Shift</h1>
                 <p class="text-text-muted mt-1">Count the opening cash float for {tillName}.</p>
             </div>
             <div class="flat-card p-4 text-center">
@@ -4355,10 +4550,12 @@
                 bind:value={openingFloatString}
                 maxLength={9}
                 placeholder="Enter opening float in pence"
-                submitLabel="Open Shift"
+                submitLabel={openingShiftBusy ? "Opening Shift..." : "Open Shift"}
+                submitDisabled={openingShiftBusy}
+                disabled={openingShiftBusy}
                 onSubmit={openShiftWithFloat}
             />
-            <button type="button" class="btn btn-secondary" on:click={cancelOpeningShift}>Cancel and Sign Out</button>
+            <button type="button" class="btn btn-secondary" disabled={openingShiftBusy} on:click={cancelOpeningShift}>Cancel and Sign Out</button>
         </div>
     </div>
 {/if}
@@ -4376,7 +4573,7 @@
             <div class="flex min-w-0 items-center gap-4">
                 <div>
                     <button
-                        class="h-12 min-w-[104px] rounded-md bg-bg-card border border-border-flat px-3 flex items-center justify-center gap-2 font-black text-text-main hover:bg-bg-card-hover hover:border-accent-primary transition-colors {isMenuDisabled ? 'opacity-70' : ''}"
+                        class="pos-admin-button h-12 min-w-[104px] rounded-md bg-bg-card border border-border-flat px-3 flex items-center justify-center gap-2 font-black text-text-main hover:bg-bg-card-hover hover:border-accent-primary transition-colors {isMenuDisabled ? 'opacity-70' : ''}"
                         aria-disabled={isMenuDisabled}
                         title="Open Admin"
                         on:click|stopPropagation={() => handleMenuClick("/admin")}
@@ -4387,7 +4584,7 @@
                 </div>
 
                 <button
-                    class="flex items-center gap-3 bg-transparent hover:bg-bg-card rounded-md p-1.5 transition-colors"
+                    class="pos-user-button flex items-center gap-3 bg-transparent hover:bg-bg-card rounded-md p-1.5 transition-colors"
                     title="Change user"
                     aria-label={`Change user: ${$currentEmployee?.name || 'Signed out'}`}
                     on:click={logoutEmployee}
@@ -4453,7 +4650,7 @@
         <div class="pos-page-tabs flex gap-3 overflow-x-auto pb-3 mb-5">
             {#each $activePosPages as page}
                 <button
-                    class="whitespace-nowrap px-6 py-3 rounded-sm font-semibold text-sm transition-colors {activePageId ===
+                    class="pos-page-tab whitespace-nowrap px-6 py-3 rounded-sm font-semibold text-sm transition-colors {activePageId ===
                     page.id
                         ? 'bg-accent-primary text-white border-accent-primary'
                         : 'bg-bg-card border border-border-flat text-text-muted hover:text-text-main hover:bg-bg-card-hover'}"
@@ -4523,7 +4720,7 @@
             </div>
             <div class="pos-toolbar flex items-center gap-1.5 md:gap-2 h-14 md:h-16 shrink-0">
                 <button
-                    class="h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
+                    class="pos-drawer-button h-full min-w-11 md:min-w-14 px-3 flex items-center justify-center gap-2 bg-bg-card border border-border-flat text-accent-primary rounded-md hover:bg-accent-primary hover:text-white transition-colors shrink-0 disabled:opacity-45 disabled:cursor-wait"
                     title="Open cash drawer"
                     disabled={drawerBusy}
                     on:click={() => handleOpenCashDrawer()}
@@ -4550,15 +4747,15 @@
                 </button>
                 {#if totalPages > 1}
                     <button
-                        class="w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
+                        class="pos-page-nav-button w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
                         disabled={currentPageIndex === 0}
                         on:click={() => currentPageIndex--}>&larr;</button
                     >
-                    <span class="text-xs md:text-sm font-semibold text-text-muted w-11 h-full md:w-14 flex items-center justify-center leading-none"
+                    <span class="pos-page-position text-xs md:text-sm font-semibold text-text-muted w-11 h-full md:w-14 flex items-center justify-center leading-none"
                         >{currentPageIndex + 1}<span class="text-text-muted/50">/</span>{totalPages}</span
                     >
                     <button
-                        class="w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
+                        class="pos-page-nav-button w-11 h-full md:w-14 flex items-center justify-center bg-bg-card border border-border-flat rounded-md disabled:opacity-50 disabled:cursor-not-allowed hover:bg-bg-card-hover transition-colors text-sm font-bold"
                         disabled={currentPageIndex >= totalPages - 1}
                         on:click={() => currentPageIndex++}>&rarr;</button
                     >
@@ -4582,12 +4779,12 @@
                                 class="pos-toolbar-action"
                                 disabled={cart.length > 0}
                                 title={cart.length > 0 ? 'Complete, hold, or clear the trolley before opening recent transactions' : 'Open recent transactions'}
-                                on:click={openRecentTransactions}>RECENT<br class="hidden md:inline"/>TRANS</button>
+                                on:click={openRecentTransactions}>RECENT TRANS</button>
                         {:else if btn === 'change_price'}
                             <button
                                 class="pos-toolbar-action disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
                                 disabled={!hasSelectedCartItem}
-                                on:click={openChangePrice}>CHANGE<br class="hidden md:inline"/>PRICE</button>
+                                on:click={openChangePrice}>CHANGE PRICE</button>
                         {/if}
                     {/each}
                 </div>
@@ -4630,7 +4827,7 @@
             </button>
 
             <div
-                class="flex-1 flex items-center gap-2 bg-bg-card border border-border-flat rounded-md px-3 h-10 focus-within:border-accent-primary transition-colors {showNotFoundModal ? 'opacity-40 pointer-events-none' : ''}"
+                class="pos-scan-search flex-1 flex items-center gap-2 bg-bg-card border border-border-flat rounded-md px-3 h-10 focus-within:border-accent-primary transition-colors {showNotFoundModal ? 'opacity-40 pointer-events-none' : ''}"
             >
                 <svg
                     viewBox="0 0 24 24"
@@ -4656,13 +4853,13 @@
                     class="bg-transparent border-none outline-none text-sm text-text-main w-full disabled:opacity-40"
                     bind:value={searchQuery}
                     on:keydown={handleSearchKeydown}
-                    disabled={showNotFoundModal}
+                    disabled={scannerOverlayOpen}
                     data-touch-keyboard="off"
                 />
             </div>
 
             <button
-                class="w-10 h-10 flex items-center justify-center bg-bg-card border border-border-flat text-danger rounded-md hover:bg-danger hover:text-white transition-colors shrink-0 disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-bg-card disabled:hover:text-danger"
+                class="pos-cart-clear-button w-10 h-10 flex items-center justify-center bg-bg-card border border-border-flat text-danger rounded-md hover:bg-danger hover:text-white transition-colors shrink-0 disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-bg-card disabled:hover:text-danger"
                 title="Clear Order"
                 disabled={cart.length === 0}
                 on:click={() => (showClearConfirm = true)}
@@ -4787,12 +4984,12 @@
 
         <!-- Selection Controls & Quantity -->
         <div class="pos-cart-controls flex gap-1 md:gap-2 p-2 md:p-4 pb-0 shrink-0">
-            <div class="flex-[3] min-w-0 h-8 md:h-10 lg:h-12 grid grid-cols-[1fr_minmax(34px,0.8fr)_1fr] overflow-hidden rounded-md border border-border-flat bg-bg-card">
+            <div class="pos-quantity-stepper flex-[3] min-w-0 h-8 md:h-10 lg:h-12 grid grid-cols-[1fr_minmax(34px,0.8fr)_1fr] overflow-hidden rounded-md border border-border-flat bg-bg-card">
                 <button
                     disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
                     title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Increase quantity"}
                     aria-label="Increase selected item quantity"
-                    class="flex min-w-0 items-center justify-center border-r border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+                    class="pos-touch-button flex min-w-0 items-center justify-center border-r border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
                     on:click={increaseQty}>+</button
                 >
                 <output
@@ -4804,7 +5001,7 @@
                     disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked || selectedCartItem.quantity <= 1}
                     title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Decrease quantity"}
                     aria-label="Decrease selected item quantity"
-                    class="flex min-w-0 items-center justify-center border-l border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+                    class="pos-touch-button flex min-w-0 items-center justify-center border-l border-border-flat text-base md:text-lg lg:text-xl font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
                     on:click={decreaseQty}>−</button
                 >
             </div>
@@ -4812,7 +5009,7 @@
                 disabled={selectedCartIndex <= 0}
                 aria-label="Select previous trolley item"
                 title="Select previous trolley item"
-                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
+                class="pos-touch-button flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
                 on:click={moveSelectionUp}
             >
                 <svg
@@ -4830,7 +5027,7 @@
                 disabled={!hasSelectedCartItem || selectedCartIndex >= cart.length - 1}
                 aria-label="Select next trolley item"
                 title="Select next trolley item"
-                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
+                class="pos-touch-button flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md hover:bg-bg-card-hover transition-colors text-text-main disabled:opacity-35 disabled:cursor-not-allowed"
                 on:click={moveSelectionDown}
             >
                 <svg
@@ -4846,7 +5043,7 @@
             </button>
             <button
                 disabled={!hasSelectedCartItem}
-                class="flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-danger hover:bg-danger hover:text-white transition-colors disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-bg-card disabled:hover:text-danger"
+                class="pos-touch-button pos-danger-button flex-1 h-8 md:h-10 lg:h-12 flex items-center justify-center bg-bg-card border border-border-flat rounded-md text-danger hover:bg-danger hover:text-white transition-colors disabled:opacity-35 disabled:cursor-not-allowed disabled:hover:bg-bg-card disabled:hover:text-danger"
                 on:click={deleteSelected}
                 title="Delete selected"
             >
@@ -4866,7 +5063,7 @@
             <button
                 disabled={!hasSelectedCartItem || selectedCartItem?.quantityLocked}
                 title={selectedCartItem?.quantityLocked ? "Scale-label quantity cannot be changed" : "Set quantity"}
-                class="flex-[2] h-8 md:h-10 lg:h-12 flex items-center justify-center gap-1 md:gap-2 bg-bg-card border border-border-flat rounded-md font-bold text-[10px] md:text-sm hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+                class="pos-touch-button flex-[2] h-8 md:h-10 lg:h-12 flex items-center justify-center gap-1 md:gap-2 bg-bg-card border border-border-flat rounded-md font-bold text-[10px] md:text-sm hover:bg-bg-card-hover transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
                 on:click={openQuantityPad}
             >
                 <svg
@@ -4932,41 +5129,41 @@
             {#each [...cartLayout.slice(0, 2), 'payment', ...cartLayout.slice(2)] as btn}
                 {#if btn === 'payment'}
                     <button
-                        class="payment-action row-span-2 h-full bg-success text-white text-base md:text-lg font-black rounded-md shadow-lg hover:brightness-110 active:scale-[0.98] transition-all tracking-wider flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100 disabled:active:scale-100"
+                        class="pos-cart-action payment-action row-span-2 h-full bg-success text-white text-base md:text-lg font-black rounded-md shadow-lg hover:brightness-110 active:scale-[0.98] transition-all tracking-wider flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:brightness-100 disabled:active:scale-100"
                         disabled={cart.length === 0}
                         on:click={openPayment}>PAYMENT</button
                     >
                 {:else if btn === 'goods'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         on:click={openGoodsModal}>GOODS</button
                     >
                 {:else if btn === 'last_receipt'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md text-[10px] font-bold leading-tight hover:bg-bg-card-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         disabled={lastReceiptPrinting || !latestTillReceiptOrder}
-                        on:click={printLastTillReceipt}>{lastReceiptPrinting ? 'PRINTING' : 'LAST'}<br/>{lastReceiptPrinting ? '...' : 'RECEIPT'}</button
+                        on:click={printLastTillReceipt}>{lastReceiptPrinting ? 'PRINTING...' : 'LAST RECEIPT'}</button
                     >
                 {:else if btn === 'change_price'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md font-bold text-xs hover:bg-bg-card-hover transition-colors leading-tight disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md font-bold text-xs hover:bg-bg-card-hover transition-colors leading-tight disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg-card"
                         disabled={!hasSelectedCartItem}
-                        on:click={openChangePrice}>CHANGE<br/>PRICE</button
+                        on:click={openChangePrice}>CHANGE PRICE</button
                     >
                 {:else if btn === 'hold'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[10px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md text-[10px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         disabled={cart.length === 0 || isHoldingOrder}
                         on:click={holdOrder}>{isHoldingOrder ? 'HOLDING...' : 'HOLD'}</button
                     >
                 {:else if btn === 'scale'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         on:click={openScale}>SCALE</button
                     >
                 {:else if btn === 'discount'}
                     <button
-                        class="h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
+                        class="pos-cart-action h-full bg-bg-card border border-border-flat rounded-md text-[9px] md:text-xs lg:text-sm font-bold hover:bg-bg-card-hover transition-colors"
                         on:click={openDiscounts}>DISCOUNT</button
                     >
                 {/if}
@@ -4977,7 +5174,13 @@
 
 {#if showDiscountModal}
     <div class="modal-overlay">
-        <div class="flat-panel modal-box" role="dialog" aria-modal="true" aria-labelledby="discount-dialog-title">
+        <div
+            use:modalFocusTrap={{ dismiss: () => (showDiscountModal = false) }}
+            class="flat-panel modal-box"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="discount-dialog-title"
+        >
             <div class="modal-header">
                 <div>
                     <h3 id="discount-dialog-title">Apply Discount</h3>
@@ -4987,7 +5190,7 @@
             </div>
             <div class="modal-body grid grid-cols-2 gap-3">
                 <button
-                    class="flat-card p-4 text-left cursor-pointer hover:!border-accent-primary {selectedManualDiscountId === '' ? '!border-accent-primary' : ''}"
+                    class="pos-choice-button flat-card p-4 text-left cursor-pointer hover:!border-accent-primary {selectedManualDiscountId === '' ? '!border-accent-primary' : ''}"
                     on:click={() => selectManualDiscount('')}
                 >
                     <strong class="block text-text-main">No manual discount</strong>
@@ -4995,7 +5198,7 @@
                 </button>
                 {#each $discountsDB.filter(d => d.kind === 'manual_percent' && d.isActive) as discount}
                     <button
-                        class="flat-card p-4 text-left cursor-pointer hover:!border-accent-primary {selectedManualDiscountId === discount.id ? '!border-accent-primary' : ''}"
+                        class="pos-choice-button flat-card p-4 text-left cursor-pointer hover:!border-accent-primary {selectedManualDiscountId === discount.id ? '!border-accent-primary' : ''}"
                         on:click={() => selectManualDiscount(discount.id)}
                     >
                         <strong class="block text-text-main">{discount.name}</strong>
@@ -5012,7 +5215,13 @@
 
 {#if showScaleModal}
     <div class="modal-overlay">
-        <div class="scale-workspace" role="dialog" aria-modal="true" aria-labelledby="scale-dialog-title">
+        <div
+            use:modalFocusTrap={{ dismiss: closeScaleModal }}
+            class="scale-workspace"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-dialog-title"
+        >
             <header class="scale-header">
                 <div>
                     <span class="scale-kicker">Manual weighing</span>
@@ -5128,7 +5337,20 @@
                     </div>
                     <div class="scale-numpad">
                         {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"] as key}
-                            <button on:click={() => handleScaleKey(key)}>{key}</button>
+                            <button
+                                type="button"
+                                class="np-btn payment-np-button"
+                                class:is-delete={key === "⌫"}
+                                aria-label={key === "⌫" ? "Delete last weight digit" : key === "." ? "Enter decimal point" : `Enter ${key}`}
+                                title={key === "⌫" ? "Delete last digit" : undefined}
+                                on:click={() => handleScaleKey(key)}
+                            >
+                                {#if key === "⌫"}
+                                    <DeleteIcon size={25} strokeWidth={2.35} aria-hidden="true" />
+                                {:else}
+                                    {key}
+                                {/if}
+                            </button>
                         {/each}
                     </div>
                     <div class="scale-total">
@@ -5151,6 +5373,7 @@
         data-pos-modal-overlay
     >
         <div
+            use:modalFocusTrap={{ dismiss: () => (showNumpad = false) }}
             class="quantity-pad-modal w-80 max-w-[95vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             role="dialog"
             aria-modal="true"
@@ -5220,7 +5443,8 @@
         data-pos-modal-overlay
     >
         <div
-            class="w-96 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            use:modalFocusTrap={{ dismiss: () => (showChangePricePad = false) }}
+            class="change-price-modal w-96 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="change-price-dialog-title"
@@ -5228,37 +5452,46 @@
             <div class="flex justify-between items-center">
                 <h3 id="change-price-dialog-title" class="m-0 text-lg font-semibold">Change Price</h3>
                 <button
-                    class="text-text-muted text-xl hover:text-text-main transition-colors"
+                    class="modal-close"
                     aria-label="Close price dialog"
                     on:click={() => (showChangePricePad = false)}>✕</button
                 >
             </div>
             <div
-                class="h-16 flex items-center justify-end px-4 text-3xl font-bold bg-bg-panel border border-border-flat rounded-md font-serif text-accent-primary"
+                class="np-display payment-display change-price-display"
+                role="spinbutton"
+                aria-live="polite"
+                aria-label="New item price"
+                aria-valuemin="0"
+                aria-valuemax={MAX_ORDER_TOTAL_PENCE}
+                aria-valuenow={parseInt(changePriceString || "0")}
+                aria-valuetext={formatMoney(parseInt(changePriceString || "0"))}
+                tabindex="0"
             >
                 {formatMoney(parseInt(changePriceString || "0"))}
             </div>
-            <div class="grid grid-cols-3 gap-3">
+            <div class="np-grid payment-np-grid change-price-np-grid" role="group" aria-label="Change price number pad">
                 {#each ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "C"] as key}
                     <button
-                        class="h-14 flex items-center justify-center text-xl font-bold rounded-md transition-colors border border-border-flat {key ===
-                        'C'
-                            ? 'text-danger bg-bg-panel hover:bg-danger hover:text-white'
-                            : 'bg-bg-panel text-text-main hover:bg-bg-card-hover'}"
+                        type="button"
+                        class="np-btn payment-np-button"
+                        class:pos-pad-clear={key === "C"}
+                        class:is-double-zero={key === "00"}
+                        aria-label={key === "C" ? "Clear new price" : key === "00" ? "Enter double zero" : `Enter ${key}`}
                         on:click={() => handleChangePriceKey(key)}
                     >
-                        {key}
+                        {key === "C" ? "Clear" : key}
                     </button>
                 {/each}
             </div>
-            <div class="flex flex-col gap-2 mt-2">
+            <div class="change-price-actions flex flex-col gap-2 mt-2">
                 <button
-                    class="w-full h-14 bg-accent-primary text-white font-bold rounded-md hover:bg-accent-primary-hover transition-colors"
+                    class="btn btn-primary w-full h-14"
                     on:click={changePriceOnce}
                     >Change only for this order</button
                 >
                 <button
-                    class="w-full h-14 border border-danger text-danger font-bold rounded-md hover:bg-danger hover:text-white transition-colors"
+                    class="btn btn-danger w-full h-14"
                     on:click={changePricePermanently}>Change permanently</button
                 >
             </div>
@@ -5270,6 +5503,7 @@
 {#if showGoodsModal}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: () => (showGoodsModal = false) }}
             class="w-[700px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] flex flex-col md:flex-row p-0 overflow-y-auto md:overflow-hidden bg-bg-card border border-border-flat rounded-md"
             role="dialog"
             aria-modal="true"
@@ -5329,6 +5563,7 @@
                     <h3>Enter Price</h3>
                     <button
                         type="button"
+                        data-modal-initial-focus
                         class="modal-close"
                         aria-label="Close goods price dialog"
                         on:click={() => (showGoodsModal = false)}>✕</button
@@ -5389,6 +5624,7 @@
 {#if showPaymentModal}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: closePayment, dismissDisabled: isCompletingSale }}
             class="payment-modal w-[1040px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
             role="dialog"
             aria-modal="true"
@@ -5844,6 +6080,7 @@
 {#if showHeldOrders}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: () => (showHeldOrders = false) }}
             class="w-[420px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
             role="dialog"
             aria-modal="true"
@@ -5933,6 +6170,12 @@
 {#if showRecentTransactions}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{
+                dismiss: () => {
+                    if (!isReversingOrder) showRecentTransactions = false;
+                },
+                dismissDisabled: isReversingOrder,
+            }}
             class="w-[900px] max-w-[95vw] max-h-[85vh] md:max-h-[95vh] overflow-y-auto p-4 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             role="dialog"
             aria-modal="true"
@@ -5947,6 +6190,7 @@
                 <button
                     class="modal-close"
                     aria-label="Close recent transactions dialog"
+                    disabled={isReversingOrder}
                     on:click={() => (showRecentTransactions = false)}>✕</button
                 >
             </div>
@@ -6028,6 +6272,7 @@
                                                 ...line,
                                                 sku: $productById.get(line.productId)?.sku || '',
                                             }))}
+                                        payments={getCachedReceiptPayments(selectedRecentOrderId)}
                                         cashierName={selectedOrder.cashierName || employeeById.get(selectedOrder.employeeId)?.name || ''}
                                         tillName={selectedOrder.tillName || registerById.get(selectedOrder.tillNumber)?.name || ''}
                                         design={receiptDesign}
@@ -6082,6 +6327,7 @@
 {#if showNotFoundModal}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: dismissNotFoundModal }}
             class="w-[460px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl border border-border-flat bg-bg-panel p-5 text-text-main shadow-[0_24px_70px_var(--shadow)] sm:p-6"
             role="alertdialog"
             aria-modal="true"
@@ -6117,7 +6363,7 @@
                     type="button"
                     class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-transparent bg-transparent text-xl text-text-muted transition-colors hover:border-border-flat hover:bg-bg-card hover:text-text-main"
                     aria-label="Close product not found dialog"
-                    on:click={() => (showNotFoundModal = false)}>✕</button
+                    on:click={dismissNotFoundModal}>✕</button
                 >
             </div>
 
@@ -6140,8 +6386,9 @@
                 <button
                     bind:this={scanAgainButton}
                     type="button"
+                    data-modal-initial-focus
                     class="btn btn-primary w-full"
-                    on:click={() => (showNotFoundModal = false)}
+                    on:click={dismissNotFoundModal}
                 >
                     <ScanLine size={19} strokeWidth={2.4} aria-hidden="true" />
                     Scan again
@@ -6159,12 +6406,19 @@
 {/if}
 
 {#if showQuickAddModal}
-    <div class="modal-overlay">
+    <div
+        class="modal-overlay"
+        role="presentation"
+        on:click={handleQuickAddBackdrop}
+        on:keydown={(event) => event.key === "Escape" && closeQuickAdd()}
+    >
         <div
+            use:modalFocusTrap={{ dismiss: closeQuickAdd, dismissDisabled: quickAddBusy }}
             class="quick-add-modal w-[920px] max-w-[97vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             role="dialog"
             aria-modal="true"
             aria-labelledby="quick-add-dialog-title"
+            aria-busy={quickAddBusy}
         >
             <div class="modal-header">
                 <h3 id="quick-add-dialog-title">Quick Add Product</h3>
@@ -6172,7 +6426,8 @@
                     type="button"
                     class="modal-close"
                     aria-label="Close quick add product dialog"
-                    on:click={() => (showQuickAddModal = false)}>✕</button
+                    disabled={quickAddBusy}
+                    on:click={closeQuickAdd}>✕</button
                 >
             </div>
 
@@ -6183,6 +6438,8 @@
                         <input
                             id="qa-name"
                             type="text"
+                            data-modal-initial-focus
+                            disabled={quickAddBusy}
                             bind:value={quickAddName}
                             placeholder="Enter name..."
                             class="flat-input !py-3.5 !text-lg"
@@ -6194,6 +6451,7 @@
                         <input
                             id="qa-sku"
                             type="text"
+                            disabled={quickAddBusy}
                             bind:value={quickAddSku}
                             placeholder="Leave blank if not needed"
                             class="flat-input !py-3.5 !text-lg"
@@ -6203,6 +6461,7 @@
                     <div class="input-group">
                         <CustomSelect
                             label="Category *"
+                            disabled={quickAddBusy}
                             bind:value={quickAddCategoryId}
                             options={$activeCategories.map((c) => ({
                                 label: c.name,
@@ -6214,6 +6473,7 @@
                     <div class="input-group">
                         <CustomSelect
                             label="Tax Rate"
+                            disabled={quickAddBusy}
                             bind:value={quickAddTaxRateId}
                             options={$taxRatesDB.map((t) => ({
                                 label: t.name,
@@ -6221,6 +6481,14 @@
                             }))}
                         />
                     </div>
+
+                    <label class="quick-add-age-toggle rounded-xl border border-border-flat bg-bg-panel p-3.5 flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" bind:checked={quickAddAgeRestricted} disabled={quickAddBusy} />
+                        <span class="flex min-w-0 flex-col gap-0.5">
+                            <strong>18+ age-restricted item</strong>
+                            <small class="text-text-muted">Cashiers must confirm a valid ID before adding it.</small>
+                        </span>
+                    </label>
                 </div>
 
                 <div class="quick-add-price-section flex flex-col gap-2">
@@ -6243,6 +6511,7 @@
                             class="payment-clear-button"
                             aria-label="Clear quick add product price"
                             title="Clear price"
+                            disabled={quickAddBusy}
                             on:click={() => handleQuickAddPriceKey("C")}
                         >
                             Clear
@@ -6259,6 +6528,7 @@
                                 class="np-btn payment-np-button"
                                 class:is-delete={key === "⌫"}
                                 class:is-double-zero={key === "00"}
+                                disabled={quickAddBusy}
                                 aria-label={key === "⌫" ? "Delete last quick add price digit" : key === "00" ? "Enter double zero" : `Enter ${key}`}
                                 title={key === "⌫" ? "Delete last digit" : undefined}
                                 on:click={() => handleQuickAddPriceKey(key)}
@@ -6299,6 +6569,7 @@
 {#if pendingAgeRestrictedAdd}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: cancelAgeRestrictedAdd }}
             class="w-[520px] max-w-[95vw] rounded-2xl border border-warning/40 bg-bg-card p-5 text-text-main shadow-[0_24px_70px_var(--shadow)] sm:p-6"
             role="alertdialog"
             aria-modal="true"
@@ -6330,6 +6601,7 @@
                 <button
                     bind:this={ageRestrictedConfirmButton}
                     type="button"
+                    data-modal-initial-focus
                     class="btn btn-primary h-14"
                     on:click={confirmAgeRestrictedAdd}
                 >
@@ -6343,6 +6615,7 @@
 {#if showManagerApprovalModal}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: cancelManagerApproval }}
             class="w-[520px] max-w-[95vw] max-h-[95vh] overflow-y-auto rounded-md border border-border-flat bg-bg-card p-5 flex flex-col gap-4"
             role="dialog"
             aria-modal="true"
@@ -6387,6 +6660,7 @@
 {#if showPartialRefundPad && pendingReversal}
     <div class="modal-overlay">
         <div
+            use:modalFocusTrap={{ dismiss: cancelPartialRefund, dismissDisabled: isReversingOrder }}
             class="w-[430px] max-w-[95vw] max-h-[95vh] overflow-y-auto p-5 rounded-md bg-bg-card border border-border-flat flex flex-col gap-4"
             role="dialog"
             aria-modal="true"
@@ -6604,7 +6878,7 @@
     .scale-live small { color: var(--text-muted); font-size: .74rem; line-height: 1.2; word-break: break-word; }
     .scale-live button { min-height: 40px; padding: 0 .7rem; white-space: nowrap; }
     .scale-numpad { min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(44px, 1fr)); gap: .42rem; }
-    .scale-numpad button { min-height: 44px; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-size: 1.28rem; font-weight: 900; }
+    .scale-numpad .payment-np-button { min-height: 44px !important; border-radius: .55rem; font-size: 1.28rem !important; }
     .scale-total { margin-top: 0; flex-direction: row; align-items: center; justify-content: space-between; }
     .scale-total strong { color: var(--success); font-size: 1.45rem; }
     .scale-add { min-height: 48px; height: auto; font-size: .95rem; box-shadow: 0 10px 24px var(--shadow); }
@@ -6623,7 +6897,7 @@
         .scale-live { min-height: 0; }
         .scale-live button { min-height: 38px; padding: 0 .5rem; }
         .scale-numpad { min-height: 0; gap: .32rem; }
-        .scale-numpad button { min-height: 40px; font-size: 1.15rem; }
+        .scale-numpad .payment-np-button { min-height: 40px !important; font-size: 1.15rem !important; }
     }
     @media (max-height: 690px) {
         .scale-workspace { height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
@@ -6634,7 +6908,7 @@
         .scale-page-tabs { min-height: 34px; }
         .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
-        .scale-numpad button { min-height: 38px; font-size: 1.05rem; }
+        .scale-numpad .payment-np-button { min-height: 38px !important; font-size: 1.05rem !important; }
         .scale-add { min-height: 42px; }
     }
     @media (max-width: 760px) {

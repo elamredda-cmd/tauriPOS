@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ckb" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1080, initial-scale=1" />
+    <title>L&amp;Bj POS — Facebook Flyer</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { width: 1080px; height: 1080px; margin: 0; overflow: hidden; background: #fff; }
+      body { font-family: ".SF Arabic", "Geeza Pro", Arial, sans-serif; }
+      .canvas { position: relative; width: 1080px; height: 1080px; overflow: hidden; background: linear-gradient(135deg, #fff 0%, #fbfdff 56%, #edf8f7 100%); }
+      .cashier { position: absolute; inset: 0; width: 1080px; height: 1080px; object-fit: cover; }
+      .orb-a, .orb-b { position: absolute; border-radius: 50%; pointer-events: none; }
+      .orb-a { width: 420px; height: 420px; right: -170px; top: -120px; background: rgba(20, 200, 196, .06); }
+      .orb-b { width: 460px; height: 460px; left: -230px; bottom: -230px; background: rgba(255, 188, 53, .07); }
+      .brand { position: absolute; direction: ltr; left: 48px; top: 42px; width: 514px; height: 112px; display: flex; align-items: center; gap: 22px; padding: 13px 20px; border-radius: 28px; background: rgba(255,255,255,.95); box-shadow: 0 12px 34px rgba(8,36,81,.14); }
+      .brand img { width: 86px; height: 86px; border-radius: 20px; }
+      .brand-name { color: #082451; font: 800 35px/1 Arial, sans-serif; }
+      .brand-sub { margin-top: 9px; color: #1c7d86; font-size: 18px; font-weight: 700; direction: rtl; text-align: left; }
+      .headline { position: absolute; direction: rtl; left: 38px; top: 186px; width: 532px; color: #082451; text-align: right; }
+      .headline h1 { margin: 0; font-size: 42px; line-height: 1.24; font-weight: 900; letter-spacing: -.3px; }
+      .headline h1 span { display: block; white-space: nowrap; }
+      .headline .pill { width: fit-content; margin-top: 18px; margin-left: auto; padding: 8px 25px 9px; color: #fff; font-size: 23px; line-height: 1.35; font-weight: 800; border-radius: 28px; background: #13beba; }
+      .features { position: absolute; direction: rtl; left: 58px; top: 376px; width: 472px; display: grid; gap: 13px; }
+      .feature { height: 61px; display: flex; align-items: center; gap: 14px; padding: 0 16px; border-radius: 18px; color: #082451; background: rgba(255,255,255,.96); box-shadow: 0 10px 25px rgba(8,36,81,.13); font-size: 24px; font-weight: 800; white-space: nowrap; }
+      .feature.small { font-size: 22px; }
+      .tick { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; color: #fff; border-radius: 50%; background: #13beba; font: 900 20px/1 Arial, sans-serif; }
+      .feature:nth-child(even) .tick { background: #ffb42e; }
+      .screen { position: absolute; left: 448px; top: 633px; width: 363px; height: 226px; object-fit: fill; border-radius: 4px; box-shadow: 0 5px 20px rgba(0,17,47,.28); }
+      .cta { position: absolute; direction: rtl; left: 58px; top: 890px; width: 500px; height: 78px; display: flex; align-items: center; justify-content: center; padding: 0 28px; color: #fff; text-align: center; font-size: 25px; font-weight: 800; border-radius: 24px; background: linear-gradient(90deg, #082451, #123d73); box-shadow: 0 12px 30px rgba(8,36,81,.17); }
+      .footer-line { position: absolute; left: 58px; top: 985px; width: 500px; height: 4px; border-radius: 4px; background: #13beba; }
+      .footer { position: absolute; direction: ltr; left: 58px; top: 1008px; color: #54647d; font: 700 17px/1 Arial, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <main class="canvas">
+      <img class="cashier" src="/lbj-cashier-white.png" alt="" />
+      <div class="orb-a"></div><div class="orb-b"></div>
+      <img class="screen" src="/lbj-pos-admin.png" alt="L&amp;Bj POS Admin dashboard" />
+
+      <section class="brand">
+        <img src="/lbj-pos-logo.png" alt="L&amp;Bj POS logo" />
+        <div><div class="brand-name">L&amp;Bj POS</div><div class="brand-sub">سیستەمی کاشێری زیرەک</div></div>
+      </section>
+
+      <section class="headline">
+        <h1><span>سیستەمی فرۆشتنی زیرەک</span><span>بۆ دووکانی تۆ</span></h1>
+        <div class="pill">هەموو شتێک لە یەک شوێن</div>
+      </section>
+
+      <section class="features">
+        <div class="feature"><span class="tick">✓</span><span>فرۆشتنی خێرا و ئاسان</span></div>
+        <div class="feature small"><span class="tick">✓</span><span>کۆگا، بارکۆد و بەڕێوەبردنی کاڵا</span></div>
+        <div class="feature small"><span class="tick">✓</span><span>کڕیار، قەرز و پارەدانی دواتر</span></div>
+        <div class="feature small"><span class="tick">✓</span><span>ڕاپۆرت و چاودێری کارمەندان</span></div>
+      </section>
+
+      <div class="cta">بۆ زانیاری زیاتر، پەیاممان بۆ بنێرە</div>
+      <div class="footer-line"></div>
+      <div class="footer">L&amp;Bj POS • SMART RETAIL MANAGEMENT</div>
+    </main>
+  </body>
+</html>

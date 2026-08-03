@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recover-online-financial-intent"
+description = "Enables the recover_online_financial_intent command without any pre-configured scope."
+commands.allow = ["recover_online_financial_intent"]
+
+[[permission]]
+identifier = "deny-recover-online-financial-intent"
+description = "Denies the recover_online_financial_intent command without any pre-configured scope."
+commands.deny = ["recover_online_financial_intent"]

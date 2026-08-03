@@ -151,8 +151,8 @@ describe('receipt command safety', () => {
             ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
         );
         expect(printableText).toContain('ACCOUNT CREDIT');
-        expect(printableText).toContain('CUSTOMER ACCOUNT CREDITED');
-        expect(printableText).not.toContain('CHARGED TO CUSTOMER ACCOUNT');
+        expect(printableText).toContain('ACCOUNT CREDITED');
+        expect(printableText).not.toContain('ACCOUNT DEBT ADDED');
     });
 
     it('labels a Pay Later sale as charged to the customer account', () => {
@@ -183,7 +183,91 @@ describe('receipt command safety', () => {
             ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
         );
         expect(printableText).toContain('PAY LATER');
-        expect(printableText).toContain('CHARGED TO CUSTOMER ACCOUNT');
+        expect(printableText).toContain('ACCOUNT DEBT ADDED');
+    });
+
+    it('prints the exact loyalty and account portions of a mixed Pay Later sale', () => {
+        const config = getReceiptPrinterConfig(settings({
+            receipt_printer_connection: 'usb_raw',
+            receipt_printer_name: 'Receipt Printer',
+            receipt_printer_cut_paper: 'false',
+        }));
+        const bytes = buildEscposReceipt({
+            store: { name: 'Test Shop' },
+            order: {
+                id: 'sale-account-loyalty-1',
+                orderNumber: 15,
+                type: 'sale',
+                total: 1_000,
+                subtotal: 1_000,
+                discountAmount: 0,
+                paymentMethod: 'account+loyalty',
+                amountTendered: 1_000,
+            },
+            lines: [],
+            payments: [{
+                method: 'account',
+                amount: 1_000,
+                cashAmount: 0,
+                cardAmount: 0,
+                loyaltyAmount: 200,
+                accountAmount: 800,
+            }],
+            cashierName: 'Cashier',
+            tillName: 'Till 1',
+            design: { ...defaultReceiptDesign, showPayment: true },
+        } as any, config);
+
+        const printableText = String.fromCharCode(
+            ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
+        );
+        expect(printableText).toContain('LOYALTY');
+        expect(printableText).toContain('2.00');
+        expect(printableText).toContain('PAY LATER');
+        expect(printableText).toContain('8.00');
+        expect(printableText).toContain('ACCOUNT DEBT ADDED');
+    });
+
+    it('prints the cash actually tendered and keeps change separate', () => {
+        const config = getReceiptPrinterConfig(settings({
+            receipt_printer_connection: 'usb_raw',
+            receipt_printer_name: 'Receipt Printer',
+            receipt_printer_cut_paper: 'false',
+        }));
+        const bytes = buildEscposReceipt({
+            store: { name: 'Test Shop' },
+            order: {
+                id: 'cash-with-change-1',
+                orderNumber: 16,
+                type: 'sale',
+                total: 1_000,
+                subtotal: 1_000,
+                discountAmount: 0,
+                paymentMethod: 'cash',
+                amountTendered: 1_200,
+            },
+            lines: [],
+            payments: [{
+                method: 'cash',
+                amount: 1_000,
+                cashAmount: 1_000,
+                cardAmount: 0,
+                loyaltyAmount: 0,
+                accountAmount: 0,
+                changeGiven: 200,
+            }],
+            cashierName: 'Cashier',
+            tillName: 'Till 1',
+            design: { ...defaultReceiptDesign, showPayment: true },
+        } as any, config);
+
+        const printableText = String.fromCharCode(
+            ...bytes.filter((byte) => byte === 0x0a || (byte >= 0x20 && byte <= 0x7e)),
+        );
+        expect(printableText).toContain('CASH');
+        expect(printableText).toContain('12.00');
+        expect(printableText).toContain('Change');
+        expect(printableText).toContain('2.00');
     });
 
     it('cuts a generic receipt without emitting a drawer pulse', () => {

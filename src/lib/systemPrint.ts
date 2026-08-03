@@ -2,11 +2,13 @@ import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import type { Order, OrderLine, Store } from '$lib/stores/db';
 import type { ReceiptDesign } from '$lib/receipt';
+import type { ReceiptPayment } from '$lib/receiptPayments';
 
 export interface SystemReceiptPayload {
     store: Store;
     order: Order;
     lines: OrderLine[];
+    payments?: Array<Partial<ReceiptPayment>>;
     cashierName: string;
     tillName: string;
     design: ReceiptDesign;

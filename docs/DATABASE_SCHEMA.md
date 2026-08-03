@@ -454,6 +454,7 @@ Derived daily totals by date and till, including account sales and repayments.
 | `accountTotal` | `INTEGER` | — | `0` |
 | `accountRepaymentsCash` | `INTEGER` | — | `0` |
 | `accountRepaymentsCard` | `INTEGER` | — | `0` |
+| `accountRepaymentsOther` | `INTEGER` | — | `0` |
 
 ### `till_report_markers`
 
@@ -774,7 +775,8 @@ The absence of an order foreign key on `customer_account_entries` is intentional
 - A Pay Later sale creates a positive charge. A later repayment creates a negative entry with its cash/card/other payment method.
 - Each ledger entry copies order, receipt, employee, till and shift metadata.
 - `payments.accountAmount` records the portion of a sale tendered to the account.
-- `daily_sales_summary.accountTotal` records Pay Later sales; `accountRepaymentsCash` and `accountRepaymentsCard` record later collections.
+- `daily_sales_summary.accountTotal` records Pay Later sales; `accountRepaymentsCash`, `accountRepaymentsCard`, and `accountRepaymentsOther` record later collections separately.
+- Account reconciliation follows: closing position = opening position + new charges - cash collected - card collected - other collected + adjustments.
 - Sales-history purge preserves both customer account tables.
 
 ## SQLite and MariaDB differences

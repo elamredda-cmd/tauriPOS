@@ -48,7 +48,7 @@
         open_cash_drawer: 'Open the cash drawer manually from the checkout screen',
         end_day_close: 'Open the restricted close-period screen and create a Z report without access to detailed sales reports',
         charge_customer_account: 'Use Pay Later at checkout for a customer with an active account',
-        take_account_payment: 'Record a cash or card payment against an amount owed',
+        take_account_payment: 'Record a cash, card, bank, cheque, or other payment against an amount owed',
         adjust_customer_account: 'Post an opening balance, correction, or write-off with a required reason',
     };
 

@@ -80,6 +80,32 @@ describe('page permission routing', () => {
         expect(canAccessPath(manager, '/reports', settings)).toBe(false);
     });
 
+    it('protects Cash-up Sessions with report or end-day permission', () => {
+        const reportSettings = roleSetting(serializeRolePermissions({
+            admin: [],
+            manager: ['open_reports'],
+            supervisor: [],
+            cashier: [],
+        }));
+        const closeSettings = roleSetting(serializeRolePermissions({
+            admin: [],
+            manager: ['end_day_close'],
+            supervisor: [],
+            cashier: [],
+        }));
+        const deniedSettings = roleSetting(serializeRolePermissions({
+            admin: [],
+            manager: [],
+            supervisor: [],
+            cashier: [],
+        }));
+
+        expect(permissionForPath('/shifts')).toBe('open_reports');
+        expect(canAccessPath(manager, '/shifts', reportSettings)).toBe(true);
+        expect(canAccessPath(manager, '/shifts', closeSettings)).toBe(true);
+        expect(canAccessPath(manager, '/shifts', deniedSettings)).toBe(false);
+    });
+
     it('restricts Shop Licence to administrators', () => {
         expect(canAccessPath(manager, '/settings/licence', [])).toBe(false);
     });

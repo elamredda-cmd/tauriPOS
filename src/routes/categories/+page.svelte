@@ -262,3 +262,17 @@
     variant="danger"
     on:confirm={handleDel}
 />
+
+<style>
+    @media (max-width: 900px) {
+        .tbl th:nth-child(3),
+        .tbl td:nth-child(3) {
+            display: none;
+        }
+
+        .tbl th,
+        .tbl td {
+            padding-inline: 0.65rem;
+        }
+    }
+</style>
