@@ -26,9 +26,9 @@
         <p class="text-text-muted leading-relaxed text-lg">{message}</p>
     </div>
     <div slot="footer" class="flex gap-3 w-full justify-end">
-        <button class="h-12 px-6 font-semibold rounded-sm text-sm border border-border-flat bg-bg-card hover:bg-bg-card-hover transition-colors" on:click={onCancel}>{cancelText}</button>
-        <button 
-            class="h-12 px-6 font-semibold rounded-sm text-sm text-white transition-colors {variant === 'danger' ? 'bg-danger hover:brightness-110' : 'bg-accent-primary hover:bg-accent-primary-hover'}" 
+        <button class="btn btn-secondary min-w-[112px]" on:click={onCancel}>{cancelText}</button>
+        <button
+            class="btn min-w-[112px] {variant === 'danger' ? 'btn-danger' : 'btn-primary'}"
             on:click={onConfirm}
         >
             {confirmText}

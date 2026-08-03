@@ -23,6 +23,7 @@ import type {
     CustomerAccount,
     CustomerAccountEntry,
 } from './db';
+import { terminalAttemptUpdatePredecessors } from '../terminalAttemptState';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -119,12 +120,173 @@ async function closeDatabase(database: Database | null): Promise<void> {
 }
 
 const CUSTOMER_ACCOUNT_SCHEMA_MIGRATION = '2026-07-customer-account-schema-v4';
+export const MYSQL_IDENTIFIER_COLLATION_MIGRATION = '2026-07-relational-identifier-collation-v2';
+const MYSQL_ACCOUNT_GUARD_MIGRATION = '2026-07-account-ledger-guards-binary-v1';
+const MYSQL_CUSTOMER_GUARD_MIGRATION = '2026-07-customer-anti-resurrection-guards-collation-v2';
+const MYSQL_IDENTIFIER_CHARSET = 'utf8mb4';
+const MYSQL_IDENTIFIER_COLLATION = 'utf8mb4_bin';
+const MYSQL_FRESH_CUSTOMER_COLLATION = 'utf8mb4_unicode_ci';
+
+const binaryIdentifier = (definition: string): string =>
+    `${definition} CHARACTER SET ${MYSQL_IDENTIFIER_CHARSET} COLLATE ${MYSQL_IDENTIFIER_COLLATION}`;
+const freshCustomerIdentifier = (definition: string): string =>
+    `${definition} CHARACTER SET ${MYSQL_IDENTIFIER_CHARSET} COLLATE ${MYSQL_FRESH_CUSTOMER_COLLATION}`;
+
+type MysqlIdentifierColumn = {
+    table: string;
+    column: string;
+    definition: string;
+};
+
+type MysqlRelationalIdentifierColumn = Pick<MysqlIdentifierColumn, 'table' | 'column'> & {
+    parentTable: string;
+    parentColumn: string;
+    uniqueUnderParentCollation?: boolean;
+};
+
+// Every reference follows its own installed parent key. Never rewrite a
+// legacy parent PK: doing so could change identity semantics or collapse IDs.
+// Polymorphic values such as tombstones.row_id are intentionally excluded.
+const MYSQL_RELATIONAL_IDENTIFIER_COLUMNS: MysqlRelationalIdentifierColumn[] = [
+    {
+        table: 'customer_accounts', column: 'customerId',
+        parentTable: 'customers', parentColumn: 'id', uniqueUnderParentCollation: true,
+    },
+    {
+        table: 'customer_account_entries', column: 'accountId',
+        parentTable: 'customer_accounts', parentColumn: 'id',
+    },
+    {
+        table: 'customer_account_entries', column: 'customerId',
+        parentTable: 'customers', parentColumn: 'id',
+    },
+    {
+        table: 'orders', column: 'customerId',
+        parentTable: 'customers', parentColumn: 'id',
+    },
+    {
+        table: 'loyalty_logs', column: 'customerId',
+        parentTable: 'customers', parentColumn: 'id',
+    },
+    {
+        table: 'pos_customer_write_locks', column: 'customerId',
+        parentTable: 'customers', parentColumn: 'id', uniqueUnderParentCollation: true,
+    },
+    {
+        table: 'product_images', column: 'id',
+        parentTable: 'products', parentColumn: 'id', uniqueUnderParentCollation: true,
+    },
+    {
+        table: 'customer_account_entries', column: 'orderId',
+        parentTable: 'orders', parentColumn: 'id',
+    },
+    {
+        table: 'customer_account_entries', column: 'receiptKey',
+        parentTable: 'orders', parentColumn: 'receiptKey',
+    },
+    {
+        table: 'customer_account_entries', column: 'employeeId',
+        parentTable: 'employees', parentColumn: 'id',
+    },
+    {
+        table: 'customer_account_entries', column: 'tillNumber',
+        parentTable: 'registers', parentColumn: 'id',
+    },
+    {
+        table: 'customer_account_entries', column: 'shiftId',
+        parentTable: 'shifts', parentColumn: 'id',
+    },
+    {
+        table: 'customer_account_entries', column: 'reversesEntryId',
+        parentTable: 'customer_account_entries', parentColumn: 'id',
+    },
+];
+
+// Coordination values are opaque capabilities/tokens. They intentionally use
+// binary comparison semantics and are isolated from business identifiers.
+const MYSQL_BINARY_COORDINATION_COLUMNS: MysqlIdentifierColumn[] = [
+    { table: 'pos_restore_gate', column: 'ownerTillId', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''` },
+    { table: 'pos_account_write_authority', column: 'authorityToken', definition: `${binaryIdentifier('VARCHAR(64)')} NOT NULL` },
+    { table: 'till_presence', column: 'tillId', definition: `${binaryIdentifier('VARCHAR(64)')} NOT NULL` },
+    { table: 'till_presence', column: 'closeBarrierToken', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''` },
+    { table: 'pos_close_barrier', column: 'token', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''` },
+    { table: 'pos_close_barrier', column: 'ownerTillId', definition: `${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT ''` },
+    { table: 'payment_terminal_locks', column: 'terminalKey', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL` },
+    { table: 'payment_terminal_locks', column: 'tillId', definition: `${binaryIdentifier('VARCHAR(64)')} NOT NULL` },
+    { table: 'payment_terminal_locks', column: 'paymentReference', definition: `${binaryIdentifier('VARCHAR(255)')} NOT NULL` },
+    { table: 'payment_terminal_attempts', column: 'id', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL` },
+    { table: 'payment_terminal_attempts', column: 'terminalKey', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL` },
+    { table: 'payment_terminal_attempts', column: 'clientTransactionId', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''` },
+    { table: 'payment_terminal_attempts', column: 'terminalSessionId', definition: `${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''` },
+    { table: 'payment_terminal_attempts', column: 'tillId', definition: `${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT ''` },
+    {
+        table: 'payment_terminal_attempts',
+        column: 'activeTerminalKey',
+        definition: `${binaryIdentifier('VARCHAR(191)')} AS (
+            CASE WHEN status IN ('prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending')
+                 THEN terminalKey ELSE NULL END
+        ) PERSISTENT`,
+    },
+];
+
+function unicodeCustomerIdentifier(expression: string): string {
+    return `CONVERT(${expression} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+}
 
 function mysqlSchemaIdentifier(value: string): string {
     if (!/^[A-Za-z0-9_]+$/.test(value)) {
         throw new Error(`Unsafe MariaDB schema identifier: ${value}`);
     }
     return `\`${value}\``;
+}
+
+// Rust's fail-closed close/restore bootstrap creates its coordination tables
+// with a binary table default. Include every character column which can inherit
+// that default, plus the explicitly normalized capability columns, so generic
+// readers are safe regardless of which runtime created the table first.
+const MYSQL_BINARY_APPLICATION_READ_COLUMNS = [
+    ...MYSQL_BINARY_COORDINATION_COLUMNS.map(({ table, column }) => [table, column] as const),
+    ['pos_restore_gate', 'claimedAt'],
+    ['till_presence', 'tillName'],
+    ['till_presence', 'closeBarrierPhase'],
+    ['pos_close_barrier', 'state'],
+    ['payment_terminal_locks', 'tillName'],
+    ['payment_terminal_attempts', 'provider'],
+    ['payment_terminal_attempts', 'operationKind'],
+    ['payment_terminal_attempts', 'currency'],
+    ['payment_terminal_attempts', 'status'],
+    ['payment_terminal_attempts', 'saleBundle'],
+    ['payment_terminal_attempts', 'providerReference'],
+    ['payment_terminal_attempts', 'error'],
+    ['payment_terminal_attempts', 'createdAt'],
+    ['payment_terminal_attempts', 'updatedAt'],
+].reduce(
+    (columnsByTable, [table, column]) => {
+        const columns = columnsByTable.get(table) || new Set<string>();
+        columns.add(column);
+        columnsByTable.set(table, columns);
+        return columnsByTable;
+    },
+    new Map<string, Set<string>>(),
+);
+
+/**
+ * Build a projection that keeps binary comparison semantics in MariaDB while
+ * returning opaque identifiers as JavaScript strings. SQLx exposes
+ * utf8mb4_bin VARCHAR columns as VARBINARY, which the Tauri SQL bridge can
+ * otherwise serialize as byte arrays.
+ */
+export function mysqlApplicationReadProjection(
+    table: string,
+    columns: readonly string[],
+): string {
+    const binaryColumns = MYSQL_BINARY_APPLICATION_READ_COLUMNS.get(table);
+    return columns.map((column) => {
+        const identifier = mysqlSchemaIdentifier(column);
+        return binaryColumns?.has(column)
+            ? `CAST(${identifier} AS CHAR CHARACTER SET utf8mb4) AS ${identifier}`
+            : identifier;
+    }).join(', ');
 }
 
 async function mysqlTableIndexes(d: Database, table: string): Promise<any[]> {
@@ -195,7 +357,399 @@ async function ensureSingleColumnUniqueIndex(
     }
 }
 
-async function hardenCustomerAccountTables(d: Database): Promise<void> {
+const MYSQL_COORDINATION_COLUMNS: Array<[string, string]> = [
+    ['pos_restore_gate', 'id'],
+    ['pos_restore_gate', 'ownerTillId'],
+    ['pos_restore_gate', 'isActive'],
+    ['pos_restore_gate', 'claimedAt'],
+    ['pos_account_write_authority', 'connectionId'],
+    ['pos_account_write_authority', 'authorityToken'],
+    ['pos_account_write_authority', 'expiresAt'],
+    ['pos_customer_write_locks', 'customerId'],
+    ['till_presence', 'tillId'],
+    ['till_presence', 'closeBarrierToken'],
+    ['pos_close_barrier', 'id'],
+    ['pos_close_barrier', 'token'],
+    ['pos_close_barrier', 'ownerTillId'],
+];
+
+/**
+ * A close barrier introduced on an existing database has no epoch of its own,
+ * but the canonical whole-system report marker is already durable history.
+ * Seed only that uninitialized barrier: an established value must never be
+ * rewound or advanced by startup repair.
+ */
+export async function seedMysqlCloseBarrierFromLatestReportMarker(d: Database): Promise<void> {
+    const markerTables: any[] = await d.select(`
+        SELECT TABLE_NAME AS tableName
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'till_report_markers'
+        LIMIT 1
+    `);
+    if (markerTables.length === 0) return;
+
+    await d.execute(`
+        UPDATE pos_close_barrier
+        SET lastClosedAt = (
+            SELECT MAX(STR_TO_DATE(
+                REPLACE(REPLACE(markerTime, 'T', ' '), 'Z', ''),
+                '%Y-%m-%d %H:%i:%s.%f'
+            ))
+            FROM till_report_markers
+            WHERE tillNumber = '' AND type = 'period'
+        )
+        WHERE id = 1 AND lastClosedAt IS NULL
+    `);
+}
+
+/**
+ * Install the shared safety primitives before any account repair runs. A
+ * failed legacy-account migration must never leave restore bypass enforcement
+ * unavailable on the server.
+ */
+export async function ensureMysqlCoordinationTables(d: Database): Promise<void> {
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS till_presence (
+            tillId ${binaryIdentifier('VARCHAR(64)')} PRIMARY KEY,
+            tillName VARCHAR(255) NOT NULL,
+            closeProtocolVersion INT NOT NULL DEFAULT 0,
+            closeBarrierToken ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            closeBarrierPhase VARCHAR(16) NOT NULL DEFAULT '',
+            outboxCount BIGINT NOT NULL DEFAULT 0,
+            localTerminalAttemptCount BIGINT NOT NULL DEFAULT 0,
+            syncConflictCount BIGINT NOT NULL DEFAULT 0,
+            barrierObservedAt DATETIME(3) NULL,
+            lastSeenAt DATETIME(3) NOT NULL,
+            INDEX idx_till_presence_last_seen (lastSeenAt)
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_close_barrier (
+            id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+            token ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            state VARCHAR(16) NOT NULL DEFAULT 'idle',
+            ownerTillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT '',
+            requestedAt DATETIME(3) NULL,
+            expiresAt DATETIME(3) NULL,
+            cutoffAt DATETIME(3) NULL,
+            lastClosedAt DATETIME(3) NULL
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_restore_gate (
+            id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+            ownerTillId ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            isActive TINYINT NOT NULL DEFAULT 0,
+            claimedAt VARCHAR(40) NOT NULL DEFAULT ''
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_account_write_authority (
+            connectionId BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+            authorityToken ${binaryIdentifier('VARCHAR(64)')} NOT NULL,
+            expiresAt DATETIME(3) NOT NULL
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_customer_write_locks (
+            customerId ${freshCustomerIdentifier('VARCHAR(64)')} NOT NULL PRIMARY KEY
+        ) ENGINE=InnoDB
+    `);
+
+    // CREATE TABLE IF NOT EXISTS does not repair an interrupted partial table.
+    // ADD COLUMN is idempotent and preserves every existing coordination row.
+    for (const sql of [
+        `ALTER TABLE pos_restore_gate ADD COLUMN IF NOT EXISTS ownerTillId ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''`,
+        `ALTER TABLE pos_restore_gate ADD COLUMN IF NOT EXISTS isActive TINYINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE pos_restore_gate ADD COLUMN IF NOT EXISTS claimedAt VARCHAR(40) NOT NULL DEFAULT ''`,
+        `ALTER TABLE pos_account_write_authority ADD COLUMN IF NOT EXISTS authorityToken ${binaryIdentifier('VARCHAR(64)')} NULL`,
+        `ALTER TABLE pos_account_write_authority ADD COLUMN IF NOT EXISTS expiresAt DATETIME(3) NULL`,
+    ]) {
+        await d.execute(sql);
+    }
+
+    await d.execute(`
+        INSERT IGNORE INTO pos_restore_gate (id, ownerTillId, isActive, claimedAt)
+        VALUES (1, '', 0, '')
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO pos_close_barrier
+            (id, token, state, ownerTillId, requestedAt, expiresAt, cutoffAt)
+        VALUES (1, '', 'idle', '', NULL, NULL, NULL)
+    `);
+    await seedMysqlCloseBarrierFromLatestReportMarker(d);
+
+    const rows: any[] = await d.select(`
+        SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN (
+              'pos_restore_gate', 'pos_account_write_authority',
+              'pos_customer_write_locks', 'till_presence', 'pos_close_barrier'
+          )
+    `);
+    const installed = new Set(rows.map((row) =>
+        `${String(row.tableName ?? row.TABLE_NAME ?? '')}.${String(row.columnName ?? row.COLUMN_NAME ?? '')}`
+    ));
+    const missing = MYSQL_COORDINATION_COLUMNS
+        .map(([table, column]) => `${table}.${column}`)
+        .filter((key) => !installed.has(key));
+    if (missing.length > 0) {
+        throw new Error(
+            `MARIADB_SCHEMA_MIGRATION_FAILED: required coordination columns are missing: ${missing.join(', ')}`,
+        );
+    }
+    const singletonRows: any[] = await d.select(`
+        SELECT 'pos_restore_gate' AS tableName FROM pos_restore_gate WHERE id = 1
+        UNION ALL
+        SELECT 'pos_close_barrier' AS tableName FROM pos_close_barrier WHERE id = 1
+    `);
+    const singletons = new Set(singletonRows.map((row) =>
+        String(row.tableName ?? row.TABLE_NAME ?? '')
+    ));
+    if (!singletons.has('pos_restore_gate') || !singletons.has('pos_close_barrier')) {
+        throw new Error(
+            'MARIADB_SCHEMA_MIGRATION_FAILED: required coordination singleton rows are missing',
+        );
+    }
+}
+
+function mysqlCollatedIdentifierDefinition(
+    definition: string,
+    charset: string,
+    collation: string,
+): string {
+    if (!/^[A-Za-z0-9_]+$/.test(charset) || !/^[A-Za-z0-9_]+$/.test(collation)) {
+        throw new Error('unsafe identifier character set or collation returned by MariaDB');
+    }
+    const match = /^(VARCHAR\(\d+\))(.*)$/i.exec(definition);
+    if (!match) throw new Error(`invalid identifier column definition: ${definition}`);
+    return `${match[1]} CHARACTER SET ${charset} COLLATE ${collation}${match[2]}`;
+}
+
+function mysqlInstalledRelationalIdentifierDefinition(
+    row: any,
+    key: string,
+    charset: string,
+    collation: string,
+): string {
+    if (!/^[A-Za-z0-9_]+$/.test(charset) || !/^[A-Za-z0-9_]+$/.test(collation)) {
+        throw new Error('unsafe identifier character set or collation returned by MariaDB');
+    }
+    const columnType = String(row.columnType ?? row.COLUMN_TYPE ?? '').toLowerCase();
+    if (!/^varchar\([1-9][0-9]*\)$/.test(columnType)) {
+        throw new Error(`${key} has unsupported installed type ${columnType || '(missing)'}`);
+    }
+    const nullable = String(row.isNullable ?? row.IS_NULLABLE ?? '').toUpperCase();
+    if (nullable !== 'YES' && nullable !== 'NO') {
+        throw new Error(`${key} does not expose valid nullability metadata`);
+    }
+    const extra = String(row.extra ?? row.EXTRA ?? '').trim();
+    if (extra) {
+        throw new Error(`${key} has unsupported installed column attributes: ${extra}`);
+    }
+    const rawDefault = row.columnDefault ?? row.COLUMN_DEFAULT;
+    let defaultClause = '';
+    if (rawDefault !== null && rawDefault !== undefined) {
+        const defaultValue = String(rawDefault);
+        if (defaultValue.toUpperCase() === 'NULL') {
+            if (nullable !== 'YES') {
+                throw new Error(`${key} has an invalid NULL default on a NOT NULL column`);
+            }
+            defaultClause = ' DEFAULT NULL';
+        } else if (defaultValue === '' || defaultValue === "''") {
+            defaultClause = " DEFAULT ''";
+        } else {
+            throw new Error(`${key} has an unsupported installed default`);
+        }
+    }
+    return `${columnType.toUpperCase()} CHARACTER SET ${charset} COLLATE ${collation} ${nullable === 'YES' ? 'NULL' : 'NOT NULL'}${defaultClause}`;
+}
+
+/**
+ * Once account ownership has been validated and nullability repaired, align
+ * each relational identifier with its installed parent without rewriting any
+ * parent key. The marker is audit history only: drift is checked on every
+ * startup so a restored/partially migrated schema repairs itself. DDL
+ * auto-commits, so all collision checks run before the first statement and
+ * each statement remains idempotent.
+ */
+export async function normalizeMysqlIdentifierCollations(d: Database): Promise<void> {
+    try {
+        const loadColumns = async (): Promise<Map<string, any>> => {
+            const rows: any[] = await d.select(`
+                SELECT TABLE_NAME AS tableName, COLUMN_NAME AS columnName,
+                       COLUMN_TYPE AS columnType, IS_NULLABLE AS isNullable,
+                       COLUMN_DEFAULT AS columnDefault, EXTRA AS extra,
+                       CHARACTER_SET_NAME AS characterSetName,
+                       COLLATION_NAME AS collationName
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+            `);
+            return new Map(rows.map((row) => [
+                `${String(row.tableName ?? row.TABLE_NAME ?? '')}.${String(row.columnName ?? row.COLUMN_NAME ?? '')}`,
+                row,
+            ]));
+        };
+
+        let columns = await loadColumns();
+        const relationPlan = MYSQL_RELATIONAL_IDENTIFIER_COLUMNS.map((spec) => {
+            const childKey = `${spec.table}.${spec.column}`;
+            const parentKey = `${spec.parentTable}.${spec.parentColumn}`;
+            const child = columns.get(childKey);
+            const parent = columns.get(parentKey);
+            if (!child) throw new Error(`required identifier column is missing: ${childKey}`);
+            if (!parent) throw new Error(`required parent identifier column is missing: ${parentKey}`);
+            const charset = String(
+                parent.characterSetName ?? parent.CHARACTER_SET_NAME ?? '',
+            ).toLowerCase();
+            const collation = String(
+                parent.collationName ?? parent.COLLATION_NAME ?? '',
+            ).toLowerCase();
+            if (charset !== MYSQL_IDENTIFIER_CHARSET || !collation) {
+                throw new Error(
+                    `${parentKey} must expose a supported ${MYSQL_IDENTIFIER_CHARSET} collation`,
+                );
+            }
+            const childCharset = String(
+                child.characterSetName ?? child.CHARACTER_SET_NAME ?? '',
+            ).toLowerCase();
+            const childCollation = String(
+                child.collationName ?? child.COLLATION_NAME ?? '',
+            ).toLowerCase();
+            return {
+                spec,
+                charset,
+                collation,
+                definition: mysqlInstalledRelationalIdentifierDefinition(
+                    child,
+                    childKey,
+                    charset,
+                    collation,
+                ),
+                needsChange: childCharset !== charset || childCollation !== collation,
+            };
+        });
+
+        // A PK/unique child can contain values that are distinct under its old
+        // collation but equal under the parent's. Detect that before any DDL.
+        for (const { spec, charset, collation, needsChange } of relationPlan) {
+            if (!needsChange || !spec.uniqueUnderParentCollation) continue;
+            const collisions: any[] = await d.select(`
+                SELECT 1 AS duplicateTargetIdentifier
+                FROM ${mysqlSchemaIdentifier(spec.table)}
+                WHERE ${mysqlSchemaIdentifier(spec.column)} IS NOT NULL
+                GROUP BY CONVERT(${mysqlSchemaIdentifier(spec.column)} USING ${charset}) COLLATE ${collation}
+                HAVING COUNT(*) > 1
+                LIMIT 1
+            `);
+            if (collisions.length > 0) {
+                throw new Error(
+                    `${spec.table}.${spec.column} contains identifiers that collide under ${spec.parentTable}.${spec.parentColumn} (${collation})`,
+                );
+            }
+        }
+
+        for (const { spec, definition, needsChange } of relationPlan) {
+            if (!needsChange) continue;
+            await d.execute(
+                `ALTER TABLE ${mysqlSchemaIdentifier(spec.table)} MODIFY COLUMN ${mysqlSchemaIdentifier(spec.column)} ${definition}`,
+            );
+        }
+        for (const spec of MYSQL_BINARY_COORDINATION_COLUMNS) {
+            const key = `${spec.table}.${spec.column}`;
+            const row = columns.get(key);
+            if (!row) throw new Error(`required identifier column is missing: ${key}`);
+            const charset = String(row.characterSetName ?? row.CHARACTER_SET_NAME ?? '').toLowerCase();
+            const collation = String(row.collationName ?? row.COLLATION_NAME ?? '').toLowerCase();
+            if (charset === MYSQL_IDENTIFIER_CHARSET && collation === MYSQL_IDENTIFIER_COLLATION) continue;
+            await d.execute(
+                `ALTER TABLE ${mysqlSchemaIdentifier(spec.table)} MODIFY COLUMN ${mysqlSchemaIdentifier(spec.column)} ${spec.definition}`,
+            );
+        }
+
+        columns = await loadColumns();
+        const inconsistentRelations = MYSQL_RELATIONAL_IDENTIFIER_COLUMNS
+            .filter((spec) => {
+                const child = columns.get(`${spec.table}.${spec.column}`);
+                const parent = columns.get(`${spec.parentTable}.${spec.parentColumn}`);
+                return !child || !parent
+                    || String(child.characterSetName ?? child.CHARACTER_SET_NAME ?? '').toLowerCase()
+                        !== String(parent.characterSetName ?? parent.CHARACTER_SET_NAME ?? '').toLowerCase()
+                    || String(child.collationName ?? child.COLLATION_NAME ?? '').toLowerCase()
+                        !== String(parent.collationName ?? parent.COLLATION_NAME ?? '').toLowerCase();
+            })
+            .map((spec) => `${spec.table}.${spec.column}`);
+        const inconsistentCoordination = MYSQL_BINARY_COORDINATION_COLUMNS
+            .filter((spec) => {
+                const row = columns.get(`${spec.table}.${spec.column}`);
+                return !row
+                    || String(row.characterSetName ?? row.CHARACTER_SET_NAME ?? '').toLowerCase() !== MYSQL_IDENTIFIER_CHARSET
+                    || String(row.collationName ?? row.COLLATION_NAME ?? '').toLowerCase() !== MYSQL_IDENTIFIER_COLLATION;
+            })
+            .map((spec) => `${spec.table}.${spec.column}`);
+        const inconsistent = [...inconsistentRelations, ...inconsistentCoordination];
+        if (inconsistent.length > 0) {
+            throw new Error(`identifier collation verification failed for: ${inconsistent.join(', ')}`);
+        }
+
+        await d.execute(
+            `INSERT IGNORE INTO pos_schema_migrations (name, appliedAt)
+             VALUES (?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))`,
+            [MYSQL_IDENTIFIER_COLLATION_MIGRATION],
+        );
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`MARIADB_IDENTIFIER_COLLATION_MIGRATION_FAILED: ${detail}`);
+    }
+}
+
+type MysqlTriggerDefinition = { name: string; sql: string };
+
+function mysqlTriggerDefinitions(sqlStatements: string[]): MysqlTriggerDefinition[] {
+    return sqlStatements.map((sql) => {
+        const name = /CREATE\s+OR\s+REPLACE\s+TRIGGER\s+([A-Za-z0-9_]+)/i.exec(sql)?.[1];
+        if (!name) throw new Error('MARIADB_SCHEMA_MIGRATION_FAILED: invalid versioned trigger definition');
+        return { name, sql };
+    });
+}
+
+async function installVersionedMysqlTriggers(
+    d: Database,
+    migrationName: string,
+    triggers: MysqlTriggerDefinition[],
+): Promise<void> {
+    const applied: any[] = await d.select(
+        `SELECT name FROM pos_schema_migrations WHERE name = ? LIMIT 1`,
+        [migrationName],
+    );
+    if (applied.length > 0) {
+        const placeholders = triggers.map(() => '?').join(', ');
+        const rows: any[] = await d.select(
+            `SELECT TRIGGER_NAME AS triggerName
+             FROM INFORMATION_SCHEMA.TRIGGERS
+             WHERE TRIGGER_SCHEMA = DATABASE()
+               AND TRIGGER_NAME IN (${placeholders})`,
+            triggers.map((trigger) => trigger.name),
+        );
+        const installed = new Set(rows.map((row) =>
+            String(row.triggerName ?? row.TRIGGER_NAME ?? '')
+        ));
+        if (triggers.every((trigger) => installed.has(trigger.name))) return;
+    }
+
+    // MariaDB's OR REPLACE swaps an installed legacy body without the
+    // unguarded DROP/CREATE window that would permit an unsafe concurrent write.
+    for (const trigger of triggers) await d.execute(trigger.sql);
+    await d.execute(
+        `INSERT IGNORE INTO pos_schema_migrations (name, appliedAt)
+         VALUES (?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))`,
+        [migrationName],
+    );
+}
+
+export async function hardenCustomerAccountTables(d: Database): Promise<void> {
     const applied: any[] = await d.select(
         `SELECT name FROM pos_schema_migrations WHERE name = ? LIMIT 1`,
         [CUSTOMER_ACCOUNT_SCHEMA_MIGRATION],
@@ -216,7 +770,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
     `);
     if (ownerlessAccounts.length > 0) {
         throw new Error(
-            'MariaDB customer account migration stopped: a customer_accounts row has no id or customerId, so customer ownership cannot be inferred',
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a customer_accounts row has no id or customerId, so customer ownership cannot be inferred',
         );
     }
     const ownerlessEntries: any[] = await d.select(`
@@ -228,7 +782,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
     `);
     if (ownerlessEntries.length > 0) {
         throw new Error(
-            'MariaDB customer account migration stopped: a customer_account_entries row has no accountId or customerId, so customer ownership cannot be inferred',
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a customer_account_entries row has no accountId or customerId, so customer ownership cannot be inferred',
         );
     }
     const incompleteFinancialEntries: any[] = await d.select(`
@@ -246,7 +800,124 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
     `);
     if (incompleteFinancialEntries.length > 0) {
         throw new Error(
-            'MariaDB customer account migration stopped: a ledger entry is missing required financial or audit data, so it cannot be repaired safely',
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a ledger entry is missing required financial or audit data, so it cannot be repaired safely',
+        );
+    }
+    const entriesWithoutStableIds: any[] = await d.select(`
+        SELECT 1 AS missingLedgerEntryId
+        FROM customer_account_entries
+        WHERE id IS NULL OR TRIM(id) = ''
+        LIMIT 1
+    `);
+    if (entriesWithoutStableIds.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a ledger entry has no immutable id; generating one could hide duplicate financial history',
+        );
+    }
+    const duplicateProspectiveEntryIds: any[] = await d.select(`
+        SELECT 1 AS duplicateLedgerEntryId
+        FROM customer_account_entries
+        GROUP BY ${unicodeCustomerIdentifier('TRIM(id)')}
+        HAVING COUNT(*) > 1
+        LIMIT 1
+    `);
+    if (duplicateProspectiveEntryIds.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: duplicate ledger entry ids must be resolved before migration',
+        );
+    }
+    const prospectiveIdempotencyKey = `COALESCE(NULLIF(TRIM(idempotencyKey), ''), CONCAT('legacy:', TRIM(id)))`;
+    const duplicateProspectiveIdempotencyKeys: any[] = await d.select(`
+        SELECT 1 AS duplicateLedgerIdempotencyKey
+        FROM customer_account_entries
+        GROUP BY ${unicodeCustomerIdentifier(prospectiveIdempotencyKey)}
+        HAVING COUNT(*) > 1
+        LIMIT 1
+    `);
+    if (duplicateProspectiveIdempotencyKeys.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: duplicate prospective ledger idempotency keys must be resolved before migration',
+        );
+    }
+
+    const prospectiveAccountId = `COALESCE(NULLIF(TRIM(account.id), ''), NULLIF(TRIM(account.customerId), ''))`;
+    const prospectiveCustomerId = `COALESCE(NULLIF(TRIM(account.customerId), ''), NULLIF(TRIM(account.id), ''))`;
+
+    // Establish the complete one-to-one ownership mapping before performing a
+    // single repair write. MariaDB DDL auto-commits, so discovering duplicate
+    // accounts only at the later unique-index step could otherwise leave
+    // ledger ownership changed by an earlier UPDATE.
+    const invalidAccountOwnership: any[] = await d.select(`
+        SELECT 1 AS invalidAccountOwnership
+        FROM customer_accounts AS account
+        WHERE ${prospectiveAccountId} IS NULL
+           OR ${prospectiveCustomerId} IS NULL
+           OR (
+               SELECT COUNT(*) FROM customers AS customer
+               WHERE ${unicodeCustomerIdentifier('customer.id')} = ${unicodeCustomerIdentifier(prospectiveCustomerId)}
+           ) <> 1
+        LIMIT 1
+    `);
+    if (invalidAccountOwnership.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a customer account does not map to exactly one existing customer',
+        );
+    }
+    const duplicateProspectiveAccountIds: any[] = await d.select(`
+        SELECT 1 AS duplicateAccountId
+        FROM customer_accounts AS account
+        GROUP BY ${unicodeCustomerIdentifier(prospectiveAccountId)}
+        HAVING COUNT(*) > 1
+        LIMIT 1
+    `);
+    if (duplicateProspectiveAccountIds.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: duplicate customer account ids must be resolved before migration',
+        );
+    }
+    const duplicateProspectiveCustomerIds: any[] = await d.select(`
+        SELECT 1 AS duplicateCustomerId
+        FROM customer_accounts AS account
+        GROUP BY ${unicodeCustomerIdentifier(prospectiveCustomerId)}
+        HAVING COUNT(*) > 1
+        LIMIT 1
+    `);
+    if (duplicateProspectiveCustomerIds.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: more than one customer account maps to the same customer',
+        );
+    }
+    const ambiguousLedgerOwnership: any[] = await d.select(`
+        SELECT 1 AS ambiguousLedgerOwnership
+        FROM customer_account_entries AS ledger_entry
+        WHERE (
+            NULLIF(TRIM(ledger_entry.accountId), '') IS NOT NULL
+            AND NULLIF(TRIM(ledger_entry.customerId), '') IS NOT NULL
+            AND (
+                SELECT COUNT(*) FROM customer_accounts AS account
+                WHERE ${unicodeCustomerIdentifier(prospectiveAccountId)} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.accountId)')}
+                  AND ${unicodeCustomerIdentifier(prospectiveCustomerId)} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.customerId)')}
+            ) <> 1
+        ) OR (
+            NULLIF(TRIM(ledger_entry.accountId), '') IS NOT NULL
+            AND NULLIF(TRIM(ledger_entry.customerId), '') IS NULL
+            AND (
+                SELECT COUNT(*) FROM customer_accounts AS account
+                WHERE ${unicodeCustomerIdentifier(prospectiveAccountId)} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.accountId)')}
+            ) <> 1
+        ) OR (
+            NULLIF(TRIM(ledger_entry.accountId), '') IS NULL
+            AND NULLIF(TRIM(ledger_entry.customerId), '') IS NOT NULL
+            AND (
+                SELECT COUNT(*) FROM customer_accounts AS account
+                WHERE ${unicodeCustomerIdentifier(prospectiveCustomerId)} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.customerId)')}
+            ) <> 1
+        )
+        LIMIT 1
+    `);
+    if (ambiguousLedgerOwnership.length > 0) {
+        throw new Error(
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a ledger entry cannot be mapped to exactly one customer account without inventing ownership',
         );
     }
 
@@ -260,7 +931,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
           AND customerId IS NOT NULL AND TRIM(customerId) <> ''
           AND (
               SELECT COUNT(*) FROM customers AS customer
-              WHERE customer.id = TRIM(customer_accounts.customerId)
+              WHERE ${unicodeCustomerIdentifier('customer.id')} = ${unicodeCustomerIdentifier('TRIM(customer_accounts.customerId)')}
           ) = 1
     `);
     await d.execute(`
@@ -270,7 +941,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
           AND id IS NOT NULL AND TRIM(id) <> ''
           AND (
               SELECT COUNT(*) FROM customers AS customer
-              WHERE customer.id = TRIM(customer_accounts.id)
+              WHERE ${unicodeCustomerIdentifier('customer.id')} = ${unicodeCustomerIdentifier('TRIM(customer_accounts.id)')}
           ) = 1
     `);
     const unmappedAccounts: any[] = await d.select(`
@@ -280,13 +951,13 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
            OR account.customerId IS NULL OR TRIM(account.customerId) = ''
            OR (
                SELECT COUNT(*) FROM customers AS customer
-               WHERE customer.id = TRIM(account.customerId)
+               WHERE ${unicodeCustomerIdentifier('customer.id')} = ${unicodeCustomerIdentifier('TRIM(account.customerId)')}
            ) <> 1
         LIMIT 1
     `);
     if (unmappedAccounts.length > 0) {
         throw new Error(
-            'MariaDB customer account migration stopped: a customer account does not map to exactly one customer, so financial ownership cannot be inferred',
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a customer account does not map to exactly one customer, so financial ownership cannot be inferred',
         );
     }
     await d.execute(`
@@ -303,12 +974,8 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
     `);
 
     await d.execute(`
-        UPDATE customer_account_entries SET id = UUID()
-        WHERE id IS NULL OR TRIM(id) = ''
-    `);
-    await d.execute(`
         UPDATE customer_account_entries
-        JOIN customer_accounts ON customer_accounts.id = TRIM(customer_account_entries.accountId)
+        JOIN customer_accounts ON ${unicodeCustomerIdentifier('customer_accounts.id')} = ${unicodeCustomerIdentifier('TRIM(customer_account_entries.accountId)')}
         SET customer_account_entries.customerId = customer_accounts.customerId
         WHERE (customer_account_entries.customerId IS NULL OR TRIM(customer_account_entries.customerId) = '')
           AND customer_account_entries.accountId IS NOT NULL
@@ -316,7 +983,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
     `);
     await d.execute(`
         UPDATE customer_account_entries
-        JOIN customer_accounts ON customer_accounts.customerId = TRIM(customer_account_entries.customerId)
+        JOIN customer_accounts ON ${unicodeCustomerIdentifier('customer_accounts.customerId')} = ${unicodeCustomerIdentifier('TRIM(customer_account_entries.customerId)')}
         SET customer_account_entries.accountId = customer_accounts.id
         WHERE (customer_account_entries.accountId IS NULL OR TRIM(customer_account_entries.accountId) = '')
           AND customer_account_entries.customerId IS NOT NULL
@@ -328,14 +995,14 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
         WHERE (
             SELECT COUNT(*)
             FROM customer_accounts AS account
-            WHERE account.id = TRIM(ledger_entry.accountId)
-              AND account.customerId = TRIM(ledger_entry.customerId)
+            WHERE ${unicodeCustomerIdentifier('account.id')} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.accountId)')}
+              AND ${unicodeCustomerIdentifier('account.customerId')} = ${unicodeCustomerIdentifier('TRIM(ledger_entry.customerId)')}
         ) <> 1
         LIMIT 1
     `);
     if (inconsistentlyMappedEntries.length > 0) {
         throw new Error(
-            'MariaDB customer account migration stopped: a ledger entry does not map consistently to exactly one customer account',
+            'MARIADB_ACCOUNT_MIGRATION_BLOCKED: a ledger entry does not map consistently to exactly one customer account',
         );
     }
     const missingBalances: any[] = await d.select(`
@@ -345,22 +1012,34 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
         LIMIT 1
     `);
     if (missingBalances.length > 0) {
-        const ledgerRows: any[] = await d.select(`
-            SELECT 1 AS ledgerRow FROM customer_account_entries LIMIT 1
+        const accountsWithoutLedger: any[] = await d.select(`
+            SELECT 1 AS missingLedger
+            FROM customer_accounts AS account
+            WHERE account.balancePence IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM customer_account_entries AS ledger_entry
+                  WHERE ${unicodeCustomerIdentifier('TRIM(ledger_entry.accountId)')} = ${unicodeCustomerIdentifier('account.id')}
+                    AND ${unicodeCustomerIdentifier('TRIM(ledger_entry.customerId)')} = ${unicodeCustomerIdentifier('account.customerId')}
+              )
+            LIMIT 1
         `);
-        if (ledgerRows.length === 0) {
+        if (accountsWithoutLedger.length > 0) {
             throw new Error(
-                'MariaDB customer account migration stopped: balancePence is missing for a populated account and there is no ledger from which to reconstruct it',
+                'MARIADB_ACCOUNT_MIGRATION_BLOCKED: an account balance is missing and that account has no matching ledger from which to reconstruct it',
             );
         }
         await d.execute(`
             UPDATE customer_accounts AS account
             LEFT JOIN (
-                SELECT customerId, SUM(amountPence) AS reconstructedBalance
+                SELECT TRIM(accountId) AS accountId,
+                       TRIM(customerId) AS customerId,
+                       SUM(amountPence) AS reconstructedBalance
                 FROM customer_account_entries
-                GROUP BY customerId
-            ) AS ledger ON ledger.customerId = account.customerId
-            SET account.balancePence = COALESCE(ledger.reconstructedBalance, 0)
+                GROUP BY TRIM(accountId), TRIM(customerId)
+            ) AS ledger ON ${unicodeCustomerIdentifier('ledger.accountId')} = ${unicodeCustomerIdentifier('account.id')}
+                       AND ${unicodeCustomerIdentifier('ledger.customerId')} = ${unicodeCustomerIdentifier('account.customerId')}
+            SET account.balancePence = ledger.reconstructedBalance
             WHERE account.balancePence IS NULL
         `);
     }
@@ -376,7 +1055,7 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
             employeeId = COALESCE(employeeId, ''),
             tillNumber = COALESCE(tillNumber, ''),
             shiftId = COALESCE(shiftId, ''),
-            idempotencyKey = COALESCE(NULLIF(TRIM(idempotencyKey), ''), CONCAT('legacy:', id)),
+            idempotencyKey = COALESCE(NULLIF(TRIM(idempotencyKey), ''), CONCAT('legacy:', TRIM(id))),
             reversesEntryId = COALESCE(reversesEntryId, ''),
             updatedAt = COALESCE(NULLIF(updatedAt, ''), NULLIF(createdAt, ''), ${stamp})
         WHERE id <> TRIM(id) OR accountId <> TRIM(accountId) OR customerId <> TRIM(customerId)
@@ -447,6 +1126,82 @@ async function hardenCustomerAccountTables(d: Database): Promise<void> {
          VALUES (?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))`,
         [CUSTOMER_ACCOUNT_SCHEMA_MIGRATION],
     );
+}
+
+/**
+ * Keep MariaDB receivables authoritative even when an older till performs a
+ * broad table upsert. Configuration fields may still sync normally, but only
+ * a short-lived native transaction (or the exact active restore owner) may
+ * change balances, append ledger rows, or remove financial history.
+ */
+export async function ensureCustomerAccountLedgerGuards(d: Database): Promise<void> {
+    await ensureMysqlCoordinationTables(d);
+
+    const authority = `(
+        EXISTS (
+            SELECT 1 FROM pos_account_write_authority AS authority
+             WHERE authority.connectionId = CONNECTION_ID()
+               AND BINARY authority.authorityToken = BINARY COALESCE(@lbj_pos_account_authority, '')
+               AND authority.authorityToken <> ''
+               AND authority.expiresAt > UTC_TIMESTAMP(3)
+        )
+        OR EXISTS (
+            SELECT 1 FROM pos_restore_gate
+             WHERE id = 1 AND isActive = 1
+               AND ownerTillId <> ''
+               AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+        )
+    )`;
+    await installVersionedMysqlTriggers(d, MYSQL_ACCOUNT_GUARD_MIGRATION, [
+        { name: 'pos_guard_account_balance_insert', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_balance_insert
+         BEFORE INSERT ON customer_accounts FOR EACH ROW
+         BEGIN
+           IF COALESCE(NEW.balancePence, 0) <> 0 AND NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: nonzero account balance insert blocked';
+           END IF;
+         END` },
+        { name: 'pos_guard_account_balance_update', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_balance_update
+         BEFORE UPDATE ON customer_accounts FOR EACH ROW
+         BEGIN
+           IF NOT (NEW.balancePence <=> OLD.balancePence) AND NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: account balance update blocked';
+           END IF;
+         END` },
+        { name: 'pos_guard_account_delete', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_delete
+         BEFORE DELETE ON customer_accounts FOR EACH ROW
+         BEGIN
+           IF NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: account deletion blocked';
+           END IF;
+         END` },
+        { name: 'pos_guard_account_entry_insert', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_entry_insert
+         BEFORE INSERT ON customer_account_entries FOR EACH ROW
+         BEGIN
+           IF NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: account ledger insert blocked';
+           END IF;
+         END` },
+        { name: 'pos_guard_account_entry_update', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_entry_update
+         BEFORE UPDATE ON customer_account_entries FOR EACH ROW
+         BEGIN
+           IF NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: account ledger update blocked';
+           END IF;
+         END` },
+        { name: 'pos_guard_account_entry_delete', sql: `CREATE OR REPLACE TRIGGER pos_guard_account_entry_delete
+         BEFORE DELETE ON customer_account_entries FOR EACH ROW
+         BEGIN
+           IF NOT ${authority} THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'ACCOUNT_LEDGER_AUTHORITY_REQUIRED: account ledger deletion blocked';
+           END IF;
+         END` },
+    ]);
 }
 
 async function backfillLegacyPaymentAllocations(d: Database): Promise<void> {
@@ -600,7 +1355,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // 6. Customers
     await d.execute(`
         CREATE TABLE IF NOT EXISTS customers (
-            id VARCHAR(36) PRIMARY KEY,
+            id ${freshCustomerIdentifier('VARCHAR(36)')} PRIMARY KEY,
             name TEXT NOT NULL,
             phone TEXT,
             email TEXT,
@@ -617,8 +1372,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // cannot erase a customer's outstanding balance or audit trail.
     await d.execute(`
         CREATE TABLE IF NOT EXISTS customer_accounts (
-            id VARCHAR(36) PRIMARY KEY,
-            customerId VARCHAR(36) NOT NULL UNIQUE,
+            id ${freshCustomerIdentifier('VARCHAR(36)')} PRIMARY KEY,
+            customerId ${freshCustomerIdentifier('VARCHAR(36)')} NOT NULL UNIQUE,
             isEnabled INT NOT NULL DEFAULT 0,
             creditLimitPence BIGINT NOT NULL DEFAULT 0,
             balancePence BIGINT NOT NULL DEFAULT 0,
@@ -629,8 +1384,8 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     await d.execute(`
         CREATE TABLE IF NOT EXISTS customer_account_entries (
             id VARCHAR(36) PRIMARY KEY,
-            accountId VARCHAR(36) NOT NULL,
-            customerId VARCHAR(36) NOT NULL,
+            accountId ${freshCustomerIdentifier('VARCHAR(36)')} NOT NULL,
+            customerId ${freshCustomerIdentifier('VARCHAR(36)')} NOT NULL,
             orderId VARCHAR(36) NOT NULL DEFAULT '',
             entryType VARCHAR(32) NOT NULL,
             amountPence BIGINT NOT NULL,
@@ -655,7 +1410,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         CREATE TABLE IF NOT EXISTS orders (
             id VARCHAR(36) PRIMARY KEY,
             shiftId VARCHAR(36),
-            customerId VARCHAR(36),
+            customerId ${freshCustomerIdentifier('VARCHAR(36)')},
             employeeId VARCHAR(36),
             orderNumber INT,
             receiptKey VARCHAR(100) UNIQUE,
@@ -837,7 +1592,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     await d.execute(`
         CREATE TABLE IF NOT EXISTS loyalty_logs (
             id VARCHAR(36) PRIMARY KEY,
-            customerId VARCHAR(36),
+            customerId ${freshCustomerIdentifier('VARCHAR(36)')},
             orderId VARCHAR(36),
             pointsChange INT,
             reason TEXT,
@@ -889,6 +1644,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             accountTotal BIGINT DEFAULT 0,
             accountRepaymentsCash BIGINT DEFAULT 0,
             accountRepaymentsCard BIGINT DEFAULT 0,
+            accountRepaymentsOther BIGINT DEFAULT 0,
             totalSales BIGINT DEFAULT 0,
             transactionCount INT DEFAULT 0,
             updatedAt TEXT,
@@ -989,7 +1745,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         CREATE TABLE IF NOT EXISTS tombstones (
             id VARCHAR(150) PRIMARY KEY,
             table_name VARCHAR(64) NOT NULL,
-            row_id VARCHAR(64) NOT NULL,
+            row_id ${freshCustomerIdentifier('VARCHAR(64)')} NOT NULL,
             deletedAt TEXT,
             updatedAt TEXT
         )
@@ -1012,24 +1768,83 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // Rows expire by lastSeenAt and only describe tills currently using MariaDB.
     await d.execute(`
         CREATE TABLE IF NOT EXISTS till_presence (
-            tillId VARCHAR(64) PRIMARY KEY,
+            tillId ${binaryIdentifier('VARCHAR(64)')} PRIMARY KEY,
             tillName VARCHAR(255) NOT NULL,
+            closeProtocolVersion INT NOT NULL DEFAULT 0,
+            closeBarrierToken ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            closeBarrierPhase VARCHAR(16) NOT NULL DEFAULT '',
+            outboxCount BIGINT NOT NULL DEFAULT 0,
+            localTerminalAttemptCount BIGINT NOT NULL DEFAULT 0,
+            syncConflictCount BIGINT NOT NULL DEFAULT 0,
+            barrierObservedAt DATETIME(3) NULL,
             lastSeenAt DATETIME(3) NOT NULL,
             INDEX idx_till_presence_last_seen (lastSeenAt)
         )
+    `);
+
+    // Singleton two-phase barrier for an atomic whole-system Z close. Native
+    // commands own state transitions; every current till publishes readiness
+    // through till_presence.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_close_barrier (
+            id TINYINT UNSIGNED PRIMARY KEY,
+            token ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            state VARCHAR(16) NOT NULL DEFAULT 'idle',
+            ownerTillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT '',
+            requestedAt DATETIME(3) NULL,
+            expiresAt DATETIME(3) NULL,
+            cutoffAt DATETIME(3) NULL,
+            lastClosedAt DATETIME(3) NULL
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        INSERT IGNORE INTO pos_close_barrier
+            (id, token, state, ownerTillId, requestedAt, expiresAt, cutoffAt)
+        VALUES (1, '', 'idle', '', NULL, NULL, NULL)
     `);
 
     // Operational lease for card readers shared by more than one till. This is
     // intentionally excluded from normal data sync and setup backups.
     await d.execute(`
         CREATE TABLE IF NOT EXISTS payment_terminal_locks (
-            terminalKey VARCHAR(191) PRIMARY KEY,
-            tillId VARCHAR(64) NOT NULL,
+            terminalKey ${binaryIdentifier('VARCHAR(191)')} PRIMARY KEY,
+            tillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL,
             tillName VARCHAR(255) NOT NULL,
-            paymentReference VARCHAR(255) NOT NULL,
+            paymentReference ${binaryIdentifier('VARCHAR(255)')} NOT NULL,
             acquiredAt DATETIME(3) NOT NULL,
             expiresAt DATETIME(3) NOT NULL,
             INDEX idx_payment_terminal_locks_expiry (expiresAt)
+        )
+    `);
+
+    // Shared operational journal for managed terminal work. This table is
+    // intentionally excluded from normal business-table sync and backups: all
+    // tills use these rows directly. The generated key makes an unresolved
+    // result a cross-till hard stop for that physical terminal.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS payment_terminal_attempts (
+            id ${binaryIdentifier('VARCHAR(191)')} PRIMARY KEY,
+            provider VARCHAR(16) NOT NULL,
+            terminalKey ${binaryIdentifier('VARCHAR(191)')} NOT NULL,
+            clientTransactionId ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            terminalSessionId ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT '',
+            operationKind VARCHAR(32) NOT NULL DEFAULT 'sale',
+            amount BIGINT NOT NULL,
+            expectedProviderAmount BIGINT NOT NULL DEFAULT 0,
+            currency VARCHAR(8) NOT NULL,
+            status VARCHAR(32) NOT NULL,
+            saleBundle LONGTEXT NOT NULL,
+            providerReference TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            tillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT '',
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL,
+            activeTerminalKey ${binaryIdentifier('VARCHAR(191)')} AS (
+                CASE WHEN status IN ('prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending')
+                     THEN terminalKey ELSE NULL END
+            ) PERSISTENT,
+            UNIQUE KEY uq_payment_terminal_active (activeTerminalKey),
+            INDEX idx_payment_terminal_attempt_status (status, updatedAt(64))
         )
     `);
 
@@ -1082,16 +1897,16 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         // Customer accounts. Add nullable text/key fields first so an
         // interrupted, populated table can be repaired before NOT NULL and
         // uniqueness are enforced by hardenCustomerAccountTables().
-        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS id VARCHAR(36) NULL`,
-        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS customerId VARCHAR(36) NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS id ${freshCustomerIdentifier('VARCHAR(36)')} NULL`,
+        `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS customerId ${freshCustomerIdentifier('VARCHAR(36)')} NULL`,
         `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS isEnabled INT NULL DEFAULT 0`,
         `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS creditLimitPence BIGINT NULL DEFAULT 0`,
         `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS balancePence BIGINT NULL`,
         `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS createdAt TEXT NULL`,
         `ALTER TABLE customer_accounts ADD COLUMN IF NOT EXISTS updatedAt TEXT NULL`,
         `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS id VARCHAR(36) NULL`,
-        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS accountId VARCHAR(36) NULL`,
-        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS customerId VARCHAR(36) NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS accountId ${freshCustomerIdentifier('VARCHAR(36)')} NULL`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS customerId ${freshCustomerIdentifier('VARCHAR(36)')} NULL`,
         `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS orderId VARCHAR(36) NULL DEFAULT ''`,
         `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS entryType VARCHAR(32) NULL`,
         `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS amountPence BIGINT NULL`,
@@ -1211,7 +2026,29 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountTotal BIGINT DEFAULT 0`,
         `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountRepaymentsCash BIGINT DEFAULT 0`,
         `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountRepaymentsCard BIGINT DEFAULT 0`,
-        `ALTER TABLE daily_sales_summary MODIFY COLUMN totalSales BIGINT DEFAULT 0`
+        `ALTER TABLE daily_sales_summary ADD COLUMN IF NOT EXISTS accountRepaymentsOther BIGINT DEFAULT 0`,
+        `ALTER TABLE daily_sales_summary MODIFY COLUMN totalSales BIGINT DEFAULT 0`,
+
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS closeProtocolVersion INT NOT NULL DEFAULT 0`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS closeBarrierToken ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS closeBarrierPhase VARCHAR(16) NOT NULL DEFAULT ''`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS outboxCount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS localTerminalAttemptCount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS syncConflictCount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE till_presence ADD COLUMN IF NOT EXISTS barrierObservedAt DATETIME(3) NULL`,
+        `ALTER TABLE pos_close_barrier ADD COLUMN IF NOT EXISTS lastClosedAt DATETIME(3) NULL`,
+
+        // Repair an interrupted early terminal-journal schema before the
+        // uniqueness invariant below is enforced.
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS terminalSessionId ${binaryIdentifier('VARCHAR(191)')} NOT NULL DEFAULT ''`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS operationKind VARCHAR(32) NOT NULL DEFAULT 'sale'`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS expectedProviderAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS providerReference TEXT NOT NULL DEFAULT ''`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS tillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT ''`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS activeTerminalKey VARCHAR(191) AS (
+            CASE WHEN status IN ('prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending')
+                 THEN terminalKey ELSE NULL END
+         ) PERSISTENT`,
     ];
     const migrationFailures: string[] = [];
     for (const sql of migrations) {
@@ -1222,12 +2059,24 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         }
     }
     if (migrationFailures.length > 0) {
-        throw new Error(`MariaDB schema migration failed:\n${migrationFailures.join('\n')}`);
+        throw new Error(`MARIADB_SCHEMA_MIGRATION_FAILED:\n${migrationFailures.join('\n')}`);
     }
     // Bust the entire column cache after migrations so new columns are seen
     for (const k of Object.keys(tableColumnsCache)) delete tableColumnsCache[k];
 
-    await hardenCustomerAccountTables(d);
+    await ensureMysqlCoordinationTables(d);
+    try {
+        await hardenCustomerAccountTables(d);
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (detail.startsWith('MARIADB_ACCOUNT_MIGRATION_BLOCKED:')) throw error;
+        throw new Error(`MARIADB_ACCOUNT_MIGRATION_BLOCKED: ${detail}`);
+    }
+    await normalizeMysqlIdentifierCollations(d);
+    await ensureCustomerAccountLedgerGuards(d);
+    // Failure here is intentionally fatal: two unresolved charges on one
+    // terminal require operator reconciliation before this shop can proceed.
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_terminal_active ON payment_terminal_attempts(activeTerminalKey)`);
 
     // HEAD stored loyalty as the residual after cash/card. Materialise only
     // non-zero legacy residuals on every startup so rows arriving later from
@@ -1235,6 +2084,20 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
     // customer-account methods remain unclassified rather than being silently
     // relabelled as loyalty or Pay Later.
     await backfillLegacyPaymentAllocations(d);
+
+    const accountOtherSummaryMigration: any[] = await d.select(
+        `SELECT name FROM pos_schema_migrations WHERE name = ? LIMIT 1`,
+        ['daily_account_repayments_other_v1'],
+    );
+    if (accountOtherSummaryMigration.length === 0) {
+        // Daily summaries are a cache. Rebuild them once from the canonical
+        // append-only ledger so historical Other payments are not hidden.
+        await mysqlAggregateDailySummary(undefined, d);
+        await d.execute(
+            `INSERT IGNORE INTO pos_schema_migrations (name, appliedAt) VALUES (?, ?)`,
+            ['daily_account_repayments_other_v1', new Date().toISOString()],
+        );
+    }
 
     // One-time-compatible migration from the legacy products.image column.
     // INSERT IGNORE protects a newer independently-synced image row.
@@ -1385,7 +2248,8 @@ async function ensureSyncChangeTriggers(d: Database): Promise<void> {
 const DELETE_SYNC_TABLES = [
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'customers', 'registers', 'suppliers', 'product_suppliers',
+    'employees', 'customers', 'customer_accounts', 'customer_account_entries',
+    'registers', 'suppliers', 'product_suppliers',
     'inventory_logs', 'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
     'till_report_markers', 'manager_approvals',
@@ -1401,9 +2265,346 @@ async function ensureDeleteTombstoneTriggers(d: Database): Promise<void> {
              AFTER DELETE ON ${table} FOR EACH ROW
              INSERT INTO tombstones (id, table_name, row_id, deletedAt, updatedAt)
              VALUES (CONCAT('${table}:', OLD.id), '${table}', OLD.id, ${stamp}, ${stamp})
-             ON DUPLICATE KEY UPDATE deletedAt = ${stamp}, updatedAt = ${stamp}`
+            ON DUPLICATE KEY UPDATE deletedAt = ${stamp}, updatedAt = ${stamp}`
         );
     }
+    await ensureCustomerAntiResurrectionTriggers(d);
+}
+
+/**
+ * Serialize customer identity writes across current and legacy clients. The
+ * lock row outlives a deleted customer, closing the race where a stale INSERT
+ * starts before the delete tombstone exists and finishes after it commits.
+ */
+export async function ensureCustomerAntiResurrectionTriggers(d: Database): Promise<void> {
+    await ensureMysqlCoordinationTables(d);
+    await installVersionedMysqlTriggers(d, MYSQL_CUSTOMER_GUARD_MIGRATION, mysqlTriggerDefinitions([
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_resurrection_insert
+         BEFORE INSERT ON customers FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.id)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.id')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.id')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: customer cannot be recreated';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_resurrection_update
+         BEFORE UPDATE ON customers FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NEW.id <> OLD.id THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'CUSTOMER_ID_IMMUTABLE: customer id cannot change';
+           END IF;
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.id)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.id')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.id')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: customer cannot be updated';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_resurrection_delete
+         BEFORE DELETE ON customers FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (OLD.id)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('OLD.id')} FOR UPDATE;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_account_resurrection_insert
+         BEFORE INSERT ON customer_accounts FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE (table_name = 'customers' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')})
+                   OR (table_name = 'customer_accounts' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.id')})
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: customer account cannot be recreated';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_account_resurrection_update
+         BEFORE UPDATE ON customer_accounts FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NEW.id <> OLD.id OR NEW.customerId <> OLD.customerId THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'CUSTOMER_ID_IMMUTABLE: account ownership cannot change';
+           END IF;
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE (table_name = 'customers' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')})
+                   OR (table_name = 'customer_accounts' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.id')})
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: customer account cannot be updated';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_account_resurrection_delete
+         BEFORE DELETE ON customer_accounts FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (OLD.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('OLD.customerId')} FOR UPDATE;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_order_insert
+         BEFORE INSERT ON orders FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: order customer is unavailable';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_order_update
+         BEFORE UPDATE ON orders FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF COALESCE(NEW.customerId, '') <> COALESCE(OLD.customerId, '') THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'CUSTOMER_ID_IMMUTABLE: order customer cannot change';
+           END IF;
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: order customer is unavailable';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_loyalty_log_insert
+         BEFORE INSERT ON loyalty_logs FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: loyalty customer is unavailable';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_loyalty_log_update
+         BEFORE UPDATE ON loyalty_logs FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NEW.id <> OLD.id OR NEW.customerId <> OLD.customerId THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'CUSTOMER_ID_IMMUTABLE: loyalty ownership cannot change';
+           END IF;
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE table_name = 'customers'
+                  AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: loyalty customer is unavailable';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_account_entry_insert
+         BEFORE INSERT ON customer_account_entries FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE (table_name = 'customers' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')})
+                   OR (table_name = 'customer_accounts' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.accountId')})
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customer_accounts
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.accountId')}
+                  AND ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: account entry owner is unavailable';
+             END IF;
+           END IF;
+         END`,
+        `CREATE OR REPLACE TRIGGER pos_guard_customer_account_entry_update
+         BEFORE UPDATE ON customer_account_entries FOR EACH ROW
+         BEGIN
+           DECLARE lockedCustomerId VARCHAR(64);
+           IF NEW.id <> OLD.id OR NEW.customerId <> OLD.customerId
+              OR NEW.accountId <> OLD.accountId THEN
+             SIGNAL SQLSTATE '45000'
+               SET MESSAGE_TEXT = 'CUSTOMER_ID_IMMUTABLE: account entry ownership cannot change';
+           END IF;
+           IF COALESCE(TRIM(NEW.customerId), '') <> '' AND NOT EXISTS (
+             SELECT 1 FROM pos_restore_gate
+              WHERE id = 1 AND isActive = 1
+                AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+           ) THEN
+             INSERT INTO pos_customer_write_locks (customerId) VALUES (NEW.customerId)
+               ON DUPLICATE KEY UPDATE customerId = VALUES(customerId);
+             SELECT customerId INTO lockedCustomerId
+               FROM pos_customer_write_locks
+              WHERE ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')} FOR UPDATE;
+             IF EXISTS (
+               SELECT 1 FROM tombstones
+                WHERE (table_name = 'customers' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.customerId')})
+                   OR (table_name = 'customer_accounts' AND ${unicodeCustomerIdentifier('row_id')} = ${unicodeCustomerIdentifier('NEW.accountId')})
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customers
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) OR NOT EXISTS (
+               SELECT 1 FROM customer_accounts
+                WHERE ${unicodeCustomerIdentifier('id')} = ${unicodeCustomerIdentifier('NEW.accountId')}
+                  AND ${unicodeCustomerIdentifier('customerId')} = ${unicodeCustomerIdentifier('NEW.customerId')}
+             ) THEN
+               SIGNAL SQLSTATE '45000'
+                 SET MESSAGE_TEXT = 'CUSTOMER_DELETED: account entry owner is unavailable';
+             END IF;
+           END IF;
+         END`,
+    ]));
 }
 
 async function cleanupDuplicatePromotionMemberships(d: Database): Promise<void> {
@@ -1793,6 +2994,24 @@ export interface MysqlConnectedTill {
     secondsAgo: number;
 }
 
+export interface MysqlWholeSystemCloseBarrier {
+    token: string;
+    state: 'idle' | 'preparing' | 'frozen';
+    ownerTillId: string;
+    requestedAt: string;
+    expiresAt: string;
+    cutoffAt: string;
+}
+
+export interface MysqlTillCloseReadiness {
+    protocolVersion: number;
+    barrierToken: string;
+    barrierPhase: '' | 'prepared' | 'frozen';
+    outboxCount: number;
+    localTerminalAttemptCount: number;
+    syncConflictCount: number;
+}
+
 export interface MysqlPaymentTerminalLock {
     terminalKey: string;
     tillId: string;
@@ -1805,6 +3024,229 @@ export interface MysqlPaymentTerminalLock {
 export interface MysqlPaymentTerminalLockResult {
     acquired: boolean;
     lock: MysqlPaymentTerminalLock | null;
+}
+
+export interface MysqlPaymentTerminalAttempt {
+    id: string;
+    provider: string;
+    terminalKey: string;
+    clientTransactionId: string;
+    terminalSessionId: string;
+    operationKind: string;
+    amount: number;
+    expectedProviderAmount: number;
+    currency: string;
+    status: string;
+    saleBundle: string;
+    providerReference: string;
+    error: string;
+    tillId: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export type MysqlPaymentTerminalAttemptUpdate = Partial<Pick<
+    MysqlPaymentTerminalAttempt,
+    | 'clientTransactionId'
+    | 'terminalSessionId'
+    | 'saleBundle'
+    | 'providerReference'
+    | 'error'
+>>;
+
+export interface MysqlPaymentTerminalAttemptTransition {
+    applied: boolean;
+    attempt: MysqlPaymentTerminalAttempt;
+}
+
+const OPERATIONAL_TERMINAL_ATTEMPT_SQL =
+    "'prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending'";
+
+const PAYMENT_TERMINAL_ATTEMPT_READ_COLUMNS = [
+    'id', 'provider', 'terminalKey', 'clientTransactionId', 'terminalSessionId',
+    'operationKind', 'amount', 'expectedProviderAmount', 'currency', 'status',
+    'saleBundle', 'providerReference', 'error', 'tillId', 'createdAt', 'updatedAt',
+] as const;
+
+// Keep shared recovery age/takeover decisions independent of every Windows
+// till's wall clock. The table is intentionally TEXT for upgrade compatibility.
+const MYSQL_SERVER_ISO_TIMESTAMP =
+    "DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')";
+
+/**
+ * Insert-only by design. A duplicate attempt ID or active terminal is a hard
+ * stop, so a caller can never overwrite unresolved financial work and charge
+ * the card again.
+ */
+export async function mysqlPreparePaymentTerminalAttempt(
+    attempt: MysqlPaymentTerminalAttempt,
+): Promise<MysqlPaymentTerminalAttempt> {
+    const d = await getDb();
+    try {
+        await d.execute(
+            `INSERT INTO payment_terminal_attempts
+                (id, provider, terminalKey, clientTransactionId, terminalSessionId,
+                 operationKind, amount, expectedProviderAmount, currency, status,
+                 saleBundle, providerReference, error, tillId, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     ${MYSQL_SERVER_ISO_TIMESTAMP}, ${MYSQL_SERVER_ISO_TIMESTAMP})`,
+            [
+                attempt.id,
+                attempt.provider,
+                attempt.terminalKey,
+                attempt.clientTransactionId,
+                attempt.terminalSessionId,
+                attempt.operationKind,
+                attempt.amount,
+                attempt.expectedProviderAmount,
+                attempt.currency,
+                attempt.status,
+                attempt.saleBundle,
+                attempt.providerReference,
+                attempt.error,
+                attempt.tillId,
+            ],
+        );
+    } catch (error) {
+        throw new Error(
+            `The shared terminal has unresolved work or its recovery journal could not be prepared: ${String(error)}`,
+        );
+    }
+    const prepared = await mysqlGetPaymentTerminalAttempt(attempt.id, attempt.provider);
+    if (!prepared) throw new Error(`Shared ${attempt.provider} recovery attempt ${attempt.id} is missing`);
+    return prepared;
+}
+
+export async function mysqlUpdatePaymentTerminalAttempt(
+    id: string,
+    provider: string,
+    status: string,
+    values: MysqlPaymentTerminalAttemptUpdate = {},
+): Promise<MysqlPaymentTerminalAttemptTransition> {
+    const d = await getDb();
+    const predecessors = terminalAttemptUpdatePredecessors(status);
+    if (predecessors.length === 0) throw new Error(`Invalid terminal recovery status: ${status}`);
+    const updates: string[] = [];
+    const parameters: unknown[] = [];
+    const columns: Array<keyof MysqlPaymentTerminalAttemptUpdate> = [
+        'clientTransactionId',
+        'terminalSessionId',
+        'saleBundle',
+        'providerReference',
+        'error',
+    ];
+    for (const column of columns) {
+        if (values[column] === undefined) continue;
+        // Provider/session/reference IDs become immutable once observed. A
+        // stale reconciler can fill a blank, but cannot replace newer proof.
+        if (column === 'clientTransactionId'
+            || column === 'terminalSessionId'
+            || column === 'providerReference') {
+            updates.push(`${column} = CASE WHEN ${column} = '' THEN ? ELSE ${column} END`);
+            parameters.push(values[column]);
+        } else if (column === 'saleBundle') {
+            // The exact provider payload may advance with the state, but an
+            // equal-state stale writer must not replace a newer payload.
+            updates.push(`${column} = CASE WHEN status <> ? THEN ? ELSE ${column} END`);
+            parameters.push(status, values[column]);
+        } else {
+            updates.push(`${column} = ?`);
+            parameters.push(values[column]);
+        }
+    }
+    // Status is intentionally last: MariaDB evaluates single-table SET
+    // assignments left-to-right, and field guards above must see the old row.
+    updates.push('status = ?', `updatedAt = ${MYSQL_SERVER_ISO_TIMESTAMP}`);
+    parameters.push(status, id, provider, ...predecessors);
+    const result = await d.execute(
+        `UPDATE payment_terminal_attempts
+         SET ${updates.join(', ')}
+         WHERE id = ? AND provider = ?
+           AND status IN (${predecessors.map(() => '?').join(', ')})`,
+        parameters,
+    );
+    // Read after the compare-and-set. A concurrent writer can only move this
+    // row farther forward, so the returned snapshot is safe and authoritative.
+    const authoritative = await mysqlGetPaymentTerminalAttempt(id, provider);
+    if (!authoritative) throw new Error(`Shared ${provider} recovery attempt ${id} is missing`);
+    return {
+        applied: Number(result.rowsAffected || 0) === 1,
+        attempt: authoritative,
+    };
+}
+
+function normalizeMysqlPaymentTerminalAttempt(row: any): MysqlPaymentTerminalAttempt {
+    return {
+        id: String(row.id || ''),
+        provider: String(row.provider || ''),
+        terminalKey: String(row.terminalKey || ''),
+        clientTransactionId: String(row.clientTransactionId || ''),
+        terminalSessionId: String(row.terminalSessionId || ''),
+        operationKind: String(row.operationKind || 'sale'),
+        amount: Number(row.amount || 0),
+        expectedProviderAmount: Number(row.expectedProviderAmount || 0),
+        currency: String(row.currency || ''),
+        status: String(row.status || ''),
+        saleBundle: String(row.saleBundle || ''),
+        providerReference: String(row.providerReference || ''),
+        error: String(row.error || ''),
+        tillId: String(row.tillId || ''),
+        createdAt: String(row.createdAt || ''),
+        updatedAt: String(row.updatedAt || ''),
+    };
+}
+
+export async function mysqlGetOperationalPaymentTerminalAttempts(
+    provider?: string,
+): Promise<MysqlPaymentTerminalAttempt[]> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT ${mysqlApplicationReadProjection(
+            'payment_terminal_attempts',
+            PAYMENT_TERMINAL_ATTEMPT_READ_COLUMNS,
+        )}
+         FROM payment_terminal_attempts
+         WHERE status IN (${OPERATIONAL_TERMINAL_ATTEMPT_SQL})
+           ${provider ? 'AND provider = ?' : ''}
+         ORDER BY createdAt ASC`,
+        provider ? [provider] : [],
+    );
+    return rows.map(normalizeMysqlPaymentTerminalAttempt);
+}
+
+export async function mysqlGetPaymentTerminalAttempt(
+    id: string,
+    provider: string,
+): Promise<MysqlPaymentTerminalAttempt | null> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT ${mysqlApplicationReadProjection(
+            'payment_terminal_attempts',
+            PAYMENT_TERMINAL_ATTEMPT_READ_COLUMNS,
+        )}
+         FROM payment_terminal_attempts
+         WHERE id = ? AND provider = ? LIMIT 1`,
+        [id, provider],
+    );
+    return rows[0] ? normalizeMysqlPaymentTerminalAttempt(rows[0]) : null;
+}
+
+export async function mysqlCountOperationalPaymentTerminalAttempts(): Promise<number> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT COUNT(*) AS count FROM payment_terminal_attempts
+         WHERE status IN (${OPERATIONAL_TERMINAL_ATTEMPT_SQL})`,
+    );
+    return Number(rows[0]?.count || 0);
+}
+
+export async function mysqlPrunePaymentTerminalAttempts(): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+        `DELETE FROM payment_terminal_attempts
+         WHERE status IN ('completed', 'failed', 'cancelled')
+           AND STR_TO_DATE(updatedAt, '%Y-%m-%dT%H:%i:%s.%fZ') < TIMESTAMPADD(DAY, -30, UTC_TIMESTAMP(3))`,
+    );
 }
 
 export async function mysqlAcquirePaymentTerminalLock(
@@ -1832,12 +3274,12 @@ export async function mysqlAcquirePaymentTerminalLock(
         [tillId, tillName || 'Till', paymentReference, lease, terminalKey, tillId, paymentReference],
     );
     const rows = await d.select<MysqlPaymentTerminalLock[]>(
-        `SELECT CAST(terminalKey AS CHAR) AS terminalKey,
-                CAST(tillId AS CHAR) AS tillId,
-                CAST(tillName AS CHAR) AS tillName,
-                CAST(paymentReference AS CHAR) AS paymentReference,
-                CAST(acquiredAt AS CHAR) AS acquiredAt,
-                CAST(expiresAt AS CHAR) AS expiresAt
+        `SELECT CAST(terminalKey AS CHAR CHARACTER SET utf8mb4) AS terminalKey,
+                CAST(tillId AS CHAR CHARACTER SET utf8mb4) AS tillId,
+                CAST(tillName AS CHAR CHARACTER SET utf8mb4) AS tillName,
+                CAST(paymentReference AS CHAR CHARACTER SET utf8mb4) AS paymentReference,
+                CAST(acquiredAt AS CHAR CHARACTER SET utf8mb4) AS acquiredAt,
+                CAST(expiresAt AS CHAR CHARACTER SET utf8mb4) AS expiresAt
          FROM payment_terminal_locks WHERE terminalKey = ? LIMIT 1`,
         [terminalKey],
     );
@@ -1878,15 +3320,84 @@ export async function mysqlReleasePaymentTerminalLock(
     );
 }
 
-export async function mysqlTouchTillPresence(tillId: string, tillName: string): Promise<void> {
+export async function mysqlGetWholeSystemCloseBarrier(): Promise<MysqlWholeSystemCloseBarrier> {
+    const d = await getDb();
+    // Any current client can recover an abandoned phase. Old-client financial
+    // triggers perform the same expiry cleanup before deciding whether to stop.
+    await d.execute(
+        `UPDATE pos_close_barrier
+         SET token = '', state = 'idle', ownerTillId = '',
+             requestedAt = NULL, expiresAt = NULL, cutoffAt = NULL
+         WHERE id = 1 AND state <> 'idle'
+           AND expiresAt IS NOT NULL AND expiresAt <= UTC_TIMESTAMP(3)`,
+    );
+    const rows: any[] = await d.select(
+        `SELECT CAST(token AS CHAR CHARACTER SET utf8mb4) AS token,
+                CAST(state AS CHAR CHARACTER SET utf8mb4) AS state,
+                CAST(ownerTillId AS CHAR CHARACTER SET utf8mb4) AS ownerTillId,
+                CAST(COALESCE(DATE_FORMAT(requestedAt, '%Y-%m-%dT%H:%i:%s.%fZ'), '')
+                    AS CHAR CHARACTER SET utf8mb4) AS requestedAt,
+                CAST(COALESCE(DATE_FORMAT(expiresAt, '%Y-%m-%dT%H:%i:%s.%fZ'), '')
+                    AS CHAR CHARACTER SET utf8mb4) AS expiresAt,
+                CAST(COALESCE(DATE_FORMAT(cutoffAt, '%Y-%m-%dT%H:%i:%s.%fZ'), '')
+                    AS CHAR CHARACTER SET utf8mb4) AS cutoffAt
+         FROM pos_close_barrier WHERE id = 1`,
+    );
+    const row = rows[0] || {};
+    const state = ['preparing', 'frozen'].includes(String(row.state))
+        ? String(row.state) as 'preparing' | 'frozen'
+        : 'idle';
+    return {
+        token: String(row.token || ''),
+        state,
+        ownerTillId: String(row.ownerTillId || ''),
+        requestedAt: String(row.requestedAt || ''),
+        expiresAt: String(row.expiresAt || ''),
+        cutoffAt: String(row.cutoffAt || ''),
+    };
+}
+
+export async function mysqlTouchTillPresence(
+    tillId: string,
+    tillName: string,
+    readiness: MysqlTillCloseReadiness = {
+        protocolVersion: 0,
+        barrierToken: '',
+        barrierPhase: '',
+        outboxCount: 0,
+        localTerminalAttemptCount: 0,
+        syncConflictCount: 0,
+    },
+): Promise<void> {
     const d = await getDb();
     await d.execute(
-        `INSERT INTO till_presence (tillId, tillName, lastSeenAt)
-         VALUES (?, ?, UTC_TIMESTAMP(3))
+        `INSERT INTO till_presence
+            (tillId, tillName, closeProtocolVersion, closeBarrierToken,
+             closeBarrierPhase, outboxCount, localTerminalAttemptCount,
+             syncConflictCount, barrierObservedAt, lastSeenAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                 IF(? = '', NULL, UTC_TIMESTAMP(3)), UTC_TIMESTAMP(3))
          ON DUPLICATE KEY UPDATE
             tillName = VALUES(tillName),
+            closeProtocolVersion = VALUES(closeProtocolVersion),
+            closeBarrierToken = VALUES(closeBarrierToken),
+            closeBarrierPhase = VALUES(closeBarrierPhase),
+            outboxCount = VALUES(outboxCount),
+            localTerminalAttemptCount = VALUES(localTerminalAttemptCount),
+            syncConflictCount = VALUES(syncConflictCount),
+            barrierObservedAt = VALUES(barrierObservedAt),
             lastSeenAt = UTC_TIMESTAMP(3)`,
-        [tillId, tillName],
+        [
+            tillId,
+            tillName,
+            readiness.protocolVersion,
+            readiness.barrierToken,
+            readiness.barrierPhase,
+            readiness.outboxCount,
+            readiness.localTerminalAttemptCount,
+            readiness.syncConflictCount,
+            readiness.barrierToken,
+        ],
     );
 }
 
@@ -1895,9 +3406,10 @@ export async function mysqlGetConnectedTills(onlineWithinSeconds = 45): Promise<
     const windowSeconds = Math.min(300, Math.max(15, Math.trunc(onlineWithinSeconds || 45)));
     const rows: any[] = await d.select(
         `SELECT
-            tillId,
-            CAST(tillName AS CHAR) AS tillName,
-            DATE_FORMAT(lastSeenAt, '%Y-%m-%dT%H:%i:%s.%fZ') AS lastSeenAt,
+            CAST(tillId AS CHAR CHARACTER SET utf8mb4) AS tillId,
+            CAST(tillName AS CHAR CHARACTER SET utf8mb4) AS tillName,
+            CAST(DATE_FORMAT(lastSeenAt, '%Y-%m-%dT%H:%i:%s.%fZ')
+                AS CHAR CHARACTER SET utf8mb4) AS lastSeenAt,
             CAST(GREATEST(0, TIMESTAMPDIFF(SECOND, lastSeenAt, UTC_TIMESTAMP(3))) AS SIGNED) AS secondsAgo
          FROM till_presence
          WHERE lastSeenAt >= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ${windowSeconds} SECOND)
@@ -1934,7 +3446,13 @@ export async function mysqlClaimHeldOrder(orderId: string): Promise<boolean> {
  */
 export async function mysqlGetAll(table: string): Promise<any[]> {
     const d = await getDb();
-    return await d.select(`SELECT * FROM ${table}`);
+    const binaryColumns = MYSQL_BINARY_APPLICATION_READ_COLUMNS.get(table);
+    if (!binaryColumns) return await d.select(`SELECT * FROM ${table}`);
+
+    const validCols = await getTableColumns(table);
+    return await d.select(
+        `SELECT ${mysqlApplicationReadProjection(table, validCols)} FROM ${table}`,
+    );
 }
 
 /**
@@ -1943,10 +3461,13 @@ export async function mysqlGetAll(table: string): Promise<any[]> {
 export async function mysqlGetUpdatedSince(table: string, sinceDate: string): Promise<any[]> {
     const d = await getDb();
     const validCols = await getTableColumns(table);
+    const selectColumns = MYSQL_BINARY_APPLICATION_READ_COLUMNS.has(table)
+        ? mysqlApplicationReadProjection(table, validCols)
+        : '*';
     if (validCols.includes('updatedAt')) {
-        return await d.select(`SELECT * FROM ${table} WHERE updatedAt > ?`, [sinceDate]);
+        return await d.select(`SELECT ${selectColumns} FROM ${table} WHERE updatedAt > ?`, [sinceDate]);
     } else {
-        return await d.select(`SELECT * FROM ${table}`);
+        return await d.select(`SELECT ${selectColumns} FROM ${table}`);
     }
 }
 
@@ -2036,19 +3557,27 @@ export async function mysqlGetSyncPage(
         where.push('updatedAt > ?');
         params.push(sinceDate);
     }
+    const idOrderExpression = MYSQL_BINARY_APPLICATION_READ_COLUMNS.get(table)?.has(idKey)
+        ? mysqlSchemaIdentifier(idKey)
+        : `CAST(${mysqlSchemaIdentifier(idKey)} AS CHAR)`;
     if (cursor) {
-        where.push(`(updatedAt > ? OR (updatedAt = ? AND CAST(\`${idKey}\` AS CHAR) > ?))`);
+        // Keep opaque IDs under their installed binary comparison semantics;
+        // only the selected value is decoded to application text.
+        where.push(`(updatedAt > ? OR (updatedAt = ? AND ${idOrderExpression} > ?))`);
         params.push(cursor.updatedAt, cursor.updatedAt, cursor.rowId);
     }
 
     const safeLimit = Math.max(1, Math.min(1000, Number(limit || 500)));
-    const selectColumns = table === 'products'
-        ? validCols.filter((column) => column !== 'image').map((column) => `\`${column}\``).join(', ')
+    const projectedColumns = table === 'products'
+        ? validCols.filter((column) => column !== 'image')
+        : MYSQL_BINARY_APPLICATION_READ_COLUMNS.has(table) ? validCols : null;
+    const selectColumns = projectedColumns
+        ? mysqlApplicationReadProjection(table, projectedColumns)
         : '*';
     const rows: any[] = await d.select(
         `SELECT ${selectColumns} FROM ${table}
          WHERE ${where.join(' AND ')}
-         ORDER BY updatedAt ASC, CAST(\`${idKey}\` AS CHAR) ASC
+         ORDER BY updatedAt ASC, ${idOrderExpression} ASC
          LIMIT ?`,
         [...params, safeLimit],
     );
@@ -2578,7 +4107,7 @@ async function mysqlGetAccountReportActivity(
     endTime: string,
     _tillNumber?: string,
 ): Promise<Pick<PaymentBreakdown,
-    'accountCharges' | 'accountRepaymentsCash' | 'accountRepaymentsCard' |
+    'accountCharges' | 'accountRepaymentsCash' | 'accountRepaymentsCard' | 'accountRepaymentsOther' |
     'accountAdjustments' | 'openingAccountOwed' | 'closingAccountOwed' |
     'accountActivityScope'>> {
     const activityParams: any[] = [startTime, endTime];
@@ -2588,6 +4117,7 @@ async function mysqlGetAccountReportActivity(
                 CAST(COALESCE(SUM(CASE WHEN entryType = 'charge' THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountCharges,
                 CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
                 CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
+                CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsOther,
                 CAST(COALESCE(SUM(CASE WHEN entryType NOT IN ('charge', 'payment') THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountAdjustments
              FROM customer_account_entries
              WHERE createdAt >= ? AND createdAt < ?`,
@@ -2609,6 +4139,7 @@ async function mysqlGetAccountReportActivity(
         accountCharges: Number(activity.accountCharges || 0),
         accountRepaymentsCash: Number(activity.accountRepaymentsCash || 0),
         accountRepaymentsCard: Number(activity.accountRepaymentsCard || 0),
+        accountRepaymentsOther: Number(activity.accountRepaymentsOther || 0),
         accountAdjustments: Number(activity.accountAdjustments || 0),
         openingAccountOwed: Number(openingRows[0]?.balance || 0),
         closingAccountOwed: Number(closingRows[0]?.balance || 0),
@@ -2767,8 +4298,8 @@ export async function mysqlGetTopProducts(
     }));
 }
 
-export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
-    const d = await getDb();
+export async function mysqlAggregateDailySummary(date?: string, existingDb?: Database): Promise<void> {
+    const d = existingDb || await getDb();
     const nowStr = new Date().toISOString();
     const rows: any[] = await d.select(
         `SELECT o.completedAt, COALESCE(o.tillNumber, '') as till, CAST(o.type AS CHAR) as type,
@@ -2798,6 +4329,7 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
         accountTotal: number;
         accountRepaymentsCash: number;
         accountRepaymentsCard: number;
+        accountRepaymentsOther: number;
         totalSales: number;
         txCount: number;
     }>();
@@ -2814,6 +4346,7 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
             accountTotal: 0,
             accountRepaymentsCash: 0,
             accountRepaymentsCard: 0,
+            accountRepaymentsOther: 0,
             totalSales: 0,
             txCount: 0,
         };
@@ -2845,11 +4378,13 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
             accountTotal: 0,
             accountRepaymentsCash: 0,
             accountRepaymentsCard: 0,
+            accountRepaymentsOther: 0,
             totalSales: 0,
             txCount: 0,
         };
         if (row.paymentMethod === 'cash') summary.accountRepaymentsCash += -Number(row.amountPence || 0);
         if (row.paymentMethod === 'card') summary.accountRepaymentsCard += -Number(row.amountPence || 0);
+        if (row.paymentMethod === 'other') summary.accountRepaymentsOther += -Number(row.amountPence || 0);
         grouped.set(key, summary);
     }
 
@@ -2857,21 +4392,22 @@ export async function mysqlAggregateDailySummary(date?: string): Promise<void> {
         await d.execute(
             `INSERT INTO daily_sales_summary (
                 date, tillNumber, cashTotal, cardTotal, accountTotal,
-                accountRepaymentsCash, accountRepaymentsCard,
+                accountRepaymentsCash, accountRepaymentsCard, accountRepaymentsOther,
                 totalSales, transactionCount, updatedAt
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 cashTotal = VALUES(cashTotal),
                 cardTotal = VALUES(cardTotal),
                 accountTotal = VALUES(accountTotal),
                 accountRepaymentsCash = VALUES(accountRepaymentsCash),
                 accountRepaymentsCard = VALUES(accountRepaymentsCard),
+                accountRepaymentsOther = VALUES(accountRepaymentsOther),
                 totalSales = VALUES(totalSales),
                 transactionCount = VALUES(transactionCount),
                 updatedAt = VALUES(updatedAt)`,
             [
                 r.day, r.till, r.cashTotal, r.cardTotal, r.accountTotal,
-                r.accountRepaymentsCash, r.accountRepaymentsCard,
+                r.accountRepaymentsCash, r.accountRepaymentsCard, r.accountRepaymentsOther,
                 r.totalSales, r.txCount, nowStr,
             ]
         );
@@ -2952,7 +4488,7 @@ export async function mysqlGetAllTillNumbers(): Promise<string[]> {
 
 export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
     const d = await getDb();
-    const [orderRows, registerRows] = await Promise.all([
+    const [orderRows, registerRows, accountRows] = await Promise.all([
         d.select<any[]>(
         `SELECT CAST(o.tillNumber AS CHAR) as id, CAST(MAX(r.name) AS CHAR) as name, MIN(o.orderNumber) as minOrderNumber
          FROM orders o LEFT JOIN registers r ON r.id = o.tillNumber
@@ -2960,10 +4496,20 @@ export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
          GROUP BY o.tillNumber ORDER BY MIN(o.orderNumber), o.tillNumber`,
         ),
         d.select<any[]>(`SELECT CAST(id AS CHAR) as id, CAST(name AS CHAR) as name FROM registers WHERE isActive = 1 ORDER BY name, id`),
+        d.select<any[]>(
+            `SELECT CAST(entry.tillNumber AS CHAR) AS id, CAST(MAX(register.name) AS CHAR) AS name, 0 AS minOrderNumber
+             FROM customer_account_entries entry
+             LEFT JOIN registers register ON register.id = entry.tillNumber
+             WHERE entry.tillNumber IS NOT NULL AND entry.tillNumber != ''
+             GROUP BY entry.tillNumber`,
+        ),
     ]);
     const byId = new Map<string, any>();
+    for (const row of accountRows) {
+        byId.set(String(row.id || ''), row);
+    }
     for (const row of registerRows) {
-        byId.set(String(row.id || ''), { ...row, minOrderNumber: 0 });
+        byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row, minOrderNumber: 0 });
     }
     for (const row of orderRows) {
         byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row });
@@ -3007,7 +4553,8 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
     ), d.select<any[]>(
         `SELECT CAST(tillNumber AS CHAR) AS id,
                 CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
-                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsOther
          FROM customer_account_entries
          WHERE entryType = 'payment'
            AND createdAt >= ? AND createdAt < ?
@@ -3034,6 +4581,7 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
             accountTotal: row.accountTotal || 0,
             accountRepaymentsCash: Number(collectionsById.get(option.id)?.accountRepaymentsCash || 0),
             accountRepaymentsCard: Number(collectionsById.get(option.id)?.accountRepaymentsCard || 0),
+            accountRepaymentsOther: Number(collectionsById.get(option.id)?.accountRepaymentsOther || 0),
         };
     });
 }

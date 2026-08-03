@@ -10,6 +10,7 @@
                 store={$systemPrintJob.payload.store}
                 order={$systemPrintJob.payload.order}
                 lines={$systemPrintJob.payload.lines}
+                payments={$systemPrintJob.payload.payments || []}
                 cashierName={$systemPrintJob.payload.cashierName}
                 tillName={$systemPrintJob.payload.tillName}
                 design={$systemPrintJob.payload.design}

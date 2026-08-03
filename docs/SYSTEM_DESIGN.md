@@ -871,6 +871,7 @@ The current session and route checks are primarily in the frontend. They are use
 - Reports can print and export CSV.
 - Till report markers track local closure state; system end-of-day requires complete MariaDB state.
 - Shift cash-up compares opening float, expected cash/card, actual counted amounts, and differences.
+- Customer-account repayments are reported separately from sales. Cash affects expected drawer cash, card affects expected terminal card, and bank/cheque/other collections affect neither expected total.
 - A cashier can be allowed to close their shift/end day without receiving general report-page access; these are separate capabilities.
 - GBP is represented internally as pence and explicitly formatted at the report/receipt boundary to avoid broken encoding symbols.
 

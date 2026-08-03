@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-commit-mysql-outbox-operation"
+description = "Enables the commit_mysql_outbox_operation command without any pre-configured scope."
+commands.allow = ["commit_mysql_outbox_operation"]
+
+[[permission]]
+identifier = "deny-commit-mysql-outbox-operation"
+description = "Denies the commit_mysql_outbox_operation command without any pre-configured scope."
+commands.deny = ["commit_mysql_outbox_operation"]

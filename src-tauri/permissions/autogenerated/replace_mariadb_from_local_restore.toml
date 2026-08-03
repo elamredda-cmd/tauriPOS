@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-replace-mariadb-from-local-restore"
+description = "Enables the replace_mariadb_from_local_restore command without any pre-configured scope."
+commands.allow = ["replace_mariadb_from_local_restore"]
+
+[[permission]]
+identifier = "deny-replace-mariadb-from-local-restore"
+description = "Denies the replace_mariadb_from_local_restore command without any pre-configured scope."
+commands.deny = ["replace_mariadb_from_local_restore"]

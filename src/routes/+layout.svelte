@@ -13,9 +13,12 @@
         hasRestorePendingMariaDbReplace,
         hydrateSvelteStores,
         isLightStorePath,
+        reconcileServerDataEpochBeforeFinancialRecovery,
+        recoverOnlineFinancialIntent,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
         runAutomaticSetupBackupIfEnabled,
-        startBackgroundSync
+        startBackgroundSync,
+        verifyDatabaseIdentityBeforeSchemaMutation
     } from '$lib/stores/database';
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
@@ -35,11 +38,13 @@
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
     import { markAppNavigation } from '$lib/navigation';
     import { OWNER_CLOUD_ACTIVATION_EVENT, shouldStartOwnerCloudReporter } from '$lib/ownerCloudConfig';
+    import { runTerminalRecovery } from '$lib/terminalRecovery';
 
     let dbReady = false;
     let dbError = '';
     let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
     let syncStartupRunning = false;
+    let mysqlSchemaReadyConfigKey = '';
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let stopOwnerCloudReporter: (() => void) | null = null;
     let ownerCloudStartupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -51,6 +56,8 @@
     let automaticBackupStartTimeout: ReturnType<typeof setTimeout> | null = null;
     let automaticBackupInterval: ReturnType<typeof setInterval> | null = null;
     let automaticBackupRunning = false;
+    let terminalRecoveryInterval: ReturnType<typeof setInterval> | null = null;
+    let terminalRecoveryRunning = false;
     const SYNC_STARTUP_RETRY_MS = 60 * 1000;
     const AUTOMATIC_BACKUP_START_DELAY_MS = 2 * 60 * 1000;
     const AUTOMATIC_BACKUP_CHECK_MS = 5 * 60 * 1000;
@@ -76,6 +83,29 @@
             clearInterval(automaticBackupInterval);
             automaticBackupInterval = null;
         }
+    }
+
+    async function recoverManagedTerminalWork() {
+        if (terminalRecoveryRunning) return;
+        terminalRecoveryRunning = true;
+        try {
+            const result = await runTerminalRecovery();
+            if (result.errors.length > 0) {
+                console.warn('POS: managed terminal recovery needs attention:', result.errors);
+            }
+        } catch (error) {
+            console.warn('POS: managed terminal recovery deferred:', error);
+        } finally {
+            terminalRecoveryRunning = false;
+        }
+    }
+
+    function startTerminalRecoverySchedule() {
+        if (terminalRecoveryInterval) return;
+        void recoverManagedTerminalWork();
+        terminalRecoveryInterval = setInterval(() => {
+            void recoverManagedTerminalWork();
+        }, 60_000);
     }
 
     async function checkAutomaticSetupBackup() {
@@ -115,32 +145,112 @@
         }
     }
 
-    function isDatabaseIdentityMismatch(error: unknown): boolean {
-        return String(error).includes('DATABASE_IDENTITY_MISMATCH');
+    function isDatabaseStartupSafetyBlock(error: unknown): boolean {
+        const message = String(error);
+        return message.includes('DATABASE_IDENTITY_MISMATCH')
+            || message.includes('DATABASE_IDENTITY_UNVERIFIED')
+            || message.includes('MARIADB_RESTORE_MAINTENANCE');
+    }
+
+    function mysqlSchemaConfigKey(config: MysqlConfig): string {
+        return `${config.user}@${config.host}:${config.port}/${config.database}`;
+    }
+
+    function isTransientMariaDbStartupError(error: unknown): boolean {
+        const message = String(error).toLowerCase();
+        return [
+            'connection timed out',
+            'connect timeout',
+            'connection refused',
+            'connection reset',
+            'connection closed',
+            'connection was reset while opening',
+            'server has gone away',
+            'lost connection',
+            'broken pipe',
+            'network is unreachable',
+            'temporary failure',
+            'temporarily unavailable',
+            'too many connections',
+            'deadlock found',
+            'lock wait timeout',
+            'try restarting transaction',
+            'dns',
+            'econnrefused',
+            'econnreset',
+            'etimedout',
+        ].some((fragment) => message.includes(fragment));
+    }
+
+    function isDeterministicMariaDbStartupError(error: unknown): boolean {
+        const message = String(error);
+        const normalized = message.toLowerCase();
+        return message.includes('MARIADB_SCHEMA_MIGRATION_FAILED')
+            || message.includes('MARIADB_ACCOUNT_MIGRATION_BLOCKED')
+            || message.includes('MARIADB_IDENTIFIER_COLLATION_MIGRATION_FAILED')
+            || message.includes('MARIADB_CUSTOMER_COLLATION_MIGRATION_FAILED')
+            || message.includes('MariaDB schema migration failed')
+            || message.includes('MariaDB customer account migration stopped')
+            || normalized.includes('illegal mix of collations')
+            || normalized.includes('unknown collation')
+            || normalized.includes('collation is not valid')
+            || normalized.includes('duplicate values exist')
+            || normalized.includes('duplicate entry')
+            || normalized.includes('command denied')
+            || normalized.includes('access denied')
+            || normalized.includes('trigger already exists')
+            || normalized.includes('data too long')
+            || normalized.includes('cannot be null')
+            || normalized.includes('foreign key constraint');
     }
 
     async function startMultiTillSyncWhenReady(config: MysqlConfig) {
         if (syncStartupRunning) return;
         syncStartupRunning = true;
+        const schemaConfigKey = mysqlSchemaConfigKey(config);
+        let startupStage: 'identity-preflight' | 'schema' | 'identity' | 'epoch' | 'financial-recovery' | 'background-sync' = 'identity-preflight';
         try {
-            await initMysqlDb(config);
+            await verifyDatabaseIdentityBeforeSchemaMutation();
+            if (mysqlSchemaReadyConfigKey !== schemaConfigKey) {
+                startupStage = 'schema';
+                await initMysqlDb(config);
+                mysqlSchemaReadyConfigKey = schemaConfigKey;
+            }
+            startupStage = 'identity';
             await ensureDatabaseIdentityForSync();
+            startupStage = 'epoch';
+            await reconcileServerDataEpochBeforeFinancialRecovery();
+            startupStage = 'financial-recovery';
+            await recoverOnlineFinancialIntent(config);
             clearSyncStartupRetry();
+            startupStage = 'background-sync';
             await startBackgroundSync();
             connectionState.update((state) => ({
                 ...state,
                 mysqlOnline: true,
                 syncError: null,
             }));
+            startTerminalRecoverySchedule();
         } catch (error) {
             console.warn('POS: MariaDB sync blocked/deferred:', error);
+            const transientStartupFailure = isTransientMariaDbStartupError(error);
+            // Once DDL/hardening has returned a non-transport error, another
+            // timer pass would execute the same migration sequence against the
+            // same data. Keep the error visible and wait for an operator fix or
+            // an app restart instead of hammering MariaDB every minute.
+            const knownDeterministicFailure = isDeterministicMariaDbStartupError(error);
+            const deterministicSchemaFailure = startupStage === 'schema'
+                && (knownDeterministicFailure || !transientStartupFailure);
+            const syncError = deterministicSchemaFailure
+                ? `MariaDB schema setup is blocked and automatic retries have stopped: ${String(error)}`
+                : String(error);
             connectionState.update((state) => ({
                 ...state,
                 mysqlOnline: false,
-                syncError: String(error),
+                syncError,
             }));
 
-            if (isDatabaseIdentityMismatch(error)) {
+            if (isDatabaseStartupSafetyBlock(error) || deterministicSchemaFailure) {
                 clearSyncStartupRetry();
                 return;
             }
@@ -348,6 +458,8 @@
                 } else {
                     startBackgroundSync();
                 }
+            } else {
+                startTerminalRecoverySchedule();
             }
 
             // Remove legacy app data while preserving device-only preferences.
@@ -396,6 +508,10 @@
         }
         clearSyncStartupRetry();
         clearAutomaticBackupSchedule();
+        if (terminalRecoveryInterval) {
+            clearInterval(terminalRecoveryInterval);
+            terminalRecoveryInterval = null;
+        }
     });
 
     // Reactive theme application via store subscription.

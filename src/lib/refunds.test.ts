@@ -65,7 +65,33 @@ describe('allocateRefundPayment', () => {
         expect(allocation.loyaltyAmount).toBe(0);
     });
 
-    it('continues to recover legacy cash rows without split columns', () => {
+    it.each([
+        ['cash', 'cashAmount'],
+        ['card', 'cardAmount'],
+        ['loyalty', 'loyaltyAmount'],
+        ['account', 'accountAmount'],
+        ['pay_later', 'accountAmount'],
+        ['customer_account', 'accountAmount'],
+    ] as const)('recovers a DB-shaped legacy %s row with zero split columns', (method, component) => {
+        const allocation = allocateRefundPayment(2_500, [{
+            method,
+            amount: 2_500,
+            cashAmount: 0,
+            cardAmount: 0,
+            loyaltyAmount: 0,
+            accountAmount: 0,
+        }]);
+
+        expect(allocation).toEqual({
+            method: component === 'accountAmount' ? 'account' : method,
+            cashAmount: component === 'cashAmount' ? 2_500 : 0,
+            cardAmount: component === 'cardAmount' ? 2_500 : 0,
+            loyaltyAmount: component === 'loyaltyAmount' ? 2_500 : 0,
+            accountAmount: component === 'accountAmount' ? 2_500 : 0,
+        });
+    });
+
+    it('continues to recover legacy cash rows whose split columns are absent', () => {
         const allocation = allocateRefundPayment(2_500, [{
             method: 'cash',
             amount: 2_500,

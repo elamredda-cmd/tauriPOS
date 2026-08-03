@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-freeze-whole-system-close"
+description = "Enables the freeze_whole_system_close command without any pre-configured scope."
+commands.allow = ["freeze_whole_system_close"]
+
+[[permission]]
+identifier = "deny-freeze-whole-system-close"
+description = "Denies the freeze_whole_system_close command without any pre-configured scope."
+commands.deny = ["freeze_whole_system_close"]

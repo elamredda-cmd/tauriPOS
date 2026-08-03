@@ -1,5 +1,6 @@
 <script lang="ts">
     import { Delete as DeleteIcon } from "@lucide/svelte";
+    import { canInsertDigitPadKey, editDigitPadValue } from "$lib/digitPadEditing";
 
     export let value = "";
     export let maxLength = 8;
@@ -8,37 +9,42 @@
     export let submitDisabled = false;
     export let disabled = false;
     export let allowDecimal = false;
+    export let allowPhoneSymbols = false;
     export let placeholder = "Enter number";
     export let max: number | null = null;
+    export let selectionStart = -1;
+    export let selectionEnd = -1;
     export let onSubmit: () => void = () => {};
 
     const digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const phoneSymbols = [
+        { key: "+", label: "+", ariaLabel: "Enter plus" },
+        { key: " ", label: "Space", ariaLabel: "Enter space" },
+        { key: "-", label: "-", ariaLabel: "Enter hyphen" },
+        { key: "(", label: "(", ariaLabel: "Enter opening parenthesis" },
+        { key: ")", label: ")", ariaLabel: "Enter closing parenthesis" },
+    ];
+
+    function editOptions() {
+        return { maxLength, allowDecimal, allowPhoneSymbols, max };
+    }
 
     function press(key: string) {
-        if (key === "clear") {
-            value = "";
-        } else if (key === "backspace") {
-            value = value.slice(0, -1);
-        } else if (key === "." && (!allowDecimal || value.includes("."))) {
-            return;
-        } else if (value.length < maxLength) {
-            append(key);
-        }
+        const result = editDigitPadValue(
+            value,
+            selectionStart,
+            selectionEnd,
+            key,
+            editOptions(),
+        );
+        if (!result.applied) return;
+        value = result.value;
+        selectionStart = result.selectionStart;
+        selectionEnd = result.selectionEnd;
     }
 
-    function append(key: string) {
-        const next = `${value}${key}`;
-        if (!isWithinBounds(next)) return;
-        value = next;
-    }
-
-    function isWithinBounds(next: string): boolean {
-        if (!next || next === ".") return true;
-        const numeric = Number(next);
-        if (!Number.isFinite(numeric)) return false;
-        if (max !== null && numeric > max) return false;
-        return true;
-    }
+    $: decimalDisabled = !canInsertDigitPadKey(value, selectionStart, selectionEnd, ".", editOptions());
+    $: plusDisabled = !canInsertDigitPadKey(value, selectionStart, selectionEnd, "+", editOptions());
 
     $: outputLabel = masked
         ? `${placeholder}: ${value.length ? `${value.length} digits entered` : "no digits entered"}`
@@ -48,7 +54,7 @@
 <div
     class="digit-pad"
     role="group"
-    aria-label={allowDecimal ? "Decimal number pad" : "Number pad"}
+    aria-label={allowPhoneSymbols ? "Phone number pad" : allowDecimal ? "Decimal number pad" : "Number pad"}
     aria-disabled={disabled}
 >
     <div class="digit-display-row">
@@ -93,7 +99,7 @@
             <button
                 type="button"
                 class="digit-key digit-decimal"
-                disabled={disabled || value.includes(".")}
+                disabled={disabled || decimalDisabled}
                 aria-label="Enter decimal point"
                 on:click={() => press(".")}
             >.</button>
@@ -126,6 +132,20 @@
             <DeleteIcon size={25} strokeWidth={2.35} aria-hidden="true" />
         </button>
     </div>
+
+    {#if allowPhoneSymbols}
+        <div class="phone-symbol-grid" role="group" aria-label="Phone number symbols">
+            {#each phoneSymbols as symbol}
+                <button
+                    type="button"
+                    class="digit-key phone-symbol-key"
+                    disabled={disabled || (symbol.key === "+" && plusDisabled)}
+                    aria-label={symbol.ariaLabel}
+                    on:click={() => press(symbol.key)}
+                >{symbol.label}</button>
+            {/each}
+        </div>
+    {/if}
 
     <button
         type="button"
@@ -193,6 +213,18 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
         grid-template-rows: repeat(4, minmax(52px, 1fr));
         gap: .55rem;
+    }
+
+    .phone-symbol-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: .45rem;
+    }
+
+    .phone-symbol-key {
+        min-height: 46px;
+        font-family: inherit;
+        font-size: 1.05rem;
     }
 
     .digit-key,
@@ -305,7 +337,8 @@
     .digit-action:disabled,
     .digit-submit:disabled {
         cursor: not-allowed;
-        opacity: .38;
+        opacity: .5;
+        filter: saturate(.55);
         box-shadow: none;
     }
 

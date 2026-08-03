@@ -2,6 +2,7 @@
     import { onDestroy, onMount } from 'svelte';
     import { goto } from '$app/navigation';
     import { page } from '$app/stores';
+    import { modalFocusTrap } from '$lib/actions/modalFocusTrap';
     import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
     import {
         activateManualLicense,
@@ -128,10 +129,6 @@
         if (!blocked) dismissedNotice = currentNotice;
     }
 
-    function handleKeydown(event: KeyboardEvent) {
-        if (visible && !blocked && event.key === 'Escape') dismissWarning();
-    }
-
     async function activateCode() {
         const token = activationCode.trim();
         if (!token || activating) return;
@@ -157,11 +154,10 @@
     }
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
-
 {#if visible && status}
     <div class="fixed inset-0 z-[2600] flex items-center justify-center bg-[var(--overlay)] p-3 sm:p-5" role="presentation">
         <div
+            use:modalFocusTrap={{ dismiss: dismissWarning, dismissDisabled: blocked }}
             class="flex max-h-full w-full max-w-[720px] flex-col overflow-hidden rounded-lg border border-border-flat bg-bg-panel text-text-main shadow-[0_24px_80px_var(--shadow)]"
             role="dialog"
             aria-modal="true"

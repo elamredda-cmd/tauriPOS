@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1754" viewBox="0 0 1240 1754">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#03142d"/>
+      <stop offset="0.58" stop-color="#062441"/>
+      <stop offset="1" stop-color="#07344b"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#45e7e1"/>
+      <stop offset="1" stop-color="#0aaeb9"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd157"/>
+      <stop offset="1" stop-color="#f4a91c"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#e8f3f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#001020" flood-opacity="0.48"/>
+    </filter>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#001020" flood-opacity="0.3"/>
+    </filter>
+    <style>
+      .ku { font-family: "Arial Unicode MS", "Geeza Pro", Arial, sans-serif; direction: rtl; unicode-bidi: plaintext; }
+      .latin { font-family: Arial, Helvetica, sans-serif; }
+      .smallcaps { font-family: Arial, Helvetica, sans-serif; font-weight: 800; letter-spacing: 3px; }
+    </style>
+  </defs>
+
+  <rect width="1240" height="1754" fill="url(#bg)"/>
+  <circle cx="1115" cy="165" r="270" fill="#0db9c4" opacity="0.08"/>
+  <circle cx="75" cy="650" r="220" fill="#f5b52c" opacity="0.055"/>
+  <path d="M0 1180 C250 1080 430 1240 680 1150 C900 1070 1050 1110 1240 1025 V1754 H0Z" fill="#052039" opacity="0.68"/>
+
+  <!-- Brand mark -->
+  <g transform="translate(70 66)" filter="url(#softShadow)">
+    <rect width="166" height="166" rx="42" fill="#061832" stroke="#1fcbd0" stroke-width="3"/>
+    <rect x="29" y="58" width="108" height="83" rx="15" fill="url(#cyan)"/>
+    <rect x="39" y="70" width="88" height="43" rx="7" fill="#061832"/>
+    <text x="83" y="102" fill="#ffffff" font-family="Georgia, serif" font-size="31" font-weight="700" text-anchor="middle">L&amp;Bj</text>
+    <rect x="47" y="121" width="18" height="10" rx="4" fill="#072540"/>
+    <rect x="74" y="121" width="18" height="10" rx="4" fill="#072540"/>
+    <rect x="101" y="121" width="18" height="10" rx="4" fill="#fbbd32"/>
+    <path d="M52 58V25h62v33" fill="#ffc644"/>
+    <path d="M52 25l8 7 8-7 8 7 8-7 8 7 8-7 8 7 6-7" fill="none" stroke="#ffc644" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M66 44h34" stroke="#09223b" stroke-width="4" stroke-linecap="round"/>
+  </g>
+
+  <text x="1168" y="92" class="smallcaps" fill="#4ee3df" font-size="20" text-anchor="end">L&amp;BJ POS ECOSYSTEM</text>
+  <text x="1168" y="158" class="ku" fill="#ffffff" font-size="48" font-weight="800" text-anchor="end">سیستەمی فرۆشتنی زیرەک</text>
+  <text x="1168" y="216" class="ku" fill="#ffffff" font-size="48" font-weight="800" text-anchor="end">بۆ دوکانەکەت</text>
+  <text x="1168" y="270" class="ku" fill="#a8c5d3" font-size="24" text-anchor="end">فرۆشتن، بەڕێوەبردن و چاودێری — هەمووی لە یەک سیستەمدا</text>
+
+  <!-- Desktop POS hero -->
+  <g filter="url(#shadow)">
+    <rect x="72" y="338" width="1096" height="545" rx="38" fill="#08182b" stroke="#1e6170" stroke-width="3"/>
+    <rect x="92" y="358" width="1056" height="475" rx="22" fill="url(#screen)"/>
+    <rect x="92" y="358" width="1056" height="62" rx="22" fill="#0a2c4b"/>
+    <rect x="92" y="398" width="1056" height="22" fill="#0a2c4b"/>
+    <circle cx="125" cy="389" r="7" fill="#45e7e1"/>
+    <text x="151" y="397" class="latin" fill="#ffffff" font-size="22" font-weight="800">L&amp;Bj POS</text>
+    <text x="1119" y="397" class="ku" fill="#b6d6df" font-size="18" text-anchor="end">فرۆشتنی خێرا و ئاسان</text>
+
+    <!-- Product grid -->
+    <g transform="translate(119 451)">
+      <rect width="205" height="132" rx="18" fill="#0eb6bd"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.28"/>
+      <text x="178" y="55" class="ku" fill="#ffffff" font-size="22" font-weight="700" text-anchor="end">خواردنەوە</text>
+      <text x="178" y="99" class="ku" fill="#d9ffff" font-size="18" text-anchor="end">£٢.٥٠</text>
+    </g>
+    <g transform="translate(340 451)">
+      <rect width="205" height="132" rx="18" fill="#2867c9"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.25"/>
+      <text x="178" y="55" class="ku" fill="#ffffff" font-size="22" font-weight="700" text-anchor="end">کاڵای کۆگا</text>
+      <text x="178" y="99" class="ku" fill="#dceaff" font-size="18" text-anchor="end">£٤.٠٠</text>
+    </g>
+    <g transform="translate(561 451)">
+      <rect width="205" height="132" rx="18" fill="#f2b52c"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.34"/>
+      <text x="178" y="55" class="ku" fill="#11263b" font-size="22" font-weight="700" text-anchor="end">کاڵای کێشی</text>
+      <text x="178" y="99" class="ku" fill="#27425a" font-size="18" text-anchor="end">£١.٥٠ / kg</text>
+    </g>
+    <g transform="translate(119 600)">
+      <rect width="205" height="132" rx="18" fill="#7b55cf"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.25"/>
+      <text x="178" y="55" class="ku" fill="#ffffff" font-size="22" font-weight="700" text-anchor="end">پڕۆمۆشن</text>
+      <text x="178" y="99" class="ku" fill="#eee7ff" font-size="18" text-anchor="end">داشکاندن</text>
+    </g>
+    <g transform="translate(340 600)">
+      <rect width="205" height="132" rx="18" fill="#df635c"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.25"/>
+      <text x="178" y="55" class="ku" fill="#ffffff" font-size="22" font-weight="700" text-anchor="end">کڕیار</text>
+      <text x="178" y="99" class="ku" fill="#ffe9e7" font-size="18" text-anchor="end">وفاداری</text>
+    </g>
+    <g transform="translate(561 600)">
+      <rect width="205" height="132" rx="18" fill="#1d8b6c"/>
+      <circle cx="35" cy="35" r="15" fill="#ffffff" opacity="0.25"/>
+      <text x="178" y="55" class="ku" fill="#ffffff" font-size="22" font-weight="700" text-anchor="end">ڕاپۆرت</text>
+      <text x="178" y="99" class="ku" fill="#dcfff4" font-size="18" text-anchor="end">ڕاستەوخۆ</text>
+    </g>
+
+    <!-- Basket and payment -->
+    <rect x="795" y="441" width="327" height="343" rx="20" fill="#ffffff" stroke="#c9dde5" stroke-width="2"/>
+    <text x="1091" y="484" class="ku" fill="#17344a" font-size="21" font-weight="800" text-anchor="end">سبەتەی فرۆشتن</text>
+    <line x1="825" y1="507" x2="1092" y2="507" stroke="#dce8ed" stroke-width="2"/>
+    <text x="1088" y="550" class="ku" fill="#405b6d" font-size="18" text-anchor="end">٢ × کاڵا</text>
+    <text x="833" y="550" class="latin" fill="#17344a" font-size="18" font-weight="700">£5.00</text>
+    <text x="1088" y="593" class="ku" fill="#405b6d" font-size="18" text-anchor="end">١ × کاڵای کێشی</text>
+    <text x="833" y="593" class="latin" fill="#17344a" font-size="18" font-weight="700">£1.50</text>
+    <line x1="825" y1="626" x2="1092" y2="626" stroke="#dce8ed" stroke-width="2"/>
+    <text x="1088" y="672" class="ku" fill="#17344a" font-size="23" font-weight="800" text-anchor="end">کۆی گشتی</text>
+    <text x="833" y="672" class="latin" fill="#0a9da7" font-size="27" font-weight="900">£6.50</text>
+    <rect x="823" y="704" width="271" height="58" rx="14" fill="url(#cyan)"/>
+    <text x="958" y="741" class="ku" fill="#05243a" font-size="22" font-weight="800" text-anchor="middle">پارەدان</text>
+
+    <rect x="485" y="833" width="270" height="30" rx="15" fill="#061321"/>
+    <rect x="555" y="873" width="130" height="24" rx="12" fill="#061321"/>
+  </g>
+
+  <text x="1128" y="953" class="ku" fill="#ffffff" font-size="31" font-weight="800" text-anchor="end">یەک سیستەم — سێ ڕێگای زیرەک بۆ کارکردن</text>
+  <text x="1128" y="990" class="ku" fill="#8fb4c3" font-size="20" text-anchor="end">داتاکانت هاوکات دەبن و هەمیشە لەبەردەستتدان</text>
+
+  <!-- Handheld card -->
+  <g transform="translate(72 1035)" filter="url(#softShadow)">
+    <rect width="1096" height="205" rx="28" fill="#0b2b47" stroke="#1a5b6d" stroke-width="2"/>
+    <rect x="35" y="25" width="155" height="155" rx="24" fill="#0db4bd" opacity="0.16"/>
+    <rect x="78" y="43" width="70" height="116" rx="14" fill="none" stroke="#43e3de" stroke-width="6"/>
+    <line x1="94" y1="64" x2="132" y2="64" stroke="#43e3de" stroke-width="5" stroke-linecap="round"/>
+    <path d="M89 92v-13h13 M137 92v-13h-13 M89 111v13h13 M137 111v13h-13" fill="none" stroke="#ffd050" stroke-width="5" stroke-linecap="round"/>
+    <line x1="101" y1="101" x2="125" y2="101" stroke="#ffd050" stroke-width="4"/>
+    <text x="1038" y="67" class="ku" fill="#47e5e0" font-size="27" font-weight="800" text-anchor="end">ئامێری دەستی</text>
+    <text x="1038" y="111" class="ku" fill="#ffffff" font-size="24" text-anchor="end">کاڵا بسکێنە، زیاد بکە و دەستکاری بکە؛</text>
+    <text x="1038" y="149" class="ku" fill="#b7d0da" font-size="22" text-anchor="end">نرخ و وێنە نوێ بکەرەوە، پڕۆمۆشن بەڕێوە ببە و لیبڵ چاپ بکە.</text>
+  </g>
+
+  <!-- CCTV card -->
+  <g transform="translate(72 1262)" filter="url(#softShadow)">
+    <rect width="1096" height="205" rx="28" fill="#102840" stroke="#705c2b" stroke-width="2"/>
+    <rect x="35" y="25" width="155" height="155" rx="24" fill="#f7bd35" opacity="0.13"/>
+    <path d="M64 81h89a14 14 0 0 1 14 14v44H64a14 14 0 0 1-14-14V95a14 14 0 0 1 14-14Z" fill="none" stroke="#ffd050" stroke-width="6"/>
+    <circle cx="111" cy="110" r="22" fill="none" stroke="#ffd050" stroke-width="6"/>
+    <path d="M166 99l25-14v51l-25-14" fill="#ffd050"/>
+    <rect x="58" y="47" width="103" height="26" rx="8" fill="#0a1728" stroke="#43e3de" stroke-width="3"/>
+    <line x1="70" y1="60" x2="116" y2="60" stroke="#43e3de" stroke-width="4"/>
+    <line x1="124" y1="60" x2="149" y2="60" stroke="#ffffff" stroke-width="4"/>
+    <text x="1038" y="67" class="ku" fill="#ffd050" font-size="27" font-weight="800" text-anchor="end">پیشاندانی CCTV</text>
+    <text x="1038" y="111" class="ku" fill="#ffffff" font-size="24" text-anchor="end">ناوی کاڵا، بڕ، نرخ و کۆی پارە بە شێوەی ڕاستەوخۆ</text>
+    <text x="1038" y="149" class="ku" fill="#b7d0da" font-size="22" text-anchor="end">لەسەر ڤیدیۆی کامێرا پیشان بدە بۆ چاودێرییەکی ڕوونتر.</text>
+  </g>
+
+  <!-- Owner phone card -->
+  <g transform="translate(72 1489)" filter="url(#softShadow)">
+    <rect width="1096" height="185" rx="28" fill="#0b2b47" stroke="#1a5b6d" stroke-width="2"/>
+    <rect x="35" y="20" width="155" height="145" rx="24" fill="#2a68cf" opacity="0.18"/>
+    <rect x="79" y="34" width="70" height="119" rx="14" fill="none" stroke="#67a3ff" stroke-width="6"/>
+    <path d="M92 121V98 M108 121V82 M124 121V91 M140 121V67" stroke="#43e3de" stroke-width="7" stroke-linecap="round"/>
+    <path d="M97 50h34" stroke="#67a3ff" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="164" cy="54" r="8" fill="#42e4df"/>
+    <circle cx="164" cy="54" r="16" fill="none" stroke="#42e4df" stroke-width="3" opacity="0.45"/>
+    <text x="1038" y="59" class="ku" fill="#72aaff" font-size="27" font-weight="800" text-anchor="end">نوێکارییە ڕاستەوخۆکان لە مۆبایل</text>
+    <text x="1038" y="101" class="ku" fill="#ffffff" font-size="23" text-anchor="end">فرۆشتن، ڕاپۆرت، کۆگا و دۆخی هەموو تیلەکان</text>
+    <text x="1038" y="139" class="ku" fill="#b7d0da" font-size="22" text-anchor="end">لە هەر شوێنێکەوە لە ئەپی خاوەنکار ببینە.</text>
+  </g>
+
+  <text x="620" y="1717" class="ku" fill="#ffffff" font-size="24" font-weight="800" text-anchor="middle">خێرا  •  ئاسان  •  هاوکاتکراو  •  دروستکراو بۆ دوکانی مۆدێرن</text>
+</svg>

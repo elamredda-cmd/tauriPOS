@@ -157,6 +157,7 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
     { path: '/discounts', permission: 'open_discounts' },
     { path: '/orders', permission: 'open_orders' },
     { path: '/reports', permission: 'open_reports' },
+    { path: '/shifts', permission: 'open_reports' },
     { path: '/stock-receiving', permission: 'open_stock_receiving' },
     { path: '/sync', permission: 'open_sync' },
     { path: '/audit', permission: 'open_audit' },
@@ -173,7 +174,7 @@ const adminOnlyPaths = [
     '/settings/owner-app',
     '/settings/licence',
 ];
-const signedInOperationalPaths = ['/shifts', '/label-print', '/about'];
+const signedInOperationalPaths = ['/label-print', '/about'];
 const publicPaths = ['/', '/customer-display'];
 
 function matchesPath(pathname: string, route: string): boolean {
@@ -210,7 +211,7 @@ export function canAccessPath(
     // Closing a reporting period is intentionally independent from access to
     // detailed sales reports. The reports route renders a restricted Z-report
     // view when this is the employee's only reporting permission.
-    if (matchesPath(pathname, '/reports')) {
+    if (matchesPath(pathname, '/reports') || matchesPath(pathname, '/shifts')) {
         return hasPermission(employee, 'open_reports', settings)
             || hasPermission(employee, 'end_day_close', settings);
     }

@@ -1,0 +1,51 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-begin-whole-system-close"
+description = "Enables the begin_whole_system_close command without any pre-configured scope."
+commands.allow = ["begin_whole_system_close"]
+
+[[permission]]
+identifier = "deny-begin-whole-system-close"
+description = "Denies the begin_whole_system_close command without any pre-configured scope."
+commands.deny = ["begin_whole_system_close"]
+
+[[permission]]
+identifier = "allow-freeze-whole-system-close"
+description = "Enables the freeze_whole_system_close command without any pre-configured scope."
+commands.allow = ["freeze_whole_system_close"]
+
+[[permission]]
+identifier = "deny-freeze-whole-system-close"
+description = "Denies the freeze_whole_system_close command without any pre-configured scope."
+commands.deny = ["freeze_whole_system_close"]
+
+[[permission]]
+identifier = "allow-get-frozen-whole-system-report"
+description = "Enables the get_frozen_whole_system_report command without any pre-configured scope."
+commands.allow = ["get_frozen_whole_system_report"]
+
+[[permission]]
+identifier = "deny-get-frozen-whole-system-report"
+description = "Denies the get_frozen_whole_system_report command without any pre-configured scope."
+commands.deny = ["get_frozen_whole_system_report"]
+
+[[permission]]
+identifier = "allow-finish-whole-system-close"
+description = "Enables the finish_whole_system_close command without any pre-configured scope."
+commands.allow = ["finish_whole_system_close"]
+
+[[permission]]
+identifier = "deny-finish-whole-system-close"
+description = "Denies the finish_whole_system_close command without any pre-configured scope."
+commands.deny = ["finish_whole_system_close"]
+
+[[permission]]
+identifier = "allow-abort-whole-system-close"
+description = "Enables the abort_whole_system_close command without any pre-configured scope."
+commands.allow = ["abort_whole_system_close"]
+
+[[permission]]
+identifier = "deny-abort-whole-system-close"
+description = "Denies the abort_whole_system_close command without any pre-configured scope."
+commands.deny = ["abort_whole_system_close"]

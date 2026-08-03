@@ -26,6 +26,7 @@
         cardPayments?: number;
         accountRepaymentsCash?: number;
         accountRepaymentsCard?: number;
+        accountRepaymentsOther?: number;
         cashMovements?: number;
     };
 
@@ -63,8 +64,9 @@
     $: cashUpEnabled = ($settingsDB.find(setting => setting.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: reconcileCard = ($settingsDB.find(setting => setting.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
     $: canViewShiftHistory = hasPermission($currentEmployee, 'open_reports', $settingsDB);
+    $: canEndDayClose = hasPermission($currentEmployee, 'end_day_close', $settingsDB);
     $: activeOrderCount = Number(activeShift?.orderCount || 0);
-    $: canClose = poundsToPence(countedCash) !== null && (!reconcileCard || poundsToPence(cardMachineTotal) !== null);
+    $: canClose = canEndDayClose && poundsToPence(countedCash) !== null && (!reconcileCard || poundsToPence(cardMachineTotal) !== null);
     $: pageCount = Math.max(1, Math.ceil(shiftsTotal / PAGE_SIZE));
     $: if (page >= pageCount) page = pageCount - 1;
 
@@ -230,6 +232,10 @@
 
     async function closeCurrentShift() {
         if (!activeShift || !$currentEmployee || isClosing) return;
+        if (!canEndDayClose) {
+            toast('End Day / Z Report permission is required to close a till session', 'error');
+            return;
+        }
         const actualCash = poundsToPence(countedCash);
         const actualCardInput = poundsToPence(cardMachineTotal);
         if (actualCash === null) {
@@ -281,7 +287,7 @@
 </script>
 
 <MgmtPage title="Cash-up Sessions">
-    {#if cashUpEnabled && activeShift}
+    {#if cashUpEnabled && activeShift && canEndDayClose}
         <section class="cash-up-panel">
             <div class="cash-up-heading">
                 <div>
@@ -329,6 +335,8 @@
                 </div>
             </div>
         </section>
+    {:else if cashUpEnabled && activeShift}
+        <div class="feature-off"><strong>Current till session is open.</strong><span>End Day / Z Report permission is required to enter cash-up totals and close it.</span></div>
     {:else if !cashUpEnabled}
         <div class="feature-off"><strong>Till cash-up is disabled.</strong><span>Sessions still record transactions. Enable Till Cash-Up in Settings to use opening and closing counts.</span></div>
     {:else}
@@ -391,7 +399,7 @@
                                     <div class="shift-details">
                                         <div><h4>Cash</h4><p><span>Opening Float</span><b>{formatMoney(money(shift.openingFloat))}</b></p><p><span>Cash Sales</span><b>{formatMoney(money(shift.cashPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCash))}</b></p><p><span>Cash Movements</span><b>{formatMoney(money(shift.cashMovements))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCash)) : 'After close'}</b></p><p><span>Counted</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCash)) : '-'}</b></p></div>
                                         <div><h4>Card</h4><p><span>Card Sales</span><b>{formatMoney(money(shift.cardPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCard))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCard)) : 'After close'}</b></p><p><span>Machine</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCard)) : '-'}</b></p><p><span>Difference</span><b>{shift.status === 'closed' ? formatMoney(money(shift.cardDifference)) : '-'}</b></p></div>
-                                        <div><h4>Activity</h4><p><span>Orders</span><b>{money(shift.orderCount)}</b></p><p><span>Total Sales</span><b>{formatMoney(money(shift.salesTotal))}</b></p><p><span>Closed By</span><b>{shift.closedByName || '-'}</b></p>{#if shift.notes}<p><span>Notes</span><b>{shift.notes}</b></p>{/if}</div>
+                                        <div><h4>Activity</h4><p><span>Orders</span><b>{money(shift.orderCount)}</b></p><p><span>Total Sales</span><b>{formatMoney(money(shift.salesTotal))}</b></p><p><span>Other Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsOther))}</b></p><p><span>Closed By</span><b>{shift.closedByName || '-'}</b></p>{#if shift.notes}<p><span>Notes</span><b>{shift.notes}</b></p>{/if}</div>
                                     </div>
                                 </td></tr>
                             {/if}

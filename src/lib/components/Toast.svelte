@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { modalFocusTrap } from '$lib/actions/modalFocusTrap';
     import { toasts, removeToast, type ToastItem } from '$lib/stores/toast';
     $: items = $toasts;
 
@@ -30,6 +31,7 @@
     >
         {#each items as t (t.id)}
             <section
+                use:modalFocusTrap={{ dismiss: () => removeToast(t.id) }}
                 class="toast-pop w-full max-w-[460px] shrink-0 overflow-hidden rounded-2xl border border-border-flat bg-bg-panel p-5 text-text-main shadow-[0_24px_70px_var(--shadow)] sm:p-6"
                 role={t.type === 'error' ? 'alertdialog' : 'dialog'}
                 aria-modal="true"
@@ -82,6 +84,7 @@
                 <div class="mt-5 flex w-full flex-col gap-2.5 sm:flex-row">
                     <button
                         type="button"
+                        data-modal-initial-focus
                         class="btn btn-secondary flex-1"
                         on:click={() => removeToast(t.id)}
                     >OK</button>

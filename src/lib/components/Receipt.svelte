@@ -2,6 +2,11 @@
     import { formatMoney, type Order, type Store } from '$lib/stores/db';
     import { defaultReceiptDesign, type ReceiptDesign } from '$lib/receipt';
     import { getScaleSaleDisplay } from '$lib/scaleSale';
+    import {
+        receiptTenderBreakdown,
+        receiptTenderRows,
+        type ReceiptPayment,
+    } from '$lib/receiptPayments';
     import Code39Barcode from './Code39Barcode.svelte';
 
     interface ReceiptLine {
@@ -17,6 +22,7 @@
     export let store: Store;
     export let order: Order;
     export let lines: ReceiptLine[] = [];
+    export let payments: Array<Partial<ReceiptPayment>> = [];
     export let cashierName = '';
     export let tillName = '';
     export let design: ReceiptDesign = defaultReceiptDesign;
@@ -38,6 +44,11 @@
         .slice(0, 32);
     $: normalizedPaymentMethod = String(order.paymentMethod || 'cash').toLowerCase();
     $: hasAccountMovement = normalizedPaymentMethod.includes('account');
+    $: tenderBreakdown = receiptTenderBreakdown(payments);
+    $: tenderRows = receiptTenderRows(order, payments);
+    $: accountMovement = payments.length > 0
+        ? tenderBreakdown.account
+        : hasAccountMovement ? Number(order.total || 0) : 0;
     $: paymentLabel = hasAccountMovement
         ? order.type === 'return'
             ? normalizedPaymentMethod.includes('+') ? 'MIXED REFUND' : 'ACCOUNT CREDIT'
@@ -97,11 +108,17 @@
         {/if}
         <div class="receipt-total"><span>Total</span><span>{formatMoney(order.total || 0)}</span></div>
         {#if design.showPayment}
-            <div><span>{paymentLabel}</span><span>{formatMoney(order.amountTendered || order.total || 0)}</span></div>
-            {#if hasAccountMovement}
+            {#if payments.length > 0}
+                {#each tenderRows as tender}
+                    <div><span>{tender.label}</span><span>{formatMoney(tender.amount)}</span></div>
+                {/each}
+            {:else}
+                <div><span>{paymentLabel}</span><span>{formatMoney(order.amountTendered || order.total || 0)}</span></div>
+            {/if}
+            {#if accountMovement !== 0}
                 <div class="receipt-account-note">
-                    <span>{order.type === 'return' ? 'Customer account credited' : 'Charged to customer account'}</span>
-                    <span>{order.type === 'return' ? 'ACCOUNT REFUND' : 'PAY LATER'}</span>
+                    <span>{order.type === 'return' ? 'Customer account credited' : 'Account debt added'}</span>
+                    <span>{formatMoney(Math.abs(accountMovement))}</span>
                 </div>
             {/if}
             {#if (order.amountTendered || 0) > order.total}

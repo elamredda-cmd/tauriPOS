@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <defs>
+    <linearGradient id="soft-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.55" stop-color="#fbfdff"/>
+      <stop offset="1" stop-color="#edf8f7"/>
+    </linearGradient>
+    <linearGradient id="cta" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#082451"/>
+      <stop offset="1" stop-color="#123d73"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#082451" flood-opacity="0.14"/>
+    </filter>
+    <filter id="screen-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="9" flood-color="#00112f" flood-opacity="0.28"/>
+    </filter>
+    <clipPath id="screen-clip">
+      <rect x="448" y="633" width="363" height="226" rx="3"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1080" height="1080" fill="url(#soft-bg)"/>
+  <circle cx="980" cy="92" r="210" fill="#14c8c4" opacity="0.06"/>
+  <circle cx="82" cy="968" r="240" fill="#ffbc35" opacity="0.07"/>
+
+  <image href="lbj-cashier-white.png" x="0" y="0" width="1080" height="1080" preserveAspectRatio="xMidYMid slice"/>
+
+  <g filter="url(#screen-shadow)" clip-path="url(#screen-clip)">
+    <image href="lbj-pos-admin.png" x="448" y="633" width="363" height="226" preserveAspectRatio="none"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="48" y="42" width="514" height="112" rx="28" fill="#ffffff" fill-opacity="0.94"/>
+  </g>
+  <image href="lbj-pos-logo.png" x="66" y="55" width="86" height="86"/>
+  <text x="174" y="104" fill="#082451" font-family="Arial, sans-serif" font-size="35" font-weight="800">L&amp;Bj POS</text>
+  <text x="174" y="130" fill="#1c7d86" font-family="SF Arabic, Geeza Pro, Arial" font-size="18" font-weight="700">سیستەمی کاشێری زیرەک</text>
+
+  <g font-family="SF Arabic, Geeza Pro, Arial" direction="rtl" text-anchor="end">
+    <text x="570" y="228" fill="#082451" font-size="48" font-weight="800">سیستەمی فرۆشتنی زیرەک</text>
+    <text x="570" y="286" fill="#082451" font-size="48" font-weight="800">بۆ دووکانی تۆ</text>
+    <rect x="222" y="311" width="348" height="48" rx="24" fill="#13beba"/>
+    <text x="548" y="344" fill="#ffffff" font-size="23" font-weight="700">هەموو شتێک لە یەک شوێن</text>
+  </g>
+
+  <g font-family="SF Arabic, Geeza Pro, Arial" direction="rtl" text-anchor="end">
+    <g filter="url(#shadow)">
+      <rect x="58" y="392" width="472" height="61" rx="18" fill="#ffffff" fill-opacity="0.96"/>
+      <rect x="58" y="466" width="472" height="61" rx="18" fill="#ffffff" fill-opacity="0.96"/>
+      <rect x="58" y="540" width="472" height="61" rx="18" fill="#ffffff" fill-opacity="0.96"/>
+      <rect x="58" y="614" width="472" height="61" rx="18" fill="#ffffff" fill-opacity="0.96"/>
+    </g>
+    <circle cx="498" cy="422" r="16" fill="#13beba"/>
+    <circle cx="498" cy="496" r="16" fill="#ffb42e"/>
+    <circle cx="498" cy="570" r="16" fill="#13beba"/>
+    <circle cx="498" cy="644" r="16" fill="#ffb42e"/>
+    <text x="502" y="429" fill="#ffffff" font-size="19" font-weight="900" text-anchor="middle">✓</text>
+    <text x="502" y="503" fill="#ffffff" font-size="19" font-weight="900" text-anchor="middle">✓</text>
+    <text x="502" y="577" fill="#ffffff" font-size="19" font-weight="900" text-anchor="middle">✓</text>
+    <text x="502" y="651" fill="#ffffff" font-size="19" font-weight="900" text-anchor="middle">✓</text>
+    <text x="468" y="430" fill="#082451" font-size="25" font-weight="700">فرۆشتنی خێرا و ئاسان</text>
+    <text x="468" y="504" fill="#082451" font-size="25" font-weight="700">کۆگا، بارکۆد و بەڕێوەبردنی کاڵا</text>
+    <text x="468" y="578" fill="#082451" font-size="25" font-weight="700">کڕیار، قەرز و پارەدانی دواتر</text>
+    <text x="468" y="652" fill="#082451" font-size="23" font-weight="700">ڕاپۆرت و چاودێری کارمەندان</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="890" width="500" height="78" rx="24" fill="url(#cta)"/>
+  </g>
+  <text x="528" y="941" fill="#ffffff" font-family="SF Arabic, Geeza Pro, Arial" font-size="26" font-weight="700" direction="rtl" text-anchor="end">بۆ زانیاری زیاتر، پەیاممان بۆ بنێرە</text>
+  <rect x="58" y="985" width="500" height="4" rx="2" fill="#13beba"/>
+  <text x="58" y="1025" fill="#54647d" font-family="Arial, sans-serif" font-size="17" font-weight="700">L&amp;Bj POS • SMART RETAIL MANAGEMENT</text>
+</svg>

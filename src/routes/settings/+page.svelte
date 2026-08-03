@@ -63,6 +63,8 @@
     let store = { ...$storeDB };
     let editTillName = '';
     let tillId = '';
+    let storeSaving = false;
+    let tillNameSaving = false;
 
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
     $: ageRestrictionEnabled = isAgeRestrictionEnabled($settingsDB);
@@ -90,15 +92,21 @@
         tillId = await getOrCreateTillId();
     });
 
-    async function updateSetting(key: string, value: string) {
+    async function updateSetting(key: string, value: string): Promise<boolean> {
         const row = { key, value, updatedAt: now() };
-        settingsDB.update(settings => {
-            const index = settings.findIndex(item => item.key === key);
-            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
-            return [...settings, row];
-        });
-        if (!isTauri()) return;
-        await upsert('settings', row, 'key');
+        try {
+            if (isTauri()) await upsert('settings', row, 'key');
+            settingsDB.update(settings => {
+                const index = settings.findIndex(item => item.key === key);
+                if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
+                return [...settings, row];
+            });
+            return true;
+        } catch (error) {
+            console.error(`Could not save setting ${key}:`, error);
+            toast(`Could not save ${key.replace(/_/g, ' ')}. Try again.`, 'error');
+            return false;
+        }
     }
 
     function getSettingValue(key: string): string {
@@ -113,39 +121,64 @@
     async function updateLoyaltyNumber(key: string, rawValue: string, minimum: number, fallback: number) {
         const parsed = Math.floor(Number(rawValue));
         const value = Number.isFinite(parsed) ? Math.max(minimum, parsed) : fallback;
-        await updateSetting(key, String(value));
+        if (!await updateSetting(key, String(value))) return;
         if (rawValue.trim() !== String(value)) {
             toast(`Loyalty value adjusted to ${value}`, 'info');
         }
     }
 
-    function saveStore() {
-        storeDB.set(store as Store);
-        upsert('settings', { key: 'store_info', value: JSON.stringify(store), updatedAt: now() }, 'key');
-        toast('Store settings saved');
+    async function saveStore() {
+        if (storeSaving) return;
+        const nextStore = { ...store } as Store;
+        const row = { key: 'store_info', value: JSON.stringify(nextStore), updatedAt: now() };
+        storeSaving = true;
+        try {
+            if (isTauri()) await upsert('settings', row, 'key');
+            storeDB.set(nextStore);
+            settingsDB.update(settings => {
+                const index = settings.findIndex(item => item.key === row.key);
+                if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
+                return [...settings, row];
+            });
+            toast('Store settings saved');
+        } catch (error) {
+            console.error('Could not save store settings:', error);
+            toast('Could not save store settings. Try again.', 'error');
+        } finally {
+            storeSaving = false;
+        }
     }
 
-    function setStockTracking(enabled: boolean) {
-        updateSetting('stock_tracking_enabled', enabled ? 'true' : 'false');
+    async function setStockTracking(enabled: boolean) {
+        if (!await updateSetting('stock_tracking_enabled', enabled ? 'true' : 'false')) return;
         toast(enabled ? 'Stock tracking enabled' : 'Stock tracking disabled across the shop');
     }
 
-    function setAgeRestrictionEnabled(enabled: boolean) {
-        updateSetting(AGE_RESTRICTION_SETTING_KEY, enabled ? 'true' : 'false');
+    async function setAgeRestrictionEnabled(enabled: boolean) {
+        if (!await updateSetting(AGE_RESTRICTION_SETTING_KEY, enabled ? 'true' : 'false')) return;
         toast(enabled
             ? '18+ item alerts enabled across the shop'
             : '18+ item alerts disabled across the shop');
     }
 
-    function setCashUpEnabled(enabled: boolean) {
-        updateSetting('cash_up_enabled', enabled ? 'true' : 'false');
-        if (enabled) updateSetting('cash_up_activation_time', now());
+    async function setCashUpEnabled(enabled: boolean) {
+        if (enabled && !await updateSetting('cash_up_activation_time', now())) return;
+        if (!await updateSetting('cash_up_enabled', enabled ? 'true' : 'false')) return;
         toast(enabled ? 'Till cash-up enabled across the shop' : 'Till cash-up disabled across the shop');
     }
 
     async function saveTillName() {
-        await setTillNameDb(editTillName);
-        toast('Till name saved');
+        if (tillNameSaving) return;
+        tillNameSaving = true;
+        try {
+            if (isTauri()) await setTillNameDb(editTillName);
+            toast('Till name saved');
+        } catch (error) {
+            console.error('Could not save till name:', error);
+            toast('Could not save till name. Try again.', 'error');
+        } finally {
+            tillNameSaving = false;
+        }
     }
 
     function selectedSizeLabel(value: string): string {
@@ -158,9 +191,9 @@
 </svelte:head>
 
 <MgmtPage title="Settings">
-    <button slot="actions" class="btn btn-primary settings-save-button" on:click={saveStore}>
+    <button slot="actions" class="btn btn-primary settings-save-button" disabled={storeSaving} on:click={saveStore}>
         <Save size={19} strokeWidth={2.4} aria-hidden="true" />
-        <span>Save shop</span>
+        <span>{storeSaving ? 'Saving...' : 'Save shop'}</span>
     </button>
 
     <div class="settings-overview">
@@ -261,7 +294,7 @@
                             <label for="settings-till-name">Till display name</label>
                             <div class="settings-inline-field">
                                 <input id="settings-till-name" bind:value={editTillName} placeholder="e.g. Till 1" />
-                                <button class="btn btn-primary" on:click={saveTillName}>Save name</button>
+                                <button class="btn btn-primary" disabled={tillNameSaving} on:click={saveTillName}>{tillNameSaving ? 'Saving...' : 'Save name'}</button>
                             </div>
                         </div>
                         <div class="field">
@@ -896,6 +929,10 @@
     @media (max-width: 1180px) {
         .settings-shortcut-grid {
             grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .settings-till-fields {
+            grid-template-columns: 1fr;
         }
 
         .settings-summary {

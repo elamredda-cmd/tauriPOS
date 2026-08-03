@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="ckb" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>L&amp;Bj POS — Kurdish Sorani Social Campaign</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Kufi+Arabic:wght@500;700;800;900&amp;family=Noto+Sans+Arabic:wght@500;600;700;800&amp;display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --navy: #061b34;
+      --navy-2: #0b2948;
+      --panel: #0e3456;
+      --cyan: #37d5e5;
+      --teal: #16b8c4;
+      --amber: #ffbe2e;
+      --white: #f7fbff;
+      --muted: #a9c4d7;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #031428; }
+    body { font-family: "Noto Sans Arabic", "Geeza Pro", Arial, sans-serif; }
+
+    .page {
+      position: relative;
+      width: 1080px;
+      height: 1080px;
+      overflow: hidden;
+      color: var(--white);
+      background:
+        radial-gradient(circle at 84% 13%, rgba(55, 213, 229, .20), transparent 24%),
+        radial-gradient(circle at 14% 86%, rgba(22, 184, 196, .14), transparent 29%),
+        linear-gradient(145deg, #04162d 0%, var(--navy) 46%, #0a2d4d 100%);
+      isolation: isolate;
+    }
+
+    .page::before,
+    .page::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      border: 1px solid rgba(55, 213, 229, .16);
+      border-radius: 50%;
+    }
+    .page::before { width: 630px; height: 630px; left: -260px; top: -300px; }
+    .page::after { width: 720px; height: 720px; right: -380px; bottom: -350px; }
+
+    .topbar {
+      position: absolute;
+      top: 58px;
+      left: 64px;
+      right: 64px;
+      display: flex;
+      direction: ltr;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo {
+      width: 112px;
+      height: 112px;
+      object-fit: contain;
+      border-radius: 28px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, .26);
+    }
+    .brand-chip {
+      direction: ltr;
+      padding: 12px 22px;
+      border: 1px solid rgba(55, 213, 229, .45);
+      border-radius: 999px;
+      color: var(--cyan);
+      background: rgba(4, 22, 45, .52);
+      font: 800 19px/1.1 "Noto Kufi Arabic", sans-serif;
+      letter-spacing: .10em;
+    }
+
+    .copy {
+      position: absolute;
+      top: 230px;
+      right: 64px;
+      width: 476px;
+      text-align: right;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 20px;
+      color: var(--cyan);
+      font: 800 20px/1.5 "Noto Kufi Arabic", sans-serif;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 5px;
+      border-radius: 99px;
+      background: var(--amber);
+    }
+    h1 {
+      margin: 0;
+      font: 900 54px/1.55 "Noto Kufi Arabic", "Noto Sans Arabic", sans-serif;
+      letter-spacing: -.035em;
+      text-wrap: balance;
+    }
+    .accent { color: var(--cyan); }
+    .body-copy {
+      margin: 24px 0 0;
+      color: #d7e7f2;
+      font-size: 25px;
+      font-weight: 600;
+      line-height: 2;
+    }
+    .feature-line {
+      display: inline-flex;
+      margin-top: 30px;
+      padding: 11px 21px 13px;
+      border: 1px solid rgba(255, 190, 46, .46);
+      border-radius: 999px;
+      color: var(--amber);
+      background: rgba(255, 190, 46, .07);
+      font: 800 18px/1.5 "Noto Kufi Arabic", sans-serif;
+    }
+    .cta {
+      position: absolute;
+      right: 64px;
+      bottom: 64px;
+      min-width: 350px;
+      padding: 17px 28px 19px;
+      border-radius: 18px;
+      color: #032238;
+      background: linear-gradient(135deg, var(--cyan), #65e7d4);
+      box-shadow: 0 18px 50px rgba(55, 213, 229, .18);
+      text-align: center;
+      font: 900 20px/1.55 "Noto Kufi Arabic", sans-serif;
+    }
+
+    .hero {
+      position: absolute;
+      top: 215px;
+      left: 54px;
+      width: 456px;
+      height: 675px;
+      border: 1px solid rgba(122, 224, 237, .24);
+      border-radius: 46px;
+      background:
+        linear-gradient(160deg, rgba(22, 184, 196, .14), transparent 42%),
+        rgba(7, 30, 55, .74);
+      box-shadow: 0 34px 80px rgba(0, 0, 0, .28), inset 0 1px rgba(255,255,255,.08);
+    }
+
+    /* Handheld */
+    .device {
+      position: absolute;
+      top: 75px;
+      left: 105px;
+      width: 246px;
+      height: 450px;
+      border: 11px solid #122f4d;
+      border-radius: 42px;
+      background: #173d5d;
+      transform: rotate(-4deg);
+      box-shadow: 0 30px 55px rgba(0, 0, 0, .42), inset 0 0 0 2px #4a7087;
+    }
+    .device::before {
+      content: "";
+      position: absolute;
+      top: 16px;
+      left: 84px;
+      width: 58px;
+      height: 7px;
+      border-radius: 99px;
+      background: #061b34;
+    }
+    .screen {
+      position: absolute;
+      top: 40px;
+      left: 13px;
+      right: 13px;
+      bottom: 60px;
+      overflow: hidden;
+      border-radius: 24px;
+      background: linear-gradient(160deg, #f4fbff, #ccebf0);
+    }
+    .scan-head {
+      height: 84px;
+      padding: 23px 16px;
+      color: #06304c;
+      background: linear-gradient(135deg, #36d5e5, #61e3cc);
+      text-align: center;
+      font: 900 16px/1.5 "Noto Kufi Arabic", sans-serif;
+    }
+    .scan-box {
+      position: relative;
+      width: 132px;
+      height: 132px;
+      margin: 24px auto 15px;
+      border: 4px solid #11aab8;
+      border-radius: 22px;
+    }
+    .scan-box::before,
+    .scan-box::after {
+      content: "";
+      position: absolute;
+      left: 17px;
+      right: 17px;
+      height: 4px;
+      border-radius: 99px;
+      background: var(--amber);
+    }
+    .scan-box::before { top: 49px; box-shadow: 0 9px 22px var(--amber); }
+    .scan-box::after { bottom: 20px; background: repeating-linear-gradient(90deg, #0b2948 0 4px, transparent 4px 8px); }
+    .product-pill {
+      width: 146px;
+      margin: 0 auto;
+      padding: 8px;
+      border-radius: 12px;
+      color: #0b2948;
+      background: white;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .home-dot {
+      position: absolute;
+      left: 94px;
+      bottom: 18px;
+      width: 38px;
+      height: 12px;
+      border-radius: 99px;
+      background: #061b34;
+    }
+    .scan-beam {
+      position: absolute;
+      left: 68px;
+      top: 332px;
+      width: 340px;
+      height: 4px;
+      border-radius: 99px;
+      background: var(--amber);
+      box-shadow: 0 0 18px 4px rgba(255, 190, 46, .55);
+      transform: rotate(-4deg);
+    }
+    .mini-card {
+      position: absolute;
+      min-width: 116px;
+      padding: 11px 14px;
+      border: 1px solid rgba(55, 213, 229, .40);
+      border-radius: 16px;
+      color: #e8faff;
+      background: rgba(13, 52, 86, .92);
+      box-shadow: 0 16px 28px rgba(0,0,0,.25);
+      text-align: center;
+      font-size: 15px;
+      font-weight: 800;
+    }
+    .mc1 { top: 72px; left: 26px; }
+    .mc2 { top: 455px; right: 18px; border-color: rgba(255,190,46,.40); }
+    .mc3 { bottom: 35px; left: 52px; }
+    .mc4 { bottom: 82px; right: 36px; }
+
+    /* Phone */
+    .phone {
+      position: absolute;
+      top: 45px;
+      left: 91px;
+      width: 276px;
+      height: 540px;
+      padding: 13px;
+      border: 7px solid #173d5d;
+      border-radius: 48px;
+      background: #061b34;
+      box-shadow: 0 34px 66px rgba(0,0,0,.48), inset 0 0 0 1px #628197;
+      transform: rotate(3deg);
+    }
+    .phone::before {
+      content: "";
+      position: absolute;
+      z-index: 3;
+      top: 14px;
+      left: 91px;
+      width: 86px;
+      height: 20px;
+      border-radius: 999px;
+      background: #061b34;
+    }
+    .phone-screen {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border-radius: 34px;
+      padding: 54px 18px 18px;
+      color: #0b2948;
+      background: linear-gradient(180deg, #effbff 0%, #d6eef4 100%);
+    }
+    .dash-title {
+      font: 900 15px/1.4 "Noto Kufi Arabic", sans-serif;
+      text-align: right;
+    }
+    .metric {
+      margin-top: 14px;
+      padding: 14px;
+      border-radius: 18px;
+      color: white;
+      background: linear-gradient(135deg, #0f8d9c, #15bcc7);
+    }
+    .metric small { display: block; opacity: .82; font-size: 11px; font-weight: 800; }
+    .metric strong { display: block; margin-top: 5px; font: 900 28px/1.2 Arial, sans-serif; direction: ltr; text-align: right; }
+    .chart {
+      height: 128px;
+      margin-top: 12px;
+      padding: 15px 13px;
+      border-radius: 18px;
+      background: white;
+      box-shadow: 0 10px 22px rgba(16, 69, 91, .10);
+    }
+    .bars { height: 72px; display: flex; direction: ltr; align-items: end; gap: 9px; }
+    .bar { flex: 1; border-radius: 7px 7px 2px 2px; background: linear-gradient(180deg, var(--cyan), #0c9cab); }
+    .bar:nth-child(1) { height: 32%; }
+    .bar:nth-child(2) { height: 70%; }
+    .bar:nth-child(3) { height: 52%; }
+    .bar:nth-child(4) { height: 88%; background: linear-gradient(180deg, var(--amber), #ef9c17); }
+    .bar:nth-child(5) { height: 64%; }
+    .chart-label { margin-top: 7px; color: #5b788e; font-size: 10px; font-weight: 800; text-align: right; }
+    .till-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 11px; }
+    .till {
+      padding: 10px 8px;
+      border-radius: 14px;
+      color: #0b2948;
+      background: white;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 900;
+    }
+    .till::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 5px; border-radius: 50%; background: #20bf75; }
+    .qr {
+      position: absolute;
+      right: 25px;
+      bottom: 32px;
+      width: 112px;
+      height: 112px;
+      padding: 14px;
+      border: 1px solid rgba(255,190,46,.46);
+      border-radius: 22px;
+      background: #fff;
+      box-shadow: 0 18px 36px rgba(0,0,0,.25);
+    }
+    .qr-grid {
+      width: 100%;
+      height: 100%;
+      background:
+        linear-gradient(90deg, #061b34 14%, transparent 14% 28%, #061b34 28% 42%, transparent 42% 57%, #061b34 57% 72%, transparent 72% 86%, #061b34 86%),
+        linear-gradient(#061b34 14%, transparent 14% 28%, #061b34 28% 42%, transparent 42% 57%, #061b34 57% 72%, transparent 72% 86%, #061b34 86%);
+      background-blend-mode: multiply;
+    }
+    .live-badge {
+      position: absolute;
+      left: 26px;
+      bottom: 49px;
+      padding: 11px 16px;
+      border-radius: 999px;
+      color: #bfffe2;
+      background: rgba(18, 158, 95, .20);
+      border: 1px solid rgba(77, 230, 153, .38);
+      font-size: 14px;
+      font-weight: 900;
+    }
+
+    /* CCTV */
+    .monitor {
+      position: absolute;
+      top: 105px;
+      left: 26px;
+      width: 404px;
+      height: 354px;
+      padding: 15px;
+      border: 7px solid #173d5d;
+      border-radius: 29px;
+      background: #061b34;
+      box-shadow: 0 30px 58px rgba(0,0,0,.46), inset 0 0 0 1px #628197;
+    }
+    .monitor::before {
+      content: "";
+      position: absolute;
+      left: 177px;
+      bottom: -62px;
+      width: 50px;
+      height: 62px;
+      background: #173d5d;
+    }
+    .monitor::after {
+      content: "";
+      position: absolute;
+      left: 130px;
+      bottom: -70px;
+      width: 144px;
+      height: 17px;
+      border-radius: 99px;
+      background: #173d5d;
+    }
+    .cctv-screen {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border-radius: 18px;
+      background:
+        linear-gradient(120deg, rgba(55,213,229,.22), transparent 45%),
+        linear-gradient(145deg, #34647a 0%, #1b3f59 50%, #092a44 100%);
+    }
+    .counter-shape {
+      position: absolute;
+      left: -16px;
+      right: 120px;
+      bottom: -7px;
+      height: 116px;
+      transform: skewX(-10deg);
+      background: rgba(223,241,245,.14);
+      border-top: 2px solid rgba(255,255,255,.22);
+    }
+    .overlay {
+      position: absolute;
+      top: 32px;
+      right: 25px;
+      width: 286px;
+      padding: 18px;
+      border-left: 4px solid var(--amber);
+      color: white;
+      background: rgba(2, 13, 25, .72);
+      box-shadow: 0 12px 24px rgba(0,0,0,.26);
+      direction: rtl;
+      text-align: right;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.9;
+    }
+    .overlay-title { color: var(--cyan); font: 900 14px/1.6 "Noto Kufi Arabic", sans-serif; }
+    .overlay-row { display: flex; direction: rtl; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgba(255,255,255,.13); }
+    .overlay-total { display: flex; justify-content: space-between; padding-top: 8px; color: var(--amber); font-weight: 900; font-size: 16px; }
+    .camera {
+      position: absolute;
+      left: 72px;
+      bottom: 58px;
+      width: 206px;
+      height: 112px;
+      border: 7px solid #1a4967;
+      border-radius: 27px 46px 46px 27px;
+      background: linear-gradient(145deg, #f2fbff, #a9c7d3);
+      box-shadow: 0 24px 48px rgba(0,0,0,.36);
+      transform: rotate(-4deg);
+    }
+    .camera::before {
+      content: "";
+      position: absolute;
+      right: 24px;
+      top: 21px;
+      width: 58px;
+      height: 58px;
+      border: 10px solid #153a55;
+      border-radius: 50%;
+      background: radial-gradient(circle at 38% 35%, var(--cyan) 0 7%, #0a1e33 9% 47%, #06131f 49%);
+      box-shadow: 0 0 0 6px #628197;
+    }
+    .camera::after {
+      content: "";
+      position: absolute;
+      left: 35px;
+      bottom: -43px;
+      width: 65px;
+      height: 49px;
+      border-radius: 8px 8px 18px 18px;
+      background: #173d5d;
+      transform: skewX(-16deg);
+    }
+    .network-line {
+      position: absolute;
+      left: 175px;
+      bottom: 184px;
+      width: 172px;
+      height: 95px;
+      border-top: 3px dashed rgba(55,213,229,.66);
+      border-right: 3px dashed rgba(55,213,229,.66);
+      border-radius: 0 28px 0 0;
+    }
+    .network-dot {
+      position: absolute;
+      left: 337px;
+      bottom: 267px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 0 8px rgba(55,213,229,.15);
+    }
+    .page-cctv h1 { font-size: 51px; }
+    .page-phone h1 { font-size: 56px; }
+  </style>
+</head>
+<body>
+  <main class="page page-handheld" data-document-role="page" data-label="ئامێری دەستی">
+    <header class="topbar">
+      <img class="logo" src="https://media.canva.com/v2/image-resize/format:PNG/height:200/quality:100/uri:ifs%3A%2F%2FM%2Fc3bfec94-797c-4c86-aa68-21eae014e5b0/watermark:F/width:200?csig=AAAAAAAAAAAAAAAAAAAAAPp6eRZ0N61ISf--OQnnr02RU9eUym_kmAKhSjWblK-B&amp;exp=1785533699&amp;osig=AAAAAAAAAAAAAAAAAAAAAFVUFepVy54EFLCpXwT1GYQaEufLOpqefs00eFLj0fmw&amp;signer=media-rpc&amp;x-canva-quality=thumbnail" alt="L&amp;Bj POS" />
+      <div class="brand-chip">L&amp;BJ POS ECOSYSTEM</div>
+    </header>
+    <section class="copy">
+      <div class="eyebrow">بەڕێوەبردنی زیرەک</div>
+      <h1><span class="accent">ئامێری دەستی</span> — دوکانەکەت لە ناو دەستتدا</h1>
+      <p class="body-copy">کاڵا بسکێنە، زیاد بکە و دەستکاری بکە؛ نرخ و وێنە نوێ بکەرەوە، پڕۆمۆشنەکان بەڕێوە ببە و لیبڵ چاپ بکە.</p>
+      <div class="feature-line">خێرا • ئاسان • هاوکاتکراو</div>
+    </section>
+    <section class="hero" aria-label="ئامێری دەستی">
+      <div class="device">
+        <div class="screen">
+          <div class="scan-head">سکانی کاڵا</div>
+          <div class="scan-box"></div>
+          <div class="product-pill">کاڵاکە دۆزرایەوە</div>
+        </div>
+        <div class="home-dot"></div>
+      </div>
+      <div class="scan-beam"></div>
+      <div class="mini-card mc1">سکان</div>
+      <div class="mini-card mc2">وێنە</div>
+      <div class="mini-card mc3">پڕۆمۆشن</div>
+      <div class="mini-card mc4">چاپی لیبڵ</div>
+    </section>
+    <footer class="cta">بۆ زانیاری زیاتر پەیوەندیمان پێوە بکە</footer>
+  </main>
+
+  <main class="page page-phone" data-document-role="page" data-label="ئەپی خاوەنکار">
+    <header class="topbar">
+      <img class="logo" src="https://media.canva.com/v2/image-resize/format:PNG/height:200/quality:100/uri:ifs%3A%2F%2FM%2Fc3bfec94-797c-4c86-aa68-21eae014e5b0/watermark:F/width:200?csig=AAAAAAAAAAAAAAAAAAAAAPp6eRZ0N61ISf--OQnnr02RU9eUym_kmAKhSjWblK-B&amp;exp=1785533699&amp;osig=AAAAAAAAAAAAAAAAAAAAAFVUFepVy54EFLCpXwT1GYQaEufLOpqefs00eFLj0fmw&amp;signer=media-rpc&amp;x-canva-quality=thumbnail" alt="L&amp;Bj POS" />
+      <div class="brand-chip">L&amp;BJ POS ECOSYSTEM</div>
+    </header>
+    <section class="copy">
+      <div class="eyebrow">نوێکاریی ڕاستەوخۆ</div>
+      <h1>دوکانەکەت لە <span class="accent">مۆبایلەکەتدا</span></h1>
+      <p class="body-copy">فرۆشتن، شێوازی پارەدان، کۆگا، کاڵا پڕفرۆشەکان و دۆخی هەموو تێلەکان بە نوێکاریی ڕاستەوخۆ ببینە.</p>
+      <div class="feature-line">لە هەر شوێنێکەوە • لە هەر کاتێکدا</div>
+    </section>
+    <section class="hero" aria-label="داشبۆردی مۆبایل">
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="dash-title">پوختەی دوکان</div>
+          <div class="metric"><small>فرۆشتنی ئەمڕۆ</small><strong>£2,486</strong></div>
+          <div class="chart">
+            <div class="bars"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>
+            <div class="chart-label">ڕەوتی فرۆشتن</div>
+          </div>
+          <div class="till-grid"><div class="till">تیل ١</div><div class="till">تیل ٢</div></div>
+        </div>
+      </div>
+      <div class="qr"><div class="qr-grid"></div></div>
+      <div class="live-badge">● پەیوەندی زیندوو</div>
+    </section>
+    <footer class="cta">بە QR پەیوەست ببە</footer>
+  </main>
+
+  <main class="page page-cctv" data-document-role="page" data-label="پیشاندانی CCTV">
+    <header class="topbar">
+      <img class="logo" src="https://media.canva.com/v2/image-resize/format:PNG/height:200/quality:100/uri:ifs%3A%2F%2FM%2Fc3bfec94-797c-4c86-aa68-21eae014e5b0/watermark:F/width:200?csig=AAAAAAAAAAAAAAAAAAAAAPp6eRZ0N61ISf--OQnnr02RU9eUym_kmAKhSjWblK-B&amp;exp=1785533699&amp;osig=AAAAAAAAAAAAAAAAAAAAAFVUFepVy54EFLCpXwT1GYQaEufLOpqefs00eFLj0fmw&amp;signer=media-rpc&amp;x-canva-quality=thumbnail" alt="L&amp;Bj POS" />
+      <div class="brand-chip">L&amp;BJ POS ECOSYSTEM</div>
+    </header>
+    <section class="copy">
+      <div class="eyebrow">چاودێریی زیرەک</div>
+      <h1>هەر مامەڵەیەک لەسەر <span class="accent">CCTV</span> ببینە</h1>
+      <p class="body-copy">ناوی کاڵا، بڕ، نرخ، کۆی پارە و زانیاریی وەسڵ بە شێوەی ڕاستەوخۆ لەسەر ڤیدیۆی کامێرا پیشان بدە.</p>
+      <div class="feature-line">چاودێریی ڕوونتر • کۆنترۆڵی باشتر</div>
+    </section>
+    <section class="hero" aria-label="پیشاندانی مامەڵە لەسەر CCTV">
+      <div class="monitor">
+        <div class="cctv-screen">
+          <div class="counter-shape"></div>
+          <div class="overlay">
+            <div class="overlay-title">مامەڵەی تیل ١</div>
+            <div class="overlay-row"><span>٢ × کۆلا</span><bdi>£4.00</bdi></div>
+            <div class="overlay-row"><span>١ × کاڵای کێشی</span><bdi>£1.50</bdi></div>
+            <div class="overlay-total"><span>کۆی گشتی</span><bdi>£5.50</bdi></div>
+          </div>
+        </div>
+      </div>
+      <div class="network-line"></div><div class="network-dot"></div>
+      <div class="camera"></div>
+    </section>
+    <footer class="cta">L&amp;Bj POS بۆ دوکانی مۆدێرن</footer>
+  </main>
+</body>
+</html>

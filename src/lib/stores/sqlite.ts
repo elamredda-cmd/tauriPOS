@@ -204,6 +204,18 @@ export async function initDb() {
         )
     `);
     await d.execute(`
+        CREATE TABLE IF NOT EXISTS _online_financial_intent (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            operation TEXT NOT NULL,
+            orderId TEXT NOT NULL UNIQUE,
+            requestJson TEXT NOT NULL,
+            bundleJson TEXT NOT NULL,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL,
+            lastError TEXT NOT NULL DEFAULT ''
+        )
+    `);
+    await d.execute(`
         CREATE TABLE IF NOT EXISTS app_identity (
             id TEXT PRIMARY KEY,
             shopId TEXT NOT NULL,
@@ -220,11 +232,16 @@ export async function initDb() {
             provider TEXT NOT NULL,
             terminalKey TEXT NOT NULL,
             clientTransactionId TEXT DEFAULT '',
+            terminalSessionId TEXT DEFAULT '',
+            operationKind TEXT NOT NULL DEFAULT 'sale',
             amount INTEGER NOT NULL,
+            expectedProviderAmount INTEGER NOT NULL DEFAULT 0,
             currency TEXT NOT NULL,
             status TEXT NOT NULL,
             saleBundle TEXT NOT NULL,
+            providerReference TEXT DEFAULT '',
             error TEXT DEFAULT '',
+            tillId TEXT DEFAULT '',
             createdAt TEXT NOT NULL,
             updatedAt TEXT NOT NULL
         )
@@ -545,6 +562,7 @@ export async function initDb() {
             accountTotal INTEGER DEFAULT 0,
             accountRepaymentsCash INTEGER DEFAULT 0,
             accountRepaymentsCard INTEGER DEFAULT 0,
+            accountRepaymentsOther INTEGER DEFAULT 0,
             totalSales INTEGER DEFAULT 0,
             transactionCount INTEGER DEFAULT 0,
             updatedAt TEXT,
@@ -723,6 +741,11 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt DESC, id)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_offline_queue_due ON _offline_queue(next_attempt_at, created_at)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payment_terminal_attempt_status ON payment_terminal_attempts(status, updatedAt)`);
+    await d.execute(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_terminal_active
+        ON payment_terminal_attempts(terminalKey)
+        WHERE status IN ('prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending')
+    `);
     await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu ON products(scalePlu)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_products_scale_plu_active ON products(scalePlu, isActive)`);
@@ -824,6 +847,15 @@ async function runMigrations() {
     await addColumnIfMissing('_offline_queue', 'last_error', "TEXT DEFAULT ''");
     await addColumnIfMissing('_offline_queue', 'next_attempt_at', "TEXT DEFAULT ''");
 
+    // Managed-card attempts are an operational journal, not receipt history.
+    // Keep enough provider and ledger context to recover every request after a
+    // process or machine crash.
+    await addColumnIfMissing('payment_terminal_attempts', 'terminalSessionId', "TEXT DEFAULT ''");
+    await addColumnIfMissing('payment_terminal_attempts', 'operationKind', "TEXT NOT NULL DEFAULT 'sale'");
+    await addColumnIfMissing('payment_terminal_attempts', 'expectedProviderAmount', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing('payment_terminal_attempts', 'providerReference', "TEXT DEFAULT ''");
+    await addColumnIfMissing('payment_terminal_attempts', 'tillId', "TEXT DEFAULT ''");
+
     // Experimental builds may already have one or both account tables with an
     // incomplete shape. CREATE TABLE IF NOT EXISTS cannot repair those tables,
     // so guard every required field before account indexes or feature queries.
@@ -874,7 +906,14 @@ async function runMigrations() {
     await addColumnIfMissing('customer_accounts', 'customerId', "TEXT NOT NULL DEFAULT ''");
     await addColumnIfMissing('customer_accounts', 'isEnabled', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing('customer_accounts', 'creditLimitPence', 'INTEGER NOT NULL DEFAULT 0');
-    await addColumnIfMissing('customer_accounts', 'balancePence', 'INTEGER NOT NULL DEFAULT 0');
+    // Keep a newly-added balance nullable until it has been reconstructed from
+    // that account's own ledger. A default of zero would make an interrupted
+    // migration indistinguishable from a genuine zero balance on the next run.
+    await addColumnIfMissing(
+        'customer_accounts',
+        'balancePence',
+        accountBalanceMissing ? 'INTEGER' : 'INTEGER NOT NULL DEFAULT 0',
+    );
     await addColumnIfMissing('customer_accounts', 'createdAt', "TEXT NOT NULL DEFAULT ''");
     await addColumnIfMissing('customer_accounts', 'updatedAt', "TEXT NOT NULL DEFAULT ''");
 
@@ -988,6 +1027,36 @@ async function runMigrations() {
         throw new Error('A partially-upgraded customer account ledger contains entries that do not map to exactly one customer account. Restore the pre-schema backup or repair the financial relationships before continuing.');
     }
     if (accountBalanceMissing) {
+        const accountsWithoutLedger = await d.select<Array<{ count: number }>>(`
+            SELECT COUNT(*) AS count
+            FROM customer_accounts account
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM customer_account_entries entry
+                WHERE entry.accountId = account.id
+                  AND entry.customerId = account.customerId
+            )
+        `);
+        if (Number(accountsWithoutLedger[0]?.count || 0) > 0) {
+            throw new Error('A partially-upgraded customer account has no saved balance and no matching ledger from which to reconstruct it. Restore the pre-schema backup or repair the balance before continuing.');
+        }
+    } else {
+        const nullBalancesWithoutLedger = await d.select<Array<{ count: number }>>(`
+            SELECT COUNT(*) AS count
+            FROM customer_accounts account
+            WHERE account.balancePence IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM customer_account_entries entry
+                  WHERE entry.accountId = account.id
+                    AND entry.customerId = account.customerId
+              )
+        `);
+        if (Number(nullBalancesWithoutLedger[0]?.count || 0) > 0) {
+            throw new Error('A partially-upgraded customer account has a missing balance and no matching ledger from which to reconstruct it. Restore the pre-schema backup or repair the balance before continuing.');
+        }
+    }
+    if (accountBalanceMissing) {
         await d.execute(`
             UPDATE customer_accounts
             SET balancePence = COALESCE((
@@ -1032,6 +1101,14 @@ async function runMigrations() {
     await addColumnIfMissing('daily_sales_summary', 'accountTotal', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('daily_sales_summary', 'accountRepaymentsCash', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('daily_sales_summary', 'accountRepaymentsCard', 'INTEGER DEFAULT 0');
+    const accountRepaymentsOtherAdded = await addColumnIfMissing(
+        'daily_sales_summary',
+        'accountRepaymentsOther',
+        'INTEGER DEFAULT 0',
+    );
+    // This is derived cache data, so an older database can rebuild it from the
+    // append-only account ledger without inventing or losing financial value.
+    if (accountRepaymentsOtherAdded) await aggregateDailySummary();
 
     // Multi-till support: track which till processed each order.
     await addColumnIfMissing('orders', 'tillNumber', "TEXT DEFAULT ''");
@@ -2354,7 +2431,8 @@ async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
         d.select<any[]>(
             `SELECT shiftId,
                     COALESCE(SUM(CASE WHEN paymentMethod = 'cash' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
-                    COALESCE(SUM(CASE WHEN paymentMethod = 'card' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard
+                    COALESCE(SUM(CASE WHEN paymentMethod = 'card' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
+                    COALESCE(SUM(CASE WHEN paymentMethod = 'other' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther
              FROM customer_account_entries
              WHERE shiftId IN (${placeholders})
                AND entryType = 'payment'
@@ -2376,6 +2454,7 @@ async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
         cashMovements: Number(movementsByShift.get(String(row.id))?.cashMovements || 0),
         accountRepaymentsCash: Number(accountPaymentsByShift.get(String(row.id))?.accountRepaymentsCash || 0),
         accountRepaymentsCard: Number(accountPaymentsByShift.get(String(row.id))?.accountRepaymentsCard || 0),
+        accountRepaymentsOther: Number(accountPaymentsByShift.get(String(row.id))?.accountRepaymentsOther || 0),
     }));
 }
 
@@ -2461,6 +2540,7 @@ export interface PosHeldOrdersResult {
 export interface PosRecentReceiptsResult {
     orders: any[];
     lines: any[];
+    payments: any[];
 }
 
 export interface OrderDetailsResult {
@@ -2669,10 +2749,12 @@ export async function getPosRecentReceipts(limit = 10): Promise<PosRecentReceipt
          LIMIT ?`,
         [safeLimit],
     );
-    return {
-        orders,
-        lines: await getLinesForOrderIds(d, orders.map((order) => order.id)),
-    };
+    const orderIds = orders.map((order) => order.id);
+    const [lines, payments] = await Promise.all([
+        getLinesForOrderIds(d, orderIds),
+        getPaymentsForOrderIds(d, orderIds),
+    ]);
+    return { orders, lines, payments };
 }
 
 /** Fetch only the latest printable receipt for this till. */
@@ -2920,6 +3002,7 @@ export interface PaymentBreakdown {
     accountCharges: number;
     accountRepaymentsCash: number;
     accountRepaymentsCard: number;
+    accountRepaymentsOther: number;
     accountAdjustments: number;
     openingAccountOwed: number;
     closingAccountOwed: number;
@@ -2940,6 +3023,7 @@ interface AccountReportActivity {
     accountCharges: number;
     accountRepaymentsCash: number;
     accountRepaymentsCard: number;
+    accountRepaymentsOther: number;
     accountAdjustments: number;
     openingAccountOwed: number;
     closingAccountOwed: number;
@@ -2962,6 +3046,7 @@ async function getAccountReportActivity(
                 COALESCE(SUM(CASE WHEN entryType = 'charge' THEN amountPence ELSE 0 END), 0) AS accountCharges,
                 COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
                 COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
+                COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther,
                 COALESCE(SUM(CASE WHEN entryType NOT IN ('charge', 'payment') THEN amountPence ELSE 0 END), 0) AS accountAdjustments
              FROM customer_account_entries
              WHERE createdAt >= ? AND createdAt < ?`,
@@ -2983,6 +3068,7 @@ async function getAccountReportActivity(
         accountCharges: Number(activity.accountCharges || 0),
         accountRepaymentsCash: Number(activity.accountRepaymentsCash || 0),
         accountRepaymentsCard: Number(activity.accountRepaymentsCard || 0),
+        accountRepaymentsOther: Number(activity.accountRepaymentsOther || 0),
         accountAdjustments: Number(activity.accountAdjustments || 0),
         openingAccountOwed: Number(openingRows[0]?.balance || 0),
         closingAccountOwed: Number(closingRows[0]?.balance || 0),
@@ -3017,6 +3103,7 @@ export interface TillSalesSummary extends TillReportOption {
     accountTotal: number;
     accountRepaymentsCash: number;
     accountRepaymentsCard: number;
+    accountRepaymentsOther: number;
 }
 
 export interface DailySalesPoint {
@@ -3233,7 +3320,8 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
         `SELECT date(createdAt, 'localtime') AS day,
                 COALESCE(tillNumber, '') AS till,
                 COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
-                COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard
+                COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
+                COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther
          FROM customer_account_entries
          WHERE entryType = 'payment'${date ? ` AND date(createdAt, 'localtime') = ?` : ''}
          GROUP BY day, till`,
@@ -3246,6 +3334,7 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
             ...row,
             accountRepaymentsCash: 0,
             accountRepaymentsCard: 0,
+            accountRepaymentsOther: 0,
         });
     }
     for (const row of collectionRows) {
@@ -3261,6 +3350,7 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
             ...summaries.get(key),
             accountRepaymentsCash: Number(row.accountRepaymentsCash || 0),
             accountRepaymentsCard: Number(row.accountRepaymentsCard || 0),
+            accountRepaymentsOther: Number(row.accountRepaymentsOther || 0),
         });
     }
 
@@ -3268,21 +3358,22 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
         await d.execute(
             `INSERT INTO daily_sales_summary (
                 date, tillNumber, cashTotal, cardTotal, accountTotal,
-                accountRepaymentsCash, accountRepaymentsCard,
+                accountRepaymentsCash, accountRepaymentsCard, accountRepaymentsOther,
                 totalSales, transactionCount, updatedAt
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(date, tillNumber) DO UPDATE SET
                 cashTotal = excluded.cashTotal,
                 cardTotal = excluded.cardTotal,
                 accountTotal = excluded.accountTotal,
                 accountRepaymentsCash = excluded.accountRepaymentsCash,
                 accountRepaymentsCard = excluded.accountRepaymentsCard,
+                accountRepaymentsOther = excluded.accountRepaymentsOther,
                 totalSales = excluded.totalSales,
                 transactionCount = excluded.transactionCount,
                 updatedAt = excluded.updatedAt`,
             [
                 r.day, r.till, r.cashTotal, r.cardTotal, r.accountTotal,
-                r.accountRepaymentsCash, r.accountRepaymentsCard,
+                r.accountRepaymentsCash, r.accountRepaymentsCard, r.accountRepaymentsOther,
                 r.totalSales, r.txCount, nowStr,
             ]
         );
@@ -3379,7 +3470,7 @@ function friendlyTillName(id: string, name: string | null, minOrderNumber: numbe
 /** Return every till used by sales with a human-friendly display name. */
 export async function getTillReportOptions(): Promise<TillReportOption[]> {
     const d = await getDb();
-    const [orderRows, registerRows] = await Promise.all([
+    const [orderRows, registerRows, accountRows] = await Promise.all([
         d.select<any[]>(
         `SELECT o.tillNumber as id, MAX(r.name) as name, MIN(o.orderNumber) as minOrderNumber
          FROM orders o
@@ -3389,10 +3480,20 @@ export async function getTillReportOptions(): Promise<TillReportOption[]> {
          ORDER BY MIN(o.orderNumber), o.tillNumber`,
         ),
         d.select<any[]>(`SELECT id, name FROM registers WHERE isActive = 1 ORDER BY name, id`),
+        d.select<any[]>(
+            `SELECT entry.tillNumber AS id, MAX(register.name) AS name, 0 AS minOrderNumber
+             FROM customer_account_entries entry
+             LEFT JOIN registers register ON register.id = entry.tillNumber
+             WHERE entry.tillNumber IS NOT NULL AND entry.tillNumber != ''
+             GROUP BY entry.tillNumber`,
+        ),
     ]);
     const byId = new Map<string, any>();
+    for (const row of accountRows) {
+        byId.set(String(row.id || ''), row);
+    }
     for (const row of registerRows) {
-        byId.set(String(row.id || ''), { ...row, minOrderNumber: 0 });
+        byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row, minOrderNumber: 0 });
     }
     for (const row of orderRows) {
         byId.set(String(row.id || ''), { ...byId.get(String(row.id || '')), ...row });
@@ -3441,7 +3542,8 @@ export async function getTillSalesSummaries(startDate: string, endDate: string):
     ), d.select<any[]>(
         `SELECT tillNumber AS id,
                 COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
-                COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard
+                COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
+                COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther
          FROM customer_account_entries
          WHERE entryType = 'payment'
            AND createdAt >= ? AND createdAt < ?
@@ -3468,6 +3570,7 @@ export async function getTillSalesSummaries(startDate: string, endDate: string):
             accountTotal: row.accountTotal || 0,
             accountRepaymentsCash: Number(collectionsById.get(option.id)?.accountRepaymentsCash || 0),
             accountRepaymentsCard: Number(collectionsById.get(option.id)?.accountRepaymentsCard || 0),
+            accountRepaymentsOther: Number(collectionsById.get(option.id)?.accountRepaymentsOther || 0),
         };
     });
 }

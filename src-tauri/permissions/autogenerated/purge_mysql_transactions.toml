@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-purge-mysql-transactions"
+description = "Enables the purge_mysql_transactions command without any pre-configured scope."
+commands.allow = ["purge_mysql_transactions"]
+
+[[permission]]
+identifier = "deny-purge-mysql-transactions"
+description = "Denies the purge_mysql_transactions command without any pre-configured scope."
+commands.deny = ["purge_mysql_transactions"]

@@ -1,7 +1,8 @@
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, time::Duration};
+use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager};
 
 use crate::secret_store::{self, DOJO_API_KEY};
@@ -9,6 +10,16 @@ use crate::secret_store::{self, DOJO_API_KEY};
 const DOJO_API_BASE: &str = "https://api.dojo.tech";
 const DOJO_API_VERSION: &str = "2026-02-27";
 const CONFIG_FILE_NAME: &str = "dojo.json";
+const PAYMENT_INTENT_SEARCH_PAGE_LIMIT: u64 = 50;
+const PAYMENT_INTENT_SEARCH_MAX_PAGES: usize = 100;
+const PAYMENT_INTENT_STATUSES: [&str; 6] = [
+    "Created",
+    "Authorized",
+    "Captured",
+    "Reversed",
+    "Refunded",
+    "Canceled",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +131,14 @@ pub struct DojoPaymentIntentStatus {
     currency: Option<String>,
     refunded_amount: Option<i64>,
     transaction_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DojoPaymentIntentReferenceResult {
+    payment: DojoPaymentIntentStatus,
+    terminal_session_id: Option<String>,
+    terminal_session_status: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +331,147 @@ fn payment_intent_from_value(value: &Value) -> DojoPaymentIntentStatus {
             .and_then(Value::as_str)
             .map(str::to_string),
     }
+}
+
+fn payment_intent_search_window(
+    created_at: &str,
+    now: DateTime<Utc>,
+) -> Result<(String, String), String> {
+    let created_at = DateTime::parse_from_rfc3339(created_at.trim())
+        .map_err(|_| {
+            "The Dojo payment creation time is not a valid ISO 8601 timestamp".to_string()
+        })?
+        .with_timezone(&Utc);
+    let start = created_at
+        .checked_sub_signed(ChronoDuration::minutes(5))
+        .ok_or_else(|| {
+            "The Dojo payment creation time is outside the supported range".to_string()
+        })?;
+    let end = now
+        .checked_add_signed(ChronoDuration::minutes(5))
+        .ok_or_else(|| "The current time is outside the supported range".to_string())?;
+    if start > end {
+        return Err("The Dojo payment creation time is too far in the future".into());
+    }
+    Ok((
+        start.to_rfc3339_opts(SecondsFormat::Millis, true),
+        end.to_rfc3339_opts(SecondsFormat::Millis, true),
+    ))
+}
+
+fn latest_terminal_session_from_value(
+    value: &Value,
+) -> Result<(Option<String>, Option<String>), String> {
+    let history = match value.get("terminalSessionHistory") {
+        None | Some(Value::Null) => return Ok((None, None)),
+        Some(Value::Array(history)) => history,
+        Some(_) => return Err("Dojo returned invalid terminal-session history".into()),
+    };
+    let Some(latest) = history.last() else {
+        return Ok((None, None));
+    };
+    let session = latest
+        .get("terminalSession")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Dojo returned invalid terminal-session history".to_string())?;
+    let id = session
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "Dojo returned a terminal session without an ID".to_string())?;
+    let status = session
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .ok_or_else(|| "Dojo returned a terminal session without a status".to_string())?;
+    Ok((Some(id.to_string()), Some(status.to_string())))
+}
+
+fn payment_intent_reference_result_from_value(
+    value: &Value,
+    expected_reference: &str,
+) -> Result<Option<DojoPaymentIntentReferenceResult>, String> {
+    let returned_reference = value
+        .get("reference")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Dojo returned a payment intent without a reference".to_string())?;
+    if returned_reference != expected_reference {
+        return Ok(None);
+    }
+    let payment = payment_intent_from_value(value);
+    if payment.id.trim().is_empty() {
+        return Err("Dojo returned a matching payment intent without an ID".into());
+    }
+    if !PAYMENT_INTENT_STATUSES.contains(&payment.status.as_str()) {
+        return Err("Dojo returned a matching payment intent with an invalid status".into());
+    }
+    let (terminal_session_id, terminal_session_status) = latest_terminal_session_from_value(value)?;
+    Ok(Some(DojoPaymentIntentReferenceResult {
+        payment,
+        terminal_session_id,
+        terminal_session_status,
+    }))
+}
+
+fn parse_payment_intent_search_page(
+    value: &Value,
+    expected_reference: &str,
+) -> Result<(Vec<DojoPaymentIntentReferenceResult>, Option<String>), String> {
+    let data = match value.get("data") {
+        Some(Value::Array(data)) => data.as_slice(),
+        Some(Value::Null) => &[],
+        _ => return Err("Dojo returned invalid payment-search data".into()),
+    };
+    let mut matches = Vec::new();
+    for payment_intent in data {
+        if let Some(result) =
+            payment_intent_reference_result_from_value(payment_intent, expected_reference)?
+        {
+            matches.push(result);
+        }
+    }
+    let after = match value.get("after") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(after)) if after.is_empty() => None,
+        Some(Value::String(after))
+            if after.len() <= 200 && !after.chars().any(char::is_control) =>
+        {
+            Some(after.clone())
+        }
+        Some(_) => return Err("Dojo returned an invalid payment-search cursor".into()),
+    };
+    Ok((matches, after))
+}
+
+fn merge_unique_reference_matches(
+    found: &mut Option<DojoPaymentIntentReferenceResult>,
+    matches: Vec<DojoPaymentIntentReferenceResult>,
+) -> Result<(), String> {
+    for result in matches {
+        if found.is_some() {
+            return Err(
+                "Dojo returned more than one payment intent for this exact reference; check the Dojo portal before retrying"
+                    .into(),
+            );
+        }
+        *found = Some(result);
+    }
+    Ok(())
+}
+
+fn payment_intent_search_payload(start_date: &str, end_date: &str, after: Option<&str>) -> Value {
+    let mut cursor = json!({ "limit": PAYMENT_INTENT_SEARCH_PAGE_LIMIT });
+    if let Some(after) = after {
+        cursor["after"] = Value::String(after.to_string());
+    }
+    json!({
+        "statuses": PAYMENT_INTENT_STATUSES,
+        "startDate": start_date,
+        "endDate": end_date,
+        "cursor": cursor,
+    })
 }
 
 async fn fetch_payment_intent(
@@ -610,6 +770,64 @@ pub async fn dojo_payment_intent_status(
 }
 
 #[tauri::command]
+pub async fn dojo_payment_intent_by_reference(
+    app: AppHandle,
+    reference: String,
+    created_at: String,
+) -> Result<Option<DojoPaymentIntentReferenceResult>, String> {
+    let config = require_api_config(&app, false)?;
+    let reference = clean_identifier(&reference, "Payment reference", 60)?;
+    if reference.is_empty() {
+        return Err("A unique payment reference is required".into());
+    }
+    let (start_date, end_date) = payment_intent_search_window(&created_at, Utc::now())?;
+    let client = api_client()?;
+    let mut after: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut found = None;
+
+    for _ in 0..PAYMENT_INTENT_SEARCH_MAX_PAGES {
+        let response = api_request(
+            &client,
+            reqwest::Method::POST,
+            format!("{DOJO_API_BASE}/payment-intents/search"),
+            &config,
+            false,
+        )
+        .json(&payment_intent_search_payload(
+            &start_date,
+            &end_date,
+            after.as_deref(),
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("Could not contact Dojo while recovering the payment: {error}"))?;
+        if !response.status().is_success() {
+            return Err(api_error(response).await);
+        }
+        let page: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Dojo returned invalid payment-search data: {error}"))?;
+        let (matches, next_after) = parse_payment_intent_search_page(&page, &reference)?;
+        merge_unique_reference_matches(&mut found, matches)?;
+
+        let Some(next_after) = next_after else {
+            return Ok(found);
+        };
+        if !seen_cursors.insert(next_after.clone()) {
+            return Err(
+                "Dojo repeated a payment-search cursor; check the Dojo portal before retrying"
+                    .into(),
+            );
+        }
+        after = Some(next_after);
+    }
+
+    Err("Dojo returned too many payment-search pages; check the Dojo portal before retrying".into())
+}
+
+#[tauri::command]
 pub async fn dojo_cancel_terminal_session(
     app: AppHandle,
     terminal_session_id: String,
@@ -748,5 +966,137 @@ mod tests {
         assert_eq!(status.amount, Some(1250));
         assert_eq!(status.refunded_amount, Some(250));
         assert_eq!(status.transaction_id.as_deref(), Some("txn-1"));
+    }
+
+    #[test]
+    fn reference_search_parses_exact_match_and_latest_terminal_session() {
+        let page = json!({
+            "data": [
+                {
+                    "id": "pi_other",
+                    "status": "Captured",
+                    "reference": "order-other",
+                    "terminalSessionHistory": []
+                },
+                {
+                    "id": "pi_match",
+                    "status": "Captured",
+                    "reference": "order-123",
+                    "amount": { "value": 2599, "currencyCode": "GBP" },
+                    "terminalSessionHistory": [
+                        {
+                            "terminalSession": {
+                                "id": "ts_first",
+                                "status": "InitiateRequested",
+                                "updatedAt": "2026-07-29T09:00:01Z"
+                            }
+                        },
+                        {
+                            "terminalSession": {
+                                "id": "ts_latest",
+                                "status": "Captured",
+                                "updatedAt": "2026-07-29T09:00:05Z"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "after": "next-page-token"
+        });
+
+        let (matches, after) = parse_payment_intent_search_page(&page, "order-123").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].payment.id, "pi_match");
+        assert_eq!(matches[0].payment.amount, Some(2599));
+        assert_eq!(matches[0].terminal_session_id.as_deref(), Some("ts_latest"));
+        assert_eq!(
+            matches[0].terminal_session_status.as_deref(),
+            Some("Captured")
+        );
+        assert_eq!(after.as_deref(), Some("next-page-token"));
+    }
+
+    #[test]
+    fn reference_search_accepts_a_match_without_terminal_history() {
+        let page = json!({
+            "data": [{
+                "id": "pi_created",
+                "status": "Created",
+                "reference": "order-123",
+                "terminalSessionHistory": null
+            }],
+            "after": null
+        });
+
+        let (matches, after) = parse_payment_intent_search_page(&page, "order-123").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].terminal_session_id.is_none());
+        assert!(matches[0].terminal_session_status.is_none());
+        assert!(after.is_none());
+    }
+
+    #[test]
+    fn reference_search_rejects_malformed_matching_terminal_history() {
+        let page = json!({
+            "data": [{
+                "id": "pi_match",
+                "status": "Captured",
+                "reference": "order-123",
+                "terminalSessionHistory": [{ "terminalSession": { "status": "Captured" } }]
+            }],
+            "after": null
+        });
+
+        let error = parse_payment_intent_search_page(&page, "order-123").unwrap_err();
+        assert!(error.contains("without an ID"));
+    }
+
+    #[test]
+    fn reference_search_rejects_duplicate_exact_matches() {
+        let value = json!({
+            "id": "pi_match_1",
+            "status": "Captured",
+            "reference": "order-123",
+            "terminalSessionHistory": []
+        });
+        let first = payment_intent_reference_result_from_value(&value, "order-123")
+            .unwrap()
+            .unwrap();
+        let mut second_value = value;
+        second_value["id"] = Value::String("pi_match_2".into());
+        let second = payment_intent_reference_result_from_value(&second_value, "order-123")
+            .unwrap()
+            .unwrap();
+        let mut found = None;
+
+        let error = merge_unique_reference_matches(&mut found, vec![first, second]).unwrap_err();
+        assert!(error.contains("more than one"));
+    }
+
+    #[test]
+    fn reference_search_window_has_five_minute_safety_margins() {
+        let now = DateTime::parse_from_rfc3339("2026-07-29T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = payment_intent_search_window("2026-07-29T09:30:00Z", now).unwrap();
+
+        assert_eq!(start, "2026-07-29T09:25:00.000Z");
+        assert_eq!(end, "2026-07-29T10:05:00.000Z");
+        let payload = payment_intent_search_payload(&start, &end, Some("cursor-2"));
+        assert_eq!(
+            payload.pointer("/cursor/limit").and_then(Value::as_u64),
+            Some(50)
+        );
+        assert_eq!(
+            payload.pointer("/cursor/after").and_then(Value::as_str),
+            Some("cursor-2")
+        );
+        assert_eq!(
+            payload
+                .get("statuses")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(PAYMENT_INTENT_STATUSES.len())
+        );
     }
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claim-mysql-held-order"
+description = "Enables the claim_mysql_held_order command without any pre-configured scope."
+commands.allow = ["claim_mysql_held_order"]
+
+[[permission]]
+identifier = "deny-claim-mysql-held-order"
+description = "Denies the claim_mysql_held_order command without any pre-configured scope."
+commands.deny = ["claim_mysql_held_order"]

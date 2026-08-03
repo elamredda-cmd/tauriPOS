@@ -23,6 +23,8 @@
     let activePageId = '';
     let lastLoadedSettingValue: string | undefined | null = null;
     let saveBusy = false;
+    let dirty = false;
+    let externalUpdatePending = false;
 
     let selectedProducts: Product[] = [];
     let selectedLoading = false;
@@ -84,8 +86,12 @@
     $: {
         const settingValue = $settingsDB.find((setting) => setting.key === SETTING_KEY)?.value;
         if (settingValue !== lastLoadedSettingValue) {
-            lastLoadedSettingValue = settingValue;
-            pages = readPages();
+            if (dirty) {
+                externalUpdatePending = true;
+            } else {
+                lastLoadedSettingValue = settingValue;
+                pages = readPages();
+            }
         }
     }
     $: if (!activePageId || !pages.some((page) => page.id === activePageId)) activePageId = pages[0]?.id || '';
@@ -93,12 +99,17 @@
     $: selectedIds = activePage?.productIds || [];
     $: assignedProductIds = new Set(pages.flatMap((page) => page.productIds));
     $: {
-        const signature = `${activePageId}:${selectedIds.join('|')}:all:${[...assignedProductIds].sort().join('|')}`;
+        const signature = selectedProductsSignature(activePageId, selectedIds, pages);
         if (signature !== selectedLoadSignature) {
             selectedLoadSignature = signature;
             void loadSelectedProducts(selectedIds);
             scheduleAvailableSearch(0);
         }
+    }
+
+    function selectedProductsSignature(pageId: string, productIds: string[], sourcePages: ScaleTilePage[]): string {
+        const allAssignedIds = sourcePages.flatMap((page) => page.productIds).sort();
+        return `${pageId}:${productIds.join('|')}:all:${allAssignedIds.join('|')}`;
     }
 
     async function loadSelectedProducts(ids: string[]) {
@@ -154,14 +165,20 @@
 
     async function save(nextPages: ScaleTilePage[], message: string): Promise<boolean> {
         if (saveBusy) return false;
+        if (externalUpdatePending) {
+            toast('A newer Scale layout arrived from another till. Reload it before saving.', 'error');
+            return false;
+        }
         saveBusy = true;
         const setting = { key: SETTING_KEY, value: JSON.stringify(nextPages), updatedAt: now() };
         try {
             await upsert('settings', setting, 'key');
             pages = nextPages;
             lastLoadedSettingValue = setting.value;
+            dirty = false;
+            externalUpdatePending = false;
             settingsDB.update((list) => [...list.filter((item) => item.key !== SETTING_KEY), setting]);
-            toast(message, 'success');
+            if (message) toast(message, 'success');
             return true;
         } catch (error) {
             toast(`Scale layout was not saved: ${error}`, 'error');
@@ -171,34 +188,50 @@
         }
     }
 
-    async function add(product: Product) {
+    function commitSelectedProducts(nextProducts: Product[]) {
+        const productIds = nextProducts.map((product) => product.id);
+        const nextPages = pages.map((page) => (
+            page.id === activePageId ? { ...page, productIds } : page
+        ));
+        selectedProducts = nextProducts;
+        selectedLoadSignature = selectedProductsSignature(activePageId, productIds, nextPages);
+        pages = nextPages;
+        dirty = true;
+        scheduleAvailableSearch(0);
+    }
+
+    function add(product: Product) {
         if (pages.some((page) => page.productIds.includes(product.id))) {
             toast('This product is already assigned to another Scale page', 'info');
             scheduleAvailableSearch(0);
             return;
         }
-        await save(
-            pages.map((page) => page.id === activePageId ? { ...page, productIds: [...page.productIds, product.id] } : page),
-            'Scale tile added',
-        );
+        availableProducts = availableProducts.filter((item) => item.id !== product.id);
+        commitSelectedProducts([...selectedProducts, product]);
     }
 
-    async function remove(id: string) {
-        await save(
-            pages.map((page) => page.id === activePageId ? { ...page, productIds: page.productIds.filter((item) => item !== id) } : page),
-            'Scale tile removed',
-        );
+    function remove(id: string) {
+        commitSelectedProducts(selectedProducts.filter((product) => product.id !== id));
     }
 
-    async function move(index: number, direction: number) {
+    function move(index: number, direction: number) {
         const target = index + direction;
-        if (target < 0 || target >= selectedIds.length) return;
-        const next = [...selectedIds];
-        [next[index], next[target]] = [next[target], next[index]];
-        await save(
-            pages.map((page) => page.id === activePageId ? { ...page, productIds: next } : page),
-            'Scale tile order saved',
-        );
+        if (target < 0 || target >= selectedProducts.length) return;
+        const nextProducts = [...selectedProducts];
+        [nextProducts[index], nextProducts[target]] = [nextProducts[target], nextProducts[index]];
+        commitSelectedProducts(nextProducts);
+    }
+
+    async function saveTrackedChanges() {
+        if (!dirty) return;
+        await save(pages, '');
+    }
+
+    function reloadLatestLayout() {
+        dirty = false;
+        externalUpdatePending = false;
+        lastLoadedSettingValue = $settingsDB.find((setting) => setting.key === SETTING_KEY)?.value;
+        pages = readPages();
     }
 
     function openAddPage() {
@@ -276,7 +309,7 @@
     <AdminPageHeader
         title="Scale Tile Designer"
         eyebrow="Design Studio"
-        description="Choose and arrange the weighed products shown to cashiers."
+        description={`Choose and arrange the weighed products shown to cashiers.${dirty ? ' Unsaved changes.' : ''}`}
         backFallback="/design"
         padded
     />
@@ -302,6 +335,17 @@
                 {/if}
             </div>
             <div class="scale-page-actions">
+                {#if externalUpdatePending}
+                    <button type="button" class="reload-layout" disabled={saveBusy} on:click={reloadLatestLayout}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v6h-6"></path></svg>
+                        Reload Latest
+                    </button>
+                {:else}
+                    <button type="button" class="save-layout" class:dirty disabled={saveBusy || !dirty} on:click={saveTrackedChanges}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path><path d="M17 21v-8H7v8"></path><path d="M7 3v5h8"></path></svg>
+                        {saveBusy ? 'Saving...' : dirty ? 'Save Changes' : 'Saved'}
+                    </button>
+                {/if}
                 <button type="button" disabled={saveBusy || !activePage} on:click={openRenamePage}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"></path></svg>
                     Edit Page
@@ -331,10 +375,10 @@
                                     <small>{formatMoney(product.price)} / kg{product.scalePlu ? ` | PLU ${product.scalePlu}` : ''}</small>
                                 </div>
                                 <div class="product-actions">
-                                    <button type="button" disabled={saveBusy || index === 0} aria-label={`Move ${product.name} earlier`} title="Move earlier" on:click={() => move(index, -1)}>
+                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || index === 0} aria-label={`Move ${product.name} earlier`} title="Move earlier" on:click={() => move(index, -1)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 15 6-6 6 6"></path></svg>
                                     </button>
-                                    <button type="button" disabled={saveBusy || index === selectedProducts.length - 1} aria-label={`Move ${product.name} later`} title="Move later" on:click={() => move(index, 1)}>
+                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || index === selectedProducts.length - 1} aria-label={`Move ${product.name} later`} title="Move later" on:click={() => move(index, 1)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
                                     </button>
                                     <button type="button" class="remove" disabled={saveBusy} aria-label={`Remove ${product.name}`} title="Remove tile" on:click={() => remove(product.id)}>
@@ -435,6 +479,8 @@
     .add-scale-page svg { width: 18px; height: 18px; }
     .scale-page-actions { flex: 0 0 auto; display: flex; gap: .4rem; padding-bottom: .35rem; }
     .scale-page-actions button { min-height: 44px; padding: 0 .7rem; display: flex; align-items: center; gap: .4rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); color: var(--text-main); font-weight: 850; }
+    .scale-page-actions button.save-layout.dirty { border-color: color-mix(in srgb, var(--success) 55%, var(--border-flat)); background: color-mix(in srgb, var(--success) 12%, var(--bg-card)); color: var(--success); }
+    .scale-page-actions button.reload-layout { border-color: color-mix(in srgb, var(--warning) 55%, var(--border-flat)); background: color-mix(in srgb, var(--warning) 12%, var(--bg-card)); color: var(--warning); }
     .scale-page-actions button.danger { color: var(--danger); }
     .scale-page-actions button:disabled { opacity: .35; cursor: not-allowed; }
     .scale-page-actions svg { width: 18px; height: 18px; }

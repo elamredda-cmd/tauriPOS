@@ -11,6 +11,7 @@
     import { storeDB, now, type Store } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
     import {
+        canRetrySyncConflict,
         forceFullSync,
         forcePushToServer,
         getAutomaticSetupBackupConfig,
@@ -24,9 +25,13 @@
         purgeAllTransactions,
         restoreLatestLocalBackup,
         restoreLocalDatabaseFromPath,
+        isReportEpochStaleConflict,
+        isRetainedLocalSaleConflict,
+        isServerDataEpochMismatchConflict,
         retrySyncConflict,
         setAutomaticSetupBackupEnabled,
         setAutomaticSetupBackupSchedule,
+        syncConflictSaleReference,
         upsert,
         validateDatabaseSchemas,
         wipeAndPullFromServer,
@@ -333,10 +338,24 @@
         }
     }
 
-    async function dismissConflict(id: string) {
-        await dismissSyncConflict(id);
+    async function dismissConflict(conflict: SyncConflict) {
+        const retainedLocalSale = isRetainedLocalSaleConflict(conflict);
+        if (retainedLocalSale) {
+            const reference = syncConflictSaleReference(conflict);
+            const confirmed = window.confirm(
+                `Dismiss the warning for ${reference}?\n\n` +
+                'This does not upload the sale and does not remove it from this till. ' +
+                'The local sale remains available for administrator review.',
+            );
+            if (!confirmed) return;
+        }
+        await dismissSyncConflict(conflict.id, {
+            acknowledgeRetainedLocalSale: retainedLocalSale,
+        });
         await refreshConflicts();
-        conflictStatus = 'Conflict dismissed on this till.';
+        conflictStatus = retainedLocalSale
+            ? 'Warning dismissed. The sale remains stored locally and was not uploaded.'
+            : 'Conflict dismissed on this till.';
     }
 
     async function saveTaxMode() {
@@ -796,10 +815,27 @@
                                 <strong>{conflict.table_name} · {conflict.operation}</strong>
                                 <span>{new Date(conflict.created_at).toLocaleString()}</span>
                                 <p>{conflict.reason}</p>
+                                {#if isReportEpochStaleConflict(conflict)}
+                                    <p class="purge-warning">
+                                        {syncConflictSaleReference(conflict)} belongs to an already-closed report period. It remains on this till and will not be uploaded automatically. Dismissing removes only this warning.
+                                    </p>
+                                {:else if isServerDataEpochMismatchConflict(conflict)}
+                                    <p class="purge-warning">
+                                        {syncConflictSaleReference(conflict)} was created for an older MariaDB dataset. It remains on this till and will not be uploaded automatically. Dismissing removes only this warning.
+                                    </p>
+                                {:else if conflict.table_name === '_online_financial_intent'}
+                                    <p class="purge-warning">
+                                        This pre-restore financial intent is retained for review and cannot be replayed automatically.
+                                    </p>
+                                {/if}
                             </div>
                             <div class="button-row">
-                                <button class="btn btn-primary" disabled={busy} on:click={() => retryConflict(conflict.id)}>Retry</button>
-                                <button class="btn btn-secondary" disabled={busy} on:click={() => dismissConflict(conflict.id)}>Dismiss</button>
+                                {#if canRetrySyncConflict(conflict)}
+                                    <button class="btn btn-primary" disabled={busy} on:click={() => retryConflict(conflict.id)}>Retry</button>
+                                {/if}
+                                <button class="btn btn-secondary" disabled={busy} on:click={() => dismissConflict(conflict)}>
+                                    {isRetainedLocalSaleConflict(conflict) ? 'Dismiss warning' : 'Dismiss'}
+                                </button>
                             </div>
                         </article>
                     {/each}

@@ -70,6 +70,7 @@ export interface OwnerClosedReportInput {
         accountCharges: number;
         accountRepaymentsCash: number;
         accountRepaymentsCard: number;
+        accountRepaymentsOther: number;
         accountAdjustments: number;
         openingAccountOwed: number;
         closingAccountOwed: number;
@@ -134,6 +135,7 @@ function emptyReportSnapshot(): ReportSnapshot {
             accountCharges: 0,
             accountRepaymentsCash: 0,
             accountRepaymentsCard: 0,
+            accountRepaymentsOther: 0,
             accountAdjustments: 0,
             openingAccountOwed: 0,
             closingAccountOwed: 0,
@@ -334,6 +336,7 @@ async function buildSnapshot() {
             payLater: cleanNumber(till.accountTotal),
             accountCashCollected: cleanNumber(till.accountRepaymentsCash),
             accountCardCollected: cleanNumber(till.accountRepaymentsCard),
+            accountOtherCollected: cleanNumber(till.accountRepaymentsOther),
             itemsSold: cleanNumber(till.itemsSold),
         };
     });
@@ -355,6 +358,7 @@ async function buildSnapshot() {
             payLater: 0,
             accountCashCollected: 0,
             accountCardCollected: 0,
+            accountOtherCollected: 0,
             itemsSold: 0,
         });
     }
@@ -386,6 +390,7 @@ async function buildSnapshot() {
             payLater: cleanNumber(report.breakdown.totalAccount),
             accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
             accountCardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+            accountOtherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
         },
         customerAccounts: {
             scope: report.breakdown.accountActivityScope,
@@ -393,6 +398,7 @@ async function buildSnapshot() {
             charges: cleanNumber(report.breakdown.accountCharges),
             cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
             cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+            otherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
             adjustments: cleanNumber(report.breakdown.accountAdjustments),
             closingOwed: cleanNumber(report.breakdown.closingAccountOwed),
         },
@@ -499,6 +505,7 @@ async function flushClosedReportOutbox(
                     payLater: cleanNumber(report.breakdown.totalAccount),
                     accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
                     accountCardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+                    accountOtherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
                     unrecorded: cleanNumber(report.breakdown.unrecordedAmount),
                     unrecordedTransactions: cleanNumber(report.breakdown.unrecordedTxCount),
                 },
@@ -508,6 +515,7 @@ async function flushClosedReportOutbox(
                     charges: cleanNumber(report.breakdown.accountCharges),
                     cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
                     cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+                    otherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
                     adjustments: cleanNumber(report.breakdown.accountAdjustments),
                     closingOwed: cleanNumber(report.breakdown.closingAccountOwed),
                 },

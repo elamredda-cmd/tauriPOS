@@ -81,17 +81,17 @@ export function allocateRefundPayment(
         let cardAmount = Math.abs(payment.cardAmount || 0);
         let loyaltyAmount = Math.abs(payment.loyaltyAmount || 0);
         let accountAmount = Math.abs(payment.accountAmount || 0);
-        const hasExplicitExtendedAllocation = payment.loyaltyAmount !== undefined
-            || payment.accountAmount !== undefined;
-        // Older receipts can predate the split columns. Recover their component
-        // from the recorded payment method instead of treating it as loyalty.
-        if (!hasExplicitExtendedAllocation && cashAmount === 0 && cardAmount === 0) {
+        // Added split columns read back as zero (rather than undefined) on an
+        // upgraded database. Recover an entirely unallocated legacy row from
+        // its method exactly as the native transaction validator does.
+        if (cashAmount + cardAmount + loyaltyAmount + accountAmount === 0) {
             if (payment.method === 'cash') cashAmount = amount;
-            if (payment.method === 'card') cardAmount = amount;
-            if (payment.method === 'account' || payment.method === 'store_credit') accountAmount = amount;
-        }
-        if (!hasExplicitExtendedAllocation) {
-            loyaltyAmount = Math.max(0, amount - cashAmount - cardAmount - accountAmount);
+            else if (payment.method === 'card') cardAmount = amount;
+            else if (payment.method === 'loyalty') loyaltyAmount = amount;
+            else if (payment.method === 'account'
+                || payment.method === 'pay_later'
+                || payment.method === 'customer_account') accountAmount = amount;
+            else loyaltyAmount = amount;
         }
         return {
             amount,
