@@ -12,6 +12,7 @@
  */
 
 import Database from '@tauri-apps/plugin-sql';
+import { readPaymentExtraTotalsByTill, reportPaymentExtraTotals } from '../paymentExtras';
 import { connectionState, type MysqlConfig } from './connection';
 import { get } from 'svelte/store';
 import {
@@ -19,11 +20,17 @@ import {
     normalizeLoyaltyCode,
     planCustomerLoyaltyCodeRepairs,
 } from '../customerLoyaltyCode';
-import type {
-    CustomerAccount,
-    CustomerAccountEntry,
+import {
+    ATTENDANCE_ONLY_PIN_HASH_PREFIX,
+    type CustomerAccount,
+    type CustomerAccountEntry,
+    type Employee,
+    type EmployeeAttendance,
 } from './db';
-import { terminalAttemptUpdatePredecessors } from '../terminalAttemptState';
+import { assertTerminalAccountingEnrichment, terminalAttemptUpdatePredecessors } from '../terminalAttemptState';
+import { effectiveReportMarkerScopes } from '../reportMarkers';
+import { ATTENDANCE_CORRECTION_CONFLICT_CODE } from '../attendance';
+import { withMysqlSession } from './mysqlSession';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -123,6 +130,7 @@ const CUSTOMER_ACCOUNT_SCHEMA_MIGRATION = '2026-07-customer-account-schema-v4';
 export const MYSQL_IDENTIFIER_COLLATION_MIGRATION = '2026-07-relational-identifier-collation-v2';
 const MYSQL_ACCOUNT_GUARD_MIGRATION = '2026-07-account-ledger-guards-binary-v1';
 const MYSQL_CUSTOMER_GUARD_MIGRATION = '2026-07-customer-anti-resurrection-guards-collation-v2';
+const MYSQL_ATTENDANCE_ROLE_GUARD_MIGRATION = '2026-08-attendance-only-role-guards-v13';
 const MYSQL_IDENTIFIER_CHARSET = 'utf8mb4';
 const MYSQL_IDENTIFIER_COLLATION = 'utf8mb4_bin';
 const MYSQL_FRESH_CUSTOMER_COLLATION = 'utf8mb4_unicode_ci';
@@ -148,6 +156,26 @@ type MysqlRelationalIdentifierColumn = Pick<MysqlIdentifierColumn, 'table' | 'co
 // legacy parent PK: doing so could change identity semantics or collapse IDs.
 // Polymorphic values such as tombstones.row_id are intentionally excluded.
 const MYSQL_RELATIONAL_IDENTIFIER_COLUMNS: MysqlRelationalIdentifierColumn[] = [
+    {
+        table: 'employee_attendance', column: 'employeeId',
+        parentTable: 'employees', parentColumn: 'id',
+    },
+    {
+        table: 'employee_attendance', column: 'clockInTillId',
+        parentTable: 'registers', parentColumn: 'id',
+    },
+    {
+        table: 'employee_attendance', column: 'clockOutTillId',
+        parentTable: 'registers', parentColumn: 'id',
+    },
+    {
+        table: 'employee_attendance', column: 'createdByEmployeeId',
+        parentTable: 'employees', parentColumn: 'id',
+    },
+    {
+        table: 'employee_attendance', column: 'updatedByEmployeeId',
+        parentTable: 'employees', parentColumn: 'id',
+    },
     {
         table: 'customer_accounts', column: 'customerId',
         parentTable: 'customers', parentColumn: 'id', uniqueUnderParentCollation: true,
@@ -229,6 +257,27 @@ const MYSQL_BINARY_COORDINATION_COLUMNS: MysqlIdentifierColumn[] = [
     },
 ];
 
+// Attendance row IDs and the generated open-session key are opaque exact
+// identifiers. Keep them binary independently of the installed legacy parent
+// collations used by employees/registers.
+const MYSQL_BINARY_ATTENDANCE_COLUMNS: MysqlIdentifierColumn[] = [
+    {
+        table: 'employee_attendance', column: 'id',
+        definition: `${binaryIdentifier('VARCHAR(36)')} NOT NULL`,
+    },
+    {
+        table: 'employee_attendance', column: 'openEmployeeId',
+        definition: `${binaryIdentifier('VARCHAR(36)')} AS (
+            CASE WHEN status = 'open' THEN employeeId ELSE NULL END
+        ) PERSISTENT`,
+    },
+];
+
+const MYSQL_BINARY_SCHEMA_COLUMNS = [
+    ...MYSQL_BINARY_COORDINATION_COLUMNS,
+    ...MYSQL_BINARY_ATTENDANCE_COLUMNS,
+];
+
 function unicodeCustomerIdentifier(expression: string): string {
     return `CONVERT(${expression} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
 }
@@ -246,6 +295,7 @@ function mysqlSchemaIdentifier(value: string): string {
 // readers are safe regardless of which runtime created the table first.
 const MYSQL_BINARY_APPLICATION_READ_COLUMNS = [
     ...MYSQL_BINARY_COORDINATION_COLUMNS.map(({ table, column }) => [table, column] as const),
+    ...MYSQL_BINARY_ATTENDANCE_COLUMNS.map(({ table, column }) => [table, column] as const),
     ['pos_restore_gate', 'claimedAt'],
     ['till_presence', 'tillName'],
     ['till_presence', 'closeBarrierPhase'],
@@ -257,6 +307,7 @@ const MYSQL_BINARY_APPLICATION_READ_COLUMNS = [
     ['payment_terminal_attempts', 'status'],
     ['payment_terminal_attempts', 'saleBundle'],
     ['payment_terminal_attempts', 'providerReference'],
+    ['payment_terminal_attempts', 'operatorResolution'],
     ['payment_terminal_attempts', 'error'],
     ['payment_terminal_attempts', 'createdAt'],
     ['payment_terminal_attempts', 'updatedAt'],
@@ -657,7 +708,7 @@ export async function normalizeMysqlIdentifierCollations(d: Database): Promise<v
                 `ALTER TABLE ${mysqlSchemaIdentifier(spec.table)} MODIFY COLUMN ${mysqlSchemaIdentifier(spec.column)} ${definition}`,
             );
         }
-        for (const spec of MYSQL_BINARY_COORDINATION_COLUMNS) {
+        for (const spec of MYSQL_BINARY_SCHEMA_COLUMNS) {
             const key = `${spec.table}.${spec.column}`;
             const row = columns.get(key);
             if (!row) throw new Error(`required identifier column is missing: ${key}`);
@@ -681,7 +732,7 @@ export async function normalizeMysqlIdentifierCollations(d: Database): Promise<v
                         !== String(parent.collationName ?? parent.COLLATION_NAME ?? '').toLowerCase();
             })
             .map((spec) => `${spec.table}.${spec.column}`);
-        const inconsistentCoordination = MYSQL_BINARY_COORDINATION_COLUMNS
+        const inconsistentBinaryColumns = MYSQL_BINARY_SCHEMA_COLUMNS
             .filter((spec) => {
                 const row = columns.get(`${spec.table}.${spec.column}`);
                 return !row
@@ -689,7 +740,7 @@ export async function normalizeMysqlIdentifierCollations(d: Database): Promise<v
                     || String(row.collationName ?? row.COLLATION_NAME ?? '').toLowerCase() !== MYSQL_IDENTIFIER_COLLATION;
             })
             .map((spec) => `${spec.table}.${spec.column}`);
-        const inconsistent = [...inconsistentRelations, ...inconsistentCoordination];
+        const inconsistent = [...inconsistentRelations, ...inconsistentBinaryColumns];
         if (inconsistent.length > 0) {
             throw new Error(`identifier collation verification failed for: ${inconsistent.join(', ')}`);
         }
@@ -1204,6 +1255,476 @@ export async function ensureCustomerAccountLedgerGuards(d: Database): Promise<vo
     ]);
 }
 
+/**
+ * Keep an attendance-only login unusable by older POS builds. Those builds do
+ * not understand the role, but they also cannot validate the wrapped PIN hash.
+ * The order/shift guards are a second server-side boundary for an already-open
+ * legacy session during a rolling update.
+ */
+export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void> {
+    const escapedPrefix = ATTENDANCE_ONLY_PIN_HASH_PREFIX.replace(/'/g, "''");
+    const attendanceJson = (row: 'NEW' | 'OLD') => `JSON_OBJECT(
+        'id', ${row}.id,
+        'employeeId', ${row}.employeeId,
+        'clockInAt', ${row}.clockInAt,
+        'clockOutAt', ${row}.clockOutAt,
+        'clockInTillId', ${row}.clockInTillId,
+        'clockOutTillId', ${row}.clockOutTillId,
+        'status', ${row}.status,
+        'notes', ${row}.notes,
+        'createdByEmployeeId', ${row}.createdByEmployeeId,
+        'updatedByEmployeeId', ${row}.updatedByEmployeeId,
+        'createdAt', ${row}.createdAt,
+        'updatedAt', ${row}.updatedAt
+    )`;
+    const serverStamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+
+    // Bulk attendance imports retain the source audit rows. The native
+    // importer creates this connection/token marker only inside the same
+    // transaction as the imported rows. Requiring both values ensures that a
+    // stale session variable cannot disable auditing for a later live write.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_attendance_audit_import_sessions (
+            connectionId BIGINT PRIMARY KEY,
+            token VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL
+        ) ENGINE=InnoDB
+    `);
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_employee_profile_write_authority (
+            connectionId BIGINT PRIMARY KEY,
+            token VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            expiresAt DATETIME(3) NOT NULL
+        ) ENGINE=InnoDB
+    `);
+    const restoreWriteAuthority = `EXISTS (
+          SELECT 1 FROM pos_restore_gate
+           WHERE id = 1 AND isActive = 1 AND ownerTillId <> ''
+             AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+        )`;
+    const employeeWriteAuthority = `(
+        EXISTS (
+          SELECT 1 FROM pos_employee_profile_write_authority
+           WHERE connectionId = CONNECTION_ID()
+             AND BINARY token = BINARY COALESCE(@lbj_pos_employee_profile_authority, '')
+             AND expiresAt > UTC_TIMESTAMP(3)
+        )
+        OR ${restoreWriteAuthority}
+    )`;
+    const attendanceWriteBypass = `(
+        ${restoreWriteAuthority}
+        OR EXISTS (
+          SELECT 1 FROM pos_attendance_audit_import_sessions
+           WHERE connectionId = CONNECTION_ID()
+             AND BINARY token = BINARY COALESCE(@lbj_pos_attendance_audit_import, '')
+        )
+    )`;
+    const attendanceActorPermissionCheck = (requiresManage: string) => `
+        SET attendanceActorActive = 0;
+        SET attendanceActorRole = '';
+        SET attendanceCanManage = 0;
+        SELECT COALESCE(isActive, 0), TRIM(COALESCE(role, ''))
+          INTO attendanceActorActive, attendanceActorRole
+          FROM employees
+         WHERE BINARY id = BINARY attendanceActorId
+         LIMIT 1 FOR UPDATE;
+        IF attendanceActorActive = 0
+           OR attendanceActorRole NOT IN ('admin', 'manager', 'supervisor', 'cashier', 'attendance') THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'ATTENDANCE_ACTOR_INVALID: sign in again before changing attendance';
+        END IF;
+        IF ${requiresManage} THEN
+          IF attendanceActorRole = 'admin' THEN
+            SET attendanceCanManage = 1;
+          ELSEIF attendanceActorRole = 'attendance' THEN
+            SET attendanceCanManage = 0;
+          ELSE
+            SET attendanceRolePermissions = '';
+            SELECT COALESCE(value, '') INTO attendanceRolePermissions
+              FROM settings
+             WHERE BINARY \`key\` = BINARY 'role_permissions'
+             LIMIT 1 FOR UPDATE;
+            IF attendanceRolePermissions = '' OR JSON_VALID(attendanceRolePermissions) = 0 THEN
+              SET attendanceCanManage = IF(attendanceActorRole = 'manager', 1, 0);
+            ELSEIF JSON_EXTRACT(attendanceRolePermissions, '$.roles') IS NOT NULL THEN
+              IF JSON_TYPE(JSON_EXTRACT(
+                  attendanceRolePermissions,
+                  CONCAT('$.roles.', attendanceActorRole)
+                )) = 'ARRAY' THEN
+                SET attendanceCanManage = COALESCE(JSON_CONTAINS(
+                  JSON_EXTRACT(attendanceRolePermissions, CONCAT('$.roles.', attendanceActorRole)),
+                  JSON_QUOTE('manage_attendance')
+                ), 0);
+              ELSE
+                SET attendanceCanManage = IF(attendanceActorRole = 'manager', 1, 0);
+              END IF;
+            ELSE
+              IF JSON_TYPE(JSON_EXTRACT(
+                  attendanceRolePermissions,
+                  CONCAT('$.', attendanceActorRole)
+                )) = 'ARRAY' THEN
+                SET attendanceCanManage = COALESCE(JSON_CONTAINS(
+                  JSON_EXTRACT(attendanceRolePermissions, CONCAT('$.', attendanceActorRole)),
+                  JSON_QUOTE('manage_attendance')
+                ), 0);
+              ELSE
+                SET attendanceCanManage = IF(attendanceActorRole = 'manager', 1, 0);
+              END IF;
+            END IF;
+          END IF;
+          IF attendanceCanManage <> 1 THEN
+            SIGNAL SQLSTATE '45000'
+              SET MESSAGE_TEXT = 'ATTENDANCE_MANAGER_REQUIRED: current staff access cannot manage attendance';
+          END IF;
+        END IF;
+    `;
+    const oldHasAttendanceEnvelope = `(
+        BINARY LEFT(COALESCE(OLD.pinHash, ''), ${ATTENDANCE_ONLY_PIN_HASH_PREFIX.length})
+          = BINARY '${escapedPrefix}'
+    )`;
+    const expectedLegacyHash = `CASE
+        WHEN BINARY TRIM(COALESCE(OLD.role, '')) = BINARY 'attendance' THEN
+          CASE
+            WHEN ${oldHasAttendanceEnvelope}
+              THEN OLD.pinHash
+            WHEN BINARY COALESCE(OLD.pinHash, '') = BINARY ''
+              THEN '${escapedPrefix}reset-required'
+            ELSE CONCAT('${escapedPrefix}', OLD.pinHash)
+          END
+        WHEN ${oldHasAttendanceEnvelope}
+          THEN SUBSTRING(OLD.pinHash, ${ATTENDANCE_ONLY_PIN_HASH_PREFIX.length + 1})
+        ELSE COALESCE(OLD.pinHash, '')
+      END`;
+    const exactLegacyRepair = `(
+        (BINARY NEW.id <=> BINARY OLD.id)
+        AND BINARY NEW.role = BINARY TRIM(COALESCE(OLD.role, ''))
+        AND BINARY NEW.pin = BINARY (CASE
+              WHEN BINARY TRIM(COALESCE(OLD.role, '')) = BINARY 'attendance' THEN ''
+              ELSE COALESCE(OLD.pin, '')
+            END)
+        AND BINARY NEW.pinHash = BINARY (${expectedLegacyHash})
+        AND (BINARY NEW.storeId <=> BINARY OLD.storeId)
+        AND (BINARY NEW.name <=> BINARY OLD.name)
+        AND (BINARY NEW.email <=> BINARY OLD.email)
+        AND (NEW.isActive <=> OLD.isActive)
+        AND (BINARY NEW.createdAt <=> BINARY OLD.createdAt)
+        AND (
+          NOT (BINARY COALESCE(OLD.role, '') = BINARY TRIM(COALESCE(OLD.role, '')))
+          OR (
+            BINARY TRIM(COALESCE(OLD.role, '')) = BINARY 'attendance'
+            AND (
+              NOT ${oldHasAttendanceEnvelope}
+              OR NOT (BINARY COALESCE(OLD.pin, '') = BINARY '')
+            )
+          )
+          OR (
+            NOT (BINARY TRIM(COALESCE(OLD.role, '')) = BINARY 'attendance')
+            AND ${oldHasAttendanceEnvelope}
+          )
+        )
+    )`;
+
+    await installVersionedMysqlTriggers(d, MYSQL_ATTENDANCE_ROLE_GUARD_MIGRATION,
+        mysqlTriggerDefinitions([
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_employee_insert
+             BEFORE INSERT ON employees FOR EACH ROW
+             BEGIN
+               IF NOT ${employeeWriteAuthority} THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_PROFILE_AUTHORITY_REQUIRED: use the current staff editor';
+               END IF;
+               SET NEW.role = TRIM(COALESCE(NEW.role, ''));
+               IF NEW.role = 'attendance'
+                  AND COALESCE(NEW.pinHash, '') NOT LIKE '${escapedPrefix}%' THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_ROLE_PIN_REQUIRED: attendance-only PIN is not protected';
+               ELSEIF COALESCE(NEW.role, '') <> 'attendance'
+                  AND COALESCE(NEW.pinHash, '') LIKE '${escapedPrefix}%' THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_ROLE_PIN_INVALID: POS staff PIN cannot remain attendance-only';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_employee_update
+             BEFORE UPDATE ON employees FOR EACH ROW
+             BEGIN
+               SET NEW.role = TRIM(COALESCE(NEW.role, ''));
+               IF NOT ${employeeWriteAuthority} AND NOT ${exactLegacyRepair} THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_PROFILE_AUTHORITY_REQUIRED: use the current staff editor';
+               ELSEIF (
+                    COALESCE(NEW.isActive, 1) = 0
+                    OR (COALESCE(OLD.role, '') <> 'attendance' AND NEW.role = 'attendance')
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM payment_terminal_attempts
+                     WHERE status IN ('prepared', 'started', 'uncertain', 'approved',
+                                      'commit_failed', 'completion_pending')
+                       AND JSON_VALID(saleBundle)
+                       AND (
+                         BINARY JSON_UNQUOTE(JSON_EXTRACT(saleBundle, '$.order.employeeId')) = BINARY NEW.id
+                         OR BINARY JSON_UNQUOTE(JSON_EXTRACT(saleBundle, '$.employeeId')) = BINARY NEW.id
+                       )
+                  ) THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'TERMINAL_ATTEMPT_ACTIVE: finish or recover this staff member''s card payment before changing access';
+               ELSEIF COALESCE(OLD.isActive, 1) <> 0
+                  AND COALESCE(NEW.isActive, 1) = 0
+                  AND EXISTS (
+                    SELECT 1 FROM employee_attendance
+                     WHERE BINARY employeeId = BINARY NEW.id AND status = 'open'
+                  ) THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_STILL_OPEN: clock this staff member out before deactivation';
+               ELSEIF NEW.role = 'attendance'
+                  AND COALESCE(NEW.pinHash, '') NOT LIKE '${escapedPrefix}%' THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_ROLE_PIN_REQUIRED: attendance-only PIN is not protected';
+               ELSEIF COALESCE(NEW.role, '') <> 'attendance'
+                  AND COALESCE(NEW.pinHash, '') LIKE '${escapedPrefix}%' THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_ROLE_PIN_INVALID: POS staff PIN cannot remain attendance-only';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_employee_delete
+             BEFORE DELETE ON employees FOR EACH ROW
+             BEGIN
+               IF NOT EXISTS (
+                 SELECT 1 FROM pos_restore_gate
+                  WHERE id = 1 AND isActive = 1
+                    AND ownerTillId <> ''
+                    AND BINARY ownerTillId = BINARY COALESCE(@lbj_pos_restore_bypass, '')
+               ) THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_DELETE_DISABLED: deactivate staff instead of deleting them in a multi-till shop';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_shift_insert
+             BEFORE INSERT ON shifts FOR EACH ROW
+             BEGIN
+               DECLARE shiftEmployeeActive INT DEFAULT 0;
+               DECLARE shiftEmployeeRole VARCHAR(32) DEFAULT '';
+               SELECT COALESCE(isActive, 0), COALESCE(role, '')
+                 INTO shiftEmployeeActive, shiftEmployeeRole
+                 FROM employees
+                WHERE BINARY id = BINARY NEW.employeeId
+                LIMIT 1 FOR UPDATE;
+               IF NOT ${restoreWriteAuthority}
+                  AND (shiftEmployeeActive = 0
+                       OR shiftEmployeeRole NOT IN ('admin', 'manager', 'supervisor', 'cashier')) THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_ACCESS_DENIED: this staff member cannot open a till shift';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_order_insert
+             BEFORE INSERT ON orders FOR EACH ROW
+             BEGIN
+               DECLARE orderEmployeeActive INT DEFAULT 0;
+               DECLARE orderEmployeeRole VARCHAR(32) DEFAULT '';
+               SELECT COALESCE(isActive, 0), COALESCE(role, '')
+                 INTO orderEmployeeActive, orderEmployeeRole
+                 FROM employees
+                WHERE BINARY id = BINARY NEW.employeeId
+                LIMIT 1 FOR UPDATE;
+               IF NOT ${restoreWriteAuthority}
+                  AND (orderEmployeeActive = 0
+                       OR orderEmployeeRole NOT IN ('admin', 'manager', 'supervisor', 'cashier')) THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_ACCESS_DENIED: this staff member cannot create a sale';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_terminal_employee_insert
+             BEFORE INSERT ON payment_terminal_attempts FOR EACH ROW
+             BEGIN
+               DECLARE attemptEmployeeId VARCHAR(36) DEFAULT '';
+               DECLARE attemptEmployeeActive INT DEFAULT 0;
+               DECLARE attemptEmployeeRole VARCHAR(32) DEFAULT '';
+               IF JSON_VALID(NEW.saleBundle) THEN
+                 SET attemptEmployeeId = COALESCE(
+                   NULLIF(JSON_UNQUOTE(JSON_EXTRACT(NEW.saleBundle, '$.order.employeeId')), ''),
+                   NULLIF(JSON_UNQUOTE(JSON_EXTRACT(NEW.saleBundle, '$.employeeId')), ''),
+                   ''
+                 );
+               END IF;
+               IF attemptEmployeeId = '' THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'EMPLOYEE_ACCESS_DENIED: terminal attempt has no staff authorization';
+               ELSE
+                 SELECT COALESCE(isActive, 0), COALESCE(role, '')
+                   INTO attemptEmployeeActive, attemptEmployeeRole
+                   FROM employees WHERE BINARY id = BINARY attemptEmployeeId FOR UPDATE;
+                 IF attemptEmployeeActive = 0
+                    OR attemptEmployeeRole NOT IN ('admin', 'manager', 'supervisor', 'cashier') THEN
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'EMPLOYEE_ACCESS_DENIED: this staff member cannot start a card payment';
+                 END IF;
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_active_insert
+             BEFORE INSERT ON employee_attendance FOR EACH ROW
+             BEGIN
+               DECLARE attendanceActorId VARCHAR(36) DEFAULT '';
+               DECLARE attendanceActorActive INT DEFAULT 0;
+               DECLARE attendanceActorRole VARCHAR(32) DEFAULT '';
+               DECLARE attendanceCanManage INT DEFAULT 0;
+               DECLARE attendanceRolePermissions LONGTEXT DEFAULT '';
+               IF NOT ${attendanceWriteBypass} THEN
+                 IF NEW.status NOT IN ('open', 'closed') THEN
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'ATTENDANCE_STATUS_INVALID: attendance must be open or closed';
+                 END IF;
+                 SET attendanceActorId = TRIM(COALESCE(NEW.updatedByEmployeeId, ''));
+                 IF attendanceActorId = ''
+                    OR NOT (BINARY NEW.createdByEmployeeId = BINARY attendanceActorId) THEN
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'ATTENDANCE_ACTOR_INVALID: attendance audit attribution is required';
+                 END IF;
+                 ${attendanceActorPermissionCheck(`
+                   NEW.status = 'closed'
+                   OR NOT (BINARY attendanceActorId = BINARY NEW.employeeId)
+                 `)}
+                 IF NEW.status = 'open' THEN
+                   IF NOT (BINARY attendanceActorId = BINARY NEW.employeeId) THEN
+                     SIGNAL SQLSTATE '45000'
+                       SET MESSAGE_TEXT = 'ATTENDANCE_SELF_ONLY: staff can only clock themselves in';
+                   END IF;
+                   IF COALESCE(NEW.clockOutAt, '') <> ''
+                      OR COALESCE(NEW.clockOutTillId, '') <> '' THEN
+                     SIGNAL SQLSTATE '45000'
+                       SET MESSAGE_TEXT = 'ATTENDANCE_OPEN_INVALID: an open attendance row cannot have clock-out details';
+                   END IF;
+                 END IF;
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_update
+             BEFORE UPDATE ON employee_attendance FOR EACH ROW
+             BEGIN
+               DECLARE attendanceActorId VARCHAR(36) DEFAULT '';
+               DECLARE attendanceActorActive INT DEFAULT 0;
+               DECLARE attendanceActorRole VARCHAR(32) DEFAULT '';
+               DECLARE attendanceCanManage INT DEFAULT 0;
+               DECLARE attendanceRolePermissions LONGTEXT DEFAULT '';
+               IF NOT ${attendanceWriteBypass} THEN
+                 IF NOT (BINARY NEW.id = BINARY OLD.id)
+                    OR NOT (BINARY NEW.createdByEmployeeId = BINARY OLD.createdByEmployeeId)
+                    OR NOT (BINARY NEW.createdAt = BINARY OLD.createdAt) THEN
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'ATTENDANCE_IMMUTABLE_FIELDS: attendance identity and creation audit cannot change';
+                 END IF;
+                 SET attendanceActorId = TRIM(COALESCE(NEW.updatedByEmployeeId, ''));
+                 IF attendanceActorId = '' THEN
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'ATTENDANCE_ACTOR_INVALID: attendance audit attribution is required';
+                 END IF;
+                 IF OLD.status = 'open' AND NEW.status = 'closed' THEN
+                   IF NOT (BINARY NEW.employeeId = BINARY OLD.employeeId)
+                      OR NOT (BINARY NEW.clockInAt = BINARY OLD.clockInAt)
+                      OR NOT (BINARY NEW.clockInTillId = BINARY OLD.clockInTillId)
+                      OR NOT (BINARY NEW.notes = BINARY OLD.notes)
+                      OR COALESCE(NEW.clockOutAt, '') = '' THEN
+                     SIGNAL SQLSTATE '45000'
+                       SET MESSAGE_TEXT = 'ATTENDANCE_CLOCK_OUT_INVALID: clock-out may only close the existing session';
+                   END IF;
+                   ${attendanceActorPermissionCheck(`
+                     NOT (BINARY attendanceActorId = BINARY OLD.employeeId)
+                   `)}
+                 ELSEIF OLD.status = 'closed' AND NEW.status = 'closed' THEN
+                   ${attendanceActorPermissionCheck('TRUE')}
+                 ELSE
+                   SIGNAL SQLSTATE '45000'
+                     SET MESSAGE_TEXT = 'ATTENDANCE_STATUS_TRANSITION_INVALID: use the attendance clock or correction flow';
+                 END IF;
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_guard_attendance_delete
+             BEFORE DELETE ON employee_attendance FOR EACH ROW
+             BEGIN
+               IF NOT ${attendanceWriteBypass} THEN
+                 SIGNAL SQLSTATE '45000'
+                   SET MESSAGE_TEXT = 'ATTENDANCE_DELETE_DISABLED: correct attendance instead of deleting its audit history';
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_audit_employee_attendance_insert
+             AFTER INSERT ON employee_attendance FOR EACH ROW
+             BEGIN
+               IF NOT EXISTS (
+                 SELECT 1 FROM pos_attendance_audit_import_sessions
+                  WHERE connectionId = CONNECTION_ID()
+                    AND BINARY token = BINARY COALESCE(@lbj_pos_attendance_audit_import, '')
+               ) THEN
+                 INSERT INTO audit_logs
+                   (id, employeeId, action, entityType, entityId,
+                    oldData, newData, createdAt, updatedAt)
+                 VALUES (
+                   UUID(), COALESCE(NULLIF(NEW.updatedByEmployeeId, ''), NEW.createdByEmployeeId),
+                   CASE WHEN NEW.status = 'open'
+                        THEN 'attendance_clocked_in'
+                        ELSE 'attendance_manual_record_added' END,
+                   'employee_attendance', NEW.id, NULL, ${attendanceJson('NEW')},
+                   ${serverStamp}, ${serverStamp}
+                 );
+               END IF;
+             END`,
+            `CREATE OR REPLACE TRIGGER pos_audit_employee_attendance_update
+             AFTER UPDATE ON employee_attendance FOR EACH ROW
+             BEGIN
+               IF NOT EXISTS (
+                 SELECT 1 FROM pos_attendance_audit_import_sessions
+                  WHERE connectionId = CONNECTION_ID()
+                    AND BINARY token = BINARY COALESCE(@lbj_pos_attendance_audit_import, '')
+               ) THEN
+                 INSERT INTO audit_logs
+                   (id, employeeId, action, entityType, entityId,
+                    oldData, newData, createdAt, updatedAt)
+                 VALUES (
+                   UUID(), NEW.updatedByEmployeeId,
+                   CASE WHEN OLD.status = 'open' AND NEW.status = 'closed'
+                        THEN 'attendance_clocked_out'
+                        ELSE 'attendance_corrected' END,
+                   'employee_attendance', NEW.id, ${attendanceJson('OLD')}, ${attendanceJson('NEW')},
+                   ${serverStamp}, ${serverStamp}
+                 );
+               END IF;
+             END`,
+        ]));
+
+    // Install the migration-tolerant authority trigger before touching legacy
+    // rows. In particular, the previous v8 trigger rejects a two-step trim of
+    // " attendance " before its hash is wrapped. This single deterministic
+    // statement is the only unauthorised transition accepted by v10.
+    await d.execute(
+        `UPDATE employees
+         SET role = TRIM(COALESCE(role, '')),
+             pin = CASE
+               WHEN TRIM(COALESCE(role, '')) = 'attendance' THEN ''
+               ELSE COALESCE(pin, '')
+             END,
+             pinHash = CASE
+               WHEN TRIM(COALESCE(role, '')) = 'attendance' THEN
+                 CASE
+                   WHEN COALESCE(pinHash, '') LIKE '${escapedPrefix}%'
+                     THEN pinHash
+                   WHEN COALESCE(pinHash, '') = ''
+                     THEN '${escapedPrefix}reset-required'
+                   ELSE CONCAT('${escapedPrefix}', pinHash)
+                 END
+               WHEN COALESCE(pinHash, '') LIKE '${escapedPrefix}%'
+                 THEN SUBSTRING(pinHash, ${ATTENDANCE_ONLY_PIN_HASH_PREFIX.length + 1})
+               ELSE COALESCE(pinHash, '')
+             END
+         WHERE COALESCE(role, '') <> TRIM(COALESCE(role, ''))
+            OR (
+              TRIM(COALESCE(role, '')) = 'attendance'
+              AND (
+                COALESCE(pinHash, '') NOT LIKE '${escapedPrefix}%'
+                OR COALESCE(pin, '') <> ''
+              )
+            )
+            OR (
+              TRIM(COALESCE(role, '')) <> 'attendance'
+              AND COALESCE(pinHash, '') LIKE '${escapedPrefix}%'
+            )`,
+    );
+}
+
 async function backfillLegacyPaymentAllocations(d: Database): Promise<void> {
     const normalizedMethod = `LOWER(REPLACE(REPLACE(TRIM(COALESCE(method, '')), ' ', '_'), '-', '_'))`;
     const cashAllocation = `CASE
@@ -1252,9 +1773,31 @@ async function backfillLegacyPaymentAllocations(d: Database): Promise<void> {
  * to call on every startup.
  */
 export async function initMysqlDb(config: MysqlConfig): Promise<void> {
-    const d = await getDb(config);
+    await getDb(config);
     currentDatabase = config.database;
+    await withMysqlSession(buildMysqlUri(config), 'schema', ensureMysqlSchemaOnDatabase);
+}
 
+/** Caller must own the dedicated schema-session lock. Exported for isolated upgrade tests. */
+export async function ensureMysqlSchemaOnDatabase(d: Database): Promise<void> {
+        await d.execute(`CREATE TABLE IF NOT EXISTS pos_schema_migrations (
+            name VARCHAR(191) PRIMARY KEY, appliedAt VARCHAR(40) NOT NULL)`);
+        // Bump this marker when the schema or a required data repair changes.
+        // The native connection owns GET_LOCK until this whole operation ends.
+        const version = 'pos_schema_2026_09_28_dojo_review_v1';
+        const applied: any[] = await d.select('SELECT name FROM pos_schema_migrations WHERE name = ?', [version]);
+        if (applied.length) return;
+        await initializeMysqlSchema(d);
+        await d.execute('INSERT INTO pos_schema_migrations (name, appliedAt) VALUES (?, ?)', [version, new Date().toISOString()]);
+}
+
+async function initializeMysqlSchema(d: Database): Promise<void> {
+    await d.execute(`CREATE TABLE IF NOT EXISTS pos_held_order_claims (
+        orderId VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY,
+        claimId VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+        serverDataEpoch VARCHAR(64) NOT NULL,
+        claimedAt VARCHAR(40) NOT NULL
+    )`);
     console.log('Initializing MySQL/MariaDB Database…');
 
     await d.execute(`
@@ -1477,6 +2020,29 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             isActive INT DEFAULT 1,
             createdAt TEXT,
             updatedAt TEXT
+        )
+    `);
+
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS employee_attendance (
+            id ${binaryIdentifier('VARCHAR(36)')} PRIMARY KEY,
+            employeeId VARCHAR(36) NOT NULL,
+            clockInAt VARCHAR(40) NOT NULL,
+            clockOutAt VARCHAR(40) NOT NULL DEFAULT '',
+            clockInTillId VARCHAR(36) NOT NULL DEFAULT '',
+            clockOutTillId VARCHAR(36) NOT NULL DEFAULT '',
+            status VARCHAR(16) NOT NULL DEFAULT 'open',
+            notes TEXT NOT NULL,
+            createdByEmployeeId VARCHAR(36) NOT NULL DEFAULT '',
+            updatedByEmployeeId VARCHAR(36) NOT NULL DEFAULT '',
+            createdAt VARCHAR(40) NOT NULL,
+            updatedAt VARCHAR(40) NOT NULL,
+            openEmployeeId ${binaryIdentifier('VARCHAR(36)')} AS (
+                CASE WHEN status = 'open' THEN employeeId ELSE NULL END
+            ) PERSISTENT,
+            UNIQUE KEY uq_employee_attendance_open (openEmployeeId),
+            INDEX idx_employee_attendance_employee_in (employeeId, clockInAt, id),
+            INDEX idx_employee_attendance_status_in (status, clockInAt, id)
         )
     `);
 
@@ -1835,6 +2401,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
             status VARCHAR(32) NOT NULL,
             saleBundle LONGTEXT NOT NULL,
             providerReference TEXT NOT NULL DEFAULT '',
+            operatorResolution TEXT NOT NULL DEFAULT '',
             error TEXT NOT NULL DEFAULT '',
             tillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT '',
             createdAt TEXT NOT NULL,
@@ -1887,6 +2454,12 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cardAmount INT DEFAULT 0`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS loyaltyAmount BIGINT DEFAULT 0`,
         `ALTER TABLE payments ADD COLUMN IF NOT EXISTS accountAmount BIGINT DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS tipsAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS serviceChargeAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE payments ADD COLUMN IF NOT EXISTS cashbackAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS tipsAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS serviceChargeAmount BIGINT NOT NULL DEFAULT 0`,
+        `ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS cashbackAmount BIGINT NOT NULL DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN amount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN cashAmount BIGINT DEFAULT 0`,
         `ALTER TABLE payments MODIFY COLUMN cardAmount BIGINT DEFAULT 0`,
@@ -2044,6 +2617,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS operationKind VARCHAR(32) NOT NULL DEFAULT 'sale'`,
         `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS expectedProviderAmount BIGINT NOT NULL DEFAULT 0`,
         `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS providerReference TEXT NOT NULL DEFAULT ''`,
+        `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS operatorResolution TEXT NOT NULL DEFAULT ''`,
         `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS tillId ${binaryIdentifier('VARCHAR(64)')} NOT NULL DEFAULT ''`,
         `ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS activeTerminalKey VARCHAR(191) AS (
             CASE WHEN status IN ('prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending')
@@ -2073,6 +2647,7 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         throw new Error(`MARIADB_ACCOUNT_MIGRATION_BLOCKED: ${detail}`);
     }
     await normalizeMysqlIdentifierCollations(d);
+    await ensureAttendanceOnlyRoleGuards(d);
     await ensureCustomerAccountLedgerGuards(d);
     // Failure here is intentionally fatal: two unresolved charges on one
     // terminal require operator reconciliation before this shop can proceed.
@@ -2175,23 +2750,44 @@ export async function initMysqlDb(config: MysqlConfig): Promise<void> {
         `CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt(255), id)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_receipt_key ON orders(receiptKey)`,
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_open_shift_register ON shifts(openRegisterId)`,
-        ...TIMESTAMP_SYNC_TABLES.map((table) =>
+        // Attendance uses compact VARCHAR timestamps rather than TEXT, so its
+        // prefix must not exceed the declared 40-character column length.
+        ...TIMESTAMP_SYNC_TABLES.filter((table) => table !== 'employee_attendance' && table !== 'product_images').map((table) =>
             `CREATE INDEX IF NOT EXISTS idx_${table}_updated_at ON ${table}(updatedAt(255))`
         ),
+        `CREATE INDEX IF NOT EXISTS idx_employee_attendance_updated_at ON employee_attendance(updatedAt(40))`,
+        `CREATE INDEX IF NOT EXISTS idx_product_images_updated_at ON product_images(updatedAt(40))`,
     ];
 
-    for (const sql of indexes) {
-        try { await d.execute(sql); } catch { /* index may already exist */ }
+    const indexColumns: any[] = await d.select(`SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
+        FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE()`);
+    for (const definition of indexes) {
+        // IF NOT EXISTS handles duplicates. A real failure must not be hidden
+        // behind a successful schema marker and a permanently missing index.
+        await d.execute(fitMysqlIndexPrefixes(definition, indexColumns));
     }
 
     console.log('MySQL/MariaDB database initialized successfully!');
+}
+
+/** Legacy installs use TEXT for some identifiers, newer ones VARCHAR/VARBINARY.
+ * Keep TEXT prefixes but never request more characters than a bounded column.
+ */
+export function fitMysqlIndexPrefixes(sql: string, columns: Array<{ TABLE_NAME: string; COLUMN_NAME: string; CHARACTER_MAXIMUM_LENGTH: number | string | null }>): string {
+    const table = /\bON\s+(\w+)\s*\(/i.exec(sql)?.[1];
+    if (!table) return sql;
+    return sql.replace(/\b(\w+)\((\d+)\)/g, (original, column, prefix) => {
+        const metadata = columns.find(row => row.TABLE_NAME === table && row.COLUMN_NAME === column);
+        const length = Number(metadata?.CHARACTER_MAXIMUM_LENGTH);
+        return length > 0 && length < Number(prefix) ? column : original;
+    });
 }
 
 const TIMESTAMP_SYNC_TABLES = [
     'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'customer_accounts',
+    'employees', 'employee_attendance', 'settings', 'customers', 'customer_accounts',
     'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
@@ -2248,7 +2844,7 @@ async function ensureSyncChangeTriggers(d: Database): Promise<void> {
 const DELETE_SYNC_TABLES = [
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'customers', 'customer_accounts', 'customer_account_entries',
+    'employees', 'employee_attendance', 'customers', 'customer_accounts', 'customer_account_entries',
     'registers', 'suppliers', 'product_suppliers',
     'inventory_logs', 'orders', 'order_lines', 'payments',
     'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
@@ -2629,25 +3225,25 @@ async function deleteRowsByIds(d: Database, table: string, ids: string[]): Promi
 
 async function cleanupDeletedOrOrphanedPromotionRows(d: Database): Promise<void> {
     const deletedItemRows: any[] = await d.select(`
-        SELECT row_id AS id FROM tombstones WHERE table_name = 'promo_group_items'
+        SELECT CONVERT(row_id USING utf8mb4) COLLATE utf8mb4_bin AS id FROM tombstones WHERE table_name = 'promo_group_items'
         UNION
-        SELECT item.id
+        SELECT CONVERT(item.id USING utf8mb4) COLLATE utf8mb4_bin AS id
         FROM promo_group_items item
         INNER JOIN tombstones tombstone
             ON tombstone.table_name = 'promo_groups'
-            AND tombstone.row_id = item.groupId
+            AND BINARY tombstone.row_id = BINARY item.groupId
     `);
 
     const deletedDiscountRows: any[] = await d.select(`
-        SELECT row_id AS id FROM tombstones WHERE table_name = 'discounts'
+        SELECT CONVERT(row_id USING utf8mb4) COLLATE utf8mb4_bin AS id FROM tombstones WHERE table_name = 'discounts'
         UNION
-        SELECT discount.id
+        SELECT CONVERT(discount.id USING utf8mb4) COLLATE utf8mb4_bin AS id
         FROM discounts discount
         INNER JOIN tombstones tombstone
             ON tombstone.table_name = 'promo_groups'
-            AND tombstone.row_id = discount.groupId
+            AND BINARY tombstone.row_id = BINARY discount.groupId
         UNION
-        SELECT discount.id
+        SELECT CONVERT(discount.id USING utf8mb4) COLLATE utf8mb4_bin AS id
         FROM discounts discount
         LEFT JOIN promo_groups promo_group ON promo_group.id = discount.groupId
         WHERE COALESCE(discount.groupId, '') <> ''
@@ -2747,6 +3343,443 @@ function normalizeValue(v: any): any {
     if (v === undefined) return null;
     if (typeof v === 'boolean') return v ? 1 : 0;
     return v;
+}
+
+export const MYSQL_ATTENDANCE_ROW_PROJECTION = `
+           CAST(a.id AS CHAR CHARACTER SET utf8mb4) AS id,
+           a.employeeId,
+           a.clockInAt,
+           a.clockOutAt,
+           a.clockInTillId,
+           a.clockOutTillId,
+           a.status,
+           a.notes,
+           a.createdByEmployeeId,
+           a.updatedByEmployeeId,
+           a.createdAt,
+           a.updatedAt,
+           COALESCE(e.name, '') AS employeeName,
+           COALESCE(clock_in_till.name, a.clockInTillId, '') AS clockInTillName,
+           COALESCE(clock_out_till.name, a.clockOutTillId, '') AS clockOutTillName
+`;
+
+const MYSQL_ATTENDANCE_BASE_SELECT = `
+    SELECT ${MYSQL_ATTENDANCE_ROW_PROJECTION}
+    FROM employee_attendance a
+    LEFT JOIN employees e ON e.id = a.employeeId
+    LEFT JOIN registers clock_in_till ON clock_in_till.id = a.clockInTillId
+    LEFT JOIN registers clock_out_till ON clock_out_till.id = a.clockOutTillId
+`;
+
+export const MYSQL_ATTENDANCE_SUMMARY_PROJECTION = `
+    COUNT(*) AS count,
+    CAST(COALESCE(SUM(CASE
+        WHEN a.status = 'closed' AND a.clockOutAt > a.clockInAt
+        THEN GREATEST(0, TIMESTAMPDIFF(SECOND, a.clockInAt, a.clockOutAt))
+        WHEN a.status = 'open'
+        THEN GREATEST(0, TIMESTAMPDIFF(SECOND, a.clockInAt, UTC_TIMESTAMP(3)))
+        ELSE 0 END), 0) AS SIGNED) AS workedSeconds,
+    CAST(COALESCE(SUM(CASE WHEN a.status = 'open' THEN 1 ELSE 0 END), 0) AS SIGNED) AS openCount
+`;
+
+function buildMysqlAttendanceWhere(options: import('./sqlite').AttendancePageOptions): { whereSql: string; params: any[] } {
+    const where: string[] = [];
+    const params: any[] = [];
+    const employeeId = String(options.employeeId || '').trim();
+    if (employeeId) {
+        where.push('a.employeeId = ?');
+        params.push(employeeId);
+    }
+    const status = options.status || 'all';
+    if (status !== 'all') {
+        where.push('a.status = ?');
+        params.push(status);
+    }
+    const startAt = String(options.startAt || '').trim();
+    if (startAt) {
+        where.push('a.clockInAt >= ?');
+        params.push(startAt);
+    }
+    const endAt = String(options.endAt || '').trim();
+    if (endAt) {
+        where.push('a.clockInAt < ?');
+        params.push(endAt);
+    }
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        const like = `%${search}%`;
+        where.push(`(
+            LOWER(COALESCE(e.name, '')) LIKE ?
+            OR LOWER(COALESCE(clock_in_till.name, a.clockInTillId, '')) LIKE ?
+            OR LOWER(COALESCE(clock_out_till.name, a.clockOutTillId, '')) LIKE ?
+            OR LOWER(COALESCE(a.notes, '')) LIKE ?
+        )`);
+        params.push(like, like, like, like);
+    }
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+export async function mysqlGetAttendancePage(
+    options: import('./sqlite').AttendancePageOptions = {},
+): Promise<import('./sqlite').AttendancePageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 30)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const { whereSql, params } = buildMysqlAttendanceWhere(options);
+    const overallEmployeeId = String(options.employeeId || '').trim();
+    const fromSql = `
+        FROM employee_attendance a
+        LEFT JOIN employees e ON e.id = a.employeeId
+        LEFT JOIN registers clock_in_till ON clock_in_till.id = a.clockInTillId
+        LEFT JOIN registers clock_out_till ON clock_out_till.id = a.clockOutTillId
+        ${whereSql}
+    `;
+    const [rows, counts, overallCounts] = await Promise.all([
+        d.select<EmployeeAttendance[]>(
+            `${MYSQL_ATTENDANCE_BASE_SELECT}
+             ${whereSql}
+             ORDER BY CASE WHEN a.status = 'open' THEN 0 ELSE 1 END,
+                      a.clockInAt DESC, a.id DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+        ),
+        d.select<any[]>(
+            `SELECT ${MYSQL_ATTENDANCE_SUMMARY_PROJECTION}
+             ${fromSql}`,
+            params,
+        ),
+        whereSql
+            ? d.select<any[]>(
+                `SELECT COUNT(*) AS count FROM employee_attendance${overallEmployeeId ? ' WHERE employeeId = ?' : ''}`,
+                overallEmployeeId ? [overallEmployeeId] : [],
+            )
+            : Promise.resolve(null),
+    ]);
+    const summary = counts[0] || {};
+    const total = Number(summary.count || 0);
+    return {
+        rows,
+        total,
+        overallTotal: overallCounts ? Number(overallCounts[0]?.count || 0) : total,
+        totalWorkedSeconds: Math.max(0, Number(summary.workedSeconds || 0)),
+        openCount: Math.max(0, Number(summary.openCount || 0)),
+    };
+}
+
+async function mysqlGetOpenEmployeeAttendanceOnDatabase(
+    d: Database,
+    employeeId: string,
+): Promise<EmployeeAttendance | null> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) return null;
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${MYSQL_ATTENDANCE_BASE_SELECT}
+         WHERE a.employeeId = ? AND a.status = 'open'
+         ORDER BY a.clockInAt DESC, a.id DESC LIMIT 1`,
+        [normalizedId],
+    );
+    return rows[0] || null;
+}
+
+export async function mysqlGetOpenEmployeeAttendance(employeeId: string): Promise<EmployeeAttendance | null> {
+    return mysqlGetOpenEmployeeAttendanceOnDatabase(await getDb(), employeeId);
+}
+
+export async function mysqlGetEmployeeAttendanceById(id: string): Promise<EmployeeAttendance | null> {
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) return null;
+    const d = await getDb();
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${MYSQL_ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
+        [normalizedId],
+    );
+    return rows[0] || null;
+}
+
+export async function mysqlInsertOpenEmployeeAttendanceOnDatabase(
+    d: Database,
+    id: string,
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId: string,
+    notes = '',
+): Promise<EmployeeAttendance> {
+    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    try {
+        const result: any = await d.execute(
+            `INSERT INTO employee_attendance (
+                id, employeeId, clockInAt, clockOutAt, clockInTillId, clockOutTillId,
+                status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
+             )
+             VALUES (?, ?, ${stamp}, '', ?, '', 'open', ?, ?, ?, ${stamp}, ${stamp})`,
+            [id, employeeId, tillId, notes, actorEmployeeId, actorEmployeeId],
+        );
+        if (Number(result?.rowsAffected || 0) !== 1) {
+            throw new Error('ATTENDANCE_EMPLOYEE_INACTIVE');
+        }
+    } catch (error) {
+        const message = String(error);
+        if (message.toLowerCase().includes('duplicate')) {
+            throw new Error('ATTENDANCE_ALREADY_CLOCKED_IN');
+        }
+        // The BEFORE INSERT guard performs the authoritative locking read of
+        // employees. Keep that read inside the trigger: using employees as the
+        // source of this INSERT as well causes MariaDB error 1442.
+        if (message.includes('ATTENDANCE_ACTOR_INVALID')) {
+            throw new Error('ATTENDANCE_EMPLOYEE_INACTIVE');
+        }
+        throw error;
+    }
+    const row = await mysqlGetOpenEmployeeAttendanceOnDatabase(d, employeeId);
+    if (!row || row.id !== id) throw new Error('Could not confirm the attendance clock-in');
+    return row;
+}
+
+export async function mysqlInsertOpenEmployeeAttendance(
+    id: string,
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId: string,
+    notes = '',
+): Promise<EmployeeAttendance> {
+    return mysqlInsertOpenEmployeeAttendanceOnDatabase(
+        await getDb(),
+        id,
+        employeeId,
+        tillId,
+        actorEmployeeId,
+        notes,
+    );
+}
+
+export const EMPLOYEE_PROFILE_CONFLICT_CODE = 'EMPLOYEE_PROFILE_CONFLICT';
+
+const MYSQL_EMPLOYEE_PROFILE_SELECT = `SELECT
+    CAST(id AS CHAR CHARACTER SET utf8mb4) AS id,
+    storeId, name, pin, pinHash, role, email, isActive, createdAt, updatedAt
+    FROM employees`;
+
+export async function mysqlGetEmployeeProfileByIdOnDatabase(
+    d: Database,
+    employeeId: string,
+): Promise<Employee | null> {
+    const rows = await d.select<Employee[]>(
+        `${MYSQL_EMPLOYEE_PROFILE_SELECT} WHERE BINARY id = BINARY ? LIMIT 1`,
+        [employeeId],
+    );
+    if (!rows[0]) return null;
+    return { ...rows[0], isActive: Boolean(Number(rows[0].isActive)) };
+}
+
+export async function mysqlGetEmployeeProfileById(employeeId: string): Promise<Employee | null> {
+    return mysqlGetEmployeeProfileByIdOnDatabase(await getDb(), employeeId);
+}
+
+/**
+ * Insert a new employee or update an existing employee using its authoritative
+ * MariaDB updatedAt as an optimistic-concurrency token. This prevents a stale
+ * till from silently undoing a role downgrade, PIN reset, or deactivation.
+ */
+export async function mysqlSaveEmployeeProfileCasOnDatabase(
+    d: Database,
+    employee: Employee,
+    expectedUpdatedAt: string | null,
+): Promise<Employee> {
+    const serverStamp = `DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')`;
+    if (expectedUpdatedAt === null) {
+        try {
+            const result: any = await d.execute(
+                `INSERT INTO employees
+                    (id, storeId, name, pin, pinHash, role, email, isActive, createdAt, updatedAt)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${serverStamp})`,
+                [
+                    employee.id,
+                    normalizeValue(employee.storeId),
+                    normalizeValue(employee.name),
+                    normalizeValue(employee.pin),
+                    normalizeValue(employee.pinHash),
+                    normalizeValue(employee.role),
+                    normalizeValue(employee.email),
+                    employee.isActive ? 1 : 0,
+                    normalizeValue(employee.createdAt),
+                ],
+            );
+            if (Number(result?.rowsAffected || 0) !== 1) {
+                throw new Error(EMPLOYEE_PROFILE_CONFLICT_CODE);
+            }
+        } catch (error) {
+            const code = String((error as { code?: unknown })?.code || '');
+            if (code === '1062' || String(error).toLowerCase().includes('duplicate')) {
+                throw new Error(EMPLOYEE_PROFILE_CONFLICT_CODE);
+            }
+            throw error;
+        }
+    } else {
+        const result: any = await d.execute(
+            `UPDATE employees e
+             LEFT JOIN employee_attendance attendance
+               ON attendance.employeeId = e.id AND attendance.status = 'open'
+             SET e.storeId = ?, e.name = ?, e.pin = ?, e.pinHash = ?, e.role = ?,
+                 e.email = ?, e.isActive = ?, e.updatedAt = ${serverStamp}
+             WHERE BINARY e.id = BINARY ?
+               AND BINARY COALESCE(e.updatedAt, '') = BINARY ?
+               AND (? <> 0 OR attendance.id IS NULL)`,
+            [
+                normalizeValue(employee.storeId),
+                normalizeValue(employee.name),
+                normalizeValue(employee.pin),
+                normalizeValue(employee.pinHash),
+                normalizeValue(employee.role),
+                normalizeValue(employee.email),
+                employee.isActive ? 1 : 0,
+                employee.id,
+                expectedUpdatedAt,
+                employee.isActive ? 1 : 0,
+            ],
+        );
+        if (Number(result?.rowsAffected || 0) !== 1) {
+            if (!employee.isActive && await mysqlGetOpenEmployeeAttendanceOnDatabase(d, employee.id)) {
+                throw new Error('ATTENDANCE_OPEN_SESSION');
+            }
+            throw new Error(EMPLOYEE_PROFILE_CONFLICT_CODE);
+        }
+    }
+
+    const saved = await mysqlGetEmployeeProfileByIdOnDatabase(d, employee.id);
+    if (!saved) throw new Error('Could not confirm the staff change in MariaDB');
+    return saved;
+}
+
+export async function mysqlSaveEmployeeProfileCas(
+    employee: Employee,
+    expectedUpdatedAt: string | null,
+): Promise<Employee> {
+    return mysqlSaveEmployeeProfileCasOnDatabase(await getDb(), employee, expectedUpdatedAt);
+}
+
+/**
+ * Deactivate an existing employee only while MariaDB can prove there is no
+ * open attendance row. Keeping the check in the UPDATE prevents an offline
+ * outbox replay from deactivating somebody who clocked in after the UI check.
+ */
+export async function mysqlSaveInactiveEmployeeIfNoOpenAttendance(employee: Employee): Promise<void> {
+    const d = await getDb();
+    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    const result: any = await d.execute(
+        `UPDATE employees e
+         LEFT JOIN employee_attendance attendance
+           ON attendance.employeeId = e.id AND attendance.status = 'open'
+         SET e.storeId = ?, e.name = ?, e.pin = ?, e.pinHash = ?, e.role = ?,
+             e.email = ?, e.isActive = 0, e.updatedAt = ${stamp}
+         WHERE e.id = ? AND attendance.id IS NULL`,
+        [
+            normalizeValue(employee.storeId),
+            normalizeValue(employee.name),
+            normalizeValue(employee.pin),
+            normalizeValue(employee.pinHash),
+            normalizeValue(employee.role),
+            normalizeValue(employee.email),
+            employee.id,
+        ],
+    );
+    if (Number(result?.rowsAffected || 0) === 1) return;
+
+    const openAttendance = await mysqlGetOpenEmployeeAttendance(employee.id);
+    if (openAttendance) throw new Error('ATTENDANCE_OPEN_SESSION');
+    const existing: any[] = await d.select(
+        `SELECT id, isActive FROM employees WHERE id = ? LIMIT 1`,
+        [employee.id],
+    );
+    if (existing.length === 0) throw new Error('The staff account no longer exists in MariaDB');
+    // MariaDB may report zero changed rows when an identical inactive record is
+    // saved within the same timestamp tick. The requested state is already safe.
+    if (Number(existing[0]?.isActive || 0) === 0) return;
+    throw new Error('MariaDB did not deactivate the staff account');
+}
+
+export async function mysqlCloseOpenEmployeeAttendance(
+    attendanceId: string,
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId: string,
+): Promise<EmployeeAttendance> {
+    const d = await getDb();
+    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    const result: any = await d.execute(
+        `UPDATE employee_attendance
+         SET clockOutAt = ${stamp}, clockOutTillId = ?, status = 'closed',
+             updatedByEmployeeId = ?, updatedAt = ${stamp}
+         WHERE id = ? AND employeeId = ? AND status = 'open'`,
+        [tillId, actorEmployeeId, attendanceId, employeeId],
+    );
+    if (Number(result?.rowsAffected || 0) !== 1) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${MYSQL_ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
+        [attendanceId],
+    );
+    if (!rows[0]) throw new Error('Could not confirm the attendance clock-out');
+    return rows[0];
+}
+
+export async function mysqlSaveClosedEmployeeAttendanceOnDatabase(
+    d: Database,
+    row: EmployeeAttendance,
+    expectedUpdatedAt = '',
+): Promise<EmployeeAttendance> {
+    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    const expectedVersion = String(expectedUpdatedAt || '').trim();
+    if (expectedVersion) {
+        const result: any = await d.execute(
+            `UPDATE employee_attendance
+             SET employeeId = ?, clockInAt = ?, clockOutAt = ?, clockInTillId = ?,
+                 clockOutTillId = ?, status = 'closed', notes = ?,
+                 updatedByEmployeeId = ?, updatedAt = ${stamp}
+             WHERE id = ? AND status = 'closed' AND updatedAt = ?`,
+            [
+                row.employeeId, row.clockInAt, row.clockOutAt, row.clockInTillId,
+                row.clockOutTillId, row.notes, row.updatedByEmployeeId, row.id,
+                expectedVersion,
+            ],
+        );
+        if (Number(result?.rowsAffected || 0) !== 1) {
+            throw new Error(ATTENDANCE_CORRECTION_CONFLICT_CODE);
+        }
+    } else {
+        try {
+            await d.execute(
+                `INSERT INTO employee_attendance (
+                    id, employeeId, clockInAt, clockOutAt, clockInTillId, clockOutTillId,
+                    status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, ${stamp}, ${stamp})`,
+                [
+                    row.id, row.employeeId, row.clockInAt, row.clockOutAt,
+                    row.clockInTillId, row.clockOutTillId, row.notes,
+                    row.createdByEmployeeId, row.updatedByEmployeeId,
+                ],
+            );
+        } catch (error) {
+            if (String(error).toLowerCase().includes('duplicate')) {
+                throw new Error(ATTENDANCE_CORRECTION_CONFLICT_CODE);
+            }
+            throw error;
+        }
+    }
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${MYSQL_ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
+        [row.id],
+    );
+    if (!rows[0]) throw new Error('Could not confirm the attendance correction');
+    return rows[0];
+}
+
+export async function mysqlSaveClosedEmployeeAttendance(
+    row: EmployeeAttendance,
+    expectedUpdatedAt = '',
+): Promise<EmployeeAttendance> {
+    return mysqlSaveClosedEmployeeAttendanceOnDatabase(await getDb(), row, expectedUpdatedAt);
 }
 
 // ─── Generic CRUD ────────────────────────────────────────────────────────────
@@ -3039,6 +4072,7 @@ export interface MysqlPaymentTerminalAttempt {
     status: string;
     saleBundle: string;
     providerReference: string;
+    operatorResolution?: string;
     error: string;
     tillId: string;
     createdAt: string;
@@ -3065,7 +4099,7 @@ const OPERATIONAL_TERMINAL_ATTEMPT_SQL =
 const PAYMENT_TERMINAL_ATTEMPT_READ_COLUMNS = [
     'id', 'provider', 'terminalKey', 'clientTransactionId', 'terminalSessionId',
     'operationKind', 'amount', 'expectedProviderAmount', 'currency', 'status',
-    'saleBundle', 'providerReference', 'error', 'tillId', 'createdAt', 'updatedAt',
+    'saleBundle', 'providerReference', 'operatorResolution', 'error', 'tillId', 'createdAt', 'updatedAt',
 ] as const;
 
 // Keep shared recovery age/takeover decisions independent of every Windows
@@ -3175,6 +4209,29 @@ export async function mysqlUpdatePaymentTerminalAttempt(
     };
 }
 
+/** Lease-owning recovery may fill missing legacy Dojo extras, never rewrite existing money. */
+export async function mysqlEnrichDojoTerminalAccounting(
+    expected: MysqlPaymentTerminalAttempt,
+    enrichedSaleBundle: string,
+): Promise<MysqlPaymentTerminalAttempt> {
+    if (expected.provider !== 'dojo' || !['sale', 'customer_account_payment'].includes(expected.operationKind)
+        || !['prepared', 'started', 'uncertain', 'approved', 'commit_failed', 'completion_pending'].includes(expected.status)) {
+        throw new Error('This shared terminal row cannot accept accounting enrichment');
+    }
+    assertTerminalAccountingEnrichment(expected.saleBundle, enrichedSaleBundle);
+    const d = await getDb();
+    await d.execute(
+        `UPDATE payment_terminal_attempts SET saleBundle = ?, updatedAt = ${MYSQL_SERVER_ISO_TIMESTAMP}
+         WHERE id = ? AND provider = 'dojo' AND status = ? AND BINARY saleBundle = BINARY ?`,
+        [enrichedSaleBundle, expected.id, expected.status, expected.saleBundle],
+    );
+    const actual = await mysqlGetPaymentTerminalAttempt(expected.id, 'dojo');
+    if (!actual || actual.saleBundle !== enrichedSaleBundle || actual.status !== expected.status) {
+        throw new Error('Shared terminal accounting changed during reconciliation; recovery remains pending');
+    }
+    return actual;
+}
+
 function normalizeMysqlPaymentTerminalAttempt(row: any): MysqlPaymentTerminalAttempt {
     return {
         id: String(row.id || ''),
@@ -3189,6 +4246,7 @@ function normalizeMysqlPaymentTerminalAttempt(row: any): MysqlPaymentTerminalAtt
         status: String(row.status || ''),
         saleBundle: String(row.saleBundle || ''),
         providerReference: String(row.providerReference || ''),
+        operatorResolution: String(row.operatorResolution || ''),
         error: String(row.error || ''),
         tillId: String(row.tillId || ''),
         createdAt: String(row.createdAt || ''),
@@ -3588,6 +4646,28 @@ export async function mysqlGetSyncPage(
             ? { updatedAt: String(last.updatedAt || ''), rowId: String(last[idKey] || '') }
             : null,
     };
+}
+
+/** Primary-key verification never filters by timestamp or the change cursor. */
+export async function mysqlGetVersionPage(table: string, after: string | null, limit = 500): Promise<Array<{ rowId: string; updatedAt: string }>> {
+    if (!TIMESTAMP_SYNC_TABLES.includes(table)) throw new Error('Unsupported verification table');
+    const d = await getDb();
+    const key = table === 'settings' ? 'key' : 'id';
+    const quoted = mysqlSchemaIdentifier(key);
+    return d.select(`SELECT CAST(${quoted} AS CHAR) AS rowId, updatedAt FROM ${mysqlSchemaIdentifier(table)}
+        ${after === null ? '' : `WHERE ${quoted} > ?`} ORDER BY ${quoted} LIMIT ?`,
+        [...(after === null ? [] : [after]), Math.max(1, Math.min(500, limit))]);
+}
+
+export async function mysqlGetSyncRowsByIds(table: string, ids: string[]): Promise<any[]> {
+    if (!TIMESTAMP_SYNC_TABLES.includes(table)) throw new Error('Unsupported verification table');
+    if (!ids.length) return [];
+    if (ids.length > 500) throw new Error('Verification page is too large');
+    const d = await getDb();
+    const columns = (await getTableColumns(table)).filter(column => table !== 'products' || column !== 'image');
+    const key = table === 'settings' ? 'key' : 'id';
+    return d.select(`SELECT ${mysqlApplicationReadProjection(table, columns)} FROM ${mysqlSchemaIdentifier(table)}
+        WHERE ${mysqlSchemaIdentifier(key)} IN (${ids.map(() => '?').join(',')})`, ids);
 }
 
 /**
@@ -4091,7 +5171,7 @@ export async function mysqlBatchUpdateGoodsMenu(
 
 import type {
     SalesOverview, PaymentBreakdown, TopProduct, TillReportOption,
-    TillSalesSummary, DailySalesPoint, BusinessSummary, EmployeeSalesSummary
+    TillSalesSummary, TillPeriodReport, DailySalesPoint, BusinessSummary, EmployeeSalesSummary
 } from './sqlite';
 
 function reportDateBounds(startDate: string, endDate: string): [string, string] {
@@ -4148,9 +5228,9 @@ async function mysqlGetAccountReportActivity(
 }
 
 export async function mysqlGetSalesOverview(
-    startDate: string, endDate: string, tillNumber?: string
+    startDate: string, endDate: string, tillNumber?: string, database?: Database
 ): Promise<SalesOverview> {
-    const d = await getDb();
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
@@ -4194,9 +5274,9 @@ export async function mysqlGetSalesOverview(
 }
 
 export async function mysqlGetPaymentBreakdown(
-    startDate: string, endDate: string, tillNumber?: string
+    startDate: string, endDate: string, tillNumber?: string, database?: Database
 ): Promise<PaymentBreakdown> {
-    const d = await getDb();
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const bounds = reportDateBounds(startDate, endDate);
     const params: any[] = [...bounds];
@@ -4238,6 +5318,7 @@ export async function mysqlGetPaymentBreakdown(
 
     const r = rows[0] || {};
     return {
+        ...reportPaymentExtraTotals(await readPaymentExtraTotalsByTill(d, bounds[0], bounds[1]), tillNumber),
         totalCash: r.totalCash || 0,
         totalCard: r.totalCard || 0,
         totalLoyalty: r.totalLoyalty || 0,
@@ -4259,9 +5340,10 @@ export async function mysqlGetTopProducts(
     endDate: string,
     sortBy: 'quantity' | 'revenue' = 'quantity',
     limit: number = 10,
-    tillNumber?: string
+    tillNumber?: string,
+    database?: Database,
 ): Promise<TopProduct[]> {
-    const d = await getDb();
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const orderClause = sortBy === 'revenue' ? 'totalRevenue DESC' : 'qtySold DESC';
     const params: any[] = [...reportDateBounds(startDate, endDate)];
@@ -4416,11 +5498,13 @@ export async function mysqlAggregateDailySummary(date?: string, existingDb?: Dat
 
 export async function mysqlGetLastReportMarker(tillNumber: string): Promise<string | null> {
     const d = await getDb();
+    const scopes = effectiveReportMarkerScopes(tillNumber);
     const rows: any[] = await d.select(
         `SELECT markerTime FROM till_report_markers
-         WHERE tillNumber = ? AND type = 'period'
+         WHERE type = 'period'
+           AND tillNumber IN (${scopes.map(() => '?').join(',')})
          ORDER BY markerTime DESC LIMIT 1`,
-        [tillNumber]
+        scopes
     );
     return rows.length > 0 ? rows[0].markerTime : null;
 }
@@ -4486,8 +5570,8 @@ export async function mysqlGetAllTillNumbers(): Promise<string[]> {
     return rows.map(r => r.tillNumber);
 }
 
-export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
-    const d = await getDb();
+export async function mysqlGetTillReportOptions(database?: Database): Promise<TillReportOption[]> {
+    const d = database || await getDb();
     const [orderRows, registerRows, accountRows] = await Promise.all([
         d.select<any[]>(
         `SELECT CAST(o.tillNumber AS CHAR) as id, CAST(MAX(r.name) AS CHAR) as name, MIN(o.orderNumber) as minOrderNumber
@@ -4525,12 +5609,25 @@ export async function mysqlGetTillReportOptions(): Promise<TillReportOption[]> {
     });
 }
 
-export async function mysqlGetTillSalesSummaries(startDate: string, endDate: string): Promise<TillSalesSummary[]> {
-    const d = await getDb();
-    const options = await mysqlGetTillReportOptions();
-    const bounds = reportDateBounds(startDate, endDate);
-    const [rows, collectionRows] = await Promise.all([d.select<any[]>(
-        `SELECT CAST(o.tillNumber AS CHAR) as id,
+export async function mysqlGetTillPeriodSalesSummaries(
+    startTime: string,
+    endTime: string,
+    tillNumber = '',
+    database?: Database,
+): Promise<TillSalesSummary[]> {
+    const d = database || await getDb();
+    const orderTillFilter = tillNumber ? ' AND o.tillNumber = ?' : '';
+    const collectionTillFilter = tillNumber ? ' AND tillNumber = ?' : '';
+    const periodParams: any[] = [startTime, endTime];
+    if (tillNumber) periodParams.push(tillNumber);
+    const [registerRows, rows, collectionRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT CAST(id AS CHAR) AS id, CAST(name AS CHAR) AS name, isActive
+             FROM registers
+             ORDER BY name, id`,
+        ),
+        d.select<any[]>(
+            `SELECT CAST(COALESCE(o.tillNumber, '') AS CHAR) as id,
             CAST(COALESCE(SUM(o.total), 0) AS SIGNED) as netSales,
             CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) as saleRevenue,
             CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) AS SIGNED) as grossSales,
@@ -4547,38 +5644,74 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?
-         GROUP BY o.tillNumber ORDER BY netSales DESC`,
-        bounds
-    ), d.select<any[]>(
-        `SELECT CAST(tillNumber AS CHAR) AS id,
+           AND o.completedAt >= ? AND o.completedAt < ?${orderTillFilter}
+             GROUP BY COALESCE(o.tillNumber, '') ORDER BY netSales DESC`,
+            periodParams,
+        ),
+        d.select<any[]>(
+            `SELECT CAST(COALESCE(tillNumber, '') AS CHAR) AS id,
                 CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
                 CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
                 CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsOther
          FROM customer_account_entries
          WHERE entryType = 'payment'
-           AND createdAt >= ? AND createdAt < ?
-         GROUP BY tillNumber`,
-        bounds,
-    )]);
+           AND createdAt >= ? AND createdAt < ?${collectionTillFilter}
+             GROUP BY COALESCE(tillNumber, '')`,
+            periodParams,
+        ),
+    ]);
     const byId = new Map(rows.map((row) => [String(row.id || ''), row]));
     const collectionsById = new Map(collectionRows.map((row) => [String(row.id || ''), row]));
+    const registerNames = new Map(registerRows.map((row) => [String(row.id), String(row.name || row.id)]));
+    const placeholderIds = new Set(['register-main', 'legacy-till']);
+    const optionIds: string[] = [];
+    const includedIds = new Set<string>();
+    const includeId = (id: string) => {
+        if (includedIds.has(id)) return;
+        includedIds.add(id);
+        optionIds.push(id);
+    };
+
+    if (tillNumber) {
+        // Preserve single-till closes even for an inactive/unknown register or
+        // an exact period with no sales.
+        includeId(tillNumber);
+    } else {
+        // Seed only genuine active registers. Historical/inactive/placeholder
+        // IDs are appended only when the exact-period aggregates contain them.
+        for (const row of registerRows) {
+            const id = String(row.id);
+            if (Number(row.isActive ?? 1) !== 0 && !placeholderIds.has(id)) includeId(id);
+        }
+        for (const id of byId.keys()) includeId(id);
+        for (const id of collectionsById.keys()) includeId(id);
+    }
+
+    const usedNames = new Map<string, number>();
+    const options: TillReportOption[] = optionIds.map((id) => {
+        const baseName = id === '' ? 'Unassigned / legacy' : registerNames.get(id) || id;
+        const occurrence = (usedNames.get(baseName) || 0) + 1;
+        usedNames.set(baseName, occurrence);
+        return { id, name: occurrence === 1 ? baseName : `${baseName} (${occurrence})` };
+    });
+    const extrasByTill = await readPaymentExtraTotalsByTill(d, startTime, endTime);
     return options.map((option) => {
         const row = byId.get(option.id) || {};
         return {
+            ...extrasByTill.get(option.id),
             id: option.id,
             name: option.name,
-            netSales: row.netSales || 0,
-            grossSales: row.grossSales || 0,
-            refunds: row.refunds || 0,
-            taxTotal: row.taxTotal || 0,
-            transactions: row.transactions || 0,
-            refundTransactions: row.refundTransactions || 0,
-            itemsSold: row.itemsSold || 0,
-            cashTotal: row.cashTotal || 0,
-            cardTotal: row.cardTotal || 0,
-            loyaltyTotal: row.loyaltyTotal || 0,
-            accountTotal: row.accountTotal || 0,
+            netSales: Number(row.netSales || 0),
+            grossSales: Number(row.grossSales || 0),
+            refunds: Number(row.refunds || 0),
+            taxTotal: Number(row.taxTotal || 0),
+            transactions: Number(row.transactions || 0),
+            refundTransactions: Number(row.refundTransactions || 0),
+            itemsSold: Number(row.itemsSold || 0),
+            cashTotal: Number(row.cashTotal || 0),
+            cardTotal: Number(row.cardTotal || 0),
+            loyaltyTotal: Number(row.loyaltyTotal || 0),
+            accountTotal: Number(row.accountTotal || 0),
             accountRepaymentsCash: Number(collectionsById.get(option.id)?.accountRepaymentsCash || 0),
             accountRepaymentsCard: Number(collectionsById.get(option.id)?.accountRepaymentsCard || 0),
             accountRepaymentsOther: Number(collectionsById.get(option.id)?.accountRepaymentsOther || 0),
@@ -4586,8 +5719,13 @@ export async function mysqlGetTillSalesSummaries(startDate: string, endDate: str
     });
 }
 
-export async function mysqlGetDailySalesTrend(startDate: string, endDate: string, tillNumber?: string): Promise<DailySalesPoint[]> {
-    const d = await getDb();
+export async function mysqlGetTillSalesSummaries(startDate: string, endDate: string, database?: Database): Promise<TillSalesSummary[]> {
+    const [startTime, endTime] = reportDateBounds(startDate, endDate);
+    return mysqlGetTillPeriodSalesSummaries(startTime, endTime, '', database);
+}
+
+export async function mysqlGetDailySalesTrend(startDate: string, endDate: string, tillNumber?: string, database?: Database): Promise<DailySalesPoint[]> {
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND tillNumber = ?` : '';
     const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
@@ -4612,8 +5750,8 @@ export async function mysqlGetDailySalesTrend(startDate: string, endDate: string
     return [...grouped.values()];
 }
 
-export async function mysqlGetBusinessSummary(startDate: string, endDate: string, tillNumber?: string): Promise<BusinessSummary> {
-    const d = await getDb();
+export async function mysqlGetBusinessSummary(startDate: string, endDate: string, tillNumber?: string, database?: Database): Promise<BusinessSummary> {
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
@@ -4644,8 +5782,8 @@ export async function mysqlGetBusinessSummary(startDate: string, endDate: string
     };
 }
 
-export async function mysqlGetEmployeeSalesSummaries(startDate: string, endDate: string, tillNumber?: string): Promise<EmployeeSalesSummary[]> {
-    const d = await getDb();
+export async function mysqlGetEmployeeSalesSummaries(startDate: string, endDate: string, tillNumber?: string, database?: Database): Promise<EmployeeSalesSummary[]> {
+    const d = database || await getDb();
     const tillFilter = tillNumber ? ` AND o.tillNumber = ?` : '';
     const params: any[] = [...reportDateBounds(startDate, endDate)];
     if (tillNumber) params.push(tillNumber);
@@ -4678,7 +5816,7 @@ export async function mysqlGetTillPeriodReport(
     tillNumber: string,
     startTime: string,
     endTime: string
-): Promise<{ overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] }> {
+): Promise<TillPeriodReport> {
     const d = await getDb();
     const tillFilter = tillNumber ? `AND o.tillNumber = ?` : '';
     const periodParams = tillNumber ? [tillNumber, startTime, endTime] : [startTime, endTime];
@@ -4752,6 +5890,7 @@ export async function mysqlGetTillPeriodReport(
     ), mysqlGetAccountReportActivity(d, startTime, endTime, tillNumber)]);
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
+        ...reportPaymentExtraTotals(await readPaymentExtraTotalsByTill(d, startTime, endTime), tillNumber),
         totalCash: b.totalCash || 0,
         totalCard: b.totalCard || 0,
         totalLoyalty: b.totalLoyalty || 0,
@@ -4796,5 +5935,6 @@ export async function mysqlGetTillPeriodReport(
         avgPrice: r.avgPrice || 0,
     }));
 
-    return { overview, breakdown, topProducts };
+    const tillSummaries = await mysqlGetTillPeriodSalesSummaries(startTime, endTime, tillNumber);
+    return { overview, breakdown, topProducts, tillSummaries };
 }

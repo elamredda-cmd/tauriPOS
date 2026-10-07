@@ -1,4 +1,5 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
+import { saleCardCollected, accountCardCollected, type PaymentExtraTotals } from '$lib/paymentExtras';
 import {
     getAuth,
     indexedDBLocalPersistence,
@@ -62,7 +63,7 @@ export interface OwnerClosedReportInput {
         avgTransactionValue: number;
         totalItemsSold: number;
     };
-    breakdown: {
+    breakdown: PaymentExtraTotals & {
         totalCash: number;
         totalCard: number;
         totalLoyalty: number;
@@ -332,6 +333,14 @@ async function buildSnapshot() {
             transactions: cleanNumber(till.transactions),
             cash: cleanNumber(till.cashTotal),
             card: cleanNumber(till.cardTotal),
+            tips: cleanNumber(till.tipsTotal),
+            serviceCharge: cleanNumber(till.serviceChargeTotal),
+            cashbackPaidOut: cleanNumber(till.cashbackTotal),
+            cardCharged: saleCardCollected(till),
+            accountTips: cleanNumber(till.accountTipsTotal),
+            accountServiceCharge: cleanNumber(till.accountServiceChargeTotal),
+            accountCashbackPaidOut: cleanNumber(till.accountCashbackTotal),
+            accountCardCharged: accountCardCollected(till),
             loyalty: cleanNumber(till.loyaltyTotal),
             payLater: cleanNumber(till.accountTotal),
             accountCashCollected: cleanNumber(till.accountRepaymentsCash),
@@ -354,6 +363,8 @@ async function buildSnapshot() {
             transactions: 0,
             cash: 0,
             card: 0,
+            tips: 0, serviceCharge: 0, cashbackPaidOut: 0, cardCharged: 0,
+            accountTips: 0, accountServiceCharge: 0, accountCashbackPaidOut: 0, accountCardCharged: 0,
             loyalty: 0,
             payLater: 0,
             accountCashCollected: 0,
@@ -386,6 +397,10 @@ async function buildSnapshot() {
         payments: {
             cash: cleanNumber(report.breakdown.totalCash),
             card: cleanNumber(report.breakdown.totalCard),
+            tips: cleanNumber(report.breakdown.tipsTotal),
+            serviceCharge: cleanNumber(report.breakdown.serviceChargeTotal),
+            cashbackPaidOut: cleanNumber(report.breakdown.cashbackTotal),
+            cardCharged: saleCardCollected(report.breakdown),
             loyalty: cleanNumber(report.breakdown.totalLoyalty),
             payLater: cleanNumber(report.breakdown.totalAccount),
             accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
@@ -398,6 +413,10 @@ async function buildSnapshot() {
             charges: cleanNumber(report.breakdown.accountCharges),
             cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
             cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+            tips: cleanNumber(report.breakdown.accountTipsTotal),
+            serviceCharge: cleanNumber(report.breakdown.accountServiceChargeTotal),
+            cashbackPaidOut: cleanNumber(report.breakdown.accountCashbackTotal),
+            cardCharged: accountCardCollected(report.breakdown),
             otherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
             adjustments: cleanNumber(report.breakdown.accountAdjustments),
             closingOwed: cleanNumber(report.breakdown.closingAccountOwed),
@@ -501,6 +520,10 @@ async function flushClosedReportOutbox(
                 payments: {
                     cash: cleanNumber(report.breakdown.totalCash),
                     card: cleanNumber(report.breakdown.totalCard),
+                    tips: cleanNumber(report.breakdown.tipsTotal),
+                    serviceCharge: cleanNumber(report.breakdown.serviceChargeTotal),
+                    cashbackPaidOut: cleanNumber(report.breakdown.cashbackTotal),
+                    cardCharged: saleCardCollected(report.breakdown),
                     loyalty: cleanNumber(report.breakdown.totalLoyalty),
                     payLater: cleanNumber(report.breakdown.totalAccount),
                     accountCashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
@@ -515,6 +538,10 @@ async function flushClosedReportOutbox(
                     charges: cleanNumber(report.breakdown.accountCharges),
                     cashCollected: cleanNumber(report.breakdown.accountRepaymentsCash),
                     cardCollected: cleanNumber(report.breakdown.accountRepaymentsCard),
+                    tips: cleanNumber(report.breakdown.accountTipsTotal),
+                    serviceCharge: cleanNumber(report.breakdown.accountServiceChargeTotal),
+                    cashbackPaidOut: cleanNumber(report.breakdown.accountCashbackTotal),
+                    cardCharged: accountCardCollected(report.breakdown),
                     otherCollected: cleanNumber(report.breakdown.accountRepaymentsOther),
                     adjustments: cleanNumber(report.breakdown.accountAdjustments),
                     closingOwed: cleanNumber(report.breakdown.closingAccountOwed),

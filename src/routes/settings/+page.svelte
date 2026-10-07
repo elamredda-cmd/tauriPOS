@@ -1,25 +1,51 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, tick } from 'svelte';
+    import { goto } from '$app/navigation';
+    import { page } from '$app/stores';
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import Modal from '$lib/components/Modal.svelte';
+    import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import TouchDigitPad from '$lib/components/TouchDigitPad.svelte';
+    import { canAccessPath } from '$lib/permissions';
     import { connectionState } from '$lib/stores/connection';
-    import { currentEmployee } from '$lib/stores/session';
-    import { storeDB, settingsDB, type Store, now, formatMoney } from '$lib/stores/db';
-    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId } from '$lib/stores/database';
+    import {
+        currentEmployee,
+        currentShiftId,
+        isSupportEmployee,
+        logout,
+        normalizeEmployeeForRuntime,
+        PinRateLimitError,
+        verifyEmployeePin,
+    } from '$lib/stores/session';
+    import { employeesDB, storeDB, settingsDB, type Employee, type Store, now, formatMoney } from '$lib/stores/db';
+    import { upsert, getTillName, setTillName as setTillNameDb, getOrCreateTillId, recordAuditEvent } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import {
+        deviceOperatingMode,
+        deviceOperatingModeLabel,
+        saveDeviceOperatingMode,
+        type DeviceOperatingMode,
+    } from '$lib/deviceMode';
+    import { closeCustomerDisplay } from '$lib/customerDisplay';
     import { AGE_RESTRICTION_SETTING_KEY, isAgeRestrictionEnabled } from '$lib/ageRestriction';
     import { appFontOptions, appFontSizeOptions, normalizeAppFontChoice } from '$lib/typography';
     import {
         BadgePercent,
         Banknote,
         Barcode,
+        Building2,
         Cctv,
+        Clock,
         ChevronRight,
         CreditCard,
         Database,
         GraduationCap,
         HardDrive,
         KeyRound,
+        LayoutGrid,
+        ReceiptText,
+        Tags,
         Monitor,
         MonitorCog,
         PackageCheck,
@@ -27,6 +53,7 @@
         Printer,
         Save,
         Scale,
+        ShoppingCart,
         ShieldCheck,
         Smartphone,
         Store as StoreIcon,
@@ -46,29 +73,61 @@
     };
 
     const settingsShortcuts: SettingsShortcut[] = [
+        { title: 'Button layout', group: 'Appearance', description: 'Arrange checkout shortcuts', path: '/settings/layout', accent: '#2563eb', icon: LayoutGrid },
+        { title: 'Receipt design', group: 'Checkout', description: 'Receipt content and layout', path: '/settings/receipt', accent: '#2563eb', icon: ReceiptText },
+        { title: 'Product labels', group: 'Hardware', description: 'Label sizes and templates', path: '/settings/labels', accent: '#2563eb', icon: Tags },
         { title: 'Colour theme', group: 'Appearance', description: 'Colours and contrast', path: '/settings/themes', accent: '#2563eb', icon: Palette },
         { title: 'Fonts & text', group: 'Appearance', description: 'Writing style and sizes', path: '/settings/fonts', accent: '#db2777', icon: Type },
         { title: 'Printers & drawer', group: 'Hardware', description: 'Receipts, labels and drawer', path: '/settings/printers', accent: '#16a34a', icon: Printer },
         { title: 'Scale', group: 'Hardware', description: 'Port and weighing setup', path: '/settings/scale', accent: '#0f766e', icon: Scale },
-        { title: 'Scale barcodes', group: 'Barcodes', description: 'Embedded price rules', path: '/settings/barcodes', accent: '#16a34a', icon: Barcode },
+        { title: 'Scale barcodes', group: 'Hardware', description: 'Embedded price rules', path: '/settings/barcodes', accent: '#16a34a', icon: Barcode },
         { title: 'Customer display', group: 'Checkout', description: 'Second-screen basket', path: '/settings/customer-display', accent: '#2563eb', icon: Monitor },
         { title: 'Card terminals', group: 'Checkout', description: 'SumUp, Dojo and providers', path: '/settings/payments', accent: '#059669', icon: CreditCard },
-        { title: 'Sound & haptics', group: 'Till feedback', description: 'Scan and button feedback', path: '/settings/feedback', accent: '#7c3aed', icon: Volume2 },
-        { title: 'CCTV overlay', group: 'Integrations', description: 'DVR and NVR sale text', path: '/settings/integrations', accent: '#0f766e', icon: Cctv },
+        { title: 'Sound & haptics', group: 'Checkout', description: 'Scan and button feedback', path: '/settings/feedback', accent: '#7c3aed', icon: Volume2 },
+        { title: 'CCTV overlay', group: 'Administration', description: 'DVR and NVR sale text', path: '/settings/integrations', accent: '#0f766e', icon: Cctv },
         { title: 'Shop licence', group: 'Administration', description: 'Activation and till seats', path: '/settings/licence', accent: '#16a34a', icon: KeyRound, adminOnly: true },
         { title: 'Owner app', group: 'Administration', description: 'Pair the live dashboard', path: '/settings/owner-app', accent: '#2563eb', icon: Smartphone, adminOnly: true },
+        { title: 'Cash Control', group: 'Administration', description: 'Private counts · administrator PIN', path: '/settings/cash-control', accent: '#0f766e', icon: Banknote, adminOnly: true },
         { title: 'Maintenance', group: 'Administration', description: 'Backup, restore and repair', path: '/settings/advanced', accent: '#dc2626', icon: Wrench, adminOnly: true },
     ];
+
+    const settingsCategories = [
+        { id: 'general', label: 'Shop & till', icon: StoreIcon, description: 'Shop details, loyalty and daily operation.' },
+        { id: 'Appearance', label: 'Appearance', icon: Palette, description: 'Make the workspace comfortable for your team.' },
+        { id: 'Hardware', label: 'Hardware', icon: Printer, description: 'Connect and configure the devices around your till.' },
+        { id: 'Checkout', label: 'Checkout', icon: ShoppingCart, description: 'Payments, receipts and the customer experience.' },
+        { id: 'Administration', label: 'Administration', icon: ShieldCheck, description: 'Manage services, access and shop maintenance.' },
+    ];
+    $: availableCategories = settingsCategories.filter((item) => item.id === 'general' || visibleSettingsShortcuts.some((entry) => entry.group === item.id));
+    $: activeCategory = availableCategories.some((item) => item.id === $page.url.searchParams.get('section'))
+        ? $page.url.searchParams.get('section')!
+        : 'general';
+    $: category = settingsCategories.find((item) => item.id === activeCategory) || settingsCategories[0];
+    $: categoryShortcuts = visibleSettingsShortcuts.filter((entry) => entry.group === activeCategory);
 
     let store = { ...$storeDB };
     let editTillName = '';
     let tillId = '';
     let storeSaving = false;
     let tillNameSaving = false;
+    let showDeviceModeDialog = false;
+    let requestedDeviceMode: DeviceOperatingMode | null = null;
+    let deviceModeApproverId = '';
+    let deviceModePin = '';
+    let previousDeviceModePin = '';
+    let deviceModeError = '';
+    let deviceModeSaving = false;
+    let deviceModePinInput: HTMLInputElement | null = null;
+
+    $: if (deviceModePin !== previousDeviceModePin) {
+        previousDeviceModePin = deviceModePin;
+        if (deviceModePin) deviceModeError = '';
+    }
 
     $: stockTrackingEnabled = ($settingsDB.find(s => s.key === 'stock_tracking_enabled')?.value ?? 'true') !== 'false';
     $: ageRestrictionEnabled = isAgeRestrictionEnabled($settingsDB);
     $: loyaltyEnabled = ($settingsDB.find(s => s.key === 'loyalty_enabled')?.value ?? 'true') !== 'false';
+    $: attendanceEnabled = ($settingsDB.find(s => s.key === 'time_attendance_enabled')?.value ?? 'false') === 'true';
     $: cashUpEnabled = ($settingsDB.find(s => s.key === 'cash_up_enabled')?.value ?? 'false') === 'true';
     $: openingFloatRequired = ($settingsDB.find(s => s.key === 'cash_up_require_opening_float')?.value ?? 'true') !== 'false';
     $: cardReconciliationEnabled = ($settingsDB.find(s => s.key === 'cash_up_reconcile_card')?.value ?? 'true') !== 'false';
@@ -80,7 +139,37 @@
     $: loyaltyPointsPerPound = loyaltyNumber('loyalty_points_per_pound', 0, 1);
     $: loyaltyPointsRequired = loyaltyNumber('loyalty_points_to_redeem', 1, 100);
     $: loyaltyCreditValue = loyaltyNumber('loyalty_redemption_value', 1, 100);
-    $: visibleSettingsShortcuts = settingsShortcuts.filter((entry) => !entry.adminOnly || $currentEmployee?.role === 'admin');
+    $: currentDeviceMode = $deviceOperatingMode || 'checkout';
+    $: connectionOnline = $connectionState.mode === 'single'
+        || ($connectionState.mode === 'multi'
+            && $connectionState.mysqlOnline
+            && $connectionState.mysqlReady
+            && !$connectionState.syncError);
+    $: visibleSettingsShortcuts = settingsShortcuts
+        .filter((entry) => canAccessPath($currentEmployee, entry.path, $settingsDB))
+        .filter((entry) => !entry.adminOnly || $currentEmployee?.role === 'admin')
+        .filter((entry) => currentDeviceMode !== 'back_office'
+            || !['/settings/customer-display', '/settings/payments'].includes(entry.path));
+    $: deviceModeApprovers = $employeesDB
+        .map(normalizeEmployeeForRuntime)
+        .filter((employee): employee is Employee => Boolean(
+            employee?.isActive
+            && employee.role === 'admin'
+            && !isSupportEmployee(employee),
+        ))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    $: if (
+        showDeviceModeDialog
+        && (!deviceModeApproverId || !deviceModeApprovers.some((employee) => employee.id === deviceModeApproverId))
+    ) {
+        const signedInAdmin = deviceModeApprovers.find((employee) => employee.id === $currentEmployee?.id);
+        deviceModeApproverId = signedInAdmin?.id || deviceModeApprovers[0]?.id || '';
+    }
+    $: deviceModeBlockedReason = requestedDeviceMode === 'back_office'
+        && cashUpEnabled
+        && Boolean($currentShiftId)
+        ? 'Close the current till cash-up session before changing this device to Back Office.'
+        : '';
 
     onMount(async () => {
         if (!isTauri()) {
@@ -181,6 +270,137 @@
         }
     }
 
+    function requestDeviceModeChange(mode: DeviceOperatingMode) {
+        if (deviceModeSaving || mode === currentDeviceMode) return;
+        if (mode === 'back_office' && cashUpEnabled && Boolean($currentShiftId)) {
+            toast('Close the current till cash-up session before switching this computer to Back Office.', 'error');
+            return;
+        }
+        requestedDeviceMode = mode;
+        deviceModePin = '';
+        deviceModeError = '';
+        showDeviceModeDialog = true;
+        if ($deviceOperatingMode === 'back_office') {
+            void tick().then(() => deviceModePinInput?.focus({ preventScroll: true }));
+        }
+    }
+
+    function cancelDeviceModeChange() {
+        if (deviceModeSaving) return;
+        showDeviceModeDialog = false;
+        requestedDeviceMode = null;
+        deviceModePin = '';
+        deviceModeError = '';
+    }
+
+    async function confirmDeviceModeChange() {
+        const nextMode = requestedDeviceMode;
+        const approverName = deviceModeApprovers.find((employee) => employee.id === deviceModeApproverId)?.name || 'administrator';
+        if (!nextMode || deviceModeSaving) return;
+        if (deviceModeBlockedReason) {
+            deviceModeError = deviceModeBlockedReason;
+            return;
+        }
+        if (!deviceModeApproverId) {
+            deviceModeError = 'No active administrator with a usable PIN is available. Repair administrator access first.';
+            return;
+        }
+        if (!/^\d{4,8}$/.test(deviceModePin)) {
+            deviceModeError = 'Enter the administrator’s 4 to 8 digit PIN.';
+            return;
+        }
+
+        deviceModeSaving = true;
+        deviceModeError = '';
+        try {
+            const approver = await verifyEmployeePin(deviceModeApproverId, deviceModePin);
+            if (!approver || approver.role !== 'admin' || isSupportEmployee(approver)) {
+                deviceModePin = '';
+                deviceModeError = `Incorrect PIN for ${approverName}.`;
+                return;
+            }
+
+            const previousMode = currentDeviceMode;
+            if (nextMode === 'back_office' && isTauri()) {
+                await closeCustomerDisplay();
+            }
+            await saveDeviceOperatingMode(nextMode);
+            await recordAuditEvent(
+                'device_operating_mode_changed',
+                'device',
+                tillId || 'this-device',
+                { operatingMode: previousMode },
+                { operatingMode: nextMode },
+                approver.id,
+            ).catch((error) => console.warn('Could not record device-mode audit event:', error));
+
+            showDeviceModeDialog = false;
+            requestedDeviceMode = null;
+            deviceModePin = '';
+            logout();
+            toast(`${deviceOperatingModeLabel(nextMode)} is now active on this computer. Sign in to continue.`, 'success');
+            await goto('/', { replaceState: true });
+        } catch (error) {
+            console.error('Could not change device operating mode:', error);
+            deviceModePin = '';
+            deviceModeError = error instanceof PinRateLimitError
+                ? error.message
+                : 'Mode was not changed. Could not save this device setting.';
+        } finally {
+            deviceModeSaving = false;
+        }
+    }
+
+    function handleDeviceModePinKeydown(event: KeyboardEvent) {
+        if (
+            !showDeviceModeDialog
+            || deviceModeSaving
+            || Boolean(deviceModeBlockedReason)
+            || deviceModeApprovers.length === 0
+            || event.defaultPrevented
+        ) return;
+        if (
+            $deviceOperatingMode === 'back_office'
+            && (event.target as HTMLElement | null)?.matches('.device-mode-desktop-pin-input')
+        ) return;
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        if (/^\d$/.test(event.key)) {
+            event.preventDefault();
+            if (deviceModePin.length < 8) deviceModePin += event.key;
+            deviceModeError = '';
+            return;
+        }
+        if (event.key === 'Backspace') {
+            event.preventDefault();
+            deviceModePin = deviceModePin.slice(0, -1);
+            deviceModeError = '';
+            return;
+        }
+        if (event.key === 'Enter' && deviceModePin.length >= 4) {
+            event.preventDefault();
+            void confirmDeviceModeChange();
+        }
+    }
+
+    function handleDeviceModeDesktopPinInput(event: Event & { currentTarget: HTMLInputElement }) {
+        const sanitized = event.currentTarget.value.replace(/\D/g, '').slice(0, 8);
+        event.currentTarget.value = sanitized;
+        deviceModePin = sanitized;
+        if (deviceModeError) deviceModeError = '';
+    }
+
+    function handleDeviceModeDesktopPinKeydown(event: KeyboardEvent) {
+        if (event.key === 'Enter' && deviceModePin.length >= 4) {
+            event.preventDefault();
+            void confirmDeviceModeChange();
+            return;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelDeviceModeChange();
+        }
+    }
+
     function selectedSizeLabel(value: string): string {
         return appFontSizeOptions.find((option) => option.value === value)?.label || 'Normal';
     }
@@ -190,11 +410,9 @@
     <title>Settings</title>
 </svelte:head>
 
-<MgmtPage title="Settings">
-    <button slot="actions" class="btn btn-primary settings-save-button" disabled={storeSaving} on:click={saveStore}>
-        <Save size={19} strokeWidth={2.4} aria-hidden="true" />
-        <span>{storeSaving ? 'Saving...' : 'Save shop'}</span>
-    </button>
+<svelte:window on:keydown={handleDeviceModePinKeydown} />
+
+<MgmtPage title="Settings" description="Manage your shop, devices and checkout.">
 
     <div class="settings-overview">
         <section class="settings-summary" aria-label="Current shop status">
@@ -207,14 +425,18 @@
                 <span class="settings-summary-copy">
                     <small>Database</small>
                     <strong class="settings-summary-state">
-                        <span class="settings-status-dot" class:online={$connectionState.mode !== 'multi' || $connectionState.mysqlOnline}></span>
-                        <span>{$connectionState.mode === 'multi' ? ($connectionState.mysqlOnline ? 'MariaDB online' : 'MariaDB offline') : 'Standalone'}</span>
+                        <span class="settings-status-dot" class:online={connectionOnline}></span>
+                        <span>{connectionOnline ? 'Online' : 'Offline'}</span>
                     </strong>
                 </span>
             </div>
             <div class="settings-summary-item">
                 <span class="settings-summary-icon"><MonitorCog size={22} strokeWidth={2.25} /></span>
-                <span class="settings-summary-copy"><small>This till</small><strong>{editTillName || 'Loading...'}</strong></span>
+                <span class="settings-summary-copy">
+                    <small>This device</small>
+                    <strong>{editTillName || 'Loading...'}</strong>
+                    <span class="settings-device-summary-mode">{deviceOperatingModeLabel(currentDeviceMode)}</span>
+                </span>
             </div>
             <div class="settings-summary-item">
                 <span class="settings-summary-icon"><PackageCheck size={22} strokeWidth={2.25} /></span>
@@ -226,49 +448,46 @@
             <div class="settings-sync-error" role="alert">{$connectionState.syncError}</div>
         {/if}
 
-        <section class="settings-shortcuts-section">
-            <div class="settings-section-heading">
-                <div>
-                    <span>Setup</span>
-                    <h2>Appearance, hardware and services</h2>
-                </div>
-                <small>{visibleSettingsShortcuts.length} sections</small>
-            </div>
-            <nav class="settings-shortcut-grid" aria-label="Settings sections">
-                {#each visibleSettingsShortcuts as entry (entry.path)}
-                    <a
-                        href={entry.path}
-                        class="settings-shortcut"
-                        class:admin-shortcut={entry.adminOnly}
-                        style="--setting-accent: {entry.accent}"
-                        aria-label={`${entry.title}. ${entry.description}`}
+        <div class="settings-workspace">
+            <nav class="settings-category-nav" aria-label="Settings categories">
+                {#each availableCategories as item}
+                    <button
+                        type="button"
+                        class:active={activeCategory === item.id}
+                        aria-pressed={activeCategory === item.id}
+                        aria-controls="settings-category-content"
+                        on:click={() => goto(`/settings?section=${item.id}`, { replaceState: true, noScroll: true, keepFocus: true })}
                     >
-                        <span class="settings-shortcut-mark" aria-hidden="true"></span>
-                        <span class="settings-shortcut-icon" aria-hidden="true">
-                            <svelte:component this={entry.icon} size={23} strokeWidth={2.25} />
-                        </span>
-                        <span class="settings-shortcut-copy">
-                            <small>{entry.group}</small>
-                            <strong>{entry.title}</strong>
-                            <span>
-                                {entry.path === '/settings/fonts'
-                                    ? `${selectedFontOption.label}; POS ${selectedSizeLabel(selectedPosFontSize)}, settings ${selectedSizeLabel(selectedSettingsFontSize)}`
-                                    : entry.description}
-                            </span>
-                        </span>
-                        <span class="settings-shortcut-arrow" aria-hidden="true"><ChevronRight size={19} strokeWidth={2.5} /></span>
-                    </a>
+                        <svelte:component this={item.icon} size={20} strokeWidth={2} aria-hidden="true" />
+                        <span>{item.label}</span>
+                        <ChevronRight size={16} aria-hidden="true" />
+                    </button>
                 {/each}
             </nav>
-        </section>
 
-        <section class="settings-section-heading settings-controls-heading">
-            <div>
-                <span>Shop controls</span>
-                <h2>Business and till settings</h2>
-            </div>
-        </section>
-
+            <section id="settings-category-content" class="settings-category-content" aria-labelledby="settings-category-title">
+                <header class="settings-section-heading">
+                    <div><h2 id="settings-category-title">{category.label}</h2><p>{category.description}</p></div>
+                </header>
+                {#if activeCategory !== 'general'}
+                    <div class="settings-shortcut-grid">
+                        {#each categoryShortcuts as entry (entry.path)}
+                            <a href={entry.path} class="settings-shortcut">
+                                <span class="settings-shortcut-icon" aria-hidden="true">
+                                    <svelte:component this={entry.icon} size={23} strokeWidth={2} />
+                                </span>
+                                <span class="settings-shortcut-copy">
+                                    <strong>{entry.title}</strong>
+                                    <span>{entry.path === '/settings/fonts'
+                                        ? `${selectedFontOption.label} · POS ${selectedSizeLabel(selectedPosFontSize)} · Settings ${selectedSizeLabel(selectedSettingsFontSize)}`
+                                        : entry.description}</span>
+                                    {#if entry.adminOnly}<small>Administrator</small>{/if}
+                                </span>
+                                <ChevronRight size={19} aria-hidden="true" />
+                            </a>
+                        {/each}
+                    </div>
+                {:else}
         <div class="settings-config-columns">
             <div class="settings-config-column">
                 <section class="settings-config-panel">
@@ -282,6 +501,13 @@
                         <div class="field"><label for="settings-store-phone">Phone</label><input id="settings-store-phone" bind:value={store.phone} /></div>
                         <div class="field"><label for="settings-store-email">Email</label><input id="settings-store-email" type="email" bind:value={store.email} /></div>
                     </div>
+                    <footer class="settings-panel-footer">
+                        <span>Save after editing shop details.</span>
+                        <button class="btn btn-primary settings-save-button" disabled={storeSaving} on:click={saveStore}>
+                            <Save size={18} aria-hidden="true" />
+                            <span>{storeSaving ? 'Saving…' : 'Save shop'}</span>
+                        </button>
+                    </footer>
                 </section>
 
                 <section class="settings-config-panel">
@@ -302,6 +528,36 @@
                             <input id="settings-till-id" value={tillId} readonly class="settings-readonly-input" />
                         </div>
                     </div>
+
+                    <div class="settings-device-role-row" aria-labelledby="device-role-heading">
+                        <span class="settings-device-role-icon" aria-hidden="true">
+                            {#if currentDeviceMode === 'back_office'}
+                                <Building2 size={22} strokeWidth={2.25} />
+                            {:else}
+                                <ShoppingCart size={22} strokeWidth={2.25} />
+                            {/if}
+                        </span>
+                        <span class="settings-device-role-copy">
+                            <small id="device-role-heading">Device role · this computer</small>
+                            <strong>{deviceOperatingModeLabel(currentDeviceMode)}</strong>
+                            <span>{currentDeviceMode === 'back_office'
+                                ? 'Management tools without checkout or till shifts.'
+                                : 'Sales, payments and connected till hardware.'}</span>
+                        </span>
+                        <button
+                            type="button"
+                            class="btn btn-secondary settings-device-role-action"
+                            disabled={deviceModeSaving}
+                            on:click={() => requestDeviceModeChange(currentDeviceMode === 'back_office' ? 'checkout' : 'back_office')}
+                        >
+                            <span>Use {currentDeviceMode === 'back_office' ? 'Checkout' : 'Back Office'}</span>
+                            <ChevronRight size={17} strokeWidth={2.5} aria-hidden="true" />
+                        </button>
+                    </div>
+                    <div class="settings-device-mode-note">
+                        <ShieldCheck size={17} strokeWidth={2.4} aria-hidden="true" />
+                        <span><strong>Admin PIN required.</strong> Switching changes only this computer and signs you out.</span>
+                    </div>
                 </section>
 
                 <section class="settings-config-panel settings-database-panel">
@@ -309,7 +565,11 @@
                         <span class="settings-panel-icon"><HardDrive size={22} strokeWidth={2.25} /></span>
                         <div>
                             <h3>Database</h3>
-                            <p>{$connectionState.mysqlOnline ? 'Connected to the central MariaDB server.' : 'Working from this till’s local SQLite database.'}</p>
+                            <p>{$connectionState.mode === 'single'
+                                ? 'This till’s local database is available.'
+                                : connectionOnline
+                                    ? 'Connected to the central MariaDB server.'
+                                    : 'Working from this till’s local cache while the central database is unavailable.'}</p>
                         </div>
                     </header>
                 </section>
@@ -347,10 +607,19 @@
                 <section class="settings-config-panel">
                     <header class="settings-panel-header">
                         <span class="settings-panel-icon"><PackageCheck size={22} strokeWidth={2.25} /></span>
-                        <div><h3>Shop operation</h3><p>Daily behaviour for selling and cash-up.</p></div>
+                        <div><h3>Shop operation</h3><p>Daily selling and cash-up. Switches save immediately.</p></div>
                     </header>
 
                     <div class="settings-operation-list">
+                        <div class="settings-operation-row">
+                            <span class="settings-operation-icon"><Clock size={20} /></span>
+                            <div><strong>Time attendance</strong><span>Enable clock-in and clock-out from the checkout clock. Shop-wide.</span></div>
+                            <button type="button" class="settings-switch-control" class:enabled={attendanceEnabled}
+                                role="switch" aria-checked={attendanceEnabled} aria-label="Time attendance"
+                                on:click={() => updateSetting('time_attendance_enabled', attendanceEnabled ? 'false' : 'true')}
+                            ><span>{attendanceEnabled ? 'On' : 'Off'}</span><span class="settings-switch-track"><span></span></span></button>
+                        </div>
+
                         <div class="settings-operation-row">
                             <span class="settings-operation-icon"><PackageCheck size={20} /></span>
                             <div><strong>Stock tracking</strong><span>Updates quantities after sales and refunds. Shop-wide.</span></div>
@@ -425,599 +694,397 @@
                 </section>
             </div>
         </div>
+                {/if}
+            </section>
+        </div>
     </div>
 </MgmtPage>
 
+<Modal
+    bind:show={showDeviceModeDialog}
+    title={requestedDeviceMode === 'back_office' ? 'Switch to Back Office?' : 'Switch to Checkout Till?'}
+    width="680px"
+    dismissDisabled={deviceModeSaving}
+>
+    <div
+        class="device-mode-dialog"
+        class:blocked={Boolean(deviceModeBlockedReason) || deviceModeApprovers.length === 0}
+    >
+        <section class="device-mode-dialog-copy">
+            <div class="device-mode-dialog-intro">
+                <span class="device-mode-dialog-icon" aria-hidden="true">
+                    {#if requestedDeviceMode === 'back_office'}
+                        <Building2 size={25} strokeWidth={2.25} />
+                    {:else}
+                        <ShoppingCart size={25} strokeWidth={2.25} />
+                    {/if}
+                </span>
+                <div>
+                    <strong>{editTillName || 'This computer'} will use {deviceOperatingModeLabel(requestedDeviceMode)}.</strong>
+                    <p>{requestedDeviceMode === 'back_office'
+                        ? 'Staff sign-in opens management without starting a till shift.'
+                        : 'Staff sign-in opens Checkout with payments and till hardware.'}</p>
+                </div>
+            </div>
+            <div class="device-mode-safety-note">
+                <ShieldCheck size={18} strokeWidth={2.4} aria-hidden="true" />
+                <span>Only this computer changes. Shop data and staff permissions stay unchanged.</span>
+            </div>
+            {#if deviceModeBlockedReason}
+                <div class="device-mode-blocked" role="alert">{deviceModeBlockedReason}</div>
+            {:else if deviceModeApprovers.length === 0}
+                <div class="device-mode-blocked" role="alert">
+                    No active administrator is available. Use L&amp;Bj Support to repair staff access first.
+                </div>
+            {:else}
+                <CustomSelect
+                    label="Approving administrator"
+                    bind:value={deviceModeApproverId}
+                    options={deviceModeApprovers.map((employee) => ({ label: employee.name, value: employee.id }))}
+                    placeholder="Choose an administrator"
+                    emptyText="No active administrators"
+                    disabled={deviceModeSaving}
+                    largeOptions
+                />
+            {/if}
+        </section>
+
+        {#if !deviceModeBlockedReason && deviceModeApprovers.length > 0}
+            <section class="device-mode-dialog-pad" aria-label="Administrator PIN">
+                {#if $deviceOperatingMode === 'back_office'}
+                    <div class="device-mode-desktop-pin">
+                        <span class="device-mode-desktop-pin-icon" aria-hidden="true"><KeyRound size={22} strokeWidth={2.3} /></span>
+                        <div>
+                            <label for="device-mode-admin-pin">Administrator PIN</label>
+                            <p>Enter the PIN with your keyboard.</p>
+                        </div>
+                        <input
+                            id="device-mode-admin-pin"
+                            class="device-mode-desktop-pin-input"
+                            bind:this={deviceModePinInput}
+                            value={deviceModePin}
+                            type="password"
+                            autocomplete="off"
+                            maxlength="8"
+                            pattern={"[0-9]{4,8}"}
+                            placeholder="4 to 8 digits"
+                            disabled={deviceModeSaving}
+                            data-touch-keyboard="off"
+                            data-modal-initial-focus
+                            on:input={handleDeviceModeDesktopPinInput}
+                            on:keydown={handleDeviceModeDesktopPinKeydown}
+                        />
+                        <button
+                            type="button"
+                            class="btn btn-primary"
+                            disabled={deviceModePin.length < 4 || deviceModeSaving}
+                            on:click={confirmDeviceModeChange}
+                        >{deviceModeSaving ? 'Switching…' : 'Confirm switch'}</button>
+                        <small>Press Enter to confirm · Esc to cancel</small>
+                    </div>
+                {:else}
+                    <TouchDigitPad
+                        bind:value={deviceModePin}
+                        masked
+                        maxLength={8}
+                        placeholder="Administrator PIN"
+                        submitLabel={deviceModeSaving ? 'Switching…' : 'Confirm switch'}
+                        submitDisabled={deviceModePin.length < 4}
+                        disabled={deviceModeSaving}
+                        onSubmit={confirmDeviceModeChange}
+                    />
+                {/if}
+                {#if deviceModeError}
+                    <p class="device-mode-error" aria-live="polite">{deviceModeError}</p>
+                {/if}
+            </section>
+        {/if}
+    </div>
+    <svelte:fragment slot="footer">
+        <button type="button" class="btn btn-secondary" disabled={deviceModeSaving} on:click={cancelDeviceModeChange}>
+            Cancel
+        </button>
+    </svelte:fragment>
+</Modal>
+
 <style>
     .settings-overview {
-        width: 100%;
-        max-width: 1540px;
-        margin: 0 auto;
-        padding: 1rem;
+        width: 100%; max-width: 1600px; margin: 0 auto; padding: clamp(.75rem, 2vw, 1.5rem);
+        display: flex; flex-direction: column; gap: 1.5rem; color: var(--text-main);
+        font-size: var(--font-size-settings); container: settings / inline-size;
+    }
+    .settings-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border-flat); border-radius: .75rem; overflow: hidden; background: var(--border-flat); }
+    .settings-summary-item { min-width: 0; min-height: 76px; padding: .85rem 1rem; display: flex; align-items: center; gap: .75rem; background: var(--bg-card); }
+    .settings-summary-icon, .settings-panel-icon, .settings-operation-icon, .settings-device-role-icon { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; border-radius: .6rem; background: var(--bg-panel); color: var(--accent-primary); }
+    .settings-summary-copy { min-width: 0; }
+    .settings-summary-copy small { display: block; color: var(--text-muted); font-size: .75em; font-weight: 500; }
+    .settings-summary-copy strong { display: block; margin-top: .2rem; font-size: .94em; font-weight: 650; line-height: 1.3; overflow-wrap: anywhere; }
+    .settings-device-summary-mode { display: block; margin-top: .15rem; color: var(--text-muted); font-size: .72em; }
+    .settings-summary-copy .settings-summary-state { display: flex; align-items: center; gap: .5rem; }
+    .settings-status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--warning); }
+    .settings-status-dot.online { background: var(--success); }
+    .settings-workspace { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+    .settings-category-nav { display: flex; flex-direction: column; gap: .3rem; position: sticky; top: 0; }
+    .settings-category-nav button { min-width: 0; min-height: 50px; display: grid; grid-template-columns: 20px minmax(0,1fr) 16px; gap: .65rem; align-items: center; padding: .7rem; border: 1px solid transparent; border-radius: .6rem; background: transparent; text-align: left; color: var(--text-muted); font-size: .88em; font-weight: 600; cursor: pointer; }
+    .settings-category-nav button:hover { color: var(--text-main); background: var(--bg-card-hover); }
+    .settings-category-nav button.active { background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-card)); color: var(--text-main); border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-flat)); }
+    .settings-category-nav button.active :global(svg) { color: var(--accent-primary); }
+    .settings-category-content { min-width: 0; }
+    .settings-section-heading { margin-bottom: 1.2rem; }
+    .settings-section-heading h2 { margin: 0; font-size: 1.3em; line-height: 1.25; font-weight: 700; }
+    .settings-section-heading p { margin: .35rem 0 0; color: var(--text-muted); font-size: .85em; line-height: 1.5; }
+    .settings-shortcut-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 270px), 1fr)); gap: .85rem; }
+    .settings-shortcut { min-width: 0; min-height: 112px; display: grid; grid-template-columns: 46px minmax(0, 1fr) 19px; align-items: center; gap: .85rem; padding: 1.1rem; border: 1px solid var(--border-flat); border-radius: .75rem; background: var(--bg-card); color: var(--text-main); text-decoration: none; }
+    .settings-shortcut:hover { border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .settings-shortcut-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: .65rem; background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-panel)); color: var(--accent-primary); }
+    .settings-shortcut-copy { min-width: 0; display: flex; flex-direction: column; gap: .35rem; }
+    .settings-shortcut-copy strong { font-size: 1em; line-height: 1.3; font-weight: 650; overflow-wrap: anywhere; }
+    .settings-shortcut-copy > span { font-size: .82em; line-height: 1.45; color: var(--text-muted); }
+    .settings-shortcut-copy small { font-size: .7em; color: var(--text-muted); }
+    .settings-shortcut > :global(svg) { color: var(--text-muted); }
+    .settings-config-columns { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); align-items: start; gap: 1rem; }
+    .settings-config-column { min-width: 0; display: flex; flex-direction: column; gap: 1rem; }
+    .settings-config-panel { min-width: 0; padding: 1.2rem; border: 1px solid var(--border-flat); border-radius: .75rem; background: var(--bg-card); container: setting-panel / inline-size; }
+    .settings-panel-header { display: grid; grid-template-columns: 40px minmax(0,1fr); align-items: center; gap: .75rem; margin-bottom: 1.1rem; }
+    .settings-panel-header-action { grid-template-columns: 40px minmax(0,1fr) auto; }
+    .settings-panel-header h3 { margin: 0; font-size: 1em; font-weight: 650; line-height: 1.35; }
+    .settings-panel-header p { margin: .2rem 0 0; color: var(--text-muted); font-size: .78em; line-height: 1.45; }
+    .settings-form-grid { gap: .9rem; }
+    .settings-config-panel .field label { font-size: .78em; font-weight: 550; text-transform: none; letter-spacing: 0; color: var(--text-muted); }
+    .settings-config-panel .field input { box-shadow: none; border-radius: .5rem; font-size: .9em; min-height: 46px; font-weight: 500; }
+    .settings-panel-footer { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; justify-content: space-between; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-flat); }
+    .settings-panel-footer > span { font-size: .75em; line-height: 1.4; color: var(--text-muted); }
+    .settings-config-panel .btn { min-height: 46px; font-size: .85em; padding: .65rem .9rem; box-shadow: none; font-weight: 600; }
+    .settings-till-fields { display: grid; gap: .9rem; }
+    .settings-inline-field { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .5rem; }
+    .settings-readonly-input { color: var(--text-muted) !important; font-family: var(--app-font-mono) !important; font-size: .75em !important; text-overflow: ellipsis; }
+    .settings-device-role-row { min-width: 0; display: grid; grid-template-columns: 40px minmax(0,1fr); align-items: center; gap: .7rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-flat); }
+    .settings-device-role-copy { min-width: 0; }
+    .settings-device-role-copy small, .settings-device-role-copy strong, .settings-device-role-copy > span { display: block; line-height: 1.4; }
+    .settings-device-role-copy small { color: var(--text-muted); font-size: .72em; }
+    .settings-device-role-copy strong { margin: .15rem 0; font-size: .9em; font-weight: 650; }
+    .settings-device-role-copy > span { color: var(--text-muted); font-size: .78em; }
+    .settings-device-role-action { grid-column: 1 / -1; justify-self: start; }
+    .settings-device-mode-note { display: flex; align-items: flex-start; gap: .5rem; margin-top: .75rem; color: var(--text-muted); font-size: .73em; line-height: 1.5; }
+    .settings-device-mode-note :global(svg) { flex: 0 0 auto; margin-top: .1rem; }
+    .settings-device-mode-note strong { font-weight: 600; color: var(--text-main); }
+    .settings-database-panel .settings-panel-header { margin-bottom: 0; }
+    .settings-loyalty-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .7rem; }
+    .disabled-settings { opacity: .55; }
+    .settings-example { margin-top: 1rem; padding: .75rem; background: var(--bg-panel); border-radius: .5rem; color: var(--text-muted); font-size: .8em; line-height: 1.4; }
+    .settings-operation-list { display: flex; flex-direction: column; }
+    .settings-operation-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: .75rem; align-items: center; padding: 1rem 0; border-bottom: 1px solid var(--border-flat); }
+    .settings-operation-row:first-child { padding-top: 0; }
+    .settings-operation-row:last-child { padding-bottom: 0; border-bottom: 0; }
+    .settings-operation-icon { display: none; }
+    .settings-operation-row > div { min-width: 0; }
+    .settings-operation-row strong, .settings-sub-options strong { display: block; font-size: .88em; font-weight: 600; line-height: 1.4; }
+    .settings-operation-row div > span, .settings-sub-options small { display: block; margin-top: .3rem; font-size: .78em; color: var(--text-muted); line-height: 1.5; }
+    .settings-switch-control { min-width: 88px; min-height: 46px; padding: .35rem; display: inline-flex; align-items: center; justify-content: flex-end; gap: .5rem; border: 0; background: transparent; color: var(--text-muted); font-size: .76em; font-weight: 600; cursor: pointer; border-radius: .5rem; }
+    .settings-switch-control:hover { background: var(--bg-card-hover); }
+    .settings-switch-track { position: relative; width: 44px; height: 26px; flex: 0 0 auto; border-radius: 999px; background: var(--text-muted); }
+    .settings-switch-track > span { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--bg-card); }
+    .settings-switch-control.enabled .settings-switch-track { background: var(--accent-primary); }
+    .settings-switch-control.enabled .settings-switch-track > span { transform: translateX(18px); background: white; }
+    .settings-switch-control.danger-enabled .settings-switch-track { background: var(--danger); }
+    .settings-sync-error, .settings-warning { border: 1px solid var(--danger); border-radius: .6rem; background: color-mix(in srgb, var(--danger) 8%, var(--bg-card)); padding: .85rem; color: var(--text-main); font-size: .82em; line-height: 1.5; overflow-wrap: anywhere; }
+    .settings-warning { margin-top: .75rem; }
+    .settings-sub-options { display: grid; gap: .5rem; margin-top: .75rem; }
+    .settings-sub-options > div { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: .65rem; padding: .75rem; border-radius: .5rem; background: var(--bg-panel); }
+    .settings-category-nav button:focus-visible, .settings-shortcut:focus-visible, .settings-switch-control:focus-visible { outline: 3px solid var(--accent-primary); outline-offset: 2px; }
+    @container settings (max-width: 1120px) {
+        .settings-workspace { grid-template-columns: minmax(0,1fr); gap: 1.2rem; }
+        .settings-category-nav { position: static; display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: .4rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border-flat); }
+        .settings-category-nav button { display: flex; gap: .5rem; justify-content: center; padding: .65rem .45rem; font-size: .82em; }
+        .settings-category-nav button > :global(svg:last-child) { display: none; }
+    }
+    @container settings (max-width: 850px) {
+        .settings-summary { grid-template-columns: repeat(2,minmax(0,1fr)); }
+        .settings-config-columns { grid-template-columns: minmax(0,1fr); }
+    }
+    @container settings (max-width: 740px) {
+        .settings-category-nav { grid-template-columns: repeat(3,minmax(0,1fr)); }
+        .settings-category-nav button { justify-content: flex-start; padding: .65rem; }
+    }
+    @container settings (max-width: 440px) {
+        .settings-category-nav { grid-template-columns: repeat(2,minmax(0,1fr)); }
+        .settings-summary-item { padding: .75rem; gap: .5rem; }
+        .settings-summary-icon { display: none; }
+    }
+    @container setting-panel (max-width: 360px) {
+        .settings-loyalty-grid { grid-template-columns: minmax(0,1fr); }
+        .settings-panel-header-action { grid-template-columns: minmax(0,1fr) auto; }
+        .settings-panel-header-action .settings-panel-icon { display: none; }
+        .settings-form-grid { grid-template-columns: minmax(0,1fr); }
+        .settings-form-grid > .span-2 { grid-column: 1; }
+    }
+    .device-mode-dialog {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(270px, 0.88fr);
+        align-items: start;
+        gap: 0.85rem;
+    }
+
+    .device-mode-dialog.blocked {
+        grid-template-columns: 1fr;
+    }
+
+    .device-mode-dialog-copy {
+        min-width: 0;
         display: flex;
         flex-direction: column;
-        gap: 0.9rem;
-        color: var(--text-main);
-        font-size: var(--font-size-settings);
+        gap: 0.7rem;
     }
 
-    .settings-summary {
-        display: grid;
-        grid-template-columns: minmax(220px, 1.2fr) repeat(3, minmax(150px, 0.8fr));
-        overflow: hidden;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.5rem;
-        background: var(--bg-card);
-    }
-
-    .settings-summary-item {
+    .device-mode-dialog-intro {
         min-width: 0;
-        min-height: 72px;
-        padding: 0.7rem 0.8rem;
         display: flex;
-        align-items: center;
-        gap: 0.65rem;
-        border-left: 1px solid var(--border-flat);
+        align-items: flex-start;
+        gap: 0.7rem;
     }
 
-    .settings-summary-item:first-child {
-        border-left: 0;
-    }
-
-    .settings-summary-icon,
-    .settings-panel-icon,
-    .settings-operation-icon {
-        width: 42px;
-        height: 42px;
-        flex: 0 0 auto;
+    .device-mode-dialog-icon {
+        width: 46px;
+        height: 46px;
+        flex: 0 0 46px;
         display: flex;
         align-items: center;
         justify-content: center;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.45rem;
-        background: var(--bg-panel);
+        border: 1px solid color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat));
+        border-radius: 0.65rem;
+        background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-panel));
         color: var(--accent-primary);
     }
 
-    .settings-summary-copy {
-        min-width: 0;
-        display: block;
+    .device-mode-dialog-copy strong {
+        font-size: 0.94rem;
+        line-height: 1.3;
     }
 
-    .settings-summary-copy small,
-    .settings-section-heading span,
-    .settings-shortcut-copy small {
-        display: block;
+    .device-mode-dialog-copy p {
+        margin: 0.28rem 0 0;
         color: var(--text-muted);
-        font-size: 0.68em;
-        font-weight: 900;
-        letter-spacing: 0;
-        line-height: 1.1;
-        text-transform: uppercase;
+        font-size: 0.8rem;
+        line-height: 1.38;
     }
 
-    .settings-summary-copy strong {
-        display: block;
-        margin-top: 0.2rem;
-        overflow: hidden;
-        font-size: 0.92em;
-        line-height: 1.15;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .settings-summary-copy .settings-summary-state {
-        display: flex;
-        align-items: center;
-        gap: 0.42rem;
-    }
-
-    .settings-status-dot {
-        width: 10px;
-        height: 10px;
-        margin-left: 0;
-        flex: 0 0 auto;
-        border-radius: 50%;
-        background: var(--warning);
-        box-shadow: 0 0 0 4px color-mix(in srgb, var(--warning) 15%, transparent);
-    }
-
-    .settings-status-dot.online {
-        background: var(--success);
-        box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 15%, transparent);
-    }
-
-    .settings-sync-error,
-    .settings-warning {
-        border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--border-flat));
-        border-radius: 0.45rem;
-        background: color-mix(in srgb, var(--danger) 10%, var(--bg-card));
-        color: var(--danger);
-        padding: 0.7rem 0.85rem;
-        font-size: 0.82em;
-        font-weight: 700;
-    }
-
-    .settings-shortcuts-section {
-        min-width: 0;
-    }
-
-    .settings-section-heading {
-        min-height: 46px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-        padding: 0 0.15rem 0.45rem;
-    }
-
-    .settings-section-heading h2 {
-        margin: 0.2rem 0 0;
-        color: var(--text-main);
-        font-size: 1.16em;
-        line-height: 1.1;
-        letter-spacing: 0;
-    }
-
-    .settings-section-heading > small {
-        color: var(--text-muted);
-        font-size: 0.76em;
-        font-weight: 800;
-    }
-
-    .settings-controls-heading {
-        min-height: 40px;
-        margin-top: 0.15rem;
-        padding-bottom: 0;
-    }
-
-    .settings-shortcut-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0.65rem;
-    }
-
-    .settings-shortcut {
-        --setting-accent: var(--accent-primary);
-        position: relative;
-        contain: layout paint;
-        min-width: 0;
-        min-height: 108px;
-        overflow: hidden;
-        display: grid;
-        grid-template-columns: 44px minmax(0, 1fr) 20px;
-        align-items: center;
-        gap: 0.65rem;
+    .device-mode-safety-note,
+    .device-mode-blocked {
         padding: 0.75rem;
         border: 1px solid var(--border-flat);
         border-radius: 0.5rem;
-        background: var(--bg-card);
-        color: var(--text-main);
-        text-decoration: none;
-        transition: none;
-    }
-
-    .settings-shortcut:hover {
-        border-color: var(--setting-accent);
-        background: var(--bg-card-hover);
-    }
-
-    .settings-shortcut:focus-visible,
-    .settings-switch-control:focus-visible {
-        outline: 3px solid var(--accent-primary);
-        outline-offset: -3px;
-    }
-
-    .settings-shortcut-mark {
-        position: absolute;
-        inset: 0 auto 0 0;
-        width: 4px;
-        background: var(--setting-accent);
-    }
-
-    .settings-shortcut-icon {
-        width: 44px;
-        height: 44px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.45rem;
         background: var(--bg-panel);
-        color: var(--setting-accent);
-    }
-
-    .settings-shortcut-copy {
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 0.18rem;
-    }
-
-    .settings-shortcut-copy small {
-        color: var(--setting-accent);
-        font-size: 0.64em;
-    }
-
-    .settings-shortcut-copy strong {
-        min-width: 0;
-        overflow: hidden;
-        font-size: 0.98em;
-        line-height: 1.12;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
-    .settings-shortcut-copy > span {
-        display: -webkit-box;
-        overflow: hidden;
         color: var(--text-muted);
-        font-size: 0.72em;
-        font-weight: 650;
-        line-height: 1.22;
-        -webkit-box-orient: vertical;
-        -webkit-line-clamp: 2;
-        line-clamp: 2;
-    }
-
-    .settings-shortcut-arrow {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--setting-accent);
-    }
-
-    .settings-shortcut.admin-shortcut {
-        border-style: dashed;
-    }
-
-    .settings-config-columns {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        align-items: start;
-        gap: 0.75rem;
-    }
-
-    .settings-config-column {
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-    }
-
-    .settings-config-panel {
-        min-width: 0;
-        padding: 1rem;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.5rem;
-        background: var(--bg-card);
-    }
-
-    .settings-panel-header {
-        min-width: 0;
-        display: grid;
-        grid-template-columns: 42px minmax(0, 1fr);
-        align-items: center;
-        gap: 0.7rem;
-        margin-bottom: 0.9rem;
-    }
-
-    .settings-panel-header-action {
-        grid-template-columns: 42px minmax(0, 1fr) auto;
-    }
-
-    .settings-panel-header h3 {
-        margin: 0;
-        font-size: 1.04em;
-        line-height: 1.1;
-        letter-spacing: 0;
-    }
-
-    .settings-panel-header p {
-        margin: 0.2rem 0 0;
-        color: var(--text-muted);
-        font-size: 0.74em;
-        line-height: 1.25;
-    }
-
-    .settings-form-grid {
-        gap: 0.7rem;
-    }
-
-    .settings-till-fields {
-        display: grid;
-        grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-        gap: 0.7rem;
-    }
-
-    .settings-inline-field {
-        min-width: 0;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 0.5rem;
-    }
-
-    .settings-inline-field .btn {
-        min-width: 116px;
-        padding-inline: 1rem;
-    }
-
-    .settings-readonly-input {
-        overflow: hidden;
-        color: var(--text-muted) !important;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
-        font-size: 0.72em !important;
-        text-overflow: ellipsis;
-    }
-
-    .settings-database-panel {
-        display: block;
-    }
-
-    .settings-database-panel .settings-panel-header {
-        margin-bottom: 0;
-    }
-
-    .settings-loyalty-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.65rem;
-        transition: opacity 0.15s;
-    }
-
-    .disabled-settings {
-        opacity: 0.5;
-    }
-
-    .settings-example {
-        margin-top: 0.75rem;
-        padding-top: 0.65rem;
-        border-top: 1px solid var(--border-flat);
-        color: var(--text-muted);
-        font-size: 0.76em;
+        font-size: 0.78rem;
         font-weight: 700;
-        text-align: right;
+        line-height: 1.4;
     }
 
-    .settings-operation-list {
-        overflow: hidden;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.5rem;
-        background: var(--bg-panel);
-    }
-
-    .settings-operation-row {
-        min-width: 0;
-        min-height: 76px;
-        display: grid;
-        grid-template-columns: 40px minmax(0, 1fr) auto;
-        align-items: center;
-        gap: 0.65rem;
-        padding: 0.65rem 0.75rem;
-        border-bottom: 1px solid var(--border-flat);
-    }
-
-    .settings-operation-row:last-child {
-        border-bottom: 0;
-    }
-
-    .settings-operation-icon {
-        width: 40px;
-        height: 40px;
-        color: var(--success);
-    }
-
-    .settings-operation-icon.training {
-        color: var(--warning);
-    }
-
-    .settings-operation-row > div {
-        min-width: 0;
-    }
-
-    .settings-operation-row strong,
-    .settings-sub-options strong {
-        display: block;
-        font-size: 0.86em;
-        line-height: 1.15;
-    }
-
-    .settings-operation-row div > span,
-    .settings-sub-options small {
-        display: block;
-        margin-top: 0.18rem;
-        color: var(--text-muted);
-        font-size: 0.69em;
-        line-height: 1.25;
-    }
-
-    .settings-switch-control {
-        min-width: 94px;
-        min-height: 44px;
-        padding: 0.35rem 0.4rem 0.35rem 0.65rem;
-        display: inline-flex;
-        align-items: center;
-        justify-content: flex-end;
+    .device-mode-safety-note {
+        display: flex;
+        align-items: flex-start;
         gap: 0.5rem;
-        border: 1px solid var(--border-flat);
-        border-radius: 0.45rem;
-        background: var(--bg-card);
-        color: var(--text-muted);
-        box-shadow: none;
-        font-size: 0.72em;
-        font-weight: 900;
     }
 
-    .settings-switch-control:hover {
-        border-color: var(--accent-primary);
-        background: var(--bg-card-hover);
-    }
-
-    .settings-switch-track {
-        position: relative;
-        width: 46px;
-        height: 26px;
+    .device-mode-safety-note :global(svg) {
+        margin-top: 0.05rem;
         flex: 0 0 auto;
-        border: 1px solid var(--border-flat);
-        border-radius: 999px;
-        background: var(--bg-panel);
-        transition: background 0.15s;
-    }
-
-    .settings-switch-track > span {
-        position: absolute;
-        top: 2px;
-        left: 2px;
-        width: 20px;
-        height: 20px;
-        border-radius: 50%;
-        background: var(--text-muted);
-        transition: transform 0.15s, background 0.15s;
-    }
-
-    .settings-switch-control.enabled {
         color: var(--success);
     }
 
-    .settings-switch-control.enabled .settings-switch-track {
-        border-color: var(--success);
-        background: var(--success);
-    }
-
-    .settings-switch-control.enabled .settings-switch-track > span {
-        transform: translateX(20px);
-        background: white;
-    }
-
-    .settings-switch-control.danger-enabled {
+    .device-mode-blocked {
+        border-color: color-mix(in srgb, var(--danger) 50%, var(--border-flat));
+        background: color-mix(in srgb, var(--danger) 10%, var(--bg-panel));
         color: var(--danger);
     }
 
-    .settings-switch-control.danger-enabled .settings-switch-track {
-        border-color: var(--danger);
-        background: var(--danger);
-    }
-
-    .settings-warning {
-        margin: 0.6rem 0.75rem;
-        color: var(--text-main);
-        font-size: 0.72em;
-    }
-
-    .settings-sub-options {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.5rem;
-        padding: 0.65rem;
-        border-bottom: 1px solid var(--border-flat);
-        background: var(--bg-card);
-    }
-
-    .settings-sub-options > div {
+    .device-mode-dialog-pad {
         min-width: 0;
-        min-height: 64px;
-        display: flex;
+    }
+
+    .device-mode-desktop-pin {
+        min-width: 0;
+        padding: 1rem;
+        display: grid;
+        grid-template-columns: 38px minmax(0, 1fr);
         align-items: center;
-        justify-content: space-between;
-        gap: 0.55rem;
-        padding: 0.55rem;
+        gap: 0.7rem;
         border: 1px solid var(--border-flat);
-        border-radius: 0.45rem;
+        border-radius: 0.55rem;
         background: var(--bg-panel);
     }
 
-    @media (max-width: 1180px) {
-        .settings-shortcut-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-        }
-
-        .settings-till-fields {
-            grid-template-columns: 1fr;
-        }
-
-        .settings-summary {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .settings-summary-item:nth-child(3) {
-            border-left: 0;
-            border-top: 1px solid var(--border-flat);
-        }
-
-        .settings-summary-item:nth-child(4) {
-            border-top: 1px solid var(--border-flat);
-        }
+    .device-mode-desktop-pin-icon {
+        width: 38px;
+        height: 38px;
+        display: grid;
+        place-items: center;
+        color: var(--accent-primary);
+        border: 1px solid color-mix(in srgb, var(--accent-primary) 38%, var(--border-flat));
+        border-radius: 0.45rem;
+        background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card));
     }
 
-    @media (max-width: 940px) {
-        .settings-config-columns {
-            grid-template-columns: 1fr;
-        }
+    .device-mode-desktop-pin label {
+        display: block;
+        color: var(--text-main);
+        font-size: 0.82rem;
+        font-weight: 850;
     }
 
-    @media (max-width: 760px) {
-        .settings-overview {
-            padding: 0.75rem;
-        }
-
-        .settings-shortcut-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-
-        .settings-till-fields,
-        .settings-loyalty-grid {
-            grid-template-columns: 1fr;
-        }
+    .device-mode-desktop-pin p {
+        margin: 0.12rem 0 0;
+        color: var(--text-muted);
+        font-size: 0.7rem;
     }
 
-    @media (max-width: 540px) {
-        .settings-summary,
-        .settings-shortcut-grid {
-            grid-template-columns: 1fr;
-        }
-
-        .settings-summary-item,
-        .settings-summary-item:nth-child(2),
-        .settings-summary-item:nth-child(3),
-        .settings-summary-item:nth-child(4) {
-            border-top: 1px solid var(--border-flat);
-            border-left: 0;
-        }
-
-        .settings-summary-item:first-child {
-            border-top: 0;
-        }
-
-        .settings-save-button {
-            width: 48px;
-            padding-inline: 0;
-        }
-
-        .settings-save-button span {
-            display: none;
-        }
-
-        .settings-panel-header-action {
-            grid-template-columns: 42px minmax(0, 1fr);
-        }
-
-        .settings-panel-header-action .settings-switch-control {
-            grid-column: 1 / -1;
-            width: 100%;
-        }
-
-        .settings-inline-field,
-        .settings-sub-options {
-            grid-template-columns: 1fr;
-        }
-
-        .settings-operation-row {
-            grid-template-columns: 40px minmax(0, 1fr);
-        }
-
-        .settings-operation-row .settings-switch-control {
-            grid-column: 1 / -1;
-            width: 100%;
-        }
+    .device-mode-desktop-pin-input,
+    .device-mode-desktop-pin .btn,
+    .device-mode-desktop-pin > small {
+        grid-column: 1 / -1;
     }
+
+    .device-mode-desktop-pin-input {
+        width: 100%;
+        height: 42px;
+        padding: 0 0.75rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.42rem;
+        outline: none;
+        background: var(--bg-card);
+        color: var(--text-main);
+        font-size: 1rem;
+        font-weight: 850;
+        letter-spacing: 0.15em;
+    }
+
+    .device-mode-desktop-pin-input:focus {
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-primary) 20%, transparent);
+    }
+
+    .device-mode-desktop-pin .btn {
+        width: 100%;
+        min-height: 40px;
+    }
+
+    .device-mode-desktop-pin > small {
+        color: var(--text-muted);
+        font-size: 0.67rem;
+        text-align: center;
+    }
+
+    .device-mode-error {
+        min-height: 1.25rem;
+        margin: 0.55rem 0 0;
+        color: var(--danger);
+        font-size: 0.78rem;
+        font-weight: 750;
+        line-height: 1.3;
+    }
+
+    @media (max-width: 640px) { .device-mode-dialog { grid-template-columns: minmax(0,1fr); } }
+    :global(.back-office-route) .settings-category-nav button { min-height: 42px; }
+    :global(.back-office-route) .settings-config-panel .btn { min-height: 38px; padding: .45rem .75rem; }
+    :global(.back-office-route) .settings-switch-control { min-height: 36px; }
 </style>

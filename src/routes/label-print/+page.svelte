@@ -240,7 +240,7 @@
 </svelte:head>
 
 <MgmtPage title="Quick Label Print">
-    <div slot="actions" class="flex gap-3">
+    <div slot="actions" class="flex flex-wrap gap-3">
         <button class="btn btn-danger" disabled={selected.size === 0 || printingLabels} on:click={clearSelected}>Clear</button>
         {#if printingLabels && !systemPrintMode}
             <button class="btn btn-danger" on:click={stopPrintingLabels}>Stop Printing</button>
@@ -256,7 +256,7 @@
                     <small class="block truncate text-text-muted">{printerTargetLabel}</small>
                 </div>
             </div>
-            <div class="flex shrink-0 items-center gap-3">
+            <div class="flex min-w-0 max-w-full flex-wrap items-center gap-3">
                 <span class="text-xs font-bold text-text-muted">{design.widthMm} x {design.heightMm} mm</span>
                 <a class="btn btn-secondary !min-h-10 !px-3" href="/settings/labels">Label Design</a>
                 <a class="btn btn-secondary !min-h-10 !px-3" href="/settings/printers">Printer Setup</a>

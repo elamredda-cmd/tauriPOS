@@ -524,6 +524,22 @@
     .scale-dialog footer { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .25rem; }
     .dialog-close { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
     .dialog-close svg { width: 20px; height: 20px; }
+    :where(.scale-tabs button, .scale-page-actions button, .product-actions button, .available-product, .dialog-close, .error-state button):focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
+        outline-offset: 2px;
+    }
+    :global(.back-office-route) .scale-main { padding: 0 .7rem .7rem; grid-template-rows: 46px minmax(0, 1fr); gap: .5rem; }
+    :global(.back-office-route) :where(.scale-tabs button, .scale-page-actions button) { min-height: 38px; padding-inline: .55rem; }
+    :global(.back-office-route) .scale-column { padding: .65rem; gap: .5rem; }
+    :global(.back-office-route) .current-product { min-height: 54px; }
+    :global(.back-office-route) .available-list { grid-auto-rows: 54px; }
+    @media (min-width: 761px) and (max-width: 900px) {
+        :global(.back-office-route) .scale-main { grid-template-rows: auto minmax(0, 1fr); }
+        :global(.back-office-route) .scale-page-bar { align-items: stretch; flex-direction: column; gap: .35rem; padding-bottom: .4rem; }
+        :global(.back-office-route) .scale-tabs { padding-bottom: 0; }
+        :global(.back-office-route) .scale-page-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-bottom: 0; }
+        :global(.back-office-route) .scale-page-actions button { justify-content: center; }
+    }
     @media (max-height: 680px) and (min-width: 761px) { .scale-main { grid-template-rows: 52px minmax(0,1fr); } .scale-page-actions button, .scale-tabs button { min-height: 40px; } .current-product { min-height: 58px; } .available-list { grid-auto-rows: 58px; } }
     @media (max-width: 760px) { .scale-page { overflow-y: auto; } .scale-main { display: flex; flex-direction: column; } .scale-page-bar { align-items: stretch; flex-direction: column; } .scale-columns { display: flex; flex-direction: column; overflow: visible; } .scale-column { min-height: 430px; } .scale-column + .scale-column { border-top: 1px solid var(--border-flat); border-left: 0; } }
 </style>

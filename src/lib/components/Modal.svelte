@@ -18,7 +18,7 @@
 
 {#if show}
 <div
-    class="fixed inset-0 bg-[var(--overlay)] flex items-center justify-center z-[100] p-5"
+    class="app-modal-overlay fixed inset-0 bg-[var(--overlay)] flex items-center justify-center z-[100] p-5"
     role="presentation"
     on:click={handleBackdropClick}
 >

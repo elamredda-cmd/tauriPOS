@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dojo-retry-payment"
+description = "Enables the dojo_retry_payment command without any pre-configured scope."
+commands.allow = ["dojo_retry_payment"]
+
+[[permission]]
+identifier = "deny-dojo-retry-payment"
+description = "Denies the dojo_retry_payment command without any pre-configured scope."
+commands.deny = ["dojo_retry_payment"]

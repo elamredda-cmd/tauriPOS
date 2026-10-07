@@ -8,6 +8,7 @@
     export let confirmText = "Confirm";
     export let cancelText = "Cancel";
     export let variant: 'danger' | 'primary' = 'primary';
+    export let dismissDisabled = false;
 
     const dispatch = createEventDispatcher();
 
@@ -21,7 +22,7 @@
     }
 </script>
 
-<Modal bind:show {title} width="400px">
+<Modal bind:show {title} width="400px" {dismissDisabled}>
     <div class="py-2">
         <p class="text-text-muted leading-relaxed text-lg">{message}</p>
     </div>

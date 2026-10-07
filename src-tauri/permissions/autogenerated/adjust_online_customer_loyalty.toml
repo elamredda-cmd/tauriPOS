@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-adjust-online-customer-loyalty"
+description = "Enables the adjust_online_customer_loyalty command without any pre-configured scope."
+commands.allow = ["adjust_online_customer_loyalty"]
+
+[[permission]]
+identifier = "deny-adjust-online-customer-loyalty"
+description = "Denies the adjust_online_customer_loyalty command without any pre-configured scope."
+commands.deny = ["adjust_online_customer_loyalty"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-mariadb-employee-profile-cas"
+description = "Enables the save_mariadb_employee_profile_cas command without any pre-configured scope."
+commands.allow = ["save_mariadb_employee_profile_cas"]
+
+[[permission]]
+identifier = "deny-save-mariadb-employee-profile-cas"
+description = "Denies the save_mariadb_employee_profile_cas command without any pre-configured scope."
+commands.deny = ["save_mariadb_employee_profile_cas"]

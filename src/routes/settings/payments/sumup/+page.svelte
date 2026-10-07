@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { toast } from '$lib/stores/toast';
@@ -38,6 +39,8 @@
     let saving = false;
     let readerBusy = false;
     let pairingBusy = false;
+    let removingSecrets = false;
+    let showRemoveSecretsConfirm = false;
 
     $: readerOptions = [
         ...(!readers.some((reader) => reader.id === config.readerId) && config.readerId
@@ -184,8 +187,9 @@
         }
     }
 
-    async function removeSecrets() {
-        if (!confirm('Remove the saved SumUp API and affiliate keys from this till?')) return;
+    async function confirmRemoveSecrets() {
+        if (removingSecrets) return;
+        removingSecrets = true;
         try {
             config = await clearSumupSecrets();
             apiKey = '';
@@ -194,6 +198,8 @@
             toast('SumUp secrets removed and card integration disabled', 'success');
         } catch (error) {
             toast(`Could not remove SumUp secrets: ${error}`, 'error');
+        } finally {
+            removingSecrets = false;
         }
     }
 </script>
@@ -327,7 +333,9 @@
                 </div>
             </div>
             <div class="mt-4 flex flex-wrap justify-between gap-3">
-                <button class="btn btn-danger" disabled={!config.apiKeyConfigured && !apiKey.trim()} on:click={removeSecrets}>Remove Saved Keys</button>
+                <button class="btn btn-danger" disabled={removingSecrets || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretsConfirm = true}>
+                    {removingSecrets ? 'Removing...' : 'Remove Saved Keys'}
+                </button>
                 <button class="btn btn-primary" disabled={pairingBusy || pairingCode.trim().length < 8} on:click={pairReader}>
                     {pairingBusy ? 'Pairing...' : 'Pair Reader'}
                 </button>
@@ -335,3 +343,13 @@
         </section>
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showRemoveSecretsConfirm}
+    title="Remove SumUp Keys?"
+    message="Remove the saved SumUp API and affiliate keys from this till? SumUp will be disabled until both keys are saved again."
+    confirmText="Remove Saved Keys"
+    variant="danger"
+    dismissDisabled={removingSecrets}
+    on:confirm={confirmRemoveSecrets}
+/>

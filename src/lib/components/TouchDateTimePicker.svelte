@@ -1,6 +1,7 @@
 <script lang="ts">
     import Modal from './Modal.svelte';
     import { createEventDispatcher } from 'svelte';
+    import { deviceOperatingMode } from '$lib/deviceMode';
 
     export let value = ""; // ISO string format for datetime-local compatibility
     export let label = "Date & Time";
@@ -77,19 +78,49 @@
         hour = d.getHours();
         minute = d.getMinutes();
     }
+
+    function handleNativeChange(event: Event & { currentTarget: HTMLInputElement }) {
+        value = event.currentTarget.value;
+        dispatch('change', value);
+    }
+
+    function toNativeDateTimeValue(raw: string): string {
+        if (!raw) return '';
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(raw)) return raw.slice(0, 16);
+
+        const date = new Date(raw);
+        if (Number.isNaN(date.getTime())) return '';
+        const pad = (part: number) => String(part).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    $: nativeValue = toNativeDateTimeValue(value);
 </script>
 
-<div class="flex flex-col gap-1.5 w-full">
-    {#if label}<span class="text-[0.85rem] text-text-muted font-medium">{label}</span>{/if}
-    <button
-        class="w-full h-12 px-4 flex items-center justify-between bg-bg-panel border border-border-flat rounded-sm text-text-main text-[0.95rem] cursor-pointer text-left hover:border-accent-primary transition-colors"
-        on:click={() => showModal = true}
-    >
-        <span class="flex-1">{formatDisplay(value)}</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-    </button>
-</div>
+{#if $deviceOperatingMode === 'back_office'}
+    <label class="desktop-date-time-field">
+        {#if label}<span>{label}</span>{/if}
+        <input
+            type="datetime-local"
+            value={nativeValue}
+            data-touch-keyboard="off"
+            on:change={handleNativeChange}
+        />
+    </label>
+{:else}
+    <div class="flex flex-col gap-1.5 w-full">
+        {#if label}<span class="text-[0.85rem] text-text-muted font-medium">{label}</span>{/if}
+        <button
+            class="w-full h-12 px-4 flex items-center justify-between bg-bg-panel border border-border-flat rounded-sm text-text-main text-[0.95rem] cursor-pointer text-left hover:border-accent-primary transition-colors"
+            on:click={() => showModal = true}
+        >
+            <span class="flex-1">{formatDisplay(value)}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+        </button>
+    </div>
+{/if}
 
+{#if $deviceOperatingMode !== 'back_office'}
 <Modal bind:show={showModal} title="Set {label}" width="480px">
     <div class="flex items-start justify-center py-2.5 gap-6">
         <div class="flex flex-col items-center gap-3">
@@ -139,3 +170,38 @@
         <button class="h-12 px-5 rounded-sm font-semibold cursor-pointer bg-accent-primary text-white border-0 hover:bg-accent-primary-hover" on:click={apply}>Apply</button>
     </div>
 </Modal>
+{/if}
+
+<style>
+    .desktop-date-time-field {
+        width: 100%;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.38rem;
+    }
+
+    .desktop-date-time-field > span {
+        min-height: 18px;
+        color: var(--text-muted);
+        font-size: 0.78rem;
+        font-weight: 800;
+    }
+
+    .desktop-date-time-field input {
+        width: 100%;
+        height: 40px;
+        padding: 0 0.7rem;
+        border: 1px solid var(--border-flat);
+        border-radius: 0.42rem;
+        outline: none;
+        background: var(--bg-panel);
+        color: var(--text-main);
+        font: inherit;
+    }
+
+    .desktop-date-time-field input:focus {
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-primary) 18%, transparent);
+    }
+</style>

@@ -9,6 +9,7 @@ import {
 } from '$lib/stores/mysql';
 import {
     getRecoverablePaymentTerminalAttempts,
+    assertPaymentTerminalAttemptReady,
     preparePaymentTerminalAttempt,
     prunePaymentTerminalAttempts,
     updatePaymentTerminalAttempt,
@@ -52,14 +53,26 @@ export interface DojoPaymentResult {
     reference: string;
 }
 
+export interface DojoMoney {
+    value: number;
+    currencyCode: string;
+}
+
 export interface DojoPaymentIntentStatus {
     id: string;
     status: string;
     reference: string;
     amount?: number;
     currency?: string;
+    totalAmount?: DojoMoney | null;
+    tipsAmount?: DojoMoney | null;
+    cashbackAmount?: DojoMoney | null;
+    serviceChargeAmount?: DojoMoney | null;
+    moneyValidationError?: string | null;
     refundedAmount?: number;
     transactionId?: string;
+    latestTerminalSessionId?: string | null;
+    terminalHistoryError?: string | null;
 }
 
 export interface DojoTerminalSessionStatus {
@@ -72,6 +85,7 @@ export interface DojoTerminalSessionStatus {
 }
 
 export interface DojoRefundResult {
+    rejected?: boolean;
     refundId: string;
     paymentIntentId: string;
 }
@@ -141,6 +155,18 @@ export function createDojoPayment(
     return invoke<DojoPaymentResult>('dojo_create_payment', { amountPence, reference, description });
 }
 
+export async function retryDojoPayment(attemptId: string, terminalSessionId: string): Promise<DojoPaymentResult> {
+    // Persist the retry boundary before sending it. Recovery must never use
+    // the earlier decline to release a payment whose new session is unknown.
+    await updateDojoAttempt(attemptId, 'started', { error: `DOJO_RETRY_PENDING:${terminalSessionId}` });
+    await assertPaymentTerminalAttemptReady('dojo', attemptId);
+    try {
+        return await invoke<DojoPaymentResult>('dojo_retry_payment', { attemptId, terminalSessionId });
+    } catch (error) {
+        throw new Error(`DOJO_RETRY_PENDING:${terminalSessionId} ${String(error)}`);
+    }
+}
+
 export function getDojoTerminalSessionStatus(terminalSessionId: string): Promise<DojoTerminalSessionStatus> {
     return invoke<DojoTerminalSessionStatus>('dojo_terminal_session_status', { terminalSessionId });
 }
@@ -158,6 +184,11 @@ export function findDojoPaymentIntentByReference(
 
 export function cancelDojoTerminalSession(terminalSessionId: string): Promise<void> {
     return invoke<void>('dojo_cancel_terminal_session', { terminalSessionId });
+}
+
+/** Native sandbox guard + journal/provider proof. Hold the matching terminal lease throughout. */
+export function cancelExpiredSandboxDojoPaymentIntent(attemptId: string): Promise<void> {
+    return invoke<void>('dojo_cancel_expired_sandbox_payment', { attemptId });
 }
 
 export function respondToDojoSignature(terminalSessionId: string, accepted: boolean): Promise<void> {

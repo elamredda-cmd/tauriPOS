@@ -121,6 +121,9 @@ export function modalFocusTrap(node: HTMLElement, initialOptions: ModalFocusTrap
         if (!isTopModal()) return;
 
         if (event.key === 'Escape') {
+            // Let an open select close its own list before dismissing the dialog.
+            const target = event.target instanceof HTMLElement ? event.target : null;
+            if (target?.closest('[role="listbox"], .custom-select-trigger[aria-expanded="true"]')) return;
             event.preventDefault();
             event.stopImmediatePropagation();
             if (!options.dismissDisabled) options.dismiss?.();

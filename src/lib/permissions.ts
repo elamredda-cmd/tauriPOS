@@ -1,12 +1,18 @@
-import type { Employee, Setting } from '$lib/stores/db';
+import {
+    EMPLOYEE_ROLES,
+    normalizeEmployeeRole,
+    type Employee,
+    type Setting,
+} from '$lib/stores/db';
 
-export const employeeRoles: Employee['role'][] = ['admin', 'manager', 'supervisor', 'cashier'];
+export const employeeRoles: Employee['role'][] = [...EMPLOYEE_ROLES];
 
 export const roleLabels: Record<Employee['role'], string> = {
     admin: 'Administrator',
     manager: 'Manager',
     supervisor: 'Supervisor',
     cashier: 'Cashier',
+    attendance: 'Attendance only',
 };
 
 export const roleDescriptions: Record<Employee['role'], string> = {
@@ -14,6 +20,7 @@ export const roleDescriptions: Record<Employee['role'], string> = {
     manager: 'Runs catalogue, reports, settings, promotions, stock, and daily operations.',
     supervisor: 'Handles daily approvals, reports, stock receiving, refunds, and end-of-day tasks.',
     cashier: 'Focused on checkout with only the extra actions granted here.',
+    attendance: 'Can clock in or out and view only their own attendance. No POS or management access.',
 };
 
 export type PermissionKey =
@@ -30,6 +37,8 @@ export type PermissionKey =
     | 'open_sync'
     | 'open_audit'
     | 'open_stock_receiving'
+    | 'view_attendance'
+    | 'manage_attendance'
     | 'price_override'
     | 'refund_void'
     | 'manual_discount'
@@ -37,7 +46,8 @@ export type PermissionKey =
     | 'end_day_close'
     | 'charge_customer_account'
     | 'take_account_payment'
-    | 'adjust_customer_account';
+    | 'adjust_customer_account'
+    | 'adjust_customer_loyalty';
 
 export const permissionLabels: Record<PermissionKey, string> = {
     open_items: 'Open Items',
@@ -53,6 +63,8 @@ export const permissionLabels: Record<PermissionKey, string> = {
     open_sync: 'Open Sync Dashboard',
     open_audit: 'Open Audit Log',
     open_stock_receiving: 'Open Stock Receiving',
+    view_attendance: 'View All Attendance',
+    manage_attendance: 'Correct Attendance',
     price_override: 'Override Prices',
     refund_void: 'Refund / Void Sales',
     manual_discount: 'Apply Manual Discounts',
@@ -61,6 +73,7 @@ export const permissionLabels: Record<PermissionKey, string> = {
     charge_customer_account: 'Charge Customer Accounts',
     take_account_payment: 'Take Account Payments',
     adjust_customer_account: 'Adjust Customer Accounts',
+    adjust_customer_loyalty: 'Adjust Loyalty Points',
 };
 
 export type RolePermissionMatrix = Record<Employee['role'], PermissionKey[]>;
@@ -71,15 +84,21 @@ export const defaultRolePermissions: RolePermissionMatrix = {
         'open_items', 'open_suppliers', 'open_tax_rates', 'open_customers', 'open_discounts',
         'open_orders', 'open_reports', 'open_settings',
         'open_design', 'open_sync', 'open_audit', 'open_stock_receiving',
+        'view_attendance', 'manage_attendance',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
         'charge_customer_account', 'take_account_payment', 'adjust_customer_account',
+        'adjust_customer_loyalty',
     ],
     supervisor: [
         'open_orders', 'open_reports', 'open_stock_receiving',
+        'view_attendance',
         'price_override', 'refund_void', 'manual_discount', 'open_cash_drawer', 'end_day_close',
         'charge_customer_account',
     ],
     cashier: ['manual_discount', 'charge_customer_account'],
+    // Attendance-only access is fixed by the application and cannot be
+    // expanded through the configurable permission matrix.
+    attendance: [],
 };
 
 export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix {
@@ -119,6 +138,9 @@ export function parseRolePermissions(settings: Setting[]): RolePermissionMatrix 
             manager: role(storedRoles.manager, defaultRolePermissions.manager),
             supervisor: role(storedRoles.supervisor, defaultRolePermissions.supervisor),
             cashier: role(storedRoles.cashier, defaultRolePermissions.cashier),
+            // This role is intentionally immutable. Ignore permissions from
+            // older, hand-edited, or tampered settings documents.
+            attendance: [],
         };
     } catch {
         return defaultRolePermissions;
@@ -136,13 +158,22 @@ export function hasPermission(
     key: PermissionKey,
     settings: Setting[],
 ): boolean {
-    if (!employee?.isActive) return false;
+    if (!employee?.isActive || employee.roleNeedsRepair || employee.pinNeedsReset) return false;
+    const role = normalizeEmployeeRole(employee.role);
+    if (!role) return false;
     const matrix = parseRolePermissions(settings);
-    return matrix[employee.role]?.includes(key) || false;
+    return matrix[role]?.includes(key) || false;
 }
 
 export function serializeRolePermissions(matrix: RolePermissionMatrix): string {
-    return JSON.stringify({ version: 4, roles: matrix });
+    return JSON.stringify({
+        version: 7,
+        roles: {
+            ...matrix,
+            // Do not persist configurable privileges for the attendance role.
+            attendance: [],
+        },
+    });
 }
 
 const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
@@ -168,13 +199,14 @@ const routePermissions: Array<{ path: string; permission: PermissionKey }> = [
 ];
 
 const adminOnlyPaths = [
+    '/settings/cash-control',
     '/employees/permissions',
     '/settings/permissions',
     '/settings/advanced',
     '/settings/owner-app',
     '/settings/licence',
 ];
-const signedInOperationalPaths = ['/label-print', '/about'];
+const signedInOperationalPaths = ['/attendance', '/label-print', '/about'];
 const publicPaths = ['/', '/customer-display'];
 
 function matchesPath(pathname: string, route: string): boolean {
@@ -195,17 +227,24 @@ export function canAccessPath(
     settings: Setting[],
 ): boolean {
     if (publicPaths.includes(pathname)) return true;
-    if (!employee?.isActive) return false;
-    if (pathname === '/setup') return employee.role === 'admin';
-    if (isAdminOnlyPath(pathname)) return employee.role === 'admin';
+    if (!employee?.isActive || employee.roleNeedsRepair || employee.pinNeedsReset) return false;
+    const role = normalizeEmployeeRole(employee.role);
+    if (!role) return false;
+    // The attendance role is a deliberately narrow sign-in identity. The
+    // public root remains available as the shared login entry, but once
+    // authenticated this is the only protected route the role may open.
+    if (role === 'attendance') return matchesPath(pathname, '/attendance');
+    if (pathname === '/setup') return role === 'admin';
+    if (matchesPath(pathname, '/settings/cash-control') && employee.isSupportSession) return false;
+    if (isAdminOnlyPath(pathname)) return role === 'admin';
     if (signedInOperationalPaths.some((path) => matchesPath(pathname, path))) return true;
 
     if (matchesPath(pathname, '/admin')) {
         const matrix = parseRolePermissions(settings);
-        return matrix[employee.role]?.includes('end_day_close')
+        return matrix[role]?.includes('end_day_close')
             || (Object.keys(permissionLabels) as PermissionKey[])
                 .filter((key) => key.startsWith('open_'))
-                .some((key) => matrix[employee.role]?.includes(key));
+                .some((key) => matrix[role]?.includes(key));
     }
 
     // Closing a reporting period is intentionally independent from access to

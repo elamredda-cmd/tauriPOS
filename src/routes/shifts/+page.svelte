@@ -28,6 +28,12 @@
         accountRepaymentsCard?: number;
         accountRepaymentsOther?: number;
         cashMovements?: number;
+        tipsTotal?: number;
+        serviceChargeTotal?: number;
+        cashbackTotal?: number;
+        accountTipsTotal?: number;
+        accountServiceChargeTotal?: number;
+        accountCashbackTotal?: number;
     };
 
     const PAGE_SIZE = 20;
@@ -204,11 +210,15 @@
         return money(shift.openingFloat)
             + money(shift.cashPayments)
             + money(shift.accountRepaymentsCash)
-            + money(shift.cashMovements);
+            + money(shift.cashMovements)
+            - money(shift.cashbackTotal)
+            - money(shift.accountCashbackTotal);
     }
 
     function expectedCard(shift: ShiftSummaryRow): number {
-        return money(shift.cardPayments) + money(shift.accountRepaymentsCard);
+        return money(shift.cardPayments) + money(shift.accountRepaymentsCard)
+            + money(shift.tipsTotal) + money(shift.serviceChargeTotal) + money(shift.cashbackTotal)
+            + money(shift.accountTipsTotal) + money(shift.accountServiceChargeTotal) + money(shift.accountCashbackTotal);
     }
 
     function formatDate(value: string, includeYear = false): string {
@@ -361,7 +371,7 @@
                             onClear={clearShiftSearch}
                         />
                     </div>
-                    <button class="btn btn-primary search-toolbar-action" on:click={runSearch}>Find</button>
+                    <button class="btn btn-primary search-toolbar-action history-find" on:click={runSearch}>Find</button>
                     <div class="status-filter search-control search-filter"><CustomSelect bind:value={statusFilter} options={statusOptions} /></div>
                     <span class="result-count search-meta">{shiftsLoading ? 'Loading...' : `${shiftsTotal} / ${overallTotal}`}</span>
                     {#if statusFilter !== 'all'}<button class="btn btn-secondary clear-button search-toolbar-action" on:click={clearFilters}>Reset</button>{/if}
@@ -397,6 +407,14 @@
                             {#if expandedId === shift.id}
                                 <tr><td colspan="6" class="details-cell">
                                     <div class="shift-details">
+                                        {#if money(shift.tipsTotal) || money(shift.serviceChargeTotal) || money(shift.cashbackTotal) || money(shift.accountTipsTotal) || money(shift.accountServiceChargeTotal) || money(shift.accountCashbackTotal)}
+                                            <div><h4>Extra card collections</h4>
+                                                <p><span>Tips</span><b>{formatMoney(money(shift.tipsTotal) + money(shift.accountTipsTotal))}</b></p>
+                                                <p><span>Service charge</span><b>{formatMoney(money(shift.serviceChargeTotal) + money(shift.accountServiceChargeTotal))}</b></p>
+                                                <p><span>Cashback paid out</span><b>{formatMoney(money(shift.cashbackTotal) + money(shift.accountCashbackTotal))}</b></p>
+                                                <p><span>Cashback reduces expected cash and increases expected card; it is not sales revenue.</span></p>
+                                            </div>
+                                        {/if}
                                         <div><h4>Cash</h4><p><span>Opening Float</span><b>{formatMoney(money(shift.openingFloat))}</b></p><p><span>Cash Sales</span><b>{formatMoney(money(shift.cashPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCash))}</b></p><p><span>Cash Movements</span><b>{formatMoney(money(shift.cashMovements))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCash)) : 'After close'}</b></p><p><span>Counted</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCash)) : '-'}</b></p></div>
                                         <div><h4>Card</h4><p><span>Card Sales</span><b>{formatMoney(money(shift.cardPayments))}</b></p><p><span>Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsCard))}</b></p><p><span>Expected</span><b>{shift.status === 'closed' ? formatMoney(money(shift.expectedCard)) : 'After close'}</b></p><p><span>Machine</span><b>{shift.status === 'closed' ? formatMoney(money(shift.actualCard)) : '-'}</b></p><p><span>Difference</span><b>{shift.status === 'closed' ? formatMoney(money(shift.cardDifference)) : '-'}</b></p></div>
                                         <div><h4>Activity</h4><p><span>Orders</span><b>{money(shift.orderCount)}</b></p><p><span>Total Sales</span><b>{formatMoney(money(shift.salesTotal))}</b></p><p><span>Other Account Payments</span><b>{formatMoney(money(shift.accountRepaymentsOther))}</b></p><p><span>Closed By</span><b>{shift.closedByName || '-'}</b></p>{#if shift.notes}<p><span>Notes</span><b>{shift.notes}</b></p>{/if}</div>
@@ -478,6 +496,33 @@
     .shift-details p span { color: var(--text-muted); }
     .shift-details p b { overflow-wrap: anywhere; text-align: right; }
     .pagination { padding: .75rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: var(--text-muted); border-top: 1px solid var(--border-flat); background: var(--bg-panel); font-size: .8rem; font-weight: 700; }
+    @media (min-width: 701px) and (max-width: 900px) {
+        .history-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; gap: .5rem; }
+        .history-search { width: auto; min-width: 0; max-width: none; grid-column: 1 / 3; }
+        .history-find { grid-column: 3; }
+        .status-filter { width: auto; min-width: 0; grid-column: 1; }
+        .result-count { grid-column: 2; }
+        .clear-button { grid-column: 3; }
+        .table-wrap { overflow-x: auto; }
+        .shift-table { width: 100%; min-width: 680px; table-layout: fixed; }
+        .shift-table :global(th), .shift-table :global(td) { padding-inline: .55rem; }
+        .shift-table th:nth-child(1) { width: 17%; }
+        .shift-table th:nth-child(2) { width: 15%; }
+        .shift-table th:nth-child(3) { width: 23%; }
+        .shift-table th:nth-child(4) { width: 13%; }
+        .shift-table th:nth-child(5) { width: 14%; }
+        .shift-table th:nth-child(6) { width: 18%; }
+        .shift-table td { overflow: hidden; text-overflow: ellipsis; }
+        .shift-table .tag { min-width: 0; max-width: 100%; }
+        .session-toggle { max-width: 100%; gap: .3rem; overflow: hidden; }
+        .session-toggle > span { width: 1.45rem; height: 1.45rem; flex-basis: 1.45rem; }
+        .shift-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .shift-details > div:nth-child(2) { padding-right: 0; border-right: 0; }
+        .shift-details > div:nth-child(3) { padding-top: .7rem; grid-column: 1 / -1; border-top: 1px solid var(--border-flat); }
+    }
+    :global(.back-office-route) .shift-snapshot { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    :global(.back-office-route) .shift-snapshot article:nth-child(2) { border-right: 0; }
+    :global(.back-office-route) .shift-snapshot article:nth-child(-n+2) { border-bottom: 1px solid var(--border-flat); }
     @media (max-width: 700px) {
         .cash-up-heading { align-items: stretch; flex-direction: column; }
         .open-badge { align-self: flex-start; }

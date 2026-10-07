@@ -34,6 +34,7 @@
     import { getBarcodeRules } from "$lib/barcodeRules";
     import { randomTileColor } from "$lib/tileColors";
     import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
+    import { deviceOperatingMode } from "$lib/deviceMode";
 
     let showModal = false;
     let isEditing = false;
@@ -90,6 +91,7 @@
     const MAX_ITEM_PRICE_DIGITS = String(MAX_ITEM_PRICE_PENCE).length;
     let showPricePad = false;
     let priceString = "";
+    let desktopPriceString = "0.00";
     let pricePadDialog: HTMLDivElement | null = null;
     let productImageInput: HTMLInputElement | null = null;
     let imageUploadError = "";
@@ -107,6 +109,36 @@
         showPricePad = true;
         await tick();
         pricePadDialog?.focus();
+    }
+
+    function setDesktopPrice(rawValue: string) {
+        const normalizedSeparator = rawValue.replace(",", ".");
+        if (!/^\d*(?:\.\d{0,2})?$/.test(normalizedSeparator)) return false;
+
+        desktopPriceString = normalizedSeparator;
+        const pounds = Number(normalizedSeparator);
+        currentItem.price = normalizedSeparator === "" || !Number.isFinite(pounds)
+            ? 0
+            : Math.min(MAX_ITEM_PRICE_PENCE, toPence(Math.max(0, pounds)));
+        currentItem = { ...currentItem };
+        return true;
+    }
+
+    function handleDesktopPriceInput(event: Event & { currentTarget: HTMLInputElement }) {
+        const previousValue = desktopPriceString;
+        if (!setDesktopPrice(event.currentTarget.value)) {
+            event.currentTarget.value = previousValue;
+        }
+    }
+
+    function normalizeDesktopPrice() {
+        const pounds = Number(desktopPriceString);
+        const price = desktopPriceString === "" || !Number.isFinite(pounds)
+            ? 0
+            : Math.min(MAX_ITEM_PRICE_PENCE, toPence(Math.max(0, pounds)));
+        currentItem.price = price;
+        currentItem = { ...currentItem };
+        desktopPriceString = toPounds(price).toFixed(2);
     }
 
     function closeGoodsMenu() {
@@ -277,6 +309,7 @@
             updatedAt: now(),
         };
         priceString = "0";
+        desktopPriceString = "0.00";
         selectedPluLength = configuredPluLengths[0] || 5;
         isEditing = false;
         originalItem = null;
@@ -288,6 +321,7 @@
         currentItem = { ...item, isAgeRestricted: !!item.isAgeRestricted, image: item.image || "" };
         originalItem = { ...item };
         priceString = item.price.toString();
+        desktopPriceString = toPounds(item.price).toFixed(2);
         selectedPluLength = item.scalePlu?.length || configuredPluLengths[0] || 5;
         isEditing = true;
         imageUploadError = "";
@@ -390,6 +424,7 @@
     }
 
     async function saveItem() {
+        if ($deviceOperatingMode === "back_office") normalizeDesktopPrice();
         const missing: string[] = [];
         if (!currentItem.name?.trim()) missing.push("Item Name");
         if ((currentItem.price || 0) <= 0) missing.push("Selling Price");
@@ -640,7 +675,7 @@
     <AdminPageHeader
         title="Item Management"
         description={itemsLoading ? 'Loading items' : `${totalItemsCapped ? `${totalItems}+` : totalItems} items`}
-        backFallback="/"
+        backFallback={$deviceOperatingMode === 'back_office' ? '/admin' : '/'}
     >
         <button class="btn btn-secondary" on:click={openGoodsMenu}>
             <Grid3X3 size={19} strokeWidth={2.35} aria-hidden="true" />
@@ -808,7 +843,7 @@
         on:click={(event) => handleBackdropClick(event, closeItemEditor)}
         on:keydown={(event) => handleBackdropKeydown(event, closeItemEditor)}
     >
-        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[98vh] overflow-hidden" role="dialog" aria-modal="true" aria-label={isEditing ? "Edit item" : "Add item"}>
+        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[calc(100dvh-2rem)] overflow-hidden" class:back-office={$deviceOperatingMode === 'back_office'} role="dialog" aria-modal="true" aria-label={isEditing ? "Edit item" : "Add item"}>
             <div class="item-modal-header flex justify-between items-center border-b border-border-flat p-4 shrink-0">
                 <h2>{isEditing ? "Edit Item" : "Add New Item"}</h2>
                 <button
@@ -927,16 +962,30 @@
 
                 <div class="field">
                     <label for="price">{currentItem.isWeighable ? 'Price per kg (£) *' : 'Selling Price (£) *'}</label>
-                    <button
-                        id="price"
-                        type="button"
-                        class="bg-bg-panel border border-border-flat rounded-sm px-3 py-2.5 flex justify-between items-center cursor-pointer text-[1.1rem] font-serif text-success hover:border-accent-primary"
-                        on:click={openPricePad}
-                    >
-                        <span>{formatMoney(currentItem.price || 0)}</span>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
-                            ><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-                    </button>
+                    {#if $deviceOperatingMode === 'back_office'}
+                        <input
+                            id="price"
+                            class="item-desktop-price-input"
+                            type="text"
+                            value={desktopPriceString}
+                            placeholder="0.00"
+                            data-touch-keyboard="off"
+                            autocomplete="off"
+                            on:input={handleDesktopPriceInput}
+                            on:blur={normalizeDesktopPrice}
+                        />
+                    {:else}
+                        <button
+                            id="price"
+                            type="button"
+                            class="bg-bg-panel border border-border-flat rounded-sm px-3 py-2.5 flex justify-between items-center cursor-pointer text-[1.1rem] font-serif text-success hover:border-accent-primary"
+                            on:click={openPricePad}
+                        >
+                            <span>{formatMoney(currentItem.price || 0)}</span>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
+                                ><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+                        </button>
+                    {/if}
                 </div>
 
                 <div class="field">
@@ -1004,7 +1053,7 @@
         </div>
     </div>
 
-    {#if showPricePad}
+    {#if showPricePad && $deviceOperatingMode !== 'back_office'}
         <div
             class="modal-overlay !z-[110]"
             role="presentation"
@@ -1347,7 +1396,7 @@
 
     .item-price-pad-panel {
         width: min(360px, calc(100vw - 1rem));
-        max-height: calc(100vh - 1rem);
+        max-height: calc(100dvh - 2rem);
         padding: 1rem;
         display: flex;
         flex-direction: column;
@@ -1597,7 +1646,7 @@
         }
     }
 
-    @media (min-width: 900px) and (max-width: 1180px) and (min-height: 680px) and (max-height: 900px) {
+    @media (min-width: 900px) and (max-width: 1180px) {
         .items-management-page {
             padding: var(--app-page-gutter, 1.5rem) !important;
         }
@@ -1659,8 +1708,8 @@
         }
 
         .items-col-actions {
-            width: 98px;
-            min-width: 98px;
+            width: 104px;
+            min-width: 104px;
         }
 
         .items-col-sku,
@@ -1684,15 +1733,15 @@
         }
 
         .items-table .act-row {
-            grid-template-columns: repeat(2, 38px);
+            grid-template-columns: repeat(2, 44px);
             gap: 0.35rem;
         }
 
         .items-table .act-btn {
-            width: 38px !important;
-            height: 38px !important;
-            min-width: 38px !important;
-            min-height: 38px !important;
+            width: 44px !important;
+            height: 44px !important;
+            min-width: 44px !important;
+            min-height: 44px !important;
         }
 
         .items-pagination {
@@ -1705,8 +1754,8 @@
         }
 
         .item-editor-panel {
-            max-width: calc(100vw - 1rem);
-            max-height: calc(100vh - 0.75rem);
+            max-width: calc(100vw - 2rem);
+            max-height: calc(100dvh - 2rem);
         }
 
         .item-modal-header,
@@ -1741,13 +1790,13 @@
 
         .item-modal-actions .btn,
         .plu-entry-row .btn {
-            min-height: 42px;
+            min-height: 44px;
             padding: 0.5rem 0.85rem;
         }
 
         .goods-menu-panel {
-            max-width: calc(100vw - 1rem);
-            max-height: calc(100vh - 1rem);
+            max-width: calc(100vw - 2rem);
+            max-height: calc(100dvh - 2rem);
             gap: 0.75rem;
             padding: 0.9rem !important;
         }
@@ -1832,8 +1881,8 @@
         }
 
         .items-col-actions {
-            width: 90px;
-            min-width: 90px;
+            width: 104px;
+            min-width: 104px;
         }
 
         .items-table .tag {
@@ -1844,15 +1893,15 @@
         }
 
         .items-table .act-row {
-            grid-template-columns: repeat(2, 36px);
+            grid-template-columns: repeat(2, 44px);
             gap: 0.3rem;
         }
 
         .items-table .act-btn {
-            width: 36px !important;
-            height: 36px !important;
-            min-width: 36px !important;
-            min-height: 36px !important;
+            width: 44px !important;
+            height: 44px !important;
+            min-width: 44px !important;
+            min-height: 44px !important;
         }
 
         .items-pagination {
@@ -1876,8 +1925,8 @@
 
         .item-editor-panel,
         .goods-menu-panel {
-            max-width: calc(100vw - 0.75rem);
-            max-height: calc(100vh - 0.75rem);
+            max-width: calc(100vw - 2rem);
+            max-height: calc(100dvh - 2rem);
         }
 
         .item-modal-header,
@@ -1919,12 +1968,101 @@
         .item-image-actions .btn,
         .plu-entry-row .btn {
             width: 100%;
-            min-height: 42px;
+            min-height: 44px;
         }
 
         .goods-menu-panel {
             gap: 0.75rem;
             padding: 0.85rem !important;
+        }
+    }
+
+    @media (min-width: 701px) and (max-width: 900px) {
+        .items-pagination {
+            align-items: center;
+            flex-direction: row;
+            padding-top: 0.5rem;
+        }
+    }
+
+    @media (max-height: 650px) and (min-width: 701px) {
+        .search-strip-intro span {
+            display: none;
+        }
+    }
+
+    .item-editor-panel.back-office {
+        max-width: min(760px, calc(100vw - 1.5rem));
+    }
+
+    .item-editor-panel.back-office .item-modal-header,
+    .item-editor-panel.back-office .item-modal-actions {
+        padding: 0.6rem 0.75rem !important;
+    }
+
+    .item-editor-panel.back-office .item-modal-header h2 {
+        margin: 0;
+        font-size: 1.05rem;
+    }
+
+    .item-editor-panel.back-office .item-form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.65rem;
+        padding: 0.7rem !important;
+    }
+
+    .item-editor-panel.back-office .item-form-grid > .span-2 {
+        grid-column: 1 / -1;
+    }
+
+    .item-editor-panel.back-office .item-image-editor {
+        grid-template-columns: 104px minmax(0, 1fr);
+        gap: 0.65rem;
+        padding: 0.65rem !important;
+    }
+
+    .item-editor-panel.back-office .item-image-preview {
+        height: 104px;
+    }
+
+    .item-editor-panel.back-office .item-image-editor p {
+        line-height: 1.2;
+    }
+
+    .item-editor-panel.back-office .item-image-editor p.text-xs {
+        display: none;
+    }
+
+    .item-editor-panel.back-office .item-image-actions,
+    .item-editor-panel.back-office .plu-entry-row {
+        display: flex;
+    }
+
+    .item-editor-panel.back-office .item-image-actions .btn,
+    .item-editor-panel.back-office .plu-entry-row .btn {
+        width: auto;
+        min-height: 36px;
+    }
+
+    .item-editor-panel.back-office .item-modal-actions {
+        display: flex;
+        flex-direction: row;
+    }
+
+    .item-editor-panel.back-office .item-modal-actions .btn {
+        width: auto;
+        min-width: 110px;
+        min-height: 38px;
+    }
+
+    @media (max-width: 620px) {
+        .item-editor-panel.back-office .item-form-grid,
+        .item-editor-panel.back-office .item-image-editor {
+            grid-template-columns: minmax(0, 1fr);
+        }
+
+        .item-editor-panel.back-office .item-image-preview {
+            height: 96px;
         }
     }
 </style>

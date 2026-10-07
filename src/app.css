@@ -298,6 +298,43 @@
   --sidebar-active: var(--accent-primary);
 }
 
+/* Daylight Theme — soft daytime surfaces with clear, low-saturation controls. */
+.theme-daylight {
+  color-scheme: light;
+  --bg-base: #edf0f2;
+  --bg-panel: #f5f6f4;
+  --bg-panel-rgb: 245, 246, 244;
+  --bg-card: #fffefa;
+  --bg-card-rgb: 255, 254, 250;
+  --bg-card-hover: #e5edf3;
+  --border-flat: #8291a2;
+  --border-flat-rgb: 130, 145, 162;
+  --border-focus: #245b83;
+  --text-main: #243447;
+  --text-muted: #526174;
+  --text-muted-rgb: 82, 97, 116;
+  --text-dark: #243447;
+  --text-inverse: #ffffff;
+  --accent-primary: #245b83;
+  --accent-primary-rgb: 36, 91, 131;
+  --accent-primary-hover: #194568;
+  --success: #286747;
+  --success-rgb: 40, 103, 71;
+  --warning: #87551a;
+  --warning-rgb: 135, 85, 26;
+  --danger: #b13d3d;
+  --danger-rgb: 177, 61, 61;
+  --overlay: rgba(36, 52, 71, .4);
+  --shadow: rgba(36, 52, 71, .13);
+  --card-shadow: 0 1px 3px rgba(36, 52, 71, .07);
+  --tile-bg: var(--bg-card);
+  --tile-text: var(--text-main);
+  --price-bg: #294659;
+  --price-text: #ffffff;
+  --sidebar-hover: var(--bg-card-hover);
+  --sidebar-active: var(--accent-primary);
+}
+
 /* ─────────────────────────────────────────────────────────────
  * Base elements — single source of truth, themed via tokens.
  * Edit padding/sizing once here and every page picks it up.
@@ -369,11 +406,16 @@
   .theme-linen input[type="time"],
   .theme-sage input[type="date"],
   .theme-sage input[type="datetime-local"],
-  .theme-sage input[type="time"] {
+  .theme-sage input[type="time"],
+  .theme-daylight input[type="date"],
+  .theme-daylight input[type="datetime-local"],
+  .theme-daylight input[type="time"] {
     color-scheme: light;
   }
   .theme-sage input::placeholder,
-  .theme-sage textarea::placeholder {
+  .theme-sage textarea::placeholder,
+  .theme-daylight input::placeholder,
+  .theme-daylight textarea::placeholder {
     opacity: 1;
   }
   h1, h2, h3, h4, h5, h6 {
@@ -571,6 +613,7 @@
   .tbl { @apply w-full border-collapse text-left; min-width: max-content; }
   .tbl th { @apply px-4 py-3.5 text-text-muted font-black text-[0.78rem] uppercase tracking-[0.08em] border-b border-border-flat bg-bg-card sticky top-0 z-[5] whitespace-nowrap; height: 48px; }
   .tbl td { @apply px-4 py-3 border-b border-border-flat text-[0.92rem]; height: 58px; font-variant-numeric: tabular-nums; }
+  .tbl :where(button, .btn, .btn-icon, .act-btn) { min-height: 44px; }
   .tbl tbody tr:hover td { @apply bg-bg-card-hover; }
   .tbl .empty-row td { @apply text-center py-10 text-text-muted; }
 
@@ -653,7 +696,8 @@
 
   /* Action button row */
   .act-row { @apply flex gap-2; }
-  .act-btn { @apply w-9 h-9; }
+  .act-row > :where(button, a, [role="button"]) { min-height: 44px; }
+  .act-btn { @apply w-11 h-11; min-width: 44px; min-height: 44px; }
   .act-btn.danger:hover { @apply bg-danger text-white border-danger; }
 
   /* Misc */
@@ -662,7 +706,7 @@
 
   /* Tabbed nav (used by /discounts and any future tabbed page) */
   .tabs { @apply flex bg-bg-panel border border-border-flat rounded-lg overflow-hidden p-1 gap-1; min-height: 48px; }
-  .tab-btn { @apply bg-transparent border-0 text-text-muted px-4 py-2 rounded-md cursor-pointer text-[0.9rem] font-bold hover:text-text-main hover:bg-bg-card whitespace-nowrap; min-width: 112px; }
+  .tab-btn { @apply bg-transparent border-0 text-text-muted px-4 py-2 rounded-md cursor-pointer text-[0.9rem] font-bold hover:text-text-main hover:bg-bg-card whitespace-nowrap; min-width: 112px; min-height: 44px; }
   .tab-btn.active { @apply bg-accent-primary text-white shadow-sm; }
 
   /* Header actions container + empty-state placeholder */
@@ -697,7 +741,7 @@
   .settings-order-item { @apply flex items-center gap-3 rounded-lg border border-border-flat bg-bg-panel px-4 py-3; }
   .settings-order-index { @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bg-card font-mono text-sm font-black text-text-muted; }
   .settings-order-controls { @apply flex shrink-0 gap-2; }
-  .settings-icon-btn { @apply flex h-10 w-10 items-center justify-center rounded-lg border border-border-flat bg-bg-card text-text-main transition hover:border-accent-primary hover:bg-bg-card-hover disabled:cursor-not-allowed disabled:opacity-35; }
+  .settings-icon-btn { @apply flex h-11 w-11 items-center justify-center rounded-lg border border-border-flat bg-bg-card text-text-main transition hover:border-accent-primary hover:bg-bg-card-hover disabled:cursor-not-allowed disabled:opacity-35; }
   .settings-section {
     @apply bg-bg-card border border-border-flat rounded-lg p-5 md:p-6;
     box-shadow: var(--card-shadow), 0 10px 28px var(--shadow);
@@ -710,25 +754,30 @@
      softer translucent layer instead of jarring black. */
   .modal-overlay  {
     @apply fixed inset-0 flex items-center justify-center z-[100] p-4;
+    overflow: auto;
+    overscroll-behavior: contain;
     background: var(--overlay);
   }
   .modal-box      {
     @apply w-[400px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-4 md:p-6 rounded-lg flex flex-col gap-4 md:gap-5 bg-bg-panel border border-border-flat;
+    max-height: calc(100dvh - 2rem);
     box-shadow: 0 20px 50px var(--shadow);
   }
-  .modal-box.large{ @apply w-[600px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto; }
+  .modal-box.large{ @apply w-[600px] max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto; max-height: calc(100dvh - 2rem); }
   .modal-header   { @apply flex justify-between items-center; }
   .modal-header h3{ @apply m-0 text-[1.2rem]; }
-  .modal-close    { @apply bg-transparent text-text-muted text-[1.2rem]; }
+  .modal-close    { @apply inline-flex h-11 w-11 shrink-0 items-center justify-center bg-transparent text-text-muted text-[1.2rem]; min-width: 44px; min-height: 44px; }
   .modal-body     { @apply flex flex-col gap-4; }
   .modal-footer   { @apply flex justify-end gap-3 mt-2.5; }
 
   /* Stable application layout: headers and content keep their positions while data changes. */
   .management-header {
-    @apply grid items-center gap-5;
-    grid-template-columns: minmax(260px, 1fr) minmax(0, auto);
-    height: 72px;
-    min-height: 72px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .75rem 1rem;
+    flex: 0 0 auto;
+    min-height: 64px;
     margin-bottom: 1rem;
   }
   .app-page-header-padded {
@@ -736,21 +785,31 @@
     padding: 0;
   }
   .management-title, .management-actions { min-width: 0; }
+  .management-title { flex: 1 1 220px; }
+  .management-actions { flex: 0 1 auto; max-width: 100%; margin-left: auto; }
   .app-page-heading {
     @apply flex items-center gap-4;
   }
   .app-page-heading-copy { min-width: 0; }
+  .app-page-heading-meta {
+    min-width: 0;
+    margin-bottom: .12rem;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+  }
   .app-page-eyebrow {
     @apply block text-xs font-black uppercase text-text-muted;
     letter-spacing: 0;
   }
   .app-page-heading h1 {
-    @apply m-0 truncate text-3xl font-black;
+    @apply m-0 text-3xl font-bold;
+    overflow-wrap: anywhere;
     line-height: 1.12;
     letter-spacing: 0;
   }
   .app-page-heading p {
-    @apply m-0 mt-1 truncate text-sm text-text-muted;
+    @apply m-0 mt-1 text-sm text-text-muted;
     line-height: 1.25;
   }
   .management-actions {
@@ -758,17 +817,19 @@
   }
   .management-actions:empty { display: none; }
   .management-actions .btn {
-    width: 184px;
-    min-width: 184px;
+    width: auto;
+    min-width: 112px;
     max-width: 100%;
     min-height: 44px;
     padding-inline: .9rem;
     padding-block: .6rem;
   }
   .management-content {
+    min-width: 0;
     min-height: 0;
+    container: management / inline-size;
     overflow: auto;
-    scrollbar-gutter: stable both-edges;
+    scrollbar-gutter: stable;
   }
   .app-modal-panel { min-height: 260px; }
   .app-modal-header { min-height: 65px; flex: 0 0 auto; }
@@ -1042,6 +1103,22 @@
     height: 15px;
     flex: 0 0 auto;
     color: var(--accent-primary);
+}
+
+.attendance-clock-trigger {
+    cursor: pointer;
+    min-height: 44px;
+    touch-action: manipulation;
+}
+
+.attendance-clock-trigger:hover {
+    border-color: var(--accent-primary);
+    background: var(--bg-card-hover);
+}
+
+.attendance-clock-trigger:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
+    outline-offset: 2px;
 }
 
 .pos-shop-identity {
@@ -1705,919 +1782,265 @@
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-via), var(--tw-gradient-to) !important;
 }
 
+/* One viewport-sized payment frame: customer, method and result changes never resize it. */
 .payment-modal {
-    width: min(1040px, 96vw);
-    max-height: min(94vh, 750px);
-    overflow-x: hidden !important;
-    overflow-y: auto !important;
+    width: min(1000px, calc(100vw - 2rem));
+    height: min(760px, calc(100dvh - 1rem));
+    max-width: 100%;
+    max-height: calc(100dvh - 1rem);
+    flex: none;
+    padding: 1rem;
+    display: grid;
+    grid-template-rows: 44px 84px minmax(0, 1fr) 64px;
+    gap: .85rem;
+    overflow: hidden;
+    overscroll-behavior: contain;
+    border: 1px solid var(--border-flat);
+    border-radius: .75rem;
+    background: var(--bg-card);
     box-shadow: 0 24px 80px var(--shadow);
 }
-
+.payment-modal-header { display: flex; align-items: center; gap: .75rem; }
+.payment-modal-header h2 { margin: 0; margin-right: auto; font-size: 1.35rem; font-weight: 700; }
 .payment-close {
-    width: 44px;
-    height: 44px;
-    min-width: 44px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border-flat);
-    border-radius: .45rem;
-    background: var(--bg-panel);
+    width: 44px; height: 44px; min-width: 44px;
+    display: grid; place-items: center;
+    border: 1px solid var(--border-flat); border-radius: .5rem;
+    color: var(--text-muted); background: transparent;
 }
-
-.payment-body,
-.payment-summary,
-.payment-pad {
-    min-height: 0;
+.payment-customer-toggle {
+    min-width: 0; min-height: 44px; padding: .5rem .7rem;
+    display: flex; align-items: center; justify-content: center; gap: .45rem;
+    border: 1px solid var(--border-flat); border-radius: .5rem;
+    background: transparent; color: var(--text-main); font-size: .8rem; font-weight: 600;
 }
-
-.payment-summary {
-    gap: .7rem !important;
+.payment-customer-toggle svg { flex-shrink: 0; color: var(--text-muted); }
+.payment-customer-toggle[aria-expanded="true"] { border-color: var(--accent-primary); }
+.checkout-customer-overlay { z-index: 110; }
+.checkout-customer-dialog {
+    display: flex; flex-direction: column; width: 560px; max-width: 100%;
+    max-height: calc(100dvh - 2rem); min-height: 0; overflow: hidden;
+    border: 1px solid var(--border-flat); border-radius: 1rem;
+    background: var(--bg-panel); box-shadow: 0 20px 50px var(--shadow);
 }
-
-.payment-total-card {
-    min-height: 76px;
-    padding: .75rem 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    border: 1px solid var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-panel);
-}
-
-.payment-total-copy {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: .2rem;
-}
-
-.payment-total-copy span {
-    color: var(--text-main);
-    font-size: 1rem;
-    font-weight: 900;
-}
-
-.payment-total-copy small {
-    color: var(--text-muted);
-    font-size: .72rem;
-    font-weight: 700;
-}
-
-.payment-total-card > strong {
-    flex: 0 0 auto;
-    color: var(--success);
-    font-family: var(--app-font-mono);
-    font-size: 2rem;
-    line-height: 1;
-}
-
-.payment-loyalty-applied {
-    min-height: 30px;
-    padding: .35rem .65rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-    color: var(--success);
-    border-left: 3px solid var(--success);
-    background: rgba(var(--success-rgb), .08);
-    font-size: .78rem;
-}
-
-.payment-methods {
-    height: 50px;
-    padding: .25rem;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: .25rem;
-    border: 1px solid var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-panel);
-}
-
-.payment-methods button {
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: .5rem;
-    color: var(--text-muted);
-    border: 1px solid transparent;
-    border-radius: .3rem;
-    background: transparent;
-    font-size: .92rem;
-    font-weight: 900;
-}
-
-.payment-methods button.is-active {
-    color: #fff;
-    border-color: var(--accent-primary);
-    background: var(--accent-primary);
-}
-
-.payment-methods svg,
-.payment-method-symbol {
-    width: 1.25rem;
-    height: 1.25rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-}
-
-.payment-method-symbol {
-    font-size: 1rem;
-    font-weight: 900;
-}
-
-.payment-loyalty {
-    flex: 0 0 auto;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
-    gap: .75rem;
-}
-
-.payment-loyalty-search {
-    position: relative;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: .5rem;
-}
-
-.payment-loyalty-heading {
-    min-width: 0;
-    min-height: 20px;
-    display: flex;
-    align-items: center;
-    gap: .4rem;
-}
-
-.payment-loyalty-heading > svg {
-    flex: 0 0 auto;
-    color: var(--accent-primary);
-}
-
-.payment-loyalty-heading label {
-    color: var(--text-main);
-    font-size: .76rem;
-    font-weight: 900;
-}
-
-.payment-loyalty-subtitle {
-    min-width: 0;
-    margin-left: auto;
-    overflow: hidden;
-    color: var(--text-muted);
-    font-size: .68rem;
-    font-weight: 700;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.payment-customer-search-row {
-    min-width: 0;
-    display: block;
-}
-
-.payment-customer-search-field {
-    position: relative;
-    min-width: 0;
-}
-
+.checkout-customer-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: .75rem; padding: .6rem 1rem; border-bottom: 1px solid var(--border-flat); }
+.checkout-customer-header h2 { margin: 0; font-size: 1.2rem; font-weight: 700; }
+.checkout-customer-body { display: flex; min-height: 0; padding: 1rem; overflow: hidden; }
+.payment-loyalty { position: relative; min-width: 0; min-height: 0; }
+.payment-customer-walk-in { height: 100%; padding: .65rem .75rem; display: flex; align-items: center; gap: .65rem; border: 1px dashed var(--border-flat); border-radius: .5rem; color: var(--text-muted); }
+.payment-customer-walk-in > div { display: flex; flex-direction: column; gap: .25rem; }
+.payment-customer-walk-in strong { color: var(--text-main); font-size: .85rem; font-weight: 600; }
+.payment-customer-walk-in span { font-size: .75rem; }
+.payment-loyalty-search { height: 100%; justify-content: center; min-width: 0; display: flex; flex-direction: column; gap: .5rem; }
+.payment-loyalty-search > label { color: var(--text-muted); font-size: .78rem; font-weight: 500; }
 .payment-customer-results {
-    position: absolute;
-    z-index: 30;
-    top: calc(100% + .3rem);
-    right: 0;
-    left: 0;
-    padding: .3rem;
-    overflow: hidden;
-    border: 1px solid var(--border-flat);
-    border-radius: .45rem;
-    background: var(--bg-card);
-    box-shadow: 0 14px 32px var(--shadow);
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 5;
+    max-height: min(240px, 45dvh); overflow-y: auto; padding: .25rem;
+    box-shadow: 0 10px 24px var(--shadow);
+    border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel);
 }
-
 .payment-customer-results button {
-    width: 100%;
-    min-height: 46px;
-    padding: .45rem .6rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-    border-radius: .3rem;
-    background: transparent;
-    text-align: left;
+    width: 100%; min-height: 48px; padding: .5rem .65rem;
+    display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+    border-radius: .35rem; background: transparent; text-align: left;
 }
-
-.payment-customer-results button:hover,
-.payment-customer-results button:focus-visible {
-    background: var(--bg-card-hover);
-}
-
-.payment-customer-results strong {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.payment-customer-results small {
-    flex: 0 0 auto;
-    color: var(--text-muted);
-    font-size: .7rem;
-    white-space: nowrap;
-}
-
-.payment-customer-empty,
+.payment-customer-results strong { min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.payment-customer-results small { color: var(--text-muted); font-size: .75rem; }
+.payment-search-empty { position: absolute; top: 100%; left: 0; right: 0; z-index: 5; padding: .75rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel); margin: 0; color: var(--text-muted); font-size: .8rem; }
 .payment-customer-card {
-    min-height: 70px;
-    border: 1px dashed var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-card);
+    height: 100%; min-height: 0; overflow-y: auto;
+    min-width: 0; padding: .65rem .75rem;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "details actions" "balance balance";
+    align-items: center; gap: .55rem .75rem;
+    border-radius: .5rem; background: var(--bg-panel);
 }
-
-.payment-customer-empty {
-    padding: .55rem .7rem;
-    display: flex;
-    align-items: center;
-    gap: .65rem;
-    color: var(--text-muted);
-}
-
-.payment-customer-empty > span:last-child {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: .1rem;
-}
-
-.payment-customer-empty strong {
-    color: var(--text-main);
-    font-size: .82rem;
-}
-
-.payment-customer-empty small {
-    font-size: .68rem;
-}
-
-.payment-customer-card {
-    padding: .5rem;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-        "details actions"
-        "balance balance";
-    align-items: center;
-    gap: .6rem;
-    border-style: solid;
-    border-color: rgba(var(--accent-primary-rgb), .4);
-}
-
-.payment-customer-details {
-    grid-area: details;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: .55rem;
-}
-
-.payment-customer-avatar {
-    width: 38px;
-    height: 38px;
-    display: grid;
-    place-items: center;
-    flex: 0 0 auto;
-    color: var(--accent-primary);
-    border: 1px solid rgba(var(--accent-primary-rgb), .35);
-    border-radius: .4rem;
-    background: rgba(var(--accent-primary-rgb), .1);
-}
-
-.payment-customer-avatar.is-empty {
-    color: var(--text-muted);
-    border-color: var(--border-flat);
-    background: var(--bg-panel);
-}
-
-.payment-customer-identity {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: .12rem;
-}
-
-.payment-customer-identity strong {
-    min-width: 0;
-    overflow: hidden;
-    color: var(--text-main);
-    display: -webkit-box;
-    overflow-wrap: anywhere;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-}
-
-.payment-customer-identity span {
-    overflow: hidden;
-    color: var(--text-muted);
-    font-size: .72rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.payment-customer-balance {
-    grid-area: balance;
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    gap: .55rem;
-}
-
-.payment-customer-balance > span {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: .08rem;
-    white-space: nowrap;
-}
-
-.payment-customer-balance small {
-    color: var(--text-muted);
-    font-size: .6rem;
-    font-weight: 800;
-    text-transform: uppercase;
-}
-
-.payment-customer-balance b {
-    color: var(--text-main);
-    font-size: .76rem;
-}
-
-.payment-customer-balance b.is-earned {
-    color: var(--success);
-}
-
-.payment-customer-balance b.account-owed {
-    color: var(--danger);
-}
-
-.payment-customer-balance b.account-unavailable {
-    color: var(--warning);
-}
-
-.payment-account-summary {
-    min-height: 132px;
-    padding: .85rem;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: .65rem;
-    border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border-flat));
-    border-radius: .45rem;
-    background: color-mix(in srgb, var(--warning) 8%, var(--bg-panel));
-}
-
-.payment-account-summary > div,
-.payment-account-summary p {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-}
-
-.payment-account-summary > div span,
-.payment-account-summary small,
-.payment-account-summary p span {
-    color: var(--text-muted);
-    font-size: .75rem;
-}
-
-.payment-account-summary > div strong {
-    color: var(--warning);
-    font-family: var(--app-font-mono);
-    font-size: 1.45rem;
-}
-
-.payment-customer-actions {
-    grid-area: actions;
-    display: flex;
-    align-items: center;
-    gap: .45rem;
-}
-
+.payment-customer-details { grid-area: details; min-width: 0; display: flex; align-items: center; gap: .55rem; }
+.payment-customer-avatar { width: 34px; height: 34px; flex-shrink: 0; display: grid; place-items: center; color: var(--accent-primary); }
+.payment-customer-identity { min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
+.payment-customer-identity strong { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; font-size: .85rem; font-weight: 600; }
+.payment-customer-identity span { color: var(--text-muted); font-size: .72rem; overflow-wrap: anywhere; }
+.payment-customer-balance { grid-area: balance; display: flex; flex-wrap: wrap; gap: .45rem 1.25rem; }
+.payment-customer-balance > span { min-width: 0; display: flex; flex-direction: column; gap: .12rem; }
+.payment-customer-balance small { color: var(--text-muted); font-size: .7rem; font-weight: 500; }
+.payment-customer-balance b { color: var(--text-main); font-size: .8rem; font-weight: 600; overflow-wrap: anywhere; }
+.payment-customer-balance b.is-earned { color: var(--success); }
+.payment-customer-balance b.account-owed { color: var(--danger); }
+.payment-customer-balance b.account-unavailable { color: var(--warning); }
+.payment-customer-actions { grid-area: actions; display: flex; align-items: center; gap: .35rem; }
 .payment-customer-credit {
-    min-height: 44px;
-    max-width: 130px;
-    padding: .45rem .7rem;
-    overflow: hidden;
-    border: 1px solid var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-panel);
-    color: var(--text-main);
-    font-size: .78rem;
-    font-weight: 800;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-height: 44px; max-width: 160px; padding: .5rem .65rem;
+    border: 1px solid var(--border-flat); border-radius: .45rem;
+    background: var(--bg-card); color: var(--text-main); font-size: .78rem; font-weight: 600;
 }
-
-.payment-customer-credit.active {
-    border-color: var(--success);
-    background: var(--success);
-    color: white;
+.payment-customer-credit.active { border-color: var(--success); background: rgba(var(--success-rgb), .12); color: var(--text-main); }
+.payment-customer-remove { width: 44px; height: 44px; min-width: 44px; color: var(--text-muted); }
+.payment-body, .payment-summary, .payment-pad { min-width: 0; }
+.payment-body { min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.payment-summary { min-height: 0; display: flex; flex-direction: column; gap: .75rem; }
+.payment-methods {
+    padding: .25rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem;
+    border-radius: .55rem; background: var(--bg-panel);
 }
-
-.payment-customer-remove {
-    width: 44px;
-    height: 44px;
-    min-width: 44px;
-    color: var(--danger);
+.payment-methods button {
+    min-width: 0; min-height: 44px; padding: .45rem;
+    display: flex; align-items: center; justify-content: center; gap: .45rem;
+    color: var(--text-muted); border: 1px solid transparent; border-radius: .4rem;
+    background: transparent; font-size: .88rem; font-weight: 600;
 }
-
-.payment-customer-remove svg {
-    width: 18px;
-    height: 18px;
-}
-
-.payment-cash-options {
-    padding: .65rem;
-    display: flex;
-    flex-direction: column;
-    gap: .5rem;
-    border: 1px solid var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-card);
-}
-
-.payment-section-heading {
-    min-height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-    color: var(--text-main);
-    font-size: .75rem;
-    font-weight: 900;
-    text-transform: uppercase;
-}
-
-.payment-section-heading small {
-    color: var(--text-muted);
-    font-size: .68rem;
-    font-weight: 700;
-    text-transform: none;
-}
-
-.payment-notes-heading {
-    margin-top: .1rem;
-}
-
-.payment-quick-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: .5rem;
-}
-
+.payment-methods button.is-active { color: #fff; border-color: var(--accent-primary); background: var(--accent-primary); }
+.payment-methods svg, .payment-method-symbol { width: 1.1rem; height: 1.1rem; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.payment-totals { min-width: 0; padding: .8rem 1rem; border-radius: .55rem; background: var(--bg-panel); }
+.payment-total-card { min-height: 54px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem .75rem; }
+.payment-total-copy { min-width: 0; display: flex; flex-direction: column; gap: .2rem; }
+.payment-total-copy span { color: var(--text-main); font-size: .88rem; font-weight: 600; }
+.payment-total-copy small { color: var(--text-muted); font-size: .72rem; font-weight: 500; }
+.payment-total-card > strong { margin-left: auto; color: var(--accent-primary); font-family: var(--app-font-mono); font-size: clamp(1.5rem, 2.8vw, 2rem); font-weight: 700; line-height: 1.15; overflow-wrap: anywhere; }
+.payment-cash-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; margin-top: .65rem; padding-top: .65rem; border-top: 1px solid var(--border-flat); }
+.payment-cash-totals > div { min-width: 0; padding: .4rem .5rem; border-radius: .4rem; display: flex; flex-direction: column; gap: .2rem; }
+.payment-cash-totals span { font-size: .75rem; color: var(--text-muted); }
+.payment-cash-totals strong { font-family: var(--app-font-mono); font-size: clamp(1rem, 1.8vw, 1.3rem); font-weight: 600; overflow-wrap: anywhere; }
+.payment-received { color: var(--accent-primary); background: rgba(var(--accent-primary-rgb), .09); }
+.payment-received span { color: var(--accent-primary); }
+.payment-change { text-align: right; color: color-mix(in srgb, var(--warning) 65%, var(--text-main)); background: rgba(var(--warning-rgb), .1); }
+.payment-change span { color: inherit; }
+.payment-change.is-ready { color: color-mix(in srgb, var(--success) 72%, var(--text-main)); background: rgba(var(--success-rgb), .13); }
+.payment-change.is-ready strong, .payment-change.is-ready span { color: inherit; }
+.payment-change.is-ready strong { font-weight: 700; }
+.payment-loyalty-applied { margin-top: .5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .25rem .5rem; color: var(--success); font-size: .75rem; }
+.payment-loyalty-applied strong { font-family: var(--app-font-mono); }
+.payment-cash-options { display: flex; flex-direction: column; gap: .5rem; }
+.payment-section-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .2rem .5rem; font-size: .8rem; font-weight: 600; }
+.payment-section-heading small { color: var(--text-muted); font-size: .7rem; font-weight: 500; }
+.payment-notes-heading { margin-top: .25rem; }
+.payment-quick-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+.payment-quick-grid > :only-child { grid-column: 1 / -1; }
 .payment-quick-button {
-    min-width: 0;
-    min-height: 72px;
-    padding: .5rem .65rem;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    align-items: center;
-    gap: .1rem .5rem;
-    color: var(--text-main);
-    border: 1px solid rgba(var(--accent-primary-rgb), .5);
-    border-radius: .35rem;
-    background: rgba(var(--accent-primary-rgb), .08);
-    text-align: left;
+    min-width: 0; min-height: 82px; padding: .6rem .75rem;
+    display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: .15rem;
+    border: 1px solid color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat)); border-radius: .5rem;
+    background: rgba(var(--accent-primary-rgb), .06); color: var(--text-main); text-align: left;
 }
-
-.payment-quick-button:hover:not(:disabled) {
-    border-color: var(--accent-primary);
-    background: rgba(var(--accent-primary-rgb), .14);
-}
-
-.payment-quick-button > span {
-    min-width: 0;
-    overflow: hidden;
-    font-size: .78rem;
-    font-weight: 900;
-    text-overflow: ellipsis;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
-.payment-quick-button > strong {
-    grid-row: 1 / 3;
-    grid-column: 2;
-    color: var(--accent-primary);
-    font-family: var(--app-font-mono);
-    font-size: 1.15rem;
-    white-space: nowrap;
-}
-
-.payment-quick-button > small {
-    color: var(--text-muted);
-    font-size: .68rem;
-    font-weight: 700;
-}
-
-.payment-quick-rounded {
-    border-color: rgba(var(--success-rgb), .5);
-    background: rgba(var(--success-rgb), .08);
-}
-
-.payment-quick-rounded:hover:not(:disabled) {
-    border-color: var(--success);
-    background: rgba(var(--success-rgb), .14);
-}
-
-.payment-quick-rounded > strong {
-    color: var(--success);
-}
-
-.payment-quick-grid > :only-child {
-    grid-column: 1 / -1;
-}
-
-.payment-note-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: .4rem;
-}
-
+.payment-quick-button > span { font-size: .78rem; font-weight: 600; }
+.payment-quick-button > strong { font-family: var(--app-font-mono); font-size: 1.1rem; font-weight: 700; overflow-wrap: anywhere; }
+.payment-quick-button > small { color: var(--text-muted); font-size: .7rem; font-weight: 500; }
+.payment-note-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .45rem; }
 .payment-note-button {
-    min-width: 0;
-    min-height: 54px;
-    padding: .35rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: .2rem;
-    color: var(--text-main);
-    border: 1px solid var(--border-flat);
-    border-radius: .3rem;
-    background: var(--bg-panel);
+    --note-paper: #d4eef3; --note-border: #5b99ae; --note-ink: #143f54;
+    min-width: 0; height: clamp(68px, 8.8vw, 88px); min-height: 68px; padding: 2px;
+    display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 1px;
+    overflow: hidden; border: 2px solid var(--note-border); border-radius: .4rem;
+    background: var(--note-paper); color: var(--note-ink);
 }
-
-.payment-note-button:hover:not(:disabled) {
-    border-color: #f59e0b;
-    background: rgba(var(--warning-rgb), .1);
-}
-
-.payment-note-button span {
-    color: #b45309;
-    font-size: .85rem;
-    font-weight: 900;
-}
-
-.payment-note-button strong {
-    min-width: 0;
-    overflow: hidden;
-    font-family: var(--app-font-mono);
-    font-size: .88rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.payment-quick-button:disabled,
-.payment-note-button:disabled {
-    cursor: not-allowed;
-    opacity: .5;
-}
-
-.payment-card-summary {
-    min-height: 210px;
-    padding: 1rem;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: .8rem;
-    border: 1px solid rgba(var(--accent-primary-rgb), .4);
-    border-radius: .4rem;
-    background: rgba(var(--accent-primary-rgb), .07);
-}
-
-.payment-card-amount {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-}
-
-.payment-card-amount span {
-    color: var(--text-muted);
-    font-size: .8rem;
-    font-weight: 900;
-    text-transform: uppercase;
-}
-
-.payment-card-amount strong {
-    color: var(--accent-primary);
-    font-family: var(--app-font-mono);
-    font-size: 1.55rem;
-}
-
-.payment-split-row {
-    padding-top: .65rem;
-    display: flex;
-    justify-content: space-between;
-    gap: .75rem;
-    border-top: 1px solid var(--border-flat);
-    color: var(--text-muted);
-    font-size: .8rem;
-}
-
-.payment-split-row b {
-    color: var(--text-main);
-}
-
-.payment-edit-cash {
-    min-height: 42px;
-    color: var(--accent-primary);
-    border: 1px solid var(--accent-primary);
-    border-radius: .35rem;
-    background: transparent;
-    font-size: .8rem;
-    font-weight: 900;
-}
-
-.payment-edit-cash:hover {
-    color: #fff;
-    background: var(--accent-primary);
-}
-
-.payment-pad {
-    width: 100%;
-    padding: .8rem;
-    display: flex;
-    flex-direction: column;
-    gap: .65rem;
-    border: 1px solid var(--border-flat);
-    border-radius: .4rem;
-    background: var(--bg-panel);
-}
-
-.payment-pad-heading {
-    min-height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: .75rem;
-}
-
-.payment-pad-heading span {
-    color: var(--text-main);
-    font-size: .8rem;
-    font-weight: 900;
-    text-transform: uppercase;
-}
-
-.payment-pad-heading small {
-    color: var(--text-muted);
-    font-size: .7rem;
-    font-weight: 700;
-}
-
-.payment-display-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 72px;
-    gap: .6rem;
-}
-
+.payment-note-button[data-note="10"] { --note-paper: #f7e0bb; --note-border: #bd8546; --note-ink: #623708; }
+.payment-note-button[data-note="20"] { --note-paper: #e8dff5; --note-border: #a086be; --note-ink: #4c2f6b; }
+.payment-note-button[data-note="50"] { --note-paper: #f8d7dc; --note-border: #c36d7b; --note-ink: #792738; }
+.payment-note-button img { width: 100%; min-height: 0; flex: 1; object-fit: contain; pointer-events: none; }
+.payment-note-label { flex: 0 0 20px; display: flex; align-items: center; justify-content: center; gap: .3rem; color: var(--note-ink); }
+.payment-note-label > span { font-size: .85rem; }
+.payment-note-label > strong { font-family: var(--app-font-mono); font-size: 1rem; font-weight: 700; line-height: 1; }
+.payment-modal .payment-note-button:hover:not(:disabled) { background: var(--note-paper); border-color: var(--note-ink); filter: brightness(1.05); }
+.payment-pad { display: flex; flex-direction: column; gap: .65rem; padding: .8rem; border-radius: .55rem; background: var(--bg-panel); }
+.payment-pad-heading { min-height: 22px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.payment-pad-heading span { font-size: .85rem; font-weight: 600; }
+.payment-pad-heading small { color: var(--text-muted); font-size: .72rem; font-weight: 500; }
+.payment-display-row { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: .5rem; }
 .payment-display {
-    height: 64px !important;
-    padding-inline: 1rem !important;
-    justify-content: flex-end !important;
-    color: var(--text-main);
-    border-color: color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat)) !important;
-    background: var(--bg-card) !important;
-    font-family: var(--app-font-mono) !important;
-    font-size: 2rem !important;
-    letter-spacing: .015em;
+    min-width: 0; height: 60px !important; padding-inline: .75rem !important; justify-content: flex-end !important;
+    color: var(--text-main); border-color: color-mix(in srgb, var(--accent-primary) 45%, var(--border-flat)) !important;
+    background: var(--bg-card) !important; font-family: var(--app-font-mono) !important;
+    font-size: clamp(1.25rem, 2.5vw, 1.85rem) !important; font-weight: 600 !important; letter-spacing: 0;
 }
-
-.payment-clear-button {
-    min-width: 0;
-    height: 64px;
-    color: var(--danger);
-    border: 1px solid rgba(var(--danger-rgb), .45);
-    border-radius: .35rem;
-    background: rgba(var(--danger-rgb), .07);
-    font-size: .78rem;
-    font-weight: 900;
+.payment-clear-button { min-width: 0; min-height: 48px; border: 1px solid var(--border-flat); border-radius: .45rem; background: transparent; color: var(--text-muted); font-size: .8rem; font-weight: 600; }
+.payment-np-grid { flex: 1; grid-template-rows: repeat(4, minmax(56px, 1fr)); gap: .5rem; }
+.payment-np-button { height: auto !important; min-height: 56px !important; border-color: var(--border-flat) !important; background: var(--bg-card) !important; box-shadow: none; font-family: var(--app-font-mono); font-size: 1.4rem !important; font-weight: 600; touch-action: manipulation; user-select: none; }
+.payment-np-button.is-delete { color: var(--text-muted) !important; }
+.payment-np-button.is-double-zero { font-size: 1.2rem !important; }
+.payment-result-actions { min-height: 0; display: flex; align-items: center; gap: 1rem; padding-top: .8rem; border-top: 1px solid var(--border-flat); }
+.payment-footer-message { flex: 1; max-height: 100%; overflow-y: auto; margin: 0; min-width: 0; font-size: .8rem; line-height: 1.45; color: var(--text-muted); overflow-wrap: anywhere; }
+.payment-footer-message.is-error { color: var(--danger); }
+.payment-complete-btn { flex: 1; min-width: 0; min-height: 52px; padding: .65rem 1rem; border-radius: .5rem; font-size: 1rem; font-weight: 700; white-space: normal; }
+.payment-split-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .75rem; padding-top: .75rem; border-top: 1px solid var(--border-flat); font-size: .85rem; }
+.payment-split-row span { color: var(--text-muted); }
+.payment-split-row strong { font-family: var(--app-font-mono); }
+.payment-edit-cash { min-height: 44px; margin-top: .5rem; padding: .5rem .65rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: transparent; color: var(--text-main); font-size: .8rem; font-weight: 600; }
+.payment-card-terminal { min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; padding: 1.5rem; border-radius: .55rem; background: rgba(var(--accent-primary-rgb), .07); text-align: center; }
+.payment-card-terminal-icon { width: 64px; height: 64px; border-radius: 1rem; background: rgba(var(--accent-primary-rgb), .1); flex-shrink: 0; display: grid; place-items: center; color: var(--accent-primary); }
+.payment-card-terminal-icon svg { width: 36px; height: 36px; }
+.payment-terminal-copy { min-width: 0; display: flex; flex-direction: column; gap: .3rem; }
+.payment-terminal-copy strong { font-size: 1.1rem; font-weight: 600; overflow-wrap: anywhere; }
+.payment-terminal-copy span { max-width: 340px; color: var(--text-muted); font-size: .8rem; line-height: 1.45; overflow-wrap: anywhere; }
+.payment-terminal-cancel { min-height: 44px; }
+.payment-account-summary { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1rem; padding: 1.25rem; border-radius: .55rem; background: rgba(var(--warning-rgb), .08); }
+.payment-account-summary > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .4rem; font-size: .88rem; }
+.payment-account-summary > div strong { font-family: var(--app-font-mono); font-size: 1rem; }
+.payment-account-summary > div span, .payment-account-summary small { color: var(--text-muted); }
+.payment-account-summary small { font-size: .78rem; }
+.payment-modal.is-cash .payment-methods button.is-active { color: color-mix(in srgb, var(--success) 72%, var(--text-main)); border-color: var(--success); background: rgba(var(--success-rgb), .12); }
+.payment-modal.is-account .payment-methods button.is-active { color: color-mix(in srgb, var(--warning) 65%, var(--text-main)); border-color: var(--warning); background: rgba(var(--warning-rgb), .12); }
+.payment-modal.is-card .payment-complete-btn { background: var(--accent-primary); border-color: var(--accent-primary); }
+.payment-modal.is-account .payment-complete-btn { background: var(--warning); border-color: var(--warning); color: #241c0c; }
+.theme-daylight .payment-modal.is-account .payment-complete-btn { color: var(--text-inverse); }
+.payment-modal button { touch-action: manipulation; }
+.payment-modal button:disabled { cursor: not-allowed; }
+.payment-customer-toggle:disabled, .payment-quick-button:disabled, .payment-note-button:disabled, .payment-clear-button:disabled { opacity: .5; }
+.payment-modal :is(button, [role="spinbutton"]):focus-visible { outline: 3px solid color-mix(in srgb, var(--accent-primary) 55%, transparent); outline-offset: 2px; }
+.payment-modal button:hover:not(:disabled):not(.btn):not(.is-active):not(.payment-note-button) { background: var(--bg-card-hover); }
+.payment-np-button:hover:not(:disabled) { background: var(--bg-card-hover) !important; }
+@media (min-width: 720px) {
+    .payment-modal .payment-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+    .payment-modal .payment-customer-card { grid-template-columns: minmax(120px, 1fr) minmax(180px, 1.4fr) auto; grid-template-areas: "details balance actions"; }
+    .payment-modal .payment-customer-balance { gap: .45rem .85rem; }
 }
+@media (max-height: 720px) {
+    .payment-modal { grid-template-rows: 44px 64px minmax(0, 1fr) 56px; padding: .65rem; gap: .5rem; }
+    .payment-summary { gap: .5rem; }
+    .payment-totals { padding: .55rem .75rem; }
+    .payment-total-card { min-height: 42px; }
+    .payment-total-card > strong { font-size: 1.5rem; }
+    .payment-cash-totals { margin-top: .45rem; padding-top: .45rem; }
+    .payment-cash-totals > div { padding: .3rem .4rem; flex-direction: row; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .2rem; }
+    .payment-cash-totals strong { font-size: 1.1rem; }
 
-.payment-clear-button:hover:not(:disabled) {
-    color: #fff;
-    border-color: var(--danger);
-    background: var(--danger);
+    .payment-cash-options { gap: .3rem; }
+    .payment-section-heading { line-height: 1.2; }
+    .payment-quick-button { min-height: 52px; padding: .3rem .6rem; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: center; gap: .15rem .35rem; }
+    .payment-quick-button > span, .payment-quick-button > strong, .payment-quick-button > small { line-height: 1.2; }
+    .payment-quick-button > span { grid-column: 1 / -1; }
+    .payment-quick-button > small { text-align: right; align-self: center; }
+    .payment-note-button { height: 68px; min-height: 68px; }
+    .payment-pad { padding: .6rem; gap: .4rem; }
+    .payment-pad-heading small { display: none; }
+    .payment-display { height: 48px !important; font-size: 1.35rem !important; }
+    .payment-np-grid { gap: .4rem; grid-template-rows: repeat(4, minmax(50px, 1fr)); }
+    .payment-np-button { min-height: 50px !important; }
+    .payment-result-actions { padding-top: .6rem; }
+    .payment-complete-btn { min-height: 48px; }
+    .payment-customer-card { padding: .45rem .6rem; gap: .35rem .6rem; }
 }
-
-.payment-clear-button:focus-visible {
-    outline: 3px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    outline-offset: 2px;
+@media (max-width: 719px) {
+    .payment-modal { width: calc(100vw - 1rem); grid-template-rows: auto 112px minmax(0, 1fr) 64px; padding: .75rem; gap: .6rem; }
+    .payment-modal-header { flex-wrap: wrap; gap: .4rem; }
+    .payment-modal-header h2 { font-size: 1.15rem; }
+    .payment-customer-toggle { padding-inline: .5rem; font-size: .75rem; }
+    .payment-pad { margin-top: .75rem; }
+    .payment-total-card > strong { font-size: 1.6rem; }
+    .payment-result-actions { padding-top: .5rem; background: var(--bg-card); }
+    .payment-card-terminal, .payment-account-summary { margin-top: .75rem; min-height: 240px; }
+    .payment-footer-message { font-size: .75rem; }
+    .payment-complete-btn { font-size: .9rem; }
 }
-
-.payment-clear-button:active:not(:disabled) {
-    translate: 0 1px;
-}
-
-.payment-np-grid {
-    flex: 1;
-    grid-template-rows: repeat(4, minmax(56px, 1fr));
-    gap: .6rem;
-}
-
-.payment-np-button {
-    height: auto !important;
-    min-height: 56px !important;
-    border-color: color-mix(in srgb, var(--border-flat) 80%, var(--text-muted)) !important;
-    background: color-mix(in srgb, var(--bg-card) 76%, var(--bg-panel)) !important;
-    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--border-flat) 72%, transparent);
-    font-family: var(--app-font-mono);
-    font-size: 1.45rem !important;
-    font-weight: 900;
-    touch-action: manipulation;
-    user-select: none;
-}
-
-.payment-np-button:hover:not(:disabled),
-.payment-np-button:focus-visible {
-    border-color: var(--accent-primary) !important;
-    background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-card)) !important;
-}
-
-.payment-np-button:active:not(:disabled) {
-    translate: 0 1px;
-    box-shadow: inset 0 -1px 0 var(--border-flat);
-}
-
-.payment-np-button.is-double-zero {
-    font-size: 1.25rem !important;
-}
-
-.payment-np-button.is-delete {
-    color: var(--warning) !important;
-    border-color: color-mix(in srgb, var(--warning) 42%, var(--border-flat)) !important;
-    background: color-mix(in srgb, var(--warning) 8%, var(--bg-card)) !important;
-}
-
-.payment-np-button.is-delete:hover:not(:disabled),
-.payment-np-button.is-delete:focus-visible {
-    border-color: var(--warning) !important;
-    background: color-mix(in srgb, var(--warning) 15%, var(--bg-card)) !important;
-}
-
-.payment-card-terminal {
-    min-height: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: .65rem;
-    text-align: center;
-}
-
-.payment-card-terminal-icon {
-    width: 72px;
-    height: 72px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--accent-primary);
-    border: 1px solid rgba(var(--accent-primary-rgb), .45);
-    border-radius: .4rem;
-    background: rgba(var(--accent-primary-rgb), .09);
-}
-
-.payment-card-terminal-icon svg {
-    width: 40px;
-    height: 40px;
-}
-
-.payment-account-terminal .account-icon {
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 55%, transparent);
-    background: color-mix(in srgb, var(--warning) 10%, transparent);
-}
-
-.payment-account-terminal > strong {
-    color: var(--warning);
-}
-
-.payment-card-terminal > span {
-    color: var(--text-muted);
-    font-size: .8rem;
-    font-weight: 900;
-    text-transform: uppercase;
-}
-
-.payment-card-terminal > strong {
-    color: var(--accent-primary);
-    font-family: var(--app-font-mono);
-    font-size: 2.2rem;
-}
-
-.payment-card-terminal > small {
-    max-width: 260px;
-    color: var(--text-muted);
-    font-size: .75rem;
-    line-height: 1.4;
-}
-
-@media (min-width: 760px) {
-    .payment-body {
-        display: grid !important;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        min-height: clamp(360px, calc(94vh - 240px), 500px);
-    }
-}
-
-@media (max-width: 980px) {
-    .payment-loyalty-subtitle {
-        display: none;
-    }
-}
-
-@media (max-width: 759px) {
-    .payment-modal {
-        overflow-y: auto !important;
-    }
-
-    .payment-loyalty {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .payment-customer-card {
-        grid-template-columns: minmax(0, 1fr);
-        grid-template-areas:
-            "details"
-            "balance"
-            "actions";
-    }
-
-    .payment-customer-balance {
-        justify-content: flex-start;
-    }
-
-    .payment-customer-balance > span {
-        align-items: flex-start;
-        min-width: 0;
-    }
-
-    .payment-customer-actions {
-        justify-content: flex-end;
-    }
-
-    .payment-customer-results button {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: .15rem;
-    }
-
-    .payment-customer-results small {
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-}
-
 @media (max-width: 480px) {
-    .payment-customer-balance {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        width: 100%;
-    }
-
-    .payment-account-summary > div,
-    .payment-account-summary p {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: .35rem;
-    }
+    .payment-modal-header { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .payment-modal-header h2 { grid-area: 1 / 1; }
+    .payment-modal-header .payment-close { grid-area: 1 / 2; justify-self: end; }
+    .payment-modal-header .payment-customer-toggle { grid-row: 2; }
 }
-
-@media (max-width: 380px) {
-    .payment-methods button {
-        gap: .2rem;
-        font-size: .78rem;
-    }
-
-    .payment-methods svg,
-    .payment-method-symbol {
-        width: 1.05rem;
-        height: 1.05rem;
-    }
+@media (max-width: 430px) {
+    .payment-customer-toggle svg { display: none; }
+    .payment-customer-card { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "details actions" "balance balance"; }
+    .payment-customer-actions { justify-content: flex-end; }
+    .payment-customer-results button { align-items: flex-start; flex-direction: column; gap: .2rem; }
 }
 
 @media (max-width: 900px) {
@@ -2644,6 +2067,26 @@
     .form-grid > .span-2 { grid-column: span 1; }
     .items-management-page { padding: var(--app-page-gutter) !important; }
     .tiles-management-page > header { padding: var(--app-page-gutter) !important; gap: .65rem; flex-wrap: wrap; }
+}
+
+/* Keep tablet-sized till headers on one row.  The stacked mobile header is
+   useful on phones, but at 800px it wastes enough height to hide table rows. */
+@media (min-width: 701px) and (max-width: 900px) {
+    .management-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-rows: 72px;
+        grid-auto-rows: unset;
+        gap: .75rem;
+    }
+
+    .management-actions {
+        justify-self: end;
+        max-width: 100%;
+    }
+
+    .app-page-heading-meta .app-page-eyebrow {
+        display: none;
+    }
 }
 
 @media (max-width: 600px) {
@@ -2730,7 +2173,7 @@
     }
 
     .pos-clock {
-        min-height: 30px;
+        min-height: 44px;
         padding: .3rem .4rem;
         font-size: .68rem;
     }
@@ -2770,7 +2213,7 @@
 }
 
 .pos-cart-controls button {
-    min-height: 40px !important;
+    min-height: 44px !important;
 }
 
 .pos-action-grid {
@@ -2799,148 +2242,6 @@
 }
 
 @media (max-height: 800px) {
-    .payment-modal {
-        max-height: calc(100vh - 1rem);
-        padding: .65rem !important;
-        gap: .5rem !important;
-    }
-
-    .payment-modal-header {
-        padding-bottom: .5rem !important;
-    }
-
-    .payment-modal-header h2 {
-        font-size: 1.1rem !important;
-    }
-
-    .payment-body {
-        min-height: min(410px, calc(100vh - 220px));
-    }
-
-    .payment-loyalty {
-        padding: .5rem !important;
-        gap: .45rem !important;
-    }
-
-    .payment-loyalty-subtitle {
-        display: none;
-    }
-
-    .payment-total-card {
-        min-height: 60px;
-        padding: .55rem .7rem !important;
-    }
-
-    .payment-total-card > strong {
-        font-size: 1.55rem !important;
-    }
-
-    .payment-methods {
-        height: 44px;
-    }
-
-    .payment-methods button {
-        min-height: 44px;
-        padding: .4rem !important;
-        font-size: .95rem !important;
-    }
-
-    .payment-cash-options {
-        padding: .4rem;
-        gap: .3rem;
-    }
-
-    .payment-section-heading {
-        min-height: 16px;
-        font-size: .68rem;
-    }
-
-    .payment-status-line {
-        min-height: 42px !important;
-        font-size: 1rem !important;
-    }
-
-    .payment-complete-btn {
-        min-height: 48px !important;
-        padding: .6rem !important;
-        font-size: 1rem !important;
-    }
-
-    .payment-pad {
-        padding: .5rem !important;
-        gap: .35rem;
-    }
-
-    .payment-pad-heading small {
-        display: none;
-    }
-
-    .payment-display,
-    .payment-clear-button {
-        height: 48px !important;
-        min-height: 48px !important;
-        font-size: 1.35rem !important;
-    }
-
-    .payment-np-grid {
-        grid-template-rows: repeat(4, minmax(50px, 1fr));
-        gap: .35rem !important;
-    }
-
-    .payment-np-button {
-        height: auto !important;
-        min-height: 50px !important;
-        font-size: 1.2rem !important;
-    }
-
-    .payment-quick-grid {
-        gap: .35rem !important;
-    }
-
-    .payment-quick-button {
-        min-height: 54px;
-        padding: .35rem !important;
-    }
-
-    .payment-quick-button > strong {
-        font-size: .95rem;
-    }
-
-    .payment-quick-button > small {
-        display: none;
-    }
-
-    .payment-note-grid {
-        gap: .3rem;
-    }
-
-    .payment-note-button {
-        min-height: 44px;
-    }
-
-    .payment-note-button strong {
-        font-size: .78rem;
-    }
-
-    .payment-card-summary {
-        min-height: 165px;
-        padding: .65rem;
-    }
-
-    .payment-card-terminal-icon {
-        width: 56px;
-        height: 56px;
-    }
-
-    .payment-card-terminal-icon svg {
-        width: 32px;
-        height: 32px;
-    }
-
-    .payment-card-terminal > strong {
-        font-size: 1.75rem;
-    }
-
     .pos-action-grid {
         grid-auto-rows: 3rem !important;
     }
@@ -2962,22 +2263,27 @@
 }
 
 @layer components {
-    /* 15-inch 4:3 touch POS terminals, commonly 1024x768. */
-    @media (min-width: 900px) and (max-width: 1180px) and (min-height: 680px) and (max-height: 900px) {
+    /* 15-inch and square-ish touch POS terminals. This profile is driven by
+       usable width so both 1024x768 and 1024x1024 use the same layout. */
+    @media (min-width: 900px) and (max-width: 1180px) {
         .pos-products {
             @apply !p-2;
         }
 
         .pos-main-header {
             @apply !mb-2 !h-12 !gap-2;
+            grid-template-columns: minmax(148px, 1fr) minmax(0, 1.2fr) minmax(112px, 1fr) !important;
         }
 
         .pos-main-header > div:first-child {
             @apply !gap-2;
+            overflow: hidden;
         }
 
         .pos-shop-identity {
-            max-width: 30vw;
+            width: 100%;
+            max-width: 100%;
+            overflow: hidden;
             gap: .45rem;
         }
 
@@ -2991,12 +2297,16 @@
             padding-inline: .45rem;
         }
 
+        .pos-till-chip small {
+            display: none;
+        }
+
         .pos-header-status {
             gap: .3rem;
         }
 
         .pos-clock {
-            min-height: 30px;
+            min-height: 44px;
             padding-inline: .45rem;
         }
 
@@ -3043,11 +2353,22 @@
         }
 
         .pos-cart {
-            @apply !w-[390px];
+            width: 372px !important;
+            min-width: 372px !important;
+            max-width: 372px !important;
+        }
+
+        .pos-page-tabs {
+            scrollbar-width: none;
+        }
+
+        .pos-page-tabs::-webkit-scrollbar {
+            display: none;
         }
 
         .pos-cart-header {
             @apply !gap-2 !p-2;
+            min-height: 58px;
         }
 
         .pos-retrieve-button {
@@ -3074,11 +2395,12 @@
 
         .pos-cart-controls {
             @apply !gap-1 !p-2 !pb-0;
+            min-height: 58px;
         }
 
         .pos-cart-controls button {
-            height: 42px !important;
-            min-height: 42px !important;
+            height: 44px !important;
+            min-height: 44px !important;
         }
 
         .pos-total-section {
@@ -3109,6 +2431,7 @@
 
         .pos-action-grid button {
             min-height: 48px !important;
+            line-height: 1.08;
             @apply !text-[11px];
         }
 
@@ -3116,6 +2439,7 @@
             min-height: 100px !important;
             @apply !text-base;
         }
+
     }
 }
 
@@ -3408,41 +2732,818 @@
     box-shadow: none;
 }
 
-/* The common square POS target is a 15-inch 4:3 panel at 1024x768. */
-@media (min-width: 900px) and (max-width: 1100px) and (min-height: 700px) and (max-height: 850px) {
-    .pos-cart {
-        width: 372px !important;
-        min-width: 372px !important;
-        max-width: 372px !important;
+/* Back Office is a keyboard-and-mouse workspace. Keep Checkout's larger touch
+   targets intact while fitting management tools comfortably on square screens. */
+.back-office-route {
+    --app-page-gutter: .7rem;
+    font-size: var(--font-size-management);
+}
+
+.back-office-route .management-page,
+.back-office-route .items-management-page,
+.back-office-route .tiles-management-page {
+    padding: .7rem !important;
+}
+
+.back-office-route .management-header {
+    height: auto !important;
+    min-height: 52px !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    grid-template-rows: 52px !important;
+    grid-auto-rows: unset !important;
+    gap: .6rem !important;
+    margin-bottom: .55rem !important;
+}
+
+.back-office-route .app-page-heading {
+    gap: .55rem;
+}
+
+.back-office-route .app-page-heading h1 {
+    font-size: 1.35rem;
+}
+
+.back-office-route .app-page-eyebrow {
+    font-size: .65rem;
+}
+
+.back-office-route .app-page-heading-meta .app-page-eyebrow {
+    display: none;
+}
+
+.back-office-route .app-page-heading p {
+    margin-top: .1rem;
+    font-size: .72rem;
+}
+
+.back-office-route .management-actions {
+    flex-wrap: wrap;
+    gap: .45rem;
+    overflow-x: auto;
+    justify-self: end;
+}
+
+.back-office-route .management-actions .btn {
+    width: auto;
+    min-width: 0;
+    min-height: 38px;
+    padding: .45rem .7rem;
+}
+
+.back-office-route .management-content {
+    border-radius: .45rem !important;
+    box-shadow: none !important;
+    scrollbar-gutter: stable;
+}
+
+.back-office-route .btn {
+    min-height: 38px;
+    padding: .45rem .78rem;
+    border-radius: .42rem;
+    font-size: .82rem;
+    box-shadow: none;
+}
+
+.back-office-route .btn-icon,
+.back-office-route .page-back-button,
+.back-office-route .settings-icon-btn,
+.back-office-route .act-btn {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    border-radius: .4rem;
+    box-shadow: none;
+}
+
+.back-office-route .tbl th {
+    height: 38px;
+    padding: .45rem .65rem;
+    font-size: .68rem;
+}
+
+.back-office-route .tbl td {
+    height: 44px;
+    padding: .4rem .65rem;
+    font-size: .8rem;
+}
+
+.back-office-route .tbl :where(button, .btn, .btn-icon, .act-btn) {
+    min-height: 34px;
+}
+
+.back-office-route .field {
+    gap: .32rem;
+}
+
+.back-office-route .field label,
+.back-office-route .search-label {
+    min-height: 17px;
+    font-size: .7rem;
+}
+
+.back-office-route .field input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+.back-office-route .field select,
+.back-office-route .management-content input:not(.hidden):not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+.back-office-route .management-content select {
+    height: 38px;
+    min-height: 38px;
+    padding-block: .4rem;
+    border-radius: .42rem;
+    font-size: .84rem;
+    box-shadow: none;
+}
+
+.back-office-route .management-content textarea {
+    min-height: 56px;
+    padding: .5rem .7rem;
+    border-radius: .42rem;
+    font-size: .84rem;
+    box-shadow: none;
+}
+
+.back-office-route input[data-touch-keyboard="button"],
+.back-office-route textarea[data-touch-keyboard="button"] {
+    padding-right: .75rem !important;
+}
+
+.back-office-route .search-strip {
+    padding: .5rem .65rem;
+    gap: .42rem;
+}
+
+.back-office-route .search-strip-intro > span {
+    display: none;
+}
+
+.back-office-route .search-controls {
+    gap: .45rem;
+}
+
+.back-office-route .search-primary {
+    min-width: 12rem;
+}
+
+.back-office-route .app-search-input {
+    height: 40px !important;
+    min-height: 40px !important;
+    padding-block: .45rem !important;
+    border-radius: .45rem !important;
+    font-size: .84rem !important;
+    box-shadow: none !important;
+}
+
+.back-office-route .app-search-action {
+    width: 36px;
+    height: 36px;
+}
+
+.back-office-route .search-toolbar-action,
+.back-office-route .search-meta {
+    height: 40px;
+    min-height: 40px;
+}
+
+.back-office-route .search-controls .custom-select-trigger {
+    height: 40px !important;
+    min-height: 40px !important;
+    padding-inline: .7rem !important;
+    border-radius: .45rem !important;
+    font-size: .84rem !important;
+    box-shadow: none !important;
+}
+
+.back-office-route .tag {
+    min-width: 62px;
+    padding: .25rem .55rem;
+    font-size: .68rem;
+}
+
+.back-office-route .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .72rem;
+}
+
+.back-office-route .form-grid > .span-2 {
+    grid-column: span 2;
+}
+
+.back-office-route .modal-overlay,
+.back-office-route .app-modal-overlay {
+    padding: .65rem;
+}
+
+.back-office-route .modal-box {
+    gap: .75rem;
+}
+
+.back-office-route .modal-box,
+.back-office-route .app-modal-panel {
+    border-radius: .5rem;
+}
+
+.back-office-route .app-modal-panel {
+    gap: 0;
+}
+
+.back-office-route .app-modal-header {
+    min-height: 52px;
+    padding: .55rem .8rem !important;
+}
+
+.back-office-route .app-modal-content {
+    padding: .75rem !important;
+}
+
+.back-office-route .app-modal-footer {
+    min-height: 56px;
+    padding: .5rem .8rem !important;
+    gap: .45rem;
+}
+
+.back-office-route .admin-page {
+    width: 100% !important;
+    padding: .65rem !important;
+    gap: .5rem;
+}
+
+.back-office-route .admin-header {
+    height: 50px;
+    min-height: 50px;
+}
+
+.back-office-route .admin-title h1 {
+    font-size: 1.4rem;
+}
+
+.back-office-route .admin-header-btn {
+    width: 36px;
+    height: 36px;
+}
+
+.back-office-route .admin-sections {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem;
+}
+
+.back-office-route .admin-section {
+    gap: .4rem;
+    padding: .5rem;
+    border-radius: .45rem;
+}
+
+.back-office-route .admin-section-header {
+    min-height: 38px;
+    gap: .45rem;
+}
+
+.back-office-route .admin-section-icon {
+    height: 28px;
+}
+
+.back-office-route .admin-section-copy h2 {
+    font-size: .88rem;
+}
+
+.back-office-route .admin-section-copy > span {
+    display: none;
+}
+
+.back-office-route .admin-section-count {
+    height: 24px;
+    padding-inline: .35rem;
+    font-size: .62rem;
+}
+
+.back-office-route .admin-section-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: minmax(58px, auto);
+    gap: .35rem;
+}
+
+.back-office-route .admin-entry {
+    min-height: 58px;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: .45rem;
+    padding: .3rem .45rem .3rem .6rem;
+    border-radius: .4rem;
+}
+
+.back-office-route .admin-entry-icon {
+    width: 36px;
+    height: 36px;
+}
+
+.back-office-route .admin-entry-icon svg {
+    width: 22px;
+    height: 22px;
+}
+
+.back-office-route .admin-entry-copy strong {
+    display: -webkit-box;
+    font-size: .84rem;
+    line-height: 1.1;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+}
+
+.back-office-route .admin-entry-copy > span {
+    display: none;
+}
+
+.back-office-route .admin-entry-status {
+    display: none;
+}
+
+.back-office-route .items-table {
+    width: 100%;
+    min-width: 560px !important;
+    table-layout: fixed;
+}
+
+.back-office-route .items-col-actions {
+    width: 92px !important;
+    min-width: 92px !important;
+}
+
+.back-office-route .items-col-barcode {
+    width: 110px !important;
+}
+
+.back-office-route .items-col-category {
+    width: 100px !important;
+}
+
+.back-office-route .items-col-stock,
+.back-office-route .items-col-price {
+    width: 70px !important;
+}
+
+.back-office-route .items-table .act-row {
+    display: grid;
+    grid-template-columns: repeat(2, 32px) !important;
+    gap: .25rem !important;
+}
+
+.back-office-route .items-management-page .items-table .act-row .act-btn {
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    min-height: 32px !important;
+}
+
+.back-office-route .items-pagination {
+    padding-top: .45rem !important;
+}
+
+.back-office-route .items-pagination-nav .items-command-btn {
+    height: 36px !important;
+    min-height: 36px !important;
+}
+
+.back-office-route .customer-table {
+    width: 100%;
+    min-width: 560px !important;
+    table-layout: fixed;
+}
+
+.back-office-route .customer-table-wrap {
+    overflow-x: auto !important;
+}
+
+.back-office-route .customer-value-label-full {
+    display: none !important;
+}
+
+.back-office-route .customer-value-label-short {
+    display: inline !important;
+}
+
+.back-office-route .customer-table th:nth-child(4),
+.back-office-route .customer-table td:nth-child(4) {
+    width: 58px;
+}
+
+.back-office-route .customer-table th:nth-child(5),
+.back-office-route .customer-table td:nth-child(5) {
+    width: 92px;
+}
+
+.back-office-route .customer-table th:nth-child(6),
+.back-office-route .customer-table td:nth-child(6) {
+    width: 104px;
+}
+
+.back-office-route .customer-table th:nth-child(7),
+.back-office-route .customer-table td:nth-child(7) {
+    width: 164px;
+}
+
+.back-office-route .management-content .customer-table tbody tr {
+    height: 44px;
+}
+
+.back-office-route .customer-actions {
+    gap: .25rem !important;
+}
+
+.back-office-route .customer-actions .btn-icon {
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    min-height: 32px !important;
+}
+
+.back-office-route .customer-actions svg {
+    width: 16px;
+    height: 16px;
+}
+
+.back-office-route .orders-table {
+    width: 100%;
+    min-width: 560px !important;
+    table-layout: fixed;
+}
+
+.back-office-route .orders-table-wrap {
+    overflow-x: auto !important;
+}
+
+.back-office-route .orders-table th:nth-child(1),
+.back-office-route .orders-table td:nth-child(1) { width: 86px; }
+.back-office-route .orders-table th:nth-child(2),
+.back-office-route .orders-table td:nth-child(2) { width: 104px; }
+.back-office-route .orders-table th:nth-child(3),
+.back-office-route .orders-table td:nth-child(3) { width: 90px; }
+.back-office-route .orders-table th:nth-child(5),
+.back-office-route .orders-table td:nth-child(5) { width: 58px; }
+.back-office-route .orders-table th:nth-child(6),
+.back-office-route .orders-table td:nth-child(6) { width: 90px; }
+.back-office-route .orders-table th:nth-child(7),
+.back-office-route .orders-table td:nth-child(7) { width: 84px; }
+
+.back-office-route .orders-table td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.back-office-route .stock-receiving-content {
+    padding: .65rem !important;
+}
+
+.back-office-route .stock-receiving-layout,
+.back-office-route .stock-receiving-main {
+    min-width: 0;
+    gap: .65rem;
+}
+
+.back-office-route .stock-receiving-main,
+.back-office-route .stock-receiving-history {
+    padding: .7rem !important;
+    border-radius: .45rem;
+}
+
+.back-office-route .stock-receiving-meta {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .55rem;
+    margin-bottom: .65rem !important;
+}
+
+.back-office-route .stock-receiving-search {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 132px;
+    align-items: end;
+    gap: .55rem;
+    margin-bottom: .65rem !important;
+}
+
+.back-office-route .stock-receiving-search .search-primary,
+.back-office-route .stock-receiving-search .search-control {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+}
+
+.back-office-route .stock-receiving-search .search-control {
+    padding: .45rem !important;
+}
+
+.back-office-route .stock-receiving-search .search-control strong {
+    font-size: 1.05rem;
+}
+
+.back-office-route .stock-receiving-products {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .4rem;
+    margin-bottom: .65rem !important;
+}
+
+.back-office-route .stock-receiving-products button {
+    min-width: 0;
+    padding: .55rem !important;
+    border-radius: .42rem;
+}
+
+.back-office-route .stock-receiving-lines {
+    overflow-x: auto !important;
+}
+
+.back-office-route .stock-receiving-lines-table {
+    min-width: 0 !important;
+    table-layout: fixed;
+}
+
+.back-office-route .stock-receiving-lines-table :where(th, td) {
+    padding: .45rem !important;
+    font-size: .76rem;
+}
+
+.back-office-route .stock-receiving-lines-table :where(th, td):nth-child(2) { width: 66px !important; }
+.back-office-route .stock-receiving-lines-table :where(th, td):nth-child(3) { width: 86px !important; }
+.back-office-route .stock-receiving-lines-table :where(th, td):nth-child(4) { width: 82px !important; }
+.back-office-route .stock-receiving-lines-table :where(th, td):nth-child(5) { width: 74px !important; }
+
+.back-office-route .stock-receiving-lines-table input {
+    height: 36px !important;
+    min-height: 36px !important;
+    padding-inline: .45rem;
+}
+
+.back-office-route .stock-receiving-lines-table .btn {
+    min-height: 34px !important;
+    padding-inline: .45rem !important;
+    font-size: .7rem;
+}
+
+.back-office-route .stock-receiving-history h2 {
+    font-size: 1rem;
+}
+
+.back-office-route .staff-table {
+    width: 100%;
+    min-width: 540px !important;
+    table-layout: fixed;
+}
+
+.back-office-route .staff-table-wrap {
+    overflow-x: auto !important;
+}
+
+.back-office-route .staff-table th:nth-child(2),
+.back-office-route .staff-table td:nth-child(2) { width: 126px; }
+.back-office-route .staff-table th:nth-child(3),
+.back-office-route .staff-table td:nth-child(3) { width: 112px; }
+.back-office-route .staff-table th:nth-child(4),
+.back-office-route .staff-table td:nth-child(4) { width: 126px; }
+
+.back-office-route .staff-person {
+    gap: .5rem;
+}
+
+.back-office-route .staff-avatar {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+}
+
+.back-office-route .staff-shell .action-cell .staff-actions {
+    grid-template-columns: repeat(3, 32px);
+    gap: .25rem;
+}
+
+.back-office-route .staff-shell .action-cell .staff-actions .act-btn {
+    width: 32px !important;
+    height: 32px !important;
+    min-width: 32px !important;
+    min-height: 32px !important;
+}
+
+.back-office-route .staff-summary > div {
+    padding: .55rem .65rem;
+}
+
+.back-office-route .staff-summary strong {
+    font-size: 1.05rem;
+}
+
+.back-office-route .history-panel .table-wrap {
+    overflow-x: auto !important;
+}
+
+.back-office-route .shift-table {
+    width: 100%;
+    min-width: 560px !important;
+    table-layout: fixed;
+}
+
+.back-office-route .shift-table :where(th, td) {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.back-office-route .shift-table :where(th, td):nth-child(1) { width: 92px; }
+.back-office-route .shift-table :where(th, td):nth-child(2) { width: 100px; }
+.back-office-route .shift-table :where(th, td):nth-child(3) { width: 140px; }
+.back-office-route .shift-table :where(th, td):nth-child(4) { width: 74px; }
+.back-office-route .shift-table :where(th, td):nth-child(5) { width: 68px; }
+.back-office-route .shift-table :where(th, td):nth-child(6) { width: 86px; }
+
+.back-office-route .shift-table .session-toggle {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* At 800px the persistent Back Office sidebar leaves management pages with
+   roughly 600px of content width. Bridge the gap between their viewport-based
+   responsive breakpoints without changing the phone or Checkout layouts. */
+@media (min-width: 761px) and (max-width: 900px) {
+    .back-office-route .management-content .customer-search-intro {
+        align-items: stretch;
+        flex-direction: column;
+        gap: .45rem;
     }
 
-    .pos-page-tabs {
-        scrollbar-width: none;
+    .back-office-route .management-content .customer-account-views {
+        width: 100%;
+        grid-template-columns: minmax(0, .75fr) minmax(0, 1.25fr);
+        gap: .4rem;
     }
 
-    .pos-page-tabs::-webkit-scrollbar {
+    .back-office-route .management-content .customer-account-view {
+        min-height: 42px;
+        padding: .32rem .55rem;
+    }
+}
+
+@media (min-width: 701px) and (max-width: 900px) {
+    .back-office-route .management-content .attendance-summary article {
+        padding-inline: .55rem;
+    }
+
+    .back-office-route .management-content .attendance-summary article:last-child strong {
+        font-size: .76rem;
+    }
+
+    .back-office-route .management-content .attendance-filters {
+        padding: .45rem .55rem;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: .4rem;
+    }
+
+    .back-office-route .management-content .attendance-filters .custom-select-trigger,
+    .back-office-route .management-content .attendance-filters .date-field input,
+    .back-office-route .management-content .attendance-filters .search-button {
+        height: 40px;
+        min-height: 40px !important;
+        padding-block: .4rem;
+        font-size: .82rem;
+    }
+
+    .back-office-route .management-content .attendance-table {
+        width: 100%;
+        min-width: 560px !important;
+        table-layout: fixed;
+    }
+
+    .back-office-route .management-content .attendance-table th,
+    .back-office-route .management-content .attendance-table td {
+        padding-inline: .35rem !important;
+    }
+
+    .back-office-route .management-content .attendance-table th:nth-child(1) { width: 17%; }
+    .back-office-route .management-content .attendance-table th:nth-child(2),
+    .back-office-route .management-content .attendance-table th:nth-child(3) { width: 14%; }
+    .back-office-route .management-content .attendance-table th:nth-child(4) { width: 10%; }
+    .back-office-route .management-content .attendance-table th:nth-child(5) { width: 11%; }
+    .back-office-route .management-content .attendance-table th:nth-child(6) { width: 14%; }
+    .back-office-route .management-content .attendance-table th:nth-child(7) { width: 20%; }
+
+    .back-office-route .management-content .attendance-table td,
+    .back-office-route .management-content .attendance-table td > strong,
+    .back-office-route .management-content .attendance-table td > small,
+    .back-office-route .management-content .attendance-table td:nth-child(5) > span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .back-office-route .management-content .attendance-table td:nth-child(5) > span {
+        display: block;
+    }
+
+    .back-office-route .management-content .attendance-table .manager-clock-out {
+        min-width: 72px;
+        min-height: 34px;
+        padding: .35rem;
+        font-size: .65rem;
+    }
+
+    .back-office-route .management-content .attendance-table .edit-attendance {
+        width: 34px !important;
+        height: 34px !important;
+        min-width: 34px !important;
+        min-height: 34px !important;
+    }
+}
+
+@media (min-width: 721px) and (max-width: 900px) {
+    .back-office-route .management-content .audit-page {
+        padding: .55rem;
+        gap: .65rem;
+    }
+
+    .back-office-route .management-content .audit-event-toggle {
+        min-height: 46px;
+        padding: .45rem .55rem;
+        grid-template-columns: 8px minmax(0, 1fr) auto 18px;
+        gap: .45rem;
+    }
+
+    .back-office-route .management-content .audit-event-person {
         display: none;
     }
 
-    .pos-toolbar-action {
-        padding-inline: .4rem !important;
-        font-size: .78rem !important;
+    .back-office-route .management-content .audit-event-toggle time,
+    .back-office-route .management-content .audit-chevron {
+        grid-column: auto;
+        grid-row: auto;
     }
+}
 
-    .pos-cart-header {
-        min-height: 58px;
+@media (max-width: 760px) {
+    .back-office-route .admin-sections {
+        grid-template-columns: minmax(0, 1fr);
     }
+}
 
-    .pos-cart-controls {
-        min-height: 58px;
+@media print {
+    .back-office-route {
+        --app-page-gutter: 0;
     }
+}
 
-    .pos-action-grid > button {
-        font-size: .76em !important;
-        line-height: 1.08;
-    }
+/* Fit the available workspace, including the navigation rail and tablet chrome. */
+.management-page, .items-management-page { min-width: 0; min-height: 0; height: var(--workspace-height, 100dvh); }
+.app-page-header .app-page-heading h1 { white-space: normal; overflow: visible; font-size: clamp(1.35rem, 2.4vw, 1.9rem); }
+.app-page-header .page-back-button { flex-shrink: 0; }
+.app-page-actions > .btn { flex-shrink: 0; }
+.app-modal-header { gap: 1rem; }
+.app-modal-header h2 { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.app-modal-header > button { flex-shrink: 0; }
+.app-modal-footer { flex-wrap: wrap; }
+.app-modal-panel { max-height: calc(100dvh - 1.5rem); }
+.settings-page-shell { width: 100%; max-width: 1500px; margin-inline: auto; }
+.settings-section, .settings-mini-card, .settings-row-card { min-width: 0; }
+@container management (max-width: 620px) {
+    .form-grid { grid-template-columns: minmax(0, 1fr); }
+    .form-grid > .span-2 { grid-column: 1 / -1; }
+    .settings-page-shell { padding: .85rem; gap: 1rem; }
+    .settings-section { padding: 1rem; }
+}
+@media (max-width: 600px) {
+    :root { --app-page-gutter: .75rem; }
+    .management-header { min-height: 52px; }
+    .management-actions { justify-content: flex-start; margin-left: 0; }
+    .management-actions > .btn { flex: 0 1 auto; }
+    .app-modal-overlay { padding: .5rem; }
+    .app-modal-header, .app-modal-content, .app-modal-footer { padding: 1rem; }
+    .back-office-route .form-grid { grid-template-columns: minmax(0, 1fr); }
+    .back-office-route .form-grid > .span-2 { grid-column: 1 / -1; }
+}
 
-    .payment-modal {
-        width: calc(100vw - 1rem);
-    }
+
+
+@media (min-width: 701px) and (max-width: 900px) {
+    .pos-product-grid { grid-template-columns: repeat(3, minmax(0,1fr)); grid-template-rows: repeat(6, minmax(90px,1fr)); overflow-y: auto; }
+    .pos-tile-caption { flex-direction: column; align-items: flex-start; gap: .35rem; }
+    .pos-tile-name { width: 100%; }
+    .pos-tile-price { max-width: 100%; align-self: flex-end; }
+}
+@media (max-width: 700px) {
+    .pos-checkout-shell { flex-direction: column; height: 100dvh; overflow-y: auto; }
+    .pos-products { flex: 0 0 auto; min-height: 600px; height: 85dvh; width: 100%; }
+    .pos-product-grid { grid-template-columns: repeat(3, minmax(0,1fr)); grid-template-rows: repeat(6, minmax(85px,1fr)); overflow-y: auto; }
+    .pos-cart { flex: 0 0 auto; width: 100% !important; min-width: 0 !important; max-width: none !important; height: max(600px, 85dvh); border-top: 1px solid var(--border-flat); }
+    .pos-tile-caption { flex-direction: column; align-items: flex-start; gap: .3rem; }
+    .pos-tile-name { width: 100%; }
+    .pos-tile-price { max-width: 100%; align-self: flex-end; }
+}
+
+/* Keep both time and sync text readable on compact checkout headers. */
+.pos-header-status { flex-wrap: wrap; row-gap: 4px; }
+@media (max-width: 1300px) {
+    .pos-header-status { flex-direction: column; align-items: flex-end; }
+    .pos-header-status .connection-status-pill { min-height: 24px; padding-block: 1px; }
+    .pos-header-status .connection-status-pill .sync-symbol { width: 18px; height: 18px; }
+    .pos-header-status .connection-status-pill strong { font-size: 10px; }
+}
+
+@media (max-width: 1300px) {
+    .pos-main-header { min-height: 76px !important; height: auto !important; }
 }

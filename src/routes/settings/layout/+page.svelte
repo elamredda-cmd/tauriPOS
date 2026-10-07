@@ -199,7 +199,7 @@
 </div>
 
 <style>
-    .layout-page { box-sizing: border-box; height: 100dvh; min-height: 560px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
+    .layout-page { box-sizing: border-box; height: var(--workspace-height, 100dvh); min-height: 0; overflow: auto; container: layout-editor / inline-size; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
     .panel-heading span { display: block; color: var(--accent-primary); font-size: .7rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
     button:disabled { cursor: not-allowed; opacity: .42; }
     .layout-workspace { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr) minmax(245px, .82fr); gap: .75rem; }
@@ -215,7 +215,7 @@
     .order-label strong { font-size: .87rem; }
     .order-label small { margin-top: .15rem; color: var(--text-muted); font-size: .68rem; }
     .move-controls { display: flex; gap: .3rem; }
-    .move-controls button { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: 4px; background: var(--bg-panel); color: var(--text-main); }
+    .move-controls button { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: 4px; background: var(--bg-panel); color: var(--text-main); }
     .move-controls button:not(:disabled):hover { border-color: var(--accent-primary); color: var(--accent-primary); }
     .move-controls svg { width: 17px; height: 17px; }
 
@@ -228,10 +228,14 @@
     .toolbar-group { margin-top: auto; }
     .toolbar-preview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .35rem; }
 
-    @media (max-width: 820px) {
-        .layout-page { min-height: 100dvh; height: auto; overflow: auto; }
-        .layout-workspace { grid-template-columns: 1fr; }
-        .order-panel { min-height: 390px; }
-        .preview-panel { min-height: 320px; }
+    @container layout-editor (max-width: 950px) {
+        .layout-workspace { flex: 0 0 auto; grid-template-columns: repeat(2, minmax(0,1fr)); }
+        .order-panel { min-height: 370px; }
+        .preview-panel { grid-column: 1 / -1; min-height: 260px; }
     }
+    @container layout-editor (max-width: 650px) {
+        .layout-workspace { grid-template-columns: minmax(0,1fr); }
+        .preview-panel { grid-column: auto; }
+    }
+    :global(.back-office-route) .move-controls button { width: 34px; height: 34px; }
 </style>

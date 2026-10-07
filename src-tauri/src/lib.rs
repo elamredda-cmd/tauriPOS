@@ -1,6 +1,10 @@
 mod commerce;
+mod cash_control;
+mod customer_media;
 mod dojo;
 mod licensing;
+mod local_batch;
+mod mysql_session;
 mod printer_modules;
 mod secret_store;
 mod sumup;
@@ -1394,9 +1398,14 @@ pub fn run() {
                     let _ = window.set_focus();
                 }
             }
+            if let Err(error) = secret_store::migrate_legacy_keychain_once(app.handle()) {
+                eprintln!("Legacy credential migration is incomplete: {error}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            customer_media::import_customer_display_media,
+            customer_media::remove_customer_display_media,
             greet,
             send_cctv_pos_text,
             send_raw_printer_data,
@@ -1416,8 +1425,14 @@ pub fn run() {
             commerce::commit_mysql_sale,
             commerce::commit_mysql_outbox_operation,
             commerce::claim_mysql_held_order,
+            local_batch::commit_local_batch,
+            mysql_session::open_mysql_session,
+            mysql_session::query_mysql_session,
+            mysql_session::close_mysql_session,
             commerce::save_local_customer_account_config,
             commerce::save_online_customer_account_config,
+            commerce::adjust_local_customer_loyalty,
+            commerce::adjust_online_customer_loyalty,
             commerce::commit_local_customer_account_entry,
             commerce::commit_online_customer_account_entry,
             commerce::delete_online_customer,
@@ -1427,6 +1442,8 @@ pub fn run() {
             commerce::commit_online_loyalty_sale,
             commerce::commit_online_customer_account_sale,
             commerce::recover_online_financial_intent,
+            commerce::prepare_till_report_close,
+            commerce::commit_till_report_close,
             commerce::begin_whole_system_close,
             commerce::freeze_whole_system_close,
             commerce::get_frozen_whole_system_report,
@@ -1435,6 +1452,11 @@ pub fn run() {
             commerce::purge_mysql_transactions,
             commerce::purge_local_transactions,
             commerce::allocate_mysql_till_sequence,
+            commerce::import_mariadb_attendance_audit_snapshot,
+            commerce::save_mariadb_employee_profile_cas,
+            commerce::upgrade_mariadb_employee_legacy_pin,
+            cash_control::cash_control_context,
+            cash_control::cash_control_save,
             commerce::replace_mariadb_from_local_restore,
             commerce::create_local_backup,
             commerce::latest_local_backup,
@@ -1462,6 +1484,9 @@ pub fn run() {
             dojo::dojo_payment_intent_status,
             dojo::dojo_payment_intent_by_reference,
             dojo::dojo_cancel_terminal_session,
+            dojo::dojo_cancel_expired_sandbox_payment,
+            dojo::dojo_retry_payment,
+            dojo::dojo_review_expired_payment,
             dojo::dojo_respond_signature,
             dojo::dojo_refund_payment_intent,
             sumup::sumup_get_config,

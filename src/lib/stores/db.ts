@@ -56,13 +56,32 @@ export interface Register {
 }
 
 // 3. Employee
+export const EMPLOYEE_ROLES = ['admin', 'manager', 'supervisor', 'cashier', 'attendance'] as const;
+export type EmployeeRole = typeof EMPLOYEE_ROLES[number];
+
+/**
+ * Attendance-only PINs use a prefix that older POS builds do not understand.
+ * This keeps a rolling-update till from authenticating an attendance identity
+ * as a normal checkout user.
+ */
+export const ATTENDANCE_ONLY_PIN_HASH_PREFIX = 'attendance-only-v1$';
+
+const EMPLOYEE_ROLE_SET = new Set<string>(EMPLOYEE_ROLES);
+
+/** Accept canonical roles and harmless surrounding whitespace only. */
+export function normalizeEmployeeRole(value: unknown): EmployeeRole | null {
+    if (typeof value !== 'string') return null;
+    const normalized = value.trim();
+    return EMPLOYEE_ROLE_SET.has(normalized) ? normalized as EmployeeRole : null;
+}
+
 export interface Employee {
     id: string;
     storeId: string;
     name: string;
     pin: string;
     pinHash?: string;
-    role: 'admin' | 'manager' | 'supervisor' | 'cashier';
+    role: EmployeeRole;
     email: string;
     isActive: boolean;
     createdAt: string;
@@ -70,6 +89,35 @@ export interface Employee {
     isSupportSession?: boolean;
     supportSessionId?: string;
     supportExpiresAt?: string;
+    /** Runtime-only repair markers; never grant authentication access. */
+    roleNeedsRepair?: boolean;
+    pinNeedsReset?: boolean;
+}
+
+export type EmployeeAttendanceStatus = 'open' | 'closed';
+
+/**
+ * One durable staff attendance session. Attendance is deliberately separate
+ * from till cash-up shifts: a person can work without owning the open till,
+ * and receipt/history cleanup must never remove their recorded hours.
+ */
+export interface EmployeeAttendance {
+    id: string;
+    employeeId: string;
+    clockInAt: string;
+    clockOutAt: string;
+    clockInTillId: string;
+    clockOutTillId: string;
+    status: EmployeeAttendanceStatus;
+    notes: string;
+    createdByEmployeeId: string;
+    updatedByEmployeeId: string;
+    createdAt: string;
+    updatedAt: string;
+    /** Joined display fields returned by attendance-management queries. */
+    employeeName?: string;
+    clockInTillName?: string;
+    clockOutTillName?: string;
 }
 
 // 4. Customer
@@ -124,6 +172,9 @@ export interface CustomerAccountEntry {
     orderId: string;
     entryType: CustomerAccountEntryType;
     amountPence: number;
+    tipsAmount?: number;
+    serviceChargeAmount?: number;
+    cashbackAmount?: number;
     paymentMethod: CustomerAccountPaymentMethod;
     reference: string;
     description: string;
@@ -349,6 +400,9 @@ export interface Payment {
     cardAmount: number;      // pence (card portion)
     loyaltyAmount: number;   // pence (explicit loyalty-value portion)
     accountAmount: number;   // pence (explicit customer-account portion)
+    tipsAmount?: number;     // extra card collection, not product revenue
+    serviceChargeAmount?: number;
+    cashbackAmount?: number; // extra card collection paid out from the drawer
     reference: string;
     changeGiven: number;     // pence
     createdAt: string;
@@ -361,7 +415,12 @@ export interface LoyaltyLog {
     customerId: string;
     orderId: string;
     pointsChange: number;
-    reason: 'earned' | 'redeemed' | 'manual_adjustment' | 'refund_adjustment';
+    reason:
+        | 'earned'
+        | 'redeemed'
+        | 'manual_adjustment'
+        | `manual_adjustment: ${string}`
+        | 'refund_adjustment';
     createdAt: string;
     updatedAt: string;
 }
@@ -527,6 +586,7 @@ const seedSettings: Setting[] = [
     { key: 'receipt_show_logo', value: 'true', updatedAt: now() },
     { key: 'default_order_type', value: 'sale', updatedAt: now() },
     { key: 'stock_tracking_enabled', value: 'true', updatedAt: now() },
+    { key: 'time_attendance_enabled', value: 'false', updatedAt: now() },
     { key: 'cash_up_enabled', value: 'false', updatedAt: now() },
     { key: 'cash_up_require_opening_float', value: 'true', updatedAt: now() },
     { key: 'cash_up_reconcile_card', value: 'true', updatedAt: now() },

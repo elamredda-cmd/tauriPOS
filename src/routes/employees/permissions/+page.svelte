@@ -26,8 +26,10 @@
     ];
     const accountPermissions: PermissionKey[] = [
         'charge_customer_account', 'take_account_payment', 'adjust_customer_account',
+        'adjust_customer_loyalty',
     ];
-    const permissionKeys = [...pagePermissions, ...actionPermissions, ...accountPermissions];
+    const attendancePermissions: PermissionKey[] = ['view_attendance', 'manage_attendance'];
+    const permissionKeys = [...pagePermissions, ...actionPermissions, ...accountPermissions, ...attendancePermissions];
     const permissionDescriptions: Record<PermissionKey, string> = {
         open_items: 'Products, categories, barcodes, prices, and stock settings',
         open_suppliers: 'Supplier records used by stock receiving',
@@ -42,6 +44,8 @@
         open_sync: 'MariaDB connection, till status, and synchronization tools',
         open_audit: 'Recorded staff and system activity',
         open_stock_receiving: 'Supplier deliveries and stock quantity updates',
+        view_attendance: 'View attendance sessions for every staff member and export timesheets',
+        manage_attendance: 'Add or correct completed attendance sessions with an audit trail',
         price_override: 'Change a selling price during checkout',
         refund_void: 'Refund an order or void a completed sale',
         manual_discount: 'Apply a non-automatic discount at checkout',
@@ -50,6 +54,7 @@
         charge_customer_account: 'Use Pay Later at checkout for a customer with an active account',
         take_account_payment: 'Record a cash, card, bank, cheque, or other payment against an amount owed',
         adjust_customer_account: 'Post an opening balance, correction, or write-off with a required reason',
+        adjust_customer_loyalty: 'Correct a customer loyalty balance with a permanent reason and audit record',
     };
 
     let selectedRole: Employee['role'] = 'manager';
@@ -86,12 +91,13 @@
     }
 
     function toggle(role: Employee['role'], key: PermissionKey) {
-        if (role === 'admin' || saving) return;
+        if (role === 'admin' || role === 'attendance' || saving) return;
         const next: RolePermissionMatrix = {
             admin: [...matrix.admin],
             manager: [...matrix.manager],
             supervisor: [...matrix.supervisor],
             cashier: [...matrix.cashier],
+            attendance: [],
         };
         const enabled = new Set(next[role]);
         if (enabled.has(key)) enabled.delete(key);
@@ -106,6 +112,7 @@
             manager: [...defaultRolePermissions.manager],
             supervisor: [...defaultRolePermissions.supervisor],
             cashier: [...defaultRolePermissions.cashier],
+            attendance: [],
         }, 'Role permissions reset to defaults');
     }
 </script>
@@ -137,7 +144,7 @@
                     on:click={() => selectedRole = role}
                 >
                     <span>{roleLabels[role]}</span>
-                    <small>{matrix[role].length} / {permissionKeys.length}</small>
+                    <small>{role === 'attendance' ? 'Clock only' : `${matrix[role].length} / ${permissionKeys.length}`}</small>
                 </button>
             {/each}
         </nav>
@@ -150,7 +157,7 @@
                     <p>{roleDescriptions[selectedRole]}</p>
                 </div>
             </div>
-            <strong>{selectedRole === 'admin' ? 'Full access' : `${enabledCount} enabled`}</strong>
+            <strong>{selectedRole === 'admin' ? 'Full access' : selectedRole === 'attendance' ? 'Own attendance only' : `${enabledCount} enabled`}</strong>
         </section>
 
         <div class="permission-groups">
@@ -165,7 +172,7 @@
                             class:enabled
                             role="switch"
                             aria-checked={enabled}
-                            disabled={saving || selectedRole === 'admin'}
+                            disabled={saving || selectedRole === 'admin' || selectedRole === 'attendance'}
                             on:click={() => toggle(selectedRole, key)}
                         >
                             <span class="permission-copy"><strong>{permissionLabels[key]}</strong><small>{permissionDescriptions[key]}</small></span>
@@ -186,7 +193,7 @@
                             class:enabled
                             role="switch"
                             aria-checked={enabled}
-                            disabled={saving || selectedRole === 'admin'}
+                            disabled={saving || selectedRole === 'admin' || selectedRole === 'attendance'}
                             on:click={() => toggle(selectedRole, key)}
                         >
                             <span class="permission-copy"><strong>{permissionLabels[key]}</strong><small>{permissionDescriptions[key]}</small></span>
@@ -207,7 +214,28 @@
                             class:enabled
                             role="switch"
                             aria-checked={enabled}
-                            disabled={saving || selectedRole === 'admin'}
+                            disabled={saving || selectedRole === 'admin' || selectedRole === 'attendance'}
+                            on:click={() => toggle(selectedRole, key)}
+                        >
+                            <span class="permission-copy"><strong>{permissionLabels[key]}</strong><small>{permissionDescriptions[key]}</small></span>
+                            <span class="switch" class:on={enabled} aria-hidden="true"><i></i></span>
+                        </button>
+                    {/each}
+                </div>
+            </section>
+
+            <section class="permission-group attendance-permissions">
+                <div class="group-heading"><span>Staff attendance</span><small>Timesheets and corrections</small></div>
+                <div class="permission-list">
+                    {#each attendancePermissions as key}
+                        {@const enabled = selectedPermissions.includes(key)}
+                        <button
+                            type="button"
+                            class="permission-row"
+                            class:enabled
+                            role="switch"
+                            aria-checked={enabled}
+                            disabled={saving || selectedRole === 'admin' || selectedRole === 'attendance'}
                             on:click={() => toggle(selectedRole, key)}
                         >
                             <span class="permission-copy"><strong>{permissionLabels[key]}</strong><small>{permissionDescriptions[key]}</small></span>
@@ -223,6 +251,11 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
                 Administrator permissions are locked so the shop always has a recovery account.
             </div>
+        {:else if selectedRole === 'attendance'}
+            <div class="admin-note attendance-note">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+                Attendance-only access is locked. Staff can clock in or out and view their own hours, but cannot open checkout, a till shift, reports, or management pages.
+            </div>
         {/if}
     </div>
 </MgmtPage>
@@ -230,7 +263,7 @@
 <ConfirmDialog
     bind:show={showResetConfirm}
     title="Reset Role Permissions?"
-    message="Restore the recommended access for managers, supervisors, and cashiers on every till?"
+    message="Restore the recommended access for managers, supervisors, cashiers, and attendance-only staff on every till?"
     confirmText="Reset Permissions"
     on:confirm={resetDefaults}
 />
@@ -242,7 +275,7 @@
     .permissions-intro h2 { margin: .2rem 0 0; font-size: 1.15rem; }
     .permissions-intro p { margin: .3rem 0 0; color: var(--text-muted); font-size: .78rem; }
     .saving-status { flex: 0 0 auto; color: var(--accent-primary); font-size: .78rem; font-weight: 850; }
-    .role-tabs { margin-top: .75rem; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; }
+    .role-tabs { margin-top: .75rem; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .55rem; }
     .role-tabs button { min-width: 0; min-height: 58px; padding: .65rem .8rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-main); text-align: left; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); cursor: pointer; }
     .role-tabs button:hover { border-color: var(--accent-primary); }
     .role-tabs button.active { color: white; border-color: var(--accent-primary); background: var(--accent-primary); }
@@ -254,18 +287,19 @@
     .role-mark.role-admin { background: var(--danger); }
     .role-mark.role-manager { background: var(--warning); }
     .role-mark.role-supervisor { background: var(--success); }
+    .role-mark.role-attendance { background: var(--text-muted); }
     .role-summary h3 { margin: 0; font-size: .95rem; }
     .role-summary p { margin: .15rem 0 0; color: var(--text-muted); font-size: .73rem; line-height: 1.35; }
     .role-summary > strong { flex: 0 0 auto; color: var(--accent-primary); font-size: .78rem; }
     .permission-groups { margin-top: .75rem; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(310px, .65fr); gap: .75rem; align-items: start; }
     .permission-group { min-width: 0; overflow: hidden; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
-    .permission-group:first-child { grid-row: span 2; }
+    .permission-group:first-child { grid-row: span 3; }
     .group-heading { min-height: 54px; padding: .7rem .85rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-flat); background: var(--bg-panel); }
     .group-heading span { font-size: .82rem; font-weight: 900; text-transform: uppercase; }
     .group-heading small { color: var(--text-muted); font-size: .69rem; font-weight: 700; }
     .permission-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .permission-group:not(:first-child) .permission-list { grid-template-columns: minmax(0, 1fr); }
-    .account-permissions { grid-column: 2; }
+    .account-permissions, .attendance-permissions { grid-column: 2; }
     .permission-row { min-width: 0; min-height: 68px; padding: .7rem .8rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; color: var(--text-main); text-align: left; border: 0; border-right: 1px solid var(--border-flat); border-bottom: 1px solid var(--border-flat); background: var(--bg-card); cursor: pointer; }
     .permission-row:nth-child(even) { border-right: 0; }
     .permission-group:not(:first-child) .permission-row { border-right: 0; }
@@ -282,12 +316,14 @@
     .switch.on i { background: white; transform: translateX(18px); }
     .admin-note { margin-top: .75rem; padding: .7rem .85rem; display: flex; align-items: center; gap: .6rem; color: var(--text-muted); font-size: .75rem; font-weight: 700; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); }
     .admin-note svg { width: 18px; height: 18px; flex: 0 0 18px; color: var(--accent-primary); }
+    .attendance-note { color: var(--text-main); border-color: color-mix(in srgb, var(--text-muted) 45%, var(--border-flat)); }
     @media (max-width: 900px) {
+        .role-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .permission-groups { grid-template-columns: minmax(0, 1fr); }
         .permission-group:not(:first-child) .permission-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .permission-group:not(:first-child) .permission-row { border-right: 1px solid var(--border-flat); }
         .permission-group:not(:first-child) .permission-row:nth-child(even) { border-right: 0; }
-        .account-permissions { grid-column: auto; }
+        .account-permissions, .attendance-permissions { grid-column: auto; }
         .permission-group:first-child { grid-row: auto; }
     }
     @media (max-width: 680px) {

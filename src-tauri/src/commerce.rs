@@ -1,8 +1,10 @@
+use base64::{engine::general_purpose::STANDARD as STANDARD_BASE64, Engine as _};
 use rand::{rngs::OsRng, RngCore};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
-use sqlx::mysql::{MySqlPoolOptions, MySqlRow};
-use sqlx::sqlite::{SqlitePoolOptions, SqliteRow};
+use sha2::{Digest, Sha256};
+use sqlx::mysql::{MySqlConnection, MySqlPoolOptions, MySqlRow};
+use sqlx::sqlite::{SqliteConnection, SqlitePoolOptions, SqliteRow};
 use sqlx::{MySql, MySqlPool, QueryBuilder, Row, SqlitePool, ValueRef};
 use std::{
     collections::{HashMap, HashSet},
@@ -83,6 +85,10 @@ pub struct OrderLineRecord {
     pub updated_at: String,
 }
 
+fn is_zero_terminal_amount(value: &i64) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentRecord {
@@ -92,6 +98,13 @@ pub struct PaymentRecord {
     pub amount: i64,
     pub cash_amount: i64,
     pub card_amount: i64,
+    /// Provider additions, separate from the product tender allocation.
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub tips_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub service_charge_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub cashback_amount: i64,
     #[serde(default)]
     pub loyalty_amount: i64,
     #[serde(default)]
@@ -125,6 +138,12 @@ pub struct CustomerAccountChange {
     pub amount_pence: i64,
     #[serde(default)]
     pub payment_method: String,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub tips_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub service_charge_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub cashback_amount: i64,
     #[serde(default)]
     pub reference: String,
     #[serde(default)]
@@ -165,6 +184,12 @@ pub struct CustomerAccountEntryRecord {
     pub entry_type: String,
     pub amount_pence: i64,
     pub payment_method: String,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub tips_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub service_charge_amount: i64,
+    #[serde(default, skip_serializing_if = "is_zero_terminal_amount")]
+    pub cashback_amount: i64,
     pub reference: String,
     pub description: String,
     pub receipt_number: i64,
@@ -240,6 +265,22 @@ pub struct FinishWholeSystemCloseInput {
     pub report_total: i64,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitTillReportCloseInput {
+    pub id: String,
+    pub till_number: String,
+    pub expected_last_marker: Option<String>,
+    pub period_start: String,
+    pub period_end: String,
+    #[serde(default)]
+    pub employee_id: String,
+    #[serde(default)]
+    pub report_text: String,
+    #[serde(default)]
+    pub report_total: i64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct WholeSystemCloseBarrierResult {
@@ -267,6 +308,9 @@ pub struct FrozenSalesOverview {
 pub struct FrozenPaymentBreakdown {
     pub total_cash: i64,
     pub total_card: i64,
+    pub tips_total: i64,
+    pub service_charge_total: i64,
+    pub cashback_total: i64,
     pub total_loyalty: i64,
     pub total_account: i64,
     pub cash_tx_count: i64,
@@ -278,6 +322,9 @@ pub struct FrozenPaymentBreakdown {
     pub account_repayments_cash: i64,
     pub account_repayments_card: i64,
     pub account_repayments_other: i64,
+    pub account_tips_total: i64,
+    pub account_service_charge_total: i64,
+    pub account_cashback_total: i64,
     pub account_adjustments: i64,
     pub opening_account_owed: i64,
     pub closing_account_owed: i64,
@@ -299,6 +346,33 @@ pub struct FrozenTopProduct {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct FrozenTillSalesSummary {
+    pub id: String,
+    pub name: String,
+    pub net_sales: i64,
+    pub gross_sales: i64,
+    pub refunds: i64,
+    pub tax_total: i64,
+    pub transactions: i64,
+    pub refund_transactions: i64,
+    pub items_sold: i64,
+    pub cash_total: i64,
+    pub card_total: i64,
+    pub tips_total: i64,
+    pub service_charge_total: i64,
+    pub cashback_total: i64,
+    pub loyalty_total: i64,
+    pub account_total: i64,
+    pub account_repayments_cash: i64,
+    pub account_repayments_card: i64,
+    pub account_repayments_other: i64,
+    pub account_tips_total: i64,
+    pub account_service_charge_total: i64,
+    pub account_cashback_total: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct FrozenWholeSystemReport {
     pub token: String,
     pub cutoff_at: String,
@@ -307,6 +381,19 @@ pub struct FrozenWholeSystemReport {
     pub overview: FrozenSalesOverview,
     pub breakdown: FrozenPaymentBreakdown,
     pub top_products: Vec<FrozenTopProduct>,
+    pub till_summaries: Vec<FrozenTillSalesSummary>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedTillReportClose {
+    pub expected_last_marker: Option<String>,
+    pub period_start: String,
+    pub cutoff_at: String,
+    pub overview: FrozenSalesOverview,
+    pub breakdown: FrozenPaymentBreakdown,
+    pub top_products: Vec<FrozenTopProduct>,
+    pub till_summaries: Vec<FrozenTillSalesSummary>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -347,6 +434,43 @@ pub struct LoyaltyChange {
     pub points_change: i64,
     pub reason: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerLoyaltyAdjustmentInput {
+    pub id: String,
+    pub customer_id: String,
+    pub expected_points: i64,
+    pub new_points: i64,
+    pub reason: String,
+    pub employee_id: String,
+    pub actor_expected_updated_at: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub server_data_epoch: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerLoyaltyAdjustmentEntry {
+    pub id: String,
+    pub customer_id: String,
+    pub order_id: String,
+    pub points_change: i64,
+    pub reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomerLoyaltyAdjustmentResult {
+    pub customer_id: String,
+    pub loyalty_points: i64,
+    pub customer_updated_at: String,
+    pub entry: CustomerLoyaltyAdjustmentEntry,
+    pub audit: AuditRecord,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -444,7 +568,7 @@ struct PendingRestoreMarker {
     preserve_from: Option<String>,
 }
 
-fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn local_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("pos.db"))
@@ -623,21 +747,87 @@ async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error
         .await
 }
 
+const MYSQL_WHOLE_SYSTEM_CLOSE_METADATA_TIMEOUT_SQL: &str = "SET SESSION lock_wait_timeout = 5";
+const MYSQL_WHOLE_SYSTEM_CLOSE_ROW_TIMEOUT_SQL: &str = "SET SESSION innodb_lock_wait_timeout = 5";
+const WHOLE_SYSTEM_CLOSE_SCHEMA_PREPARE_TIMEOUT_SECONDS: u64 = 20;
+
+async fn connect_mysql_for_whole_system_close(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error> {
+    let pool = connect_mysql_for_pos(mysql_uri).await?;
+    // MariaDB's default metadata timeout can be extremely long and its default
+    // InnoDB row-lock timeout is longer than the UI close deadline. Every close
+    // command uses one pooled connection, so these session limits bound both
+    // schema preparation and barrier locking without changing server globals.
+    sqlx::query(MYSQL_WHOLE_SYSTEM_CLOSE_METADATA_TIMEOUT_SQL)
+        .execute(&pool)
+        .await?;
+    sqlx::query(MYSQL_WHOLE_SYSTEM_CLOSE_ROW_TIMEOUT_SQL)
+        .execute(&pool)
+        .await?;
+    Ok(pool)
+}
+
 const RECEIPT_BLOCK: i64 = 1_000_000;
 const RECEIPT_HIGH_WATER_KEY: &str = "receipt_number_high_water";
 const MARIADB_RESTORE_MAINTENANCE_CODE: &str = "MARIADB_RESTORE_MAINTENANCE";
 const ACCOUNT_LEDGER_AUTHORITY_CODE: &str = "ACCOUNT_LEDGER_AUTHORITY_REQUIRED";
 const MARIADB_RESTORE_GATE_TABLE: &str = "pos_restore_gate";
 const MARIADB_RESTORE_LOCK_NAME: &str = "lbj-pos:mariadb-restore-replace";
+const MARIADB_ATTENDANCE_AUDIT_IMPORT_LOCK_NAME: &str = "lbj-pos:attendance-audit-import";
+const MARIADB_ATTENDANCE_AUDIT_IMPORT_LOCK_SECONDS: i64 = 8;
+const MARIADB_ATTENDANCE_AUDIT_IMPORT_TABLE: &str = "pos_attendance_audit_import_sessions";
+const MARIADB_EMPLOYEE_PROFILE_AUTHORITY_TABLE: &str = "pos_employee_profile_write_authority";
+const MYSQL_SIGNED_CONNECTION_ID_SELECT: &str = "SELECT CAST(CONNECTION_ID() AS SIGNED)";
+const MYSQL_SIGNED_EMPLOYEE_ACTIVE_PROJECTION: &str =
+    "CAST(COALESCE(isActive, 0) AS SIGNED) AS isActive";
+const MARIADB_EMPLOYEE_PROFILE_AUTHORITY_SECONDS: i64 = 15;
+const MARIADB_EMPLOYEE_ADMIN_BOOTSTRAP_LOCK_NAME: &str = "lbj-pos:employee-admin-bootstrap";
+const MARIADB_CONTROLLED_IMPORT_OWNER_KEY: &str = "staff_attendance_import_owner";
+const MARIADB_CONTROLLED_IMPORT_EMPTY_TABLES: &[&str] = &[
+    "employees",
+    "employee_attendance",
+    "audit_logs",
+    "categories",
+    "product_images",
+    "pos_pages",
+    "pos_tiles",
+    "tax_rates",
+    "discounts",
+    "promo_groups",
+    "promo_group_items",
+    "customers",
+    "customer_accounts",
+    "customer_account_entries",
+    "products",
+    "suppliers",
+    "product_suppliers",
+    "orders",
+    "order_lines",
+    "payments",
+    "shifts",
+    "cash_movements",
+    "inventory_logs",
+    "loyalty_logs",
+    "manager_approvals",
+    "till_report_markers",
+    "stock_receipts",
+    "stock_receipt_lines",
+    "daily_sales_summary",
+    "tombstones",
+];
 const MARIADB_RESTORE_MAINTENANCE_KEY: &str = "restore_maintenance_owner";
 const MARIADB_RESTORE_ONLINE_WINDOW_SECONDS: i64 = 45;
 const CUSTOMER_DELETED_CODE: &str = "CUSTOMER_DELETED";
+const MAX_LOYALTY_POINTS: i64 = i32::MAX as i64;
 const WHOLE_SYSTEM_CLOSE_IN_PROGRESS_CODE: &str = "WHOLE_SYSTEM_CLOSE_IN_PROGRESS";
 const WHOLE_SYSTEM_CLOSE_WAITING_CODE: &str = "WHOLE_SYSTEM_CLOSE_WAITING";
+const WHOLE_SYSTEM_CLOSE_SETUP_TIMEOUT_CODE: &str = "WHOLE_SYSTEM_CLOSE_SETUP_TIMEOUT";
+const WHOLE_SYSTEM_CLOSE_REPORT_TIMEOUT_CODE: &str = "WHOLE_SYSTEM_CLOSE_REPORT_TIMEOUT";
 const WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION: i64 = 1;
 const WHOLE_SYSTEM_CLOSE_ONLINE_SECONDS: i64 = 45;
 const WHOLE_SYSTEM_CLOSE_PREPARE_SECONDS: i64 = 120;
 const WHOLE_SYSTEM_CLOSE_FROZEN_SECONDS: i64 = 300;
+const WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS: u64 = 25;
+const REPORT_PERIOD_ORIGIN: &str = "2000-01-01T00:00:00.000Z";
 const ONLINE_FINANCIAL_INTENT_PENDING_CODE: &str = "ONLINE_FINANCIAL_INTENT_PENDING";
 const ONLINE_FINANCIAL_INTENT_EPOCH_CODE: &str = "ONLINE_FINANCIAL_INTENT_EPOCH_MISMATCH";
 const ONLINE_FINANCIAL_INTENT_TABLE: &str = "_online_financial_intent";
@@ -680,6 +870,13 @@ const MYSQL_CLOSE_BARRIER_LOCK_SELECT: &str =
             CAST(COALESCE(DATE_FORMAT(cutoffAt, '%Y-%m-%dT%H:%i:%s.%fZ'), '')
                  AS CHAR CHARACTER SET utf8mb4) AS cutoffAt
      FROM pos_close_barrier WHERE id = 1 FOR UPDATE";
+const MYSQL_CLOSE_BARRIER_READY_COLUMN_COUNT_SELECT: &str =
+    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'pos_close_barrier'
+       AND COLUMN_NAME IN
+         ('id', 'token', 'state', 'ownerTillId', 'requestedAt',
+          'expiresAt', 'cutoffAt')";
 
 const WHOLE_SYSTEM_CLOSE_GUARDED_TABLES: &[&str] = &[
     "orders",
@@ -711,6 +908,7 @@ const MARIADB_RESTORE_COPY_TABLES: &[&str] = &[
     "categories",
     "tax_rates",
     "employees",
+    "employee_attendance",
     "customers",
     "suppliers",
     "products",
@@ -742,6 +940,45 @@ const MARIADB_RESTORE_COPY_TABLES: &[&str] = &[
     "tombstones",
 ];
 
+// Initial single-till → MariaDB migration owns an empty destination. Unlike a
+// later restore, installed-register identities are part of that first upload.
+// Audit rows precede attendance while its live audit triggers are suppressed.
+const MARIADB_CONTROLLED_IMPORT_COPY_TABLES: &[&str] = &[
+    "app_identity",
+    "categories",
+    "tax_rates",
+    "employees",
+    "audit_logs",
+    "employee_attendance",
+    "customers",
+    "registers",
+    "suppliers",
+    "products",
+    "product_images",
+    "pos_pages",
+    "pos_tiles",
+    "promo_groups",
+    "discounts",
+    "promo_group_items",
+    "product_suppliers",
+    "shifts",
+    "orders",
+    "order_lines",
+    "payments",
+    "customer_accounts",
+    "customer_account_entries",
+    "inventory_logs",
+    "loyalty_logs",
+    "cash_movements",
+    "till_report_markers",
+    "manager_approvals",
+    "stock_receipts",
+    "stock_receipt_lines",
+    "daily_sales_summary",
+    "settings",
+    "tombstones",
+];
+
 const MARIADB_RESTORE_DELETE_TABLES: &[&str] = &[
     "daily_sales_summary",
     "stock_receipt_lines",
@@ -770,6 +1007,7 @@ const MARIADB_RESTORE_DELETE_TABLES: &[&str] = &[
     "customers",
     "tax_rates",
     "categories",
+    "employee_attendance",
     "employees",
     "app_identity",
     // Customer/account DELETE triggers emit tombstones, so clear these last.
@@ -790,6 +1028,7 @@ const MARIADB_RESTORE_GUARDED_TABLES: &[&str] = &[
     "promo_groups",
     "promo_group_items",
     "employees",
+    "employee_attendance",
     "settings",
     "customers",
     "registers",
@@ -833,6 +1072,36 @@ const PAY_LATER_REQUIRED_GUARDED_TABLES: &[&str] = &[
 #[serde(rename_all = "camelCase")]
 pub struct MariaDbRestoreResult {
     pub server_data_epoch: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttendanceAuditImportResult {
+    pub employee_count: i64,
+    pub attendance_count: i64,
+    pub audit_count: i64,
+    pub server_data_epoch: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeProfileRecord {
+    pub id: String,
+    #[serde(default)]
+    pub store_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub pin: String,
+    #[serde(default)]
+    pub pin_hash: String,
+    pub role: String,
+    #[serde(default)]
+    pub email: String,
+    pub is_active: bool,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug)]
@@ -1005,17 +1274,30 @@ async fn mysql_table_exists(pool: &MySqlPool, table: &str) -> Result<bool, sqlx:
     Ok(count > 0)
 }
 
-async fn mysql_identifier_collation_ready(pool: &MySqlPool) -> Result<bool, sqlx::Error> {
-    if !mysql_table_exists(pool, "pos_schema_migrations").await? {
+async fn mysql_identifier_collation_ready_on(
+    connection: &mut MySqlConnection,
+) -> Result<bool, sqlx::Error> {
+    let migration_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pos_schema_migrations'",
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if migration_table_exists == 0 {
         return Ok(false);
     }
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pos_schema_migrations WHERE BINARY name = BINARY ?",
     )
     .bind(MYSQL_IDENTIFIER_COLLATION_MIGRATION)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(count == 1)
+}
+
+async fn mysql_identifier_collation_ready(pool: &MySqlPool) -> Result<bool, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    mysql_identifier_collation_ready_on(&mut connection).await
 }
 
 fn mysql_customer_guard_v4_sql(table: &str, operation: &str) -> &'static str {
@@ -1434,8 +1716,10 @@ fn mysql_guarded_preflight_v4_health_is_current(
 /// path must not walk every table/trigger or issue DDL. The transaction still
 /// performs its own locking close/restore/epoch checks; this read-only health
 /// check only decides whether schema repair is actually necessary.
-async fn mysql_guarded_preflight_v4_is_current(pool: &MySqlPool) -> Result<bool, sqlx::Error> {
-    if !mysql_identifier_collation_ready(pool).await? {
+async fn mysql_guarded_preflight_v4_is_current_on(
+    connection: &mut MySqlConnection,
+) -> Result<bool, sqlx::Error> {
+    if !mysql_identifier_collation_ready_on(connection).await? {
         return Ok(false);
     }
 
@@ -1524,7 +1808,7 @@ async fn mysql_guarded_preflight_v4_is_current(pool: &MySqlPool) -> Result<bool,
         legacy_guards,
         coordination_tables,
         required_guarded_tables,
-    ): (i64, i64, i64, i64, i64) = query.build_query_as().fetch_one(pool).await?;
+    ): (i64, i64, i64, i64, i64) = query.build_query_as().fetch_one(&mut *connection).await?;
 
     if required_guarded_tables != PAY_LATER_REQUIRED_GUARDED_TABLES.len() as i64
         || guarded_tables == 0
@@ -1542,7 +1826,7 @@ async fn mysql_guarded_preflight_v4_is_current(pool: &MySqlPool) -> Result<bool,
            (SELECT COUNT(*) FROM pos_close_barrier WHERE id = 1),
            (SELECT COUNT(*) FROM pos_restore_gate WHERE id = 1)",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(mysql_guarded_preflight_v4_health_is_current(
         required_guarded_tables,
@@ -1553,6 +1837,11 @@ async fn mysql_guarded_preflight_v4_is_current(pool: &MySqlPool) -> Result<bool,
         close_rows,
         restore_rows,
     ))
+}
+
+async fn mysql_guarded_preflight_v4_is_current(pool: &MySqlPool) -> Result<bool, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    mysql_guarded_preflight_v4_is_current_on(&mut connection).await
 }
 
 /// Every legacy/raw writer must acquire the same durable locks as current
@@ -2844,14 +3133,108 @@ async fn ensure_mysql_whole_system_close_schema(pool: &MySqlPool) -> Result<(), 
     Ok(())
 }
 
+/// Close polling runs once per second while every active till acknowledges the
+/// barrier. The full migration above is deliberately kept out of that hot path:
+/// it inspects and may replace triggers, which can wait on MariaDB metadata
+/// locks. A successful `begin_whole_system_close` has already run the migration,
+/// so subsequent commands only need to fail closed if that coordination schema
+/// was removed or damaged underneath the active close.
+async fn assert_mysql_whole_system_close_barrier_ready(
+    pool: &MySqlPool,
+) -> Result<(), sqlx::Error> {
+    let column_count: i64 = sqlx::query_scalar(MYSQL_CLOSE_BARRIER_READY_COLUMN_COUNT_SELECT)
+        .fetch_one(pool)
+        .await?;
+    if column_count != 7 {
+        return Err(account_protocol_error(format!(
+            "{MYSQL_COORDINATION_SCHEMA_MISSING_CODE}: the whole-system close barrier is unavailable"
+        )));
+    }
+    let close_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pos_close_barrier WHERE id = 1")
+        .fetch_one(pool)
+        .await?;
+    if close_rows != 1 {
+        return Err(account_protocol_error(format!(
+            "{MYSQL_COORDINATION_SCHEMA_MISSING_CODE}: the whole-system close barrier row is unavailable"
+        )));
+    }
+    Ok(())
+}
+
+async fn assert_mysql_whole_system_close_schema_ready(pool: &MySqlPool) -> Result<(), sqlx::Error> {
+    let (table_count, column_count): (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT COUNT(DISTINCT TABLE_NAME)
+              FROM INFORMATION_SCHEMA.TABLES
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME IN
+                   ('pos_close_barrier', 'pos_restore_gate', 'till_presence')),
+           (SELECT COUNT(*)
+              FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND (
+                 (TABLE_NAME = 'pos_close_barrier' AND COLUMN_NAME IN
+                    ('id', 'token', 'state', 'ownerTillId', 'requestedAt',
+                     'expiresAt', 'cutoffAt', 'lastClosedAt'))
+                 OR
+                 (TABLE_NAME = 'pos_restore_gate' AND COLUMN_NAME IN
+                    ('id', 'ownerTillId', 'isActive', 'claimedAt'))
+                 OR
+                 (TABLE_NAME = 'till_presence' AND COLUMN_NAME IN
+                    ('tillId', 'tillName', 'lastSeenAt', 'closeProtocolVersion',
+                     'closeBarrierToken', 'closeBarrierPhase', 'outboxCount',
+                     'localTerminalAttemptCount', 'syncConflictCount',
+                     'barrierObservedAt'))
+               ))",
+    )
+    .fetch_one(pool)
+    .await?;
+    if table_count != 3 || column_count != 22 {
+        return Err(account_protocol_error(format!(
+            "{MYSQL_COORDINATION_SCHEMA_MISSING_CODE}: whole-system close coordination changed after the close started; cancel and begin again"
+        )));
+    }
+
+    let (close_rows, restore_rows): (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT COUNT(*) FROM pos_close_barrier WHERE id = 1),
+           (SELECT COUNT(*) FROM pos_restore_gate WHERE id = 1)",
+    )
+    .fetch_one(pool)
+    .await?;
+    if close_rows != 1 || restore_rows != 1 {
+        return Err(account_protocol_error(format!(
+            "{MYSQL_COORDINATION_SCHEMA_MISSING_CODE}: whole-system close coordination rows changed after the close started; cancel and begin again"
+        )));
+    }
+    Ok(())
+}
+
+async fn assert_mysql_whole_system_close_guards_ready(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+) -> Result<(), sqlx::Error> {
+    if mysql_guarded_preflight_v4_is_current_on(&mut **tx).await? {
+        return Ok(());
+    }
+    Err(account_protocol_error(format!(
+        "{MYSQL_COORDINATION_SCHEMA_CORRUPT_CODE}: required MariaDB V4 write guards changed after the whole-system close started; abort and begin again"
+    )))
+}
+
 fn is_restore_pushable_setting_key(key: &str) -> bool {
-    if key.starts_with("sync_ts_") || key.starts_with("migration_") {
+    let normalized = key.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    if normalized.starts_with("sync_ts_") || normalized.starts_with("sync_reconcile_") || normalized.starts_with("migration_") {
         return false;
     }
     !matches!(
-        key,
+        normalized.as_str(),
         "pos_mode"
             | "mysql_config"
+            | "device_operating_mode"
+            | "held_order_recovery_v1"
             | "till_id"
             | "till_name"
             | "till_name_manual"
@@ -2938,6 +3321,7 @@ fn is_restore_pushable_setting_key(key: &str) -> bool {
             | "till_seq_counter"
             | "bootstrap_done"
             | "restore_maintenance_owner"
+            | "staff_attendance_import_owner"
             | "server_data_epoch"
             | "server_data_epoch_seen"
             | "report_epoch_cache"
@@ -3084,6 +3468,594 @@ async fn copy_restore_table_to_mysql(
     Ok(values.len() as i64)
 }
 
+/// Copy one table from a caller-owned SQLite read transaction. This variant is
+/// used when attendance and its original audit rows must come from exactly the
+/// same local snapshot.
+async fn copy_restore_table_to_mysql_from_connection(
+    local: &mut SqliteConnection,
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    table: &str,
+) -> Result<i64, sqlx::Error> {
+    let local_exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(table)
+            .fetch_one(&mut *local)
+            .await?;
+    let remote_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+    )
+    .bind(table)
+    .fetch_one(&mut **tx)
+    .await?;
+    if local_exists == 0 || remote_exists == 0 {
+        return Err(account_protocol_error(format!(
+            "MariaDB import cannot copy missing table {table}"
+        )));
+    }
+
+    let remote_column_rows = sqlx::query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+           AND EXTRA NOT LIKE '%GENERATED%'
+         ORDER BY ORDINAL_POSITION",
+    )
+    .bind(table)
+    .fetch_all(&mut **tx)
+    .await?;
+    let remote_columns: HashSet<String> = remote_column_rows
+        .iter()
+        .map(|row| row.try_get::<String, _>("COLUMN_NAME"))
+        .collect::<Result<_, _>>()?;
+
+    let pragma_sql = format!("PRAGMA table_info({})", mysql_identifier(table));
+    let local_column_rows = sqlx::query(&pragma_sql).fetch_all(&mut *local).await?;
+    let mut columns: Vec<(String, String)> = Vec::new();
+    for row in local_column_rows {
+        let name: String = row.try_get("name")?;
+        if remote_columns.contains(&name) {
+            columns.push((name, row.try_get::<String, _>("type").unwrap_or_default()));
+        }
+    }
+    if columns.is_empty() {
+        return Err(account_protocol_error(format!(
+            "MariaDB import found no compatible columns for {table}"
+        )));
+    }
+
+    if table == "settings" {
+        let alias_collisions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (
+               SELECT LOWER(TRIM(`key`)) AS normalized_key
+                 FROM settings
+                GROUP BY LOWER(TRIM(`key`))
+               HAVING COUNT(*) > 1
+             ) setting_aliases",
+        )
+        .fetch_one(&mut *local)
+        .await?;
+        if alias_collisions != 0 {
+            return Err(account_protocol_error(
+                "MariaDB import rejected settings keys that differ only by case or surrounding whitespace",
+            ));
+        }
+    }
+
+    let quoted_columns = columns
+        .iter()
+        .map(|(name, _)| mysql_identifier(name))
+        .collect::<Vec<_>>();
+    let select_sql = format!(
+        "SELECT {} FROM {}",
+        quoted_columns.join(", "),
+        mysql_identifier(table)
+    );
+    let source_rows = sqlx::query(&select_sql).fetch_all(&mut *local).await?;
+    let mut values: Vec<Vec<RestoreValue>> = Vec::with_capacity(source_rows.len());
+    for row in source_rows {
+        if table == "settings" {
+            let key: String = row.try_get("key")?;
+            if !is_restore_pushable_setting_key(&key) {
+                continue;
+            }
+        }
+        let mut row_values = Vec::with_capacity(columns.len());
+        for (index, (_, declared_type)) in columns.iter().enumerate() {
+            row_values.push(sqlite_restore_value(&row, index, declared_type)?);
+        }
+        values.push(row_values);
+    }
+
+    let chunk_size = if table == "product_images" { 10 } else { 100 };
+    for chunk in values.chunks(chunk_size) {
+        let mut builder = QueryBuilder::<MySql>::new(format!(
+            "INSERT INTO {} ({}) ",
+            mysql_identifier(table),
+            quoted_columns.join(", ")
+        ));
+        builder.push_values(chunk, |mut separated, row_values| {
+            for value in row_values {
+                push_restore_value(&mut separated, value);
+            }
+        });
+        builder.push(" ON DUPLICATE KEY UPDATE ");
+        {
+            let mut updates = builder.separated(", ");
+            for column in &quoted_columns {
+                updates.push(format!("{column} = VALUES({column})"));
+            }
+        }
+        builder.build().execute(&mut **tx).await?;
+    }
+    Ok(values.len() as i64)
+}
+
+async fn assert_attendance_audit_import_schema_ready(mysql: &MySqlPool) -> Result<(), sqlx::Error> {
+    let table_ready: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = ?
+           AND COLUMN_NAME IN ('connectionId', 'token')",
+    )
+    .bind(MARIADB_ATTENDANCE_AUDIT_IMPORT_TABLE)
+    .fetch_one(mysql)
+    .await?;
+    if table_ready != 2 {
+        return Err(account_protocol_error(
+            "MARIADB_ATTENDANCE_AUDIT_IMPORT_SCHEMA_REQUIRED: reconnect this till to finish the MariaDB attendance migration",
+        ));
+    }
+
+    let trigger_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TRIGGERS
+         WHERE TRIGGER_SCHEMA = DATABASE()
+           AND TRIGGER_NAME IN (
+             'pos_audit_employee_attendance_insert',
+             'pos_audit_employee_attendance_update'
+           )
+           AND LOCATE('pos_attendance_audit_import_sessions', ACTION_STATEMENT) > 0
+           AND LOCATE('@lbj_pos_attendance_audit_import', ACTION_STATEMENT) > 0
+           AND LOCATE('CONNECTION_ID()', ACTION_STATEMENT) > 0",
+    )
+    .fetch_one(mysql)
+    .await?;
+    if trigger_count != 2 {
+        return Err(account_protocol_error(
+            "MARIADB_ATTENDANCE_AUDIT_IMPORT_SCHEMA_REQUIRED: attendance audit triggers are not current",
+        ));
+    }
+    Ok(())
+}
+
+async fn begin_attendance_audit_import(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    token: &str,
+) -> Result<i64, sqlx::Error> {
+    let connection_id: i64 = sqlx::query_scalar(MYSQL_SIGNED_CONNECTION_ID_SELECT)
+        .fetch_one(&mut **tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM pos_attendance_audit_import_sessions
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO pos_attendance_audit_import_sessions (connectionId, token)
+         VALUES (CONNECTION_ID(), ?)",
+    )
+    .bind(token)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("SET @lbj_pos_attendance_audit_import = ?")
+        .bind(token)
+        .execute(&mut **tx)
+        .await?;
+    Ok(connection_id)
+}
+
+async fn finish_attendance_audit_import(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    connection_id: i64,
+    token: &str,
+) -> Result<(), sqlx::Error> {
+    let removed = sqlx::query(
+        "DELETE FROM pos_attendance_audit_import_sessions
+         WHERE connectionId = ? AND BINARY token = BINARY ?",
+    )
+    .bind(connection_id)
+    .bind(token)
+    .execute(&mut **tx)
+    .await?;
+    if removed.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "MARIADB_ATTENDANCE_AUDIT_IMPORT_STATE_CHANGED: attendance import marker was lost",
+        ));
+    }
+    sqlx::query("SET @lbj_pos_attendance_audit_import = NULL")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn assert_employee_profile_authority_schema_ready(
+    mysql: &MySqlPool,
+) -> Result<(), sqlx::Error> {
+    let columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = ?
+           AND COLUMN_NAME IN ('connectionId', 'token', 'expiresAt')",
+    )
+    .bind(MARIADB_EMPLOYEE_PROFILE_AUTHORITY_TABLE)
+    .fetch_one(mysql)
+    .await?;
+    if columns != 3 {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_AUTHORITY_REQUIRED: reconnect this till to finish the MariaDB staff-security migration",
+        ));
+    }
+    let triggers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TRIGGERS
+         WHERE TRIGGER_SCHEMA = DATABASE()
+           AND TRIGGER_NAME IN (
+             'pos_guard_attendance_employee_insert',
+             'pos_guard_attendance_employee_update'
+           )
+           AND LOCATE('pos_employee_profile_write_authority', ACTION_STATEMENT) > 0
+           AND LOCATE('@lbj_pos_employee_profile_authority', ACTION_STATEMENT) > 0
+           AND LOCATE('CONNECTION_ID()', ACTION_STATEMENT) > 0",
+    )
+    .fetch_one(mysql)
+    .await?;
+    if triggers != 2 {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_AUTHORITY_REQUIRED: MariaDB staff-security triggers are not current",
+        ));
+    }
+    Ok(())
+}
+
+async fn begin_employee_profile_authority(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    token: &str,
+) -> Result<i64, sqlx::Error> {
+    let connection_id: i64 = sqlx::query_scalar(MYSQL_SIGNED_CONNECTION_ID_SELECT)
+        .fetch_one(&mut **tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM pos_employee_profile_write_authority
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO pos_employee_profile_write_authority
+            (connectionId, token, expiresAt)
+         VALUES (CONNECTION_ID(), ?, TIMESTAMPADD(SECOND, ?, UTC_TIMESTAMP(3)))",
+    )
+    .bind(token)
+    .bind(MARIADB_EMPLOYEE_PROFILE_AUTHORITY_SECONDS)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("SET @lbj_pos_employee_profile_authority = ?")
+        .bind(token)
+        .execute(&mut **tx)
+        .await?;
+    Ok(connection_id)
+}
+
+async fn finish_employee_profile_authority(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    connection_id: i64,
+    token: &str,
+) -> Result<(), sqlx::Error> {
+    let removed = sqlx::query(
+        "DELETE FROM pos_employee_profile_write_authority
+         WHERE connectionId = ? AND BINARY token = BINARY ?",
+    )
+    .bind(connection_id)
+    .bind(token)
+    .execute(&mut **tx)
+    .await?;
+    if removed.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_AUTHORITY_CHANGED: staff write authority was lost",
+        ));
+    }
+    sqlx::query("SET @lbj_pos_employee_profile_authority = NULL")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+fn employee_profile_from_mysql_row(row: &MySqlRow) -> Result<EmployeeProfileRecord, sqlx::Error> {
+    Ok(EmployeeProfileRecord {
+        id: row.try_get("id")?,
+        store_id: row.try_get("storeId")?,
+        name: row.try_get("name")?,
+        pin: row.try_get("pin")?,
+        pin_hash: row.try_get("pinHash")?,
+        role: row.try_get("role")?,
+        email: row.try_get("email")?,
+        is_active: row.try_get::<i64, _>("isActive")? != 0,
+        created_at: row.try_get("createdAt")?,
+        updated_at: row.try_get("updatedAt")?,
+    })
+}
+
+async fn select_employee_profile_for_update(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    employee_id: &str,
+) -> Result<Option<EmployeeProfileRecord>, sqlx::Error> {
+    let sql = format!(
+        "SELECT CAST(id AS CHAR CHARACTER SET utf8mb4) AS id,
+                COALESCE(storeId, '') AS storeId, COALESCE(name, '') AS name,
+                COALESCE(pin, '') AS pin, COALESCE(pinHash, '') AS pinHash,
+                COALESCE(role, '') AS role, COALESCE(email, '') AS email,
+                {MYSQL_SIGNED_EMPLOYEE_ACTIVE_PROJECTION},
+                COALESCE(createdAt, '') AS createdAt,
+                COALESCE(updatedAt, '') AS updatedAt
+         FROM employees WHERE BINARY id = BINARY ? LIMIT 1 FOR UPDATE"
+    );
+    let row = sqlx::query(&sql)
+        .bind(employee_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    row.as_ref()
+        .map(employee_profile_from_mysql_row)
+        .transpose()
+}
+
+fn employee_profile_audit_json(employee: &EmployeeProfileRecord) -> String {
+    serde_json::json!({
+        "id": employee.id,
+        "storeId": employee.store_id,
+        "name": employee.name,
+        "pin": "[redacted]",
+        "pinHash": "[redacted]",
+        "role": employee.role,
+        "email": employee.email,
+        "isActive": employee.is_active,
+        "createdAt": employee.created_at,
+    })
+    .to_string()
+}
+
+fn decoded_base64_pin_component_len(value: &str) -> Option<usize> {
+    if value.is_empty() || value.len() % 4 != 0 {
+        return None;
+    }
+    let mut padding = false;
+    let mut padding_count = 0usize;
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' if !padding => {}
+            b'=' => {
+                padding = true;
+                padding_count += 1;
+                if padding_count > 2 {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    STANDARD_BASE64
+        .decode(value)
+        .ok()
+        .map(|decoded| decoded.len())
+}
+
+fn is_valid_pbkdf2_pin_hash(value: &str) -> bool {
+    let parts: Vec<_> = value.split('$').collect();
+    if parts.len() != 4 || parts[0] != "pbkdf2-sha256" {
+        return false;
+    }
+    let Ok(iterations) = parts[1].parse::<u64>() else {
+        return false;
+    };
+    let salt_len = decoded_base64_pin_component_len(parts[2]);
+    let digest_len = decoded_base64_pin_component_len(parts[3]);
+    (100_000..=1_000_000).contains(&iterations)
+        && salt_len.is_some_and(|len| (16..=64).contains(&len))
+        && digest_len == Some(32)
+}
+
+fn is_valid_legacy_sha256_pin_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_valid_legacy_plaintext_pin(value: &str) -> bool {
+    (4..=8).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn employee_has_valid_runtime_pin(employee: &EmployeeProfileRecord) -> bool {
+    match (employee.pin.is_empty(), employee.pin_hash.is_empty()) {
+        (true, false) => {
+            is_valid_pbkdf2_pin_hash(&employee.pin_hash)
+                || is_valid_legacy_sha256_pin_hash(&employee.pin_hash)
+        }
+        (false, true) => is_valid_legacy_plaintext_pin(&employee.pin),
+        _ => false,
+    }
+}
+
+fn employee_has_valid_persisted_pin(employee: &EmployeeProfileRecord) -> bool {
+    const ATTENDANCE_ENVELOPE: &str = "attendance-only-v1$";
+    if employee.role == "attendance" {
+        return employee.pin.is_empty()
+            && employee
+                .pin_hash
+                .strip_prefix(ATTENDANCE_ENVELOPE)
+                .is_some_and(is_valid_pbkdf2_pin_hash);
+    }
+    employee_has_valid_runtime_pin(employee)
+}
+
+fn employee_profile_credentials_allowed(
+    before: Option<&EmployeeProfileRecord>,
+    after: &EmployeeProfileRecord,
+) -> bool {
+    let credentials_unchanged = before
+        .is_some_and(|current| current.pin == after.pin && current.pin_hash == after.pin_hash);
+    if credentials_unchanged {
+        return employee_has_valid_persisted_pin(after);
+    }
+    if after.role == "attendance" {
+        return after.pin.is_empty()
+            && after
+                .pin_hash
+                .strip_prefix("attendance-only-v1$")
+                .is_some_and(is_valid_pbkdf2_pin_hash);
+    }
+    after.pin.is_empty() && is_valid_pbkdf2_pin_hash(&after.pin_hash)
+}
+
+fn employee_is_usable_admin(employee: &EmployeeProfileRecord) -> bool {
+    employee.is_active && employee.role == "admin" && employee_has_valid_runtime_pin(employee)
+}
+
+async fn lock_all_employee_profiles(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+) -> Result<Vec<EmployeeProfileRecord>, sqlx::Error> {
+    let sql = format!(
+        "SELECT CAST(id AS CHAR CHARACTER SET utf8mb4) AS id,
+                COALESCE(storeId, '') AS storeId, COALESCE(name, '') AS name,
+                COALESCE(pin, '') AS pin, COALESCE(pinHash, '') AS pinHash,
+                COALESCE(role, '') AS role, COALESCE(email, '') AS email,
+                {MYSQL_SIGNED_EMPLOYEE_ACTIVE_PROJECTION},
+                COALESCE(createdAt, '') AS createdAt,
+                COALESCE(updatedAt, '') AS updatedAt
+         FROM employees ORDER BY BINARY id FOR UPDATE"
+    );
+    sqlx::query(&sql)
+        .fetch_all(&mut **tx)
+        .await?
+        .iter()
+        .map(employee_profile_from_mysql_row)
+        .collect()
+}
+
+fn configured_role_can_open_employees(role: &str, raw: Option<&str>) -> bool {
+    if role == "admin" {
+        return true;
+    }
+    if !matches!(role, "manager" | "supervisor" | "cashier") {
+        return false;
+    }
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    let roles = value.get("roles").unwrap_or(&value);
+    roles
+        .get(role)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|permissions| {
+            permissions
+                .iter()
+                .any(|permission| permission.as_str() == Some("open_employees"))
+        })
+}
+
+async fn authorize_employee_profile_actor(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    actor_employee_id: &str,
+    actor_expected_updated_at: &str,
+) -> Result<EmployeeProfileRecord, sqlx::Error> {
+    if actor_employee_id.is_empty() || actor_expected_updated_at.is_empty() {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_REQUIRED: sign in again before changing staff access",
+        ));
+    }
+    let actor = select_employee_profile_for_update(tx, actor_employee_id)
+        .await?
+        .ok_or_else(|| {
+            account_protocol_error(
+                "EMPLOYEE_PROFILE_ACTOR_REQUIRED: the authorizing staff account no longer exists",
+            )
+        })?;
+    if !actor.is_active
+        || !matches!(
+            actor.role.as_str(),
+            "admin" | "manager" | "supervisor" | "cashier"
+        )
+        || actor.updated_at != actor_expected_updated_at
+    {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_STALE: authorizing staff access changed; sign in again",
+        ));
+    }
+    let permission_json: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = 'role_permissions' LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    if !configured_role_can_open_employees(&actor.role, permission_json.as_deref()) {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_FORBIDDEN: this staff member cannot manage employees",
+        ));
+    }
+    Ok(actor)
+}
+
+fn assert_first_admin_bootstrap_allowed(
+    employee: &EmployeeProfileRecord,
+    locked_existing_employees: &[EmployeeProfileRecord],
+) -> Result<(), sqlx::Error> {
+    if employee.role != "admin"
+        || !employee.is_active
+        || !employee.pin.is_empty()
+        || !is_valid_pbkdf2_pin_hash(&employee.pin_hash)
+    {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_REQUIRED: the first staff account must be an active administrator with a secure PIN",
+        ));
+    }
+    if !locked_existing_employees.is_empty() {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_REQUIRED: first-administrator bootstrap is allowed only before any staff records exist",
+        ));
+    }
+    Ok(())
+}
+
+fn assert_employee_profile_actor_scope(
+    actor: &EmployeeProfileRecord,
+    before: Option<&EmployeeProfileRecord>,
+    after: &EmployeeProfileRecord,
+) -> Result<(), sqlx::Error> {
+    if actor.role == "admin" {
+        return Ok(());
+    }
+    if after.role == "admin" || before.is_some_and(|employee| employee.role == "admin") {
+        return Err(account_protocol_error(
+            "EMPLOYEE_PROFILE_ACTOR_FORBIDDEN: only an administrator can create or change an administrator",
+        ));
+    }
+    if actor.id == after.id {
+        let Some(before) = before else {
+            return Err(account_protocol_error(
+                "EMPLOYEE_PROFILE_ACTOR_FORBIDDEN: staff cannot create their own account",
+            ));
+        };
+        if before.role != after.role
+            || before.is_active != after.is_active
+            || before.pin != after.pin
+            || before.pin_hash != after.pin_hash
+        {
+            return Err(account_protocol_error(
+                "EMPLOYEE_PROFILE_ACTOR_FORBIDDEN: non-administrators cannot change their own access or PIN",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn assert_no_other_active_tills_in_restore(
     tx: &mut sqlx::Transaction<'_, MySql>,
     till_id: &str,
@@ -3127,6 +4099,240 @@ async fn assert_no_other_active_tills_in_restore(
     Err(account_protocol_error(format!(
         "MariaDB restore requires maintenance mode. Close these tills and wait {MARIADB_RESTORE_ONLINE_WINDOW_SECONDS} seconds: {names}"
     )))
+}
+
+enum ControlledImportGateClaim {
+    Claimed,
+    RecoveredCommitted(String),
+}
+
+async fn claim_controlled_import_gate(
+    mysql: &MySqlPool,
+    till_id: &str,
+) -> Result<ControlledImportGateClaim, sqlx::Error> {
+    sqlx::query("SET @lbj_pos_restore_bypass = ?")
+        .bind(till_id)
+        .execute(mysql)
+        .await?;
+    let stamp: String = sqlx::query_scalar(
+        "SELECT CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3),
+                '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')",
+    )
+    .fetch_one(mysql)
+    .await?;
+    let mut tx = mysql.begin().await?;
+    cleanup_expired_whole_system_close(&mut tx).await?;
+    let close_barrier = locked_whole_system_close_barrier(&mut tx).await?;
+    if close_barrier.state != "idle" {
+        return Err(account_protocol_error(format!(
+            "{WHOLE_SYSTEM_CLOSE_IN_PROGRESS_CODE}: abort the whole-system close before importing local data"
+        )));
+    }
+    let gate: Option<(String, i64)> = sqlx::query_as(MYSQL_RESTORE_GATE_LOCK_SELECT)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let (gate_owner, gate_active) = gate.ok_or_else(|| {
+        account_protocol_error(format!(
+            "{MYSQL_COORDINATION_SCHEMA_MISSING_CODE}: pos_restore_gate row 1 is required before importing local data"
+        ))
+    })?;
+    match restore_gate_write_decision(gate_active, &gate_owner, Some(till_id)) {
+        RestoreGateWriteDecision::Allowed => {}
+        RestoreGateWriteDecision::MaintenanceBlocked => {
+            return Err(account_protocol_error(format!(
+                "{MARIADB_RESTORE_MAINTENANCE_CODE}: MariaDB import is owned by another till"
+            )));
+        }
+        RestoreGateWriteDecision::Corrupt => {
+            return Err(account_protocol_error(format!(
+                "{MYSQL_COORDINATION_SCHEMA_CORRUPT_CODE}: pos_restore_gate row 1 has an invalid state"
+            )));
+        }
+    }
+
+    let bootstrap_epoch: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = 'server_data_epoch' LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let bootstrap_done: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM settings WHERE `key` = 'bootstrap_done' FOR UPDATE",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let controlled_owner: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if gate_active == 1 && gate_owner == till_id && controlled_owner.as_deref() != Some(till_id) {
+        return Err(account_protocol_error(format!(
+            "{MARIADB_RESTORE_MAINTENANCE_CODE}: this maintenance gate belongs to another operation"
+        )));
+    }
+    if gate_active == 1 && gate_owner == till_id && bootstrap_done == 1 {
+        sqlx::query(
+            "UPDATE pos_restore_gate SET isActive = 0, claimedAt = ?
+             WHERE id = 1 AND isActive = 1 AND BINARY ownerTillId = BINARY ?",
+        )
+        .bind(&stamp)
+        .bind(till_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM settings WHERE `key` = ? AND BINARY value = BINARY ?")
+            .bind(MARIADB_RESTORE_MAINTENANCE_KEY)
+            .bind(till_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM settings WHERE `key` = ? AND BINARY value = BINARY ?")
+            .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+            .bind(till_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(ControlledImportGateClaim::RecoveredCommitted(
+            bootstrap_epoch.unwrap_or(stamp),
+        ));
+    }
+    if bootstrap_done != 0 {
+        return Err(account_protocol_error(
+            "CONTROLLED_IMPORT_DESTINATION_NOT_EMPTY: MariaDB bootstrap is already complete",
+        ));
+    }
+    if controlled_owner
+        .as_deref()
+        .is_some_and(|owner| owner != till_id)
+    {
+        return Err(account_protocol_error(
+            "CONTROLLED_IMPORT_DESTINATION_NOT_EMPTY: another till owns the unfinished import",
+        ));
+    }
+
+    let mut populated = Vec::new();
+    for table in MARIADB_CONTROLLED_IMPORT_EMPTY_TABLES {
+        let row = sqlx::query(&format!(
+            "SELECT 1 FROM {} LIMIT 1 FOR UPDATE",
+            mysql_identifier(table)
+        ))
+        .fetch_optional(&mut *tx)
+        .await?;
+        if row.is_some() {
+            populated.push(*table);
+        }
+    }
+    let remote_role_permissions: Option<String> = sqlx::query_scalar(
+        "SELECT `key` FROM settings
+         WHERE LOWER(TRIM(`key`)) = 'role_permissions' LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if remote_role_permissions.is_some() {
+        populated.push("settings.role_permissions");
+    }
+    if !populated.is_empty() {
+        return Err(account_protocol_error(format!(
+            "CONTROLLED_IMPORT_DESTINATION_NOT_EMPTY: MariaDB already contains {}",
+            populated.join(", ")
+        )));
+    }
+    sqlx::query(
+        "UPDATE pos_restore_gate
+         SET ownerTillId = ?, isActive = 1, claimedAt = ?
+         WHERE id = 1 AND (
+           isActive = 0 OR (isActive = 1 AND BINARY ownerTillId = BINARY ?)
+         )",
+    )
+    .bind(till_id)
+    .bind(&stamp)
+    .bind(till_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO settings (`key`, value, updatedAt)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           value = IF(BINARY value = BINARY VALUES(value), VALUES(value), value),
+           updatedAt = IF(BINARY value = BINARY VALUES(value), VALUES(updatedAt), updatedAt)",
+    )
+    .bind(MARIADB_RESTORE_MAINTENANCE_KEY)
+    .bind(till_id)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO settings (`key`, value, updatedAt)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           value = IF(BINARY value = BINARY VALUES(value), VALUES(value), value),
+           updatedAt = IF(BINARY value = BINARY VALUES(value), VALUES(updatedAt), updatedAt)",
+    )
+    .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+    .bind(till_id)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    let claimed_owner: Option<String> = sqlx::query_scalar(MYSQL_RESTORE_GATE_ACTIVE_OWNER_SELECT)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let marker_owner: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = ? LIMIT 1",
+    )
+    .bind(MARIADB_RESTORE_MAINTENANCE_KEY)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let controlled_owner: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = ? LIMIT 1",
+    )
+    .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if claimed_owner.as_deref() != Some(till_id)
+        || marker_owner.as_deref() != Some(till_id)
+        || controlled_owner.as_deref() != Some(till_id)
+    {
+        return Err(account_protocol_error(format!(
+            "{MARIADB_RESTORE_MAINTENANCE_CODE}: MariaDB import ownership changed"
+        )));
+    }
+    tx.commit().await?;
+    Ok(ControlledImportGateClaim::Claimed)
+}
+
+async fn release_controlled_import_gate(
+    mysql: &MySqlPool,
+    till_id: &str,
+    epoch: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = mysql.begin().await?;
+    let released = sqlx::query(
+        "UPDATE pos_restore_gate SET isActive = 0, claimedAt = ?
+         WHERE id = 1 AND isActive = 1 AND BINARY ownerTillId = BINARY ?",
+    )
+    .bind(epoch)
+    .bind(till_id)
+    .execute(&mut *tx)
+    .await?;
+    if released.rows_affected() != 1 {
+        return Err(account_protocol_error(format!(
+            "{MARIADB_RESTORE_MAINTENANCE_CODE}: the controlled-import gate could not be released; retry from the same till"
+        )));
+    }
+    sqlx::query("DELETE FROM settings WHERE `key` = ? AND BINARY value = BINARY ?")
+        .bind(MARIADB_RESTORE_MAINTENANCE_KEY)
+        .bind(till_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM settings WHERE `key` = ? AND BINARY value = BINARY ?")
+        .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+        .bind(till_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }
 
 async fn assert_no_active_terminal_attempts_in_restore(
@@ -3177,6 +4383,33 @@ async fn assert_no_active_local_terminal_attempts_in_restore(
     Ok(())
 }
 
+async fn assert_no_active_local_terminal_attempts_from_connection(
+    local: &mut SqliteConnection,
+) -> Result<(), sqlx::Error> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'payment_terminal_attempts'",
+    )
+    .fetch_one(&mut *local)
+    .await?;
+    if exists == 0 {
+        return Ok(());
+    }
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payment_terminal_attempts
+         WHERE status IN ('prepared', 'started', 'uncertain', 'approved',
+                          'commit_failed', 'completion_pending')",
+    )
+    .fetch_one(&mut *local)
+    .await?;
+    if active > 0 {
+        return Err(account_protocol_error(format!(
+            "MariaDB restore cannot continue while this till has {active} terminal payment attempt(s) still needing completion or recovery"
+        )));
+    }
+    Ok(())
+}
+
 fn sqlite_account_from_row(row: &SqliteRow) -> Result<CustomerAccountRecord, sqlx::Error> {
     Ok(CustomerAccountRecord {
         id: row.try_get("id")?,
@@ -3212,6 +4445,9 @@ fn sqlite_account_entry_from_row(
         entry_type: row.try_get("entryType")?,
         amount_pence: row.try_get("amountPence")?,
         payment_method: row.try_get("paymentMethod")?,
+        tips_amount: row.try_get("tipsAmount")?,
+        service_charge_amount: row.try_get("serviceChargeAmount")?,
+        cashback_amount: row.try_get("cashbackAmount")?,
         reference: row.try_get("reference")?,
         description: row.try_get("description")?,
         receipt_number: row.try_get("receiptNumber")?,
@@ -3236,6 +4472,9 @@ fn mysql_account_entry_from_row(row: &MySqlRow) -> Result<CustomerAccountEntryRe
         entry_type: row.try_get("entryType")?,
         amount_pence: row.try_get("amountPence")?,
         payment_method: row.try_get("paymentMethod")?,
+        tips_amount: row.try_get("tipsAmount")?,
+        service_charge_amount: row.try_get("serviceChargeAmount")?,
+        cashback_amount: row.try_get("cashbackAmount")?,
         reference: row.try_get("reference")?,
         description: row.try_get("description")?,
         receipt_number: row.try_get("receiptNumber")?,
@@ -3261,6 +4500,9 @@ fn entry_matches_change(
         && entry.entry_type == change.entry_type
         && entry.amount_pence == change.amount_pence
         && entry.payment_method == change.payment_method
+        && entry.tips_amount == change.tips_amount
+        && entry.service_charge_amount == change.service_charge_amount
+        && entry.cashback_amount == change.cashback_amount
         && entry.reference == change.reference
         && entry.description == change.description
         && entry.receipt_number == change.receipt_number
@@ -3273,6 +4515,25 @@ fn entry_matches_change(
 }
 
 fn validate_account_change_shape(change: &CustomerAccountChange) -> Result<(), sqlx::Error> {
+    let extras = checked_terminal_extras(
+        change.tips_amount,
+        change.service_charge_amount,
+        change.cashback_amount,
+    )?;
+    if extras > 0 {
+        if change.entry_type != "payment"
+            || change.payment_method != "card"
+            || change.reference.trim().is_empty()
+            || change.amount_pence >= 0
+        {
+            return Err(account_protocol_error(
+                "Terminal additions require a referenced card account payment",
+            ));
+        }
+        checked_card_collection(change.amount_pence.checked_neg().ok_or_else(|| {
+            account_protocol_error("Invalid customer account payment amount")
+        })?, extras)?;
+    }
     if change.id.trim().is_empty()
         || change.customer_id.trim().is_empty()
         || change.idempotency_key.trim().is_empty()
@@ -3370,6 +4631,9 @@ fn change_to_entry(change: &CustomerAccountChange, updated_at: &str) -> Customer
         entry_type: change.entry_type.clone(),
         amount_pence: change.amount_pence,
         payment_method: change.payment_method.clone(),
+        tips_amount: change.tips_amount,
+        service_charge_amount: change.service_charge_amount,
+        cashback_amount: change.cashback_amount,
         reference: change.reference.clone(),
         description: change.description.clone(),
         receipt_number: change.receipt_number,
@@ -3434,6 +4698,8 @@ async fn find_sqlite_account_entry(
 ) -> Result<Option<CustomerAccountEntryRecord>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
+                COALESCE(tipsAmount, 0) AS tipsAmount, COALESCE(serviceChargeAmount, 0) AS serviceChargeAmount,
+                COALESCE(cashbackAmount, 0) AS cashbackAmount,
                 reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
                 shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt
          FROM customer_account_entries WHERE id = ? OR idempotencyKey = ? LIMIT 1",
@@ -3454,6 +4720,9 @@ async fn find_mysql_account_entry(
                 CAST(customerId AS CHAR) AS customerId, CAST(orderId AS CHAR) AS orderId,
                 CAST(entryType AS CHAR) AS entryType, CAST(amountPence AS SIGNED) AS amountPence,
                 CAST(paymentMethod AS CHAR) AS paymentMethod, CAST(reference AS CHAR) AS reference,
+                CAST(COALESCE(tipsAmount, 0) AS SIGNED) AS tipsAmount,
+                CAST(COALESCE(serviceChargeAmount, 0) AS SIGNED) AS serviceChargeAmount,
+                CAST(COALESCE(cashbackAmount, 0) AS SIGNED) AS cashbackAmount,
                 CAST(description AS CHAR) AS description, CAST(receiptNumber AS SIGNED) AS receiptNumber,
                 CAST(receiptKey AS CHAR) AS receiptKey, CAST(employeeId AS CHAR) AS employeeId,
                 CAST(tillNumber AS CHAR) AS tillNumber, CAST(shiftId AS CHAR) AS shiftId,
@@ -3629,8 +4898,9 @@ async fn apply_sqlite_account_change(
         "INSERT INTO customer_account_entries
          (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
           reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
-          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt,
+          tipsAmount, serviceChargeAmount, cashbackAmount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&change.id)
     .bind(&change.customer_id)
@@ -3651,6 +4921,9 @@ async fn apply_sqlite_account_change(
     .bind(balance)
     .bind(&change.created_at)
     .bind(&stamp)
+    .bind(change.tips_amount)
+    .bind(change.service_charge_amount)
+    .bind(change.cashback_amount)
     .execute(&mut **tx)
     .await?;
     account.balance_pence = balance;
@@ -3703,8 +4976,9 @@ async fn apply_mysql_account_change(
         "INSERT INTO customer_account_entries
          (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
           reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
-          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt,
+          tipsAmount, serviceChargeAmount, cashbackAmount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&change.id)
     .bind(&change.customer_id)
@@ -3725,6 +4999,9 @@ async fn apply_mysql_account_change(
     .bind(balance)
     .bind(&change.created_at)
     .bind(stamp)
+    .bind(change.tips_amount)
+    .bind(change.service_charge_amount)
+    .bind(change.cashback_amount)
     .execute(&mut **tx)
     .await?;
     account.balance_pence = balance;
@@ -3788,8 +5065,9 @@ async fn apply_authoritative_sqlite_account_change(
             "INSERT INTO customer_account_entries
              (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
               reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
-              shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt,
+              tipsAmount, serviceChargeAmount, cashbackAmount)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&change.id)
         .bind(&change.customer_id)
@@ -3810,6 +5088,9 @@ async fn apply_authoritative_sqlite_account_change(
         .bind(change.balance_after_pence)
         .bind(&change.created_at)
         .bind(&stamp)
+        .bind(change.tips_amount)
+        .bind(change.service_charge_amount)
+        .bind(change.cashback_amount)
         .execute(&mut **tx)
         .await?;
     }
@@ -3944,6 +5225,9 @@ fn sum_payment_allocation_rows(
                 amount,
                 cash_amount,
                 card_amount,
+                tips_amount: 0,
+                service_charge_amount: 0,
+                cashback_amount: 0,
                 loyalty_amount,
                 account_amount,
                 reference: String::new(),
@@ -3964,7 +5248,47 @@ fn same_quantities(expected: &[(String, i64)], actual: &[(String, i64)]) -> bool
         })
 }
 
+const MAX_SAFE_TERMINAL_MONEY: i64 = 9_007_199_254_740_991;
+
+fn checked_terminal_extras(tips: i64, service_charge: i64, cashback: i64) -> Result<i64, sqlx::Error> {
+    if [tips, service_charge, cashback].iter().any(|value| *value < 0) {
+        return Err(account_protocol_error("Terminal additions cannot be negative"));
+    }
+    tips.checked_add(service_charge)
+        .and_then(|value| value.checked_add(cashback))
+        .filter(|value| *value <= MAX_SAFE_TERMINAL_MONEY)
+        .ok_or_else(|| account_protocol_error("Terminal additions are too large"))
+}
+
+fn checked_card_collection(base: i64, extras: i64) -> Result<i64, sqlx::Error> {
+    base.checked_add(extras)
+        .filter(|value| base > 0 && *value <= MAX_SAFE_TERMINAL_MONEY)
+        .ok_or_else(|| account_protocol_error("The total card collection is invalid or too large"))
+}
+
+fn validate_sale_terminal_extras(bundle: &SaleBundle) -> Result<(), sqlx::Error> {
+    let payment = &bundle.payment;
+    let extras = checked_terminal_extras(
+        payment.tips_amount,
+        payment.service_charge_amount,
+        payment.cashback_amount,
+    )?;
+    if extras > 0 {
+        if bundle.order.order_type != "sale" || payment.reference.trim().is_empty() {
+            return Err(account_protocol_error(
+                "Terminal additions belong to the original referenced sale; goods refunds exclude them",
+            ));
+        }
+        // Product tender allocation remains unchanged. Extras affect the
+        // terminal collection and drawer only, never stock, VAT or loyalty.
+        checked_card_collection(payment.card_amount, extras)?;
+        payment_allocation(payment)?;
+    }
+    Ok(())
+}
+
 fn prepare_sale_account_changes(bundle: &mut SaleBundle) -> Result<(), sqlx::Error> {
+    validate_sale_terminal_extras(bundle)?;
     let account_amount = bundle.payment.account_amount;
     if account_amount == 0 && bundle.account_changes.is_empty() {
         return Ok(());
@@ -4283,6 +5607,21 @@ async fn validate_sqlite_reversal(
             "Sale is not available for refund".into(),
         ));
     }
+    if bundle.audit.action == "order_voided" || o.notes.starts_with("Void of receipt") {
+        let with_extras: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payments WHERE orderId = ?
+             AND (COALESCE(tipsAmount, 0) <> 0 OR COALESCE(serviceChargeAmount, 0) <> 0
+                  OR COALESCE(cashbackAmount, 0) <> 0)",
+        )
+        .bind(&o.original_order_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if with_extras > 0 {
+            return Err(account_protocol_error(
+                "A sale with terminal additions cannot be voided; refund goods without reversing tips, service charge or cashback",
+            ));
+        }
+    }
     let previous_financials: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(ABS(total)), 0), COALESCE(SUM(ABS(subtotal)), 0),
                 COALESCE(SUM(ABS(discountAmount)), 0), COALESCE(SUM(ABS(taxTotal)), 0)
@@ -4413,6 +5752,21 @@ async fn validate_mysql_reversal(
         return Err(sqlx::Error::Protocol(
             "Sale is not available for refund".into(),
         ));
+    }
+    if bundle.audit.action == "order_voided" || o.notes.starts_with("Void of receipt") {
+        let with_extras: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payments WHERE orderId = ?
+             AND (COALESCE(tipsAmount, 0) <> 0 OR COALESCE(serviceChargeAmount, 0) <> 0
+                  OR COALESCE(cashbackAmount, 0) <> 0)",
+        )
+        .bind(&o.original_order_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        if with_extras > 0 {
+            return Err(account_protocol_error(
+                "A sale with terminal additions cannot be voided; refund goods without reversing tips, service charge or cashback",
+            ));
+        }
     }
     let previous_financials: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT CAST(COALESCE(SUM(ABS(total)), 0) AS SIGNED),
@@ -4975,13 +6329,14 @@ async fn insert_sqlite_bundle_with_account_authority(
 
     let p = &committed.payment;
     sqlx::query(
-        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt, tipsAmount, serviceChargeAmount, cashbackAmount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&p.id).bind(&p.order_id).bind(&p.method).bind(p.amount).bind(p.cash_amount)
     .bind(p.card_amount).bind(p.loyalty_amount).bind(p.account_amount)
     .bind(&p.reference).bind(p.change_given).bind(&p.created_at)
-    .bind(&p.updated_at).execute(&mut *tx).await?;
+    .bind(&p.updated_at).bind(p.tips_amount).bind(p.service_charge_amount).bind(p.cashback_amount)
+    .execute(&mut *tx).await?;
 
     for s in &committed.stock_changes {
         sqlx::query("UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?")
@@ -5254,6 +6609,9 @@ fn mysql_payment_from_replay_row(row: &MySqlRow) -> Result<PaymentRecord, sqlx::
         amount: row.try_get("amount")?,
         cash_amount: row.try_get("cashAmount")?,
         card_amount: row.try_get("cardAmount")?,
+        tips_amount: row.try_get("tipsAmount")?,
+        service_charge_amount: row.try_get("serviceChargeAmount")?,
+        cashback_amount: row.try_get("cashbackAmount")?,
         loyalty_amount: row.try_get("loyaltyAmount")?,
         account_amount: row.try_get("accountAmount")?,
         reference: row.try_get("reference")?,
@@ -5415,6 +6773,9 @@ async fn load_and_validate_existing_mysql_bundle(
                 CAST(COALESCE(amount, 0) AS SIGNED) AS amount,
                 CAST(COALESCE(cashAmount, 0) AS SIGNED) AS cashAmount,
                 CAST(COALESCE(cardAmount, 0) AS SIGNED) AS cardAmount,
+                CAST(COALESCE(tipsAmount, 0) AS SIGNED) AS tipsAmount,
+                CAST(COALESCE(serviceChargeAmount, 0) AS SIGNED) AS serviceChargeAmount,
+                CAST(COALESCE(cashbackAmount, 0) AS SIGNED) AS cashbackAmount,
                 CAST(COALESCE(loyaltyAmount, 0) AS SIGNED) AS loyaltyAmount,
                 CAST(COALESCE(accountAmount, 0) AS SIGNED) AS accountAmount,
                 CAST(COALESCE(reference, '') AS CHAR) AS reference,
@@ -5558,6 +6919,9 @@ async fn load_and_validate_existing_mysql_bundle(
                 CAST(entryType AS CHAR) AS entryType,
                 CAST(amountPence AS SIGNED) AS amountPence,
                 CAST(COALESCE(paymentMethod, '') AS CHAR) AS paymentMethod,
+                CAST(COALESCE(tipsAmount, 0) AS SIGNED) AS tipsAmount,
+                CAST(COALESCE(serviceChargeAmount, 0) AS SIGNED) AS serviceChargeAmount,
+                CAST(COALESCE(cashbackAmount, 0) AS SIGNED) AS cashbackAmount,
                 CAST(COALESCE(reference, '') AS CHAR) AS reference,
                 CAST(COALESCE(description, '') AS CHAR) AS description,
                 CAST(COALESCE(receiptNumber, 0) AS SIGNED) AS receiptNumber,
@@ -5808,13 +7172,14 @@ async fn insert_mysql_bundle_once_with_intent_epoch(
     }
     let p = &committed.payment;
     sqlx::query(
-        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO payments (id, orderId, method, amount, cashAmount, cardAmount, loyaltyAmount, accountAmount, reference, changeGiven, createdAt, updatedAt, tipsAmount, serviceChargeAmount, cashbackAmount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&p.id).bind(&p.order_id).bind(&p.method).bind(p.amount).bind(p.cash_amount)
     .bind(p.card_amount).bind(p.loyalty_amount).bind(p.account_amount)
     .bind(&p.reference).bind(p.change_given).bind(&p.created_at)
-    .bind(&p.updated_at).execute(&mut *tx).await?;
+    .bind(&p.updated_at).bind(p.tips_amount).bind(p.service_charge_amount).bind(p.cashback_amount)
+    .execute(&mut *tx).await?;
 
     for s in &committed.stock_changes {
         sqlx::query("UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?")
@@ -5962,6 +7327,681 @@ async fn save_mysql_customer_account_config(
     let account = fetch_mysql_account(&mut tx, &input.customer_id, true).await?;
     tx.commit().await?;
     Ok(account)
+}
+
+fn normalize_customer_loyalty_adjustment_input(
+    mut input: CustomerLoyaltyAdjustmentInput,
+) -> Result<CustomerLoyaltyAdjustmentInput, sqlx::Error> {
+    input.id = input.id.trim().to_string();
+    input.customer_id = input.customer_id.trim().to_string();
+    input.reason = input.reason.trim().to_string();
+    input.employee_id = input.employee_id.trim().to_string();
+    input.actor_expected_updated_at = input.actor_expected_updated_at.trim().to_string();
+    input.created_at = input.created_at.trim().to_string();
+    input.server_data_epoch = input.server_data_epoch.trim().to_string();
+
+    if input.id.is_empty() || input.id.len() > 36 || input.id.chars().any(char::is_control) {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_INVALID: adjustment ID is invalid",
+        ));
+    }
+    if input.customer_id.is_empty()
+        || input.customer_id.len() > 36
+        || input.customer_id.chars().any(char::is_control)
+    {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_INVALID: customer ID is invalid",
+        ));
+    }
+    if input.employee_id.is_empty()
+        || input.employee_id.len() > 36
+        || input.employee_id.chars().any(char::is_control)
+        || input.actor_expected_updated_at.is_empty()
+        || input.actor_expected_updated_at.len() > 64
+    {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_REQUIRED: sign in again before changing loyalty points",
+        ));
+    }
+    let reason_length = input.reason.chars().count();
+    if !(3..=240).contains(&reason_length) || input.reason.chars().any(char::is_control) {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_INVALID: enter a reason between 3 and 240 characters",
+        ));
+    }
+    if input.created_at.is_empty()
+        || input.created_at.len() > 64
+        || chrono::DateTime::parse_from_rfc3339(&input.created_at).is_err()
+    {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_INVALID: adjustment timestamp is invalid",
+        ));
+    }
+    // A refund may reverse points after those points were already redeemed.
+    // Keep that signed starting balance for CAS; corrections must finish at a
+    // nonnegative balance and fit the signed INT movement stored in the ledger.
+    if !(i32::MIN as i64..=MAX_LOYALTY_POINTS).contains(&input.expected_points)
+        || !(0..=MAX_LOYALTY_POINTS).contains(&input.new_points)
+    {
+        return Err(account_protocol_error(format!(
+            "CUSTOMER_LOYALTY_INVALID: starting points must fit a signed INT and corrected points must be between 0 and {MAX_LOYALTY_POINTS}"
+        )));
+    }
+    if input.expected_points == input.new_points {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_INVALID: the corrected balance is unchanged",
+        ));
+    }
+    customer_loyalty_adjustment_delta(&input)?;
+    Ok(input)
+}
+
+fn configured_role_can_adjust_customer_loyalty(role: &str, raw: Option<&str>) -> bool {
+    let role = role.trim();
+    if role == "admin" {
+        return true;
+    }
+    if !matches!(role, "manager" | "supervisor" | "cashier") {
+        return false;
+    }
+
+    // Match the renderer's permission policy: missing or malformed settings
+    // use the default matrix (manager allowed). Once a custom matrix exists,
+    // this newly privileged action is opt-in for every non-admin role.
+    let default_allowed = role == "manager";
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return default_allowed;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return default_allowed;
+    };
+    let roles = value.get("roles").unwrap_or(&value);
+    match roles.get(role) {
+        Some(serde_json::Value::Array(permissions)) => permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("adjust_customer_loyalty")),
+        Some(_) | None => default_allowed,
+    }
+}
+
+fn customer_loyalty_adjustment_delta(
+    input: &CustomerLoyaltyAdjustmentInput,
+) -> Result<i64, sqlx::Error> {
+    input
+        .new_points
+        .checked_sub(input.expected_points)
+        .filter(|change| *change != 0 && i32::try_from(*change).is_ok())
+        .ok_or_else(|| {
+            account_protocol_error("CUSTOMER_LOYALTY_INVALID: points change is out of range")
+        })
+}
+
+fn customer_loyalty_adjustment_reason(input: &CustomerLoyaltyAdjustmentInput) -> String {
+    format!("manual_adjustment: {}", input.reason)
+}
+
+fn customer_loyalty_adjustment_audit(
+    input: &CustomerLoyaltyAdjustmentInput,
+    points_change: i64,
+) -> AuditRecord {
+    AuditRecord {
+        id: input.id.clone(),
+        employee_id: input.employee_id.clone(),
+        action: "customer_loyalty_adjusted".into(),
+        entity_type: "customer".into(),
+        entity_id: input.customer_id.clone(),
+        old_data: serde_json::json!({
+            "loyaltyPoints": input.expected_points,
+        })
+        .to_string(),
+        new_data: serde_json::json!({
+            "actorEmployeeId": input.employee_id,
+            "loyaltyLogId": input.id,
+            "loyaltyPoints": input.new_points,
+            "pointsChange": points_change,
+            "reason": input.reason,
+        })
+        .to_string(),
+        created_at: input.created_at.clone(),
+    }
+}
+
+fn customer_loyalty_adjustment_entry(
+    input: &CustomerLoyaltyAdjustmentInput,
+    points_change: i64,
+    updated_at: String,
+) -> CustomerLoyaltyAdjustmentEntry {
+    CustomerLoyaltyAdjustmentEntry {
+        id: input.id.clone(),
+        customer_id: input.customer_id.clone(),
+        order_id: String::new(),
+        points_change,
+        reason: customer_loyalty_adjustment_reason(input),
+        created_at: input.created_at.clone(),
+        updated_at,
+    }
+}
+
+fn loyalty_adjustment_idempotency_error() -> sqlx::Error {
+    account_protocol_error(
+        "CUSTOMER_LOYALTY_IDEMPOTENCY_CONFLICT: adjustment ID was already used for different data",
+    )
+}
+
+fn exact_loyalty_adjustment_replay(
+    input: &CustomerLoyaltyAdjustmentInput,
+    entry: &CustomerLoyaltyAdjustmentEntry,
+    audit: &AuditRecord,
+) -> Result<(), sqlx::Error> {
+    let points_change = customer_loyalty_adjustment_delta(input)?;
+    // `createdAt` is presentation metadata, not part of the idempotent
+    // business operation. The renderer may retry an ambiguous commit with the
+    // same adjustment ID but a newly generated timestamp. Preserve and return
+    // the original timestamps while comparing every stable semantic field.
+    if entry.created_at != audit.created_at {
+        return Err(loyalty_adjustment_idempotency_error());
+    }
+    let mut persisted_input = input.clone();
+    persisted_input.created_at = entry.created_at.clone();
+    let expected_entry = customer_loyalty_adjustment_entry(
+        &persisted_input,
+        points_change,
+        entry.updated_at.clone(),
+    );
+    let expected_audit = customer_loyalty_adjustment_audit(&persisted_input, points_change);
+    if entry != &expected_entry || audit != &expected_audit {
+        return Err(loyalty_adjustment_idempotency_error());
+    }
+    Ok(())
+}
+
+async fn authorize_sqlite_customer_loyalty_actor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: &CustomerLoyaltyAdjustmentInput,
+) -> Result<(), sqlx::Error> {
+    let actor: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT COALESCE(role, ''), COALESCE(isActive, 0), COALESCE(updatedAt, '')
+         FROM employees WHERE id = ? LIMIT 1",
+    )
+    .bind(&input.employee_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((role, is_active, updated_at)) = actor else {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_REQUIRED: the authorizing staff account no longer exists",
+        ));
+    };
+    if is_active == 0 || updated_at != input.actor_expected_updated_at {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_STALE: authorizing staff access changed; sign in again",
+        ));
+    }
+    let permission_json: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'role_permissions' LIMIT 1")
+            .fetch_optional(&mut **tx)
+            .await?;
+    if !configured_role_can_adjust_customer_loyalty(&role, permission_json.as_deref()) {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_FORBIDDEN: this staff member cannot adjust loyalty points",
+        ));
+    }
+    Ok(())
+}
+
+async fn authorize_mysql_customer_loyalty_actor(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    input: &CustomerLoyaltyAdjustmentInput,
+) -> Result<(), sqlx::Error> {
+    let actor = select_employee_profile_for_update(tx, &input.employee_id)
+        .await?
+        .ok_or_else(|| {
+            account_protocol_error(
+                "CUSTOMER_LOYALTY_ACTOR_REQUIRED: the authorizing staff account no longer exists",
+            )
+        })?;
+    if !actor.is_active || actor.updated_at != input.actor_expected_updated_at {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_STALE: authorizing staff access changed; sign in again",
+        ));
+    }
+    let permission_json: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = 'role_permissions' LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    if !configured_role_can_adjust_customer_loyalty(&actor.role, permission_json.as_deref()) {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_ACTOR_FORBIDDEN: this staff member cannot adjust loyalty points",
+        ));
+    }
+    Ok(())
+}
+
+async fn sqlite_existing_customer_loyalty_adjustment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    adjustment_id: &str,
+) -> Result<Option<(CustomerLoyaltyAdjustmentEntry, AuditRecord)>, sqlx::Error> {
+    let entry: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT COALESCE(customerId, ''), COALESCE(orderId, ''),
+                COALESCE(pointsChange, 0), COALESCE(reason, ''),
+                COALESCE(createdAt, ''), COALESCE(updatedAt, '')
+         FROM loyalty_logs WHERE id = ? LIMIT 1",
+    )
+    .bind(adjustment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let audit: Option<(String, String, String, String, String, String, String)> = sqlx::query_as(
+        "SELECT COALESCE(employeeId, ''), COALESCE(action, ''),
+                COALESCE(entityType, ''), COALESCE(entityId, ''),
+                COALESCE(oldData, ''), COALESCE(newData, ''), COALESCE(createdAt, '')
+         FROM audit_logs WHERE id = ? LIMIT 1",
+    )
+    .bind(adjustment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((customer_id, order_id, points_change, reason, created_at, updated_at)) = entry else {
+        return if audit.is_none() {
+            Ok(None)
+        } else {
+            Err(loyalty_adjustment_idempotency_error())
+        };
+    };
+    let Some((employee_id, action, entity_type, entity_id, old_data, new_data, audit_created_at)) =
+        audit
+    else {
+        return Err(loyalty_adjustment_idempotency_error());
+    };
+    Ok(Some((
+        CustomerLoyaltyAdjustmentEntry {
+            id: adjustment_id.to_string(),
+            customer_id,
+            order_id,
+            points_change,
+            reason,
+            created_at,
+            updated_at,
+        },
+        AuditRecord {
+            id: adjustment_id.to_string(),
+            employee_id,
+            action,
+            entity_type,
+            entity_id,
+            old_data,
+            new_data,
+            created_at: audit_created_at,
+        },
+    )))
+}
+
+async fn mysql_existing_customer_loyalty_adjustment(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    adjustment_id: &str,
+) -> Result<Option<(CustomerLoyaltyAdjustmentEntry, AuditRecord)>, sqlx::Error> {
+    let entry: Option<(String, String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT CAST(COALESCE(customerId, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(orderId, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(pointsChange, 0) AS SIGNED),
+                CAST(COALESCE(reason, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(createdAt, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(updatedAt, '') AS CHAR CHARACTER SET utf8mb4)
+         FROM loyalty_logs WHERE id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(adjustment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let audit: Option<(String, String, String, String, String, String, String)> = sqlx::query_as(
+        "SELECT CAST(COALESCE(employeeId, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(action, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(entityType, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(entityId, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(oldData, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(newData, '') AS CHAR CHARACTER SET utf8mb4),
+                CAST(COALESCE(createdAt, '') AS CHAR CHARACTER SET utf8mb4)
+         FROM audit_logs WHERE id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(adjustment_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((customer_id, order_id, points_change, reason, created_at, updated_at)) = entry else {
+        return if audit.is_none() {
+            Ok(None)
+        } else {
+            Err(loyalty_adjustment_idempotency_error())
+        };
+    };
+    let Some((employee_id, action, entity_type, entity_id, old_data, new_data, audit_created_at)) =
+        audit
+    else {
+        return Err(loyalty_adjustment_idempotency_error());
+    };
+    Ok(Some((
+        CustomerLoyaltyAdjustmentEntry {
+            id: adjustment_id.to_string(),
+            customer_id,
+            order_id,
+            points_change,
+            reason,
+            created_at,
+            updated_at,
+        },
+        AuditRecord {
+            id: adjustment_id.to_string(),
+            employee_id,
+            action,
+            entity_type,
+            entity_id,
+            old_data,
+            new_data,
+            created_at: audit_created_at,
+        },
+    )))
+}
+
+async fn adjust_sqlite_customer_loyalty(
+    pool: &SqlitePool,
+    input: &CustomerLoyaltyAdjustmentInput,
+) -> Result<CustomerLoyaltyAdjustmentResult, sqlx::Error> {
+    let points_change = customer_loyalty_adjustment_delta(input)?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let current: Option<(i64, String)> = sqlx::query_as(
+        "SELECT COALESCE(loyaltyPoints, 0), COALESCE(updatedAt, '')
+         FROM customers WHERE id = ? LIMIT 1",
+    )
+    .bind(&input.customer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((current_points, current_updated_at)) = current else {
+        return Err(account_protocol_error("Customer was not found"));
+    };
+
+    if let Some((entry, audit)) =
+        sqlite_existing_customer_loyalty_adjustment(&mut tx, &input.id).await?
+    {
+        exact_loyalty_adjustment_replay(input, &entry, &audit)?;
+        tx.commit().await?;
+        return Ok(CustomerLoyaltyAdjustmentResult {
+            customer_id: input.customer_id.clone(),
+            loyalty_points: current_points,
+            customer_updated_at: current_updated_at,
+            entry,
+            audit,
+        });
+    }
+
+    authorize_sqlite_customer_loyalty_actor(&mut tx, input).await?;
+    if current_points != input.expected_points {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_CONFLICT: points changed; refresh and try again",
+        ));
+    }
+    let stamp = utc_stamp();
+    let mut persisted_input = input.clone();
+    // Permanent history uses the trusted native clock, not a renderer clock
+    // that could be wrong or directly manipulated.
+    persisted_input.created_at = stamp.clone();
+    let expected_audit = customer_loyalty_adjustment_audit(&persisted_input, points_change);
+    let updated = sqlx::query(
+        "UPDATE customers SET loyaltyPoints = ?, updatedAt = ?
+         WHERE id = ? AND COALESCE(loyaltyPoints, 0) = ?",
+    )
+    .bind(input.new_points)
+    .bind(&stamp)
+    .bind(&input.customer_id)
+    .bind(input.expected_points)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_CONFLICT: points changed; refresh and try again",
+        ));
+    }
+    let entry =
+        customer_loyalty_adjustment_entry(&persisted_input, points_change, stamp.clone());
+    sqlx::query(
+        "INSERT INTO loyalty_logs
+            (id, customerId, orderId, pointsChange, reason, createdAt, updatedAt)
+         VALUES (?, ?, '', ?, ?, ?, ?)",
+    )
+    .bind(&entry.id)
+    .bind(&entry.customer_id)
+    .bind(entry.points_change)
+    .bind(&entry.reason)
+    .bind(&entry.created_at)
+    .bind(&entry.updated_at)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO audit_logs
+            (id, employeeId, action, entityType, entityId,
+             oldData, newData, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&expected_audit.id)
+    .bind(&expected_audit.employee_id)
+    .bind(&expected_audit.action)
+    .bind(&expected_audit.entity_type)
+    .bind(&expected_audit.entity_id)
+    .bind(&expected_audit.old_data)
+    .bind(&expected_audit.new_data)
+    .bind(&expected_audit.created_at)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(CustomerLoyaltyAdjustmentResult {
+        customer_id: input.customer_id.clone(),
+        loyalty_points: input.new_points,
+        customer_updated_at: stamp,
+        entry,
+        audit: expected_audit,
+    })
+}
+
+async fn adjust_mysql_customer_loyalty(
+    pool: &MySqlPool,
+    input: &CustomerLoyaltyAdjustmentInput,
+) -> Result<CustomerLoyaltyAdjustmentResult, sqlx::Error> {
+    let points_change = customer_loyalty_adjustment_delta(input)?;
+    let mut tx = pool.begin().await?;
+    assert_mysql_restore_writes_allowed(&mut tx).await?;
+    assert_mysql_server_data_epoch(&mut tx, &input.server_data_epoch).await?;
+    let current_points = lock_mysql_customer_for_write(&mut tx, &input.customer_id).await?;
+    let current_updated_at: String = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(updatedAt, '') AS CHAR CHARACTER SET utf8mb4)
+         FROM customers WHERE id = ? LIMIT 1",
+    )
+    .bind(&input.customer_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if let Some((entry, audit)) =
+        mysql_existing_customer_loyalty_adjustment(&mut tx, &input.id).await?
+    {
+        exact_loyalty_adjustment_replay(input, &entry, &audit)?;
+        tx.commit().await?;
+        return Ok(CustomerLoyaltyAdjustmentResult {
+            customer_id: input.customer_id.clone(),
+            loyalty_points: current_points,
+            customer_updated_at: current_updated_at,
+            entry,
+            audit,
+        });
+    }
+
+    authorize_mysql_customer_loyalty_actor(&mut tx, input).await?;
+    if current_points != input.expected_points {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_CONFLICT: points changed; refresh and try again",
+        ));
+    }
+    let stamp: String = sqlx::query_scalar(
+        "SELECT CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut persisted_input = input.clone();
+    // Use MariaDB's clock for the immutable activity time. The generic sync
+    // triggers may also restamp updatedAt, which is re-read below.
+    persisted_input.created_at = stamp.clone();
+    let expected_audit = customer_loyalty_adjustment_audit(&persisted_input, points_change);
+    let updated = sqlx::query(
+        "UPDATE customers SET loyaltyPoints = ?, updatedAt = ?
+         WHERE id = ? AND COALESCE(loyaltyPoints, 0) = ?",
+    )
+    .bind(input.new_points)
+    .bind(&stamp)
+    .bind(&input.customer_id)
+    .bind(input.expected_points)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(account_protocol_error(
+            "CUSTOMER_LOYALTY_CONFLICT: points changed; refresh and try again",
+        ));
+    }
+    let entry =
+        customer_loyalty_adjustment_entry(&persisted_input, points_change, stamp.clone());
+    sqlx::query(
+        "INSERT INTO loyalty_logs
+            (id, customerId, orderId, pointsChange, reason, createdAt, updatedAt)
+         VALUES (?, ?, '', ?, ?, ?, ?)",
+    )
+    .bind(&entry.id)
+    .bind(&entry.customer_id)
+    .bind(entry.points_change)
+    .bind(&entry.reason)
+    .bind(&entry.created_at)
+    .bind(&entry.updated_at)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO audit_logs
+            (id, employeeId, action, entityType, entityId,
+             oldData, newData, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&expected_audit.id)
+    .bind(&expected_audit.employee_id)
+    .bind(&expected_audit.action)
+    .bind(&expected_audit.entity_type)
+    .bind(&expected_audit.entity_id)
+    .bind(&expected_audit.old_data)
+    .bind(&expected_audit.new_data)
+    .bind(&expected_audit.created_at)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
+    let (entry, audit) = mysql_existing_customer_loyalty_adjustment(&mut tx, &input.id)
+        .await?
+        .ok_or_else(|| {
+            account_protocol_error(
+                "CUSTOMER_LOYALTY_COMMIT_INCOMPLETE: committed history could not be re-read",
+            )
+        })?;
+    exact_loyalty_adjustment_replay(&persisted_input, &entry, &audit)?;
+    let (persisted_points, persisted_updated_at): (i64, String) = sqlx::query_as(
+        "SELECT CAST(COALESCE(loyaltyPoints, 0) AS SIGNED),
+                CAST(COALESCE(updatedAt, '') AS CHAR CHARACTER SET utf8mb4)
+         FROM customers WHERE id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(&input.customer_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(CustomerLoyaltyAdjustmentResult {
+        customer_id: input.customer_id.clone(),
+        loyalty_points: persisted_points,
+        customer_updated_at: persisted_updated_at,
+        entry,
+        audit,
+    })
+}
+
+async fn cache_sqlite_customer_loyalty_adjustment(
+    pool: &SqlitePool,
+    result: &CustomerLoyaltyAdjustmentResult,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let expected_points = result
+        .loyalty_points
+        .checked_sub(result.entry.points_change)
+        .ok_or_else(|| account_protocol_error("CUSTOMER_LOYALTY_INVALID: cached points overflow"))?;
+    // A newer shared update may already have reached SQLite while this
+    // command was returning. Never move that cache backwards to the balance
+    // from this earlier commit. For equal millisecond timestamps, only apply
+    // when the cached balance is this operation's expected or resulting value.
+    sqlx::query(
+        "UPDATE customers SET loyaltyPoints = ?, updatedAt = ?
+         WHERE id = ?
+           AND (
+             COALESCE(updatedAt, '') < ?
+             OR (
+               COALESCE(updatedAt, '') = ?
+               AND COALESCE(loyaltyPoints, 0) IN (?, ?)
+             )
+           )",
+    )
+        .bind(result.loyalty_points)
+        .bind(&result.customer_updated_at)
+        .bind(&result.customer_id)
+        .bind(&result.customer_updated_at)
+        .bind(&result.customer_updated_at)
+        .bind(expected_points)
+        .bind(result.loyalty_points)
+        .execute(&mut *tx)
+        .await?;
+    let entry = &result.entry;
+    sqlx::query(
+        "INSERT INTO loyalty_logs
+            (id, customerId, orderId, pointsChange, reason, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           customerId = excluded.customerId,
+           orderId = excluded.orderId,
+           pointsChange = excluded.pointsChange,
+           reason = excluded.reason,
+           createdAt = excluded.createdAt,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&entry.id)
+    .bind(&entry.customer_id)
+    .bind(&entry.order_id)
+    .bind(entry.points_change)
+    .bind(&entry.reason)
+    .bind(&entry.created_at)
+    .bind(&entry.updated_at)
+    .execute(&mut *tx)
+    .await?;
+    let audit = &result.audit;
+    sqlx::query(
+        "INSERT INTO audit_logs
+            (id, employeeId, action, entityType, entityId,
+             oldData, newData, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           employeeId = excluded.employeeId,
+           action = excluded.action,
+           entityType = excluded.entityType,
+           entityId = excluded.entityId,
+           oldData = excluded.oldData,
+           newData = excluded.newData,
+           createdAt = excluded.createdAt,
+           updatedAt = excluded.updatedAt",
+    )
+    .bind(&audit.id)
+    .bind(&audit.employee_id)
+    .bind(&audit.action)
+    .bind(&audit.entity_type)
+    .bind(&audit.entity_id)
+    .bind(&audit.old_data)
+    .bind(&audit.new_data)
+    .bind(&audit.created_at)
+    .bind(&result.customer_updated_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 async fn post_sqlite_customer_account_entry(
@@ -6280,8 +8320,9 @@ async fn cache_sqlite_customer_account_mutation(
         "INSERT INTO customer_account_entries
          (id, accountId, customerId, orderId, entryType, amountPence, paymentMethod,
           reference, description, receiptNumber, receiptKey, employeeId, tillNumber,
-          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          shiftId, idempotencyKey, reversesEntryId, balanceAfterPence, createdAt, updatedAt,
+          tipsAmount, serviceChargeAmount, cashbackAmount)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            balanceAfterPence = excluded.balanceAfterPence,
            updatedAt = excluded.updatedAt",
@@ -6305,10 +8346,15 @@ async fn cache_sqlite_customer_account_mutation(
     .bind(entry.balance_after_pence)
     .bind(&entry.created_at)
     .bind(&entry.updated_at)
+    .bind(entry.tips_amount)
+    .bind(entry.service_charge_amount)
+    .bind(entry.cashback_amount)
     .execute(&mut *tx)
     .await?;
     tx.commit().await
 }
+
+const MAX_STOCK_RECEIPT_MONEY: i64 = 9_007_199_254_740_991;
 
 fn validate_stock_receipt_bundle(bundle: &StockReceiptBundle) -> Result<(), sqlx::Error> {
     let receipt = &bundle.receipt;
@@ -6321,6 +8367,8 @@ fn validate_stock_receipt_bundle(bundle: &StockReceiptBundle) -> Result<(), sqlx
     }
 
     let mut product_ids = HashSet::new();
+    let mut line_ids = HashSet::new();
+    let mut log_ids = HashSet::new();
     let mut calculated_total = 0_i64;
     for line in &bundle.lines {
         if line.id.trim().is_empty()
@@ -6328,8 +8376,12 @@ fn validate_stock_receipt_bundle(bundle: &StockReceiptBundle) -> Result<(), sqlx
             || line.product_id.trim().is_empty()
             || line.inventory_log_id.trim().is_empty()
             || line.quantity <= 0
+            || line.quantity > i32::MAX as i64
             || line.unit_cost < 0
+            || line.unit_cost > MAX_STOCK_RECEIPT_MONEY
             || !product_ids.insert(line.product_id.as_str())
+            || !line_ids.insert(line.id.as_str())
+            || !log_ids.insert(line.inventory_log_id.as_str())
         {
             return Err(sqlx::Error::Protocol("Invalid stock receipt line".into()));
         }
@@ -6339,13 +8391,18 @@ fn validate_stock_receipt_bundle(bundle: &StockReceiptBundle) -> Result<(), sqlx
                     sqlx::Error::Protocol("Stock receipt total is too large".into())
                 })?)
                 .ok_or_else(|| sqlx::Error::Protocol("Stock receipt total is too large".into()))?;
+        if calculated_total > MAX_STOCK_RECEIPT_MONEY {
+            return Err(sqlx::Error::Protocol("Stock receipt total is too large".into()));
+        }
     }
     if receipt.total_cost != calculated_total {
         return Err(sqlx::Error::Protocol(
             "Stock receipt total does not match its lines".into(),
         ));
     }
-    if bundle.audit.entity_id != receipt.id
+    if bundle.audit.id.trim().is_empty()
+        || bundle.audit.employee_id != receipt.employee_id
+        || bundle.audit.entity_id != receipt.id
         || bundle.audit.entity_type != "stock_receipt"
         || bundle.audit.action != "stock_received"
     {
@@ -6420,16 +8477,19 @@ async fn insert_sqlite_stock_receipt_bundle(
         .await?;
 
         let result = sqlx::query(
-            "UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?",
+            "UPDATE products SET stockLevel = COALESCE(stockLevel, 0) + ?, updatedAt = ?
+             WHERE id = ? AND COALESCE(stockLevel, 0) BETWEEN ? AND ?",
         )
         .bind(line.quantity)
         .bind(&receipt.updated_at)
         .bind(&line.product_id)
+        .bind(i32::MIN as i64)
+        .bind(i32::MAX as i64 - line.quantity)
         .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
             return Err(sqlx::Error::Protocol(format!(
-                "Product {} is no longer available",
+                "Product {} is unavailable or its stock quantity would exceed the supported range",
                 line.product_name
             )));
         }
@@ -6544,16 +8604,19 @@ async fn insert_mysql_stock_receipt_bundle(
         .await?;
 
         let result = sqlx::query(
-            "UPDATE products SET stockLevel = stockLevel + ?, updatedAt = ? WHERE id = ?",
+            "UPDATE products SET stockLevel = COALESCE(stockLevel, 0) + ?, updatedAt = ?
+             WHERE id = ? AND COALESCE(stockLevel, 0) BETWEEN ? AND ?",
         )
         .bind(line.quantity)
         .bind(&stamp)
         .bind(&line.product_id)
+        .bind(i32::MIN as i64)
+        .bind(i32::MAX as i64 - line.quantity)
         .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
             return Err(sqlx::Error::Protocol(format!(
-                "Product {} is no longer available",
+                "Product {} is unavailable or its stock quantity would exceed the supported range",
                 line.product_name
             )));
         }
@@ -6608,6 +8671,7 @@ fn generic_mysql_outbox_table_allowed(table: &str) -> bool {
             | "promo_groups"
             | "promo_group_items"
             | "employees"
+            | "employee_attendance"
             | "settings"
             | "customers"
             | "registers"
@@ -6775,12 +8839,151 @@ async fn mysql_outbox_table_columns(
         .collect()
 }
 
+const CUSTOMER_PROFILE_FIELDS: &[&str] = &[
+    "name", "phone", "email", "postcode", "loyaltyCode", "notes",
+];
+
+fn normalized_customer_profile(
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| account_protocol_error("Customer profile must be an object"))?;
+    let mut profile = serde_json::Map::new();
+    for &field in CUSTOMER_PROFILE_FIELDS {
+        let text = match object.get(field) {
+            None | Some(serde_json::Value::Null) => "",
+            Some(serde_json::Value::String(text)) => text.trim(),
+            Some(_) => return Err(account_protocol_error(format!("Customer {field} must be text"))),
+        };
+        let text = if matches!(field, "postcode" | "loyaltyCode") {
+            text.to_uppercase()
+        } else {
+            text.to_string()
+        };
+        profile.insert(field.to_string(), serde_json::Value::String(text));
+    }
+    Ok(serde_json::Value::Object(profile))
+}
+
+#[derive(Debug, PartialEq)]
+enum CustomerProfileSyncDecision {
+    AlreadyApplied,
+    Apply,
+}
+
+fn customer_profile_conflict() -> sqlx::Error {
+    sync_conflict("CUSTOMER_PROFILE_CONFLICT: customer details changed on another till; reopen the customer and review the current details before saving")
+}
+
+fn customer_profile_sync_decision(
+    current: Option<&serde_json::Value>,
+    desired: &serde_json::Value,
+    before: Option<&serde_json::Value>,
+) -> Result<CustomerProfileSyncDecision, sqlx::Error> {
+    let desired_profile = normalized_customer_profile(desired)?;
+    let current_profile = current.map(normalized_customer_profile).transpose()?;
+    if let Some(before) = before {
+        let before_profile = if before.is_null() {
+            None
+        } else {
+            Some(normalized_customer_profile(before)?)
+        };
+        // An ambiguous acknowledgement can be retried without changing the
+        // balance, timestamp, or a profile another till has subsequently saved.
+        if current_profile.as_ref() == Some(&desired_profile) {
+            return Ok(CustomerProfileSyncDecision::AlreadyApplied);
+        }
+        if current_profile != before_profile {
+            return Err(customer_profile_conflict());
+        }
+        return Ok(CustomerProfileSyncDecision::Apply);
+    }
+    // Legacy generic outbox entries have no editor snapshot. An unchanged
+    // replay is safe, but never guess that a later save timestamp proves that
+    // an old profile (or its loyalty balance) should replace the shared row.
+    if let Some(current) = current_profile {
+        if CUSTOMER_PROFILE_FIELDS.iter().any(|field| {
+            desired.get(*field).is_some() && current[*field] != desired_profile[*field]
+        }) {
+            return Err(customer_profile_conflict());
+        }
+        return Ok(CustomerProfileSyncDecision::AlreadyApplied);
+    }
+    if desired.get("loyaltyPoints").is_some_and(|points| {
+        !points.is_null() && points.as_i64() != Some(0) && points.as_str().map(str::trim) != Some("0")
+    }) {
+        return Err(sync_conflict("CUSTOMER_PROFILE_CONFLICT: a legacy customer creation contains loyalty points; reconcile its ledger before syncing instead of discarding or importing a balance"));
+    }
+    Ok(CustomerProfileSyncDecision::Apply)
+}
+
+fn customer_profile_operation_data(
+    data: &serde_json::Value,
+) -> Result<(serde_json::Value, &serde_json::Value), sqlx::Error> {
+    let id = data.get("id").and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty() && id.len() <= 36)
+        .ok_or_else(|| account_protocol_error("Customer profile ID is invalid"))?;
+    let customer = data.get("customer")
+        .ok_or_else(|| account_protocol_error("Customer profile is missing"))?;
+    let before = data.get("before")
+        .ok_or_else(|| account_protocol_error("Customer profile before-state is required"))?;
+    if customer.get("id").and_then(serde_json::Value::as_str) != Some(id)
+        || before.get("id").is_some_and(|value| value.as_str() != Some(id))
+        || CUSTOMER_PROFILE_FIELDS.iter().any(|field| customer.get(*field).is_none())
+        || (!before.is_null() && CUSTOMER_PROFILE_FIELDS.iter().any(|field| before.get(*field).is_none()))
+    {
+        return Err(account_protocol_error("Customer profile snapshot is incomplete or belongs to another customer"));
+    }
+    let mut profile = normalized_customer_profile(customer)?;
+    if profile["name"].as_str().unwrap_or_default().is_empty() {
+        return Err(account_protocol_error("Customer name is required"));
+    }
+    let object = profile.as_object_mut().expect("normalized customer object");
+    object.insert("id".into(), serde_json::Value::String(id.into()));
+    if let Some(created_at) = customer.get("createdAt") {
+        object.insert("createdAt".into(), created_at.clone());
+    }
+    Ok((profile, before))
+}
+
+async fn mysql_customer_profile_for_update(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    customer_id: &str,
+) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let fields = CUSTOMER_PROFILE_FIELDS.iter()
+        .map(|field| format!("'{field}', {}", mysql_identifier(field)))
+        .collect::<Vec<_>>().join(", ");
+    let row: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT CAST(JSON_OBJECT({fields}) AS CHAR CHARACTER SET utf8mb4)
+         FROM customers WHERE id = ? LIMIT 1 FOR UPDATE"
+    ))
+    .bind(customer_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| serde_json::from_str(&row)
+        .map_err(|_| account_protocol_error("Cannot decode current customer profile"))).transpose()
+}
+
 async fn mysql_epoch_fenced_outbox_upsert(
     tx: &mut sqlx::Transaction<'_, MySql>,
     table: &str,
     data: &serde_json::Value,
     id_key: &str,
     reject_newer_server_row: bool,
+) -> Result<(), sqlx::Error> {
+    mysql_epoch_fenced_outbox_upsert_with_customer_base(
+        tx, table, data, id_key, reject_newer_server_row, None,
+    ).await
+}
+
+async fn mysql_epoch_fenced_outbox_upsert_with_customer_base(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    table: &str,
+    data: &serde_json::Value,
+    id_key: &str,
+    reject_newer_server_row: bool,
+    customer_profile_before: Option<&serde_json::Value>,
 ) -> Result<(), sqlx::Error> {
     if !generic_mysql_outbox_table_allowed(table)
         || !safe_mysql_column_name(id_key)
@@ -6835,7 +9038,18 @@ async fn mysql_epoch_fenced_outbox_upsert(
         }
     }
 
-    if reject_newer_server_row && remote_columns.contains("updatedAt") {
+    let mut customer_exists = false;
+    if table == "customers" {
+        let current = mysql_customer_profile_for_update(tx, id_json.as_str().unwrap_or_default()).await?;
+        customer_exists = current.is_some();
+        if customer_profile_sync_decision(current.as_ref(), data, customer_profile_before)?
+            == CustomerProfileSyncDecision::AlreadyApplied
+        {
+            return Ok(());
+        }
+    }
+
+    if table != "customers" && reject_newer_server_row && remote_columns.contains("updatedAt") {
         if let Some(incoming_stamp) = object
             .get("updatedAt")
             .and_then(serde_json::Value::as_str)
@@ -6868,8 +9082,20 @@ async fn mysql_epoch_fenced_outbox_upsert(
         if name == "updatedAt" || !remote_columns.contains(name) {
             continue;
         }
+        // Financial balances have dedicated transactional ledger operations.
+        // Customer profile sync must never import stale points or reset them.
+        if table == "customers" && (name == "loyaltyPoints"
+            || (customer_exists && name == "createdAt")
+            || !(name == "id" || name == "createdAt" || CUSTOMER_PROFILE_FIELDS.contains(&name.as_str())))
+        {
+            continue;
+        }
         columns.push(name.clone());
         values.push(normalized_outbox_mysql_value(table, name, value)?);
+    }
+    if table == "customers" && !customer_exists && remote_columns.contains("loyaltyPoints") {
+        columns.push("loyaltyPoints".into());
+        values.push(RestoreValue::Integer(0));
     }
     if !columns.iter().any(|column| column == id_key) {
         return Err(account_protocol_error("Outbox row key is not writable"));
@@ -6897,6 +9123,13 @@ async fn mysql_epoch_fenced_outbox_upsert(
         .build_query_scalar()
         .fetch_optional(&mut **tx)
         .await?;
+
+    // In READ COMMITTED an absent-row read need not hold a gap lock. If a
+    // concurrent create appeared since the profile CAS read, never turn this
+    // create into an update (which would also import its initial zero points).
+    if table == "customers" && exists.is_some() != customer_exists {
+        return Err(customer_profile_conflict());
+    }
 
     if exists.is_some() {
         let update_pairs = columns
@@ -7015,7 +9248,6 @@ fn validate_held_order_record(order: &OrderRecord) -> Result<(), sqlx::Error> {
         || order.order_number != 0
         || !order.receipt_key.trim().is_empty()
         || !order.original_order_id.trim().is_empty()
-        || !order.customer_id.trim().is_empty()
         || !order.payment_method.trim().is_empty()
         || order.amount_tendered != 0
         || !order.completed_at.trim().is_empty()
@@ -7025,6 +9257,32 @@ fn validate_held_order_record(order: &OrderRecord) -> Result<(), sqlx::Error> {
         ));
     }
     Ok(())
+}
+
+// SQLite snapshots contain NULL for unused optional receipt fields. Normalize
+// only optional text here, not identifiers, totals or paid/held status.
+fn decode_held_order(data: &serde_json::Value) -> Result<OrderRecord, sqlx::Error> {
+    let mut data = data.clone();
+    if let Some(object) = data.as_object_mut() {
+        for key in ["customerId", "receiptKey", "originalOrderId", "discountId", "notes", "paymentMethod", "completedAt"] {
+            if object.get(key).is_none_or(serde_json::Value::is_null) {
+                object.insert(key.into(), serde_json::Value::String(String::new()));
+            }
+        }
+    }
+    serde_json::from_value(data).map_err(|error| account_protocol_error(format!("Invalid held order: {error}")))
+}
+
+fn decode_held_line(data: &serde_json::Value) -> Result<OrderLineRecord, sqlx::Error> {
+    let mut data = data.clone();
+    if let Some(object) = data.as_object_mut() {
+        for key in ["discountId", "notes"] {
+            if object.get(key).is_none_or(serde_json::Value::is_null) {
+                object.insert(key.into(), serde_json::Value::String(String::new()));
+            }
+        }
+    }
+    serde_json::from_value(data).map_err(|error| account_protocol_error(format!("Invalid held-order line: {error}")))
 }
 
 fn validate_held_order_line_record(line: &OrderLineRecord) -> Result<(), sqlx::Error> {
@@ -7043,8 +9301,7 @@ async fn mysql_epoch_fenced_held_order_upsert(
     tx: &mut sqlx::Transaction<'_, MySql>,
     data: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
-    let order: OrderRecord = serde_json::from_value(data.clone())
-        .map_err(|error| account_protocol_error(format!("Invalid held order: {error}")))?;
+    let order = decode_held_order(data)?;
     validate_held_order_record(&order)?;
     let tombstoned: i64 = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM tombstones
@@ -7102,11 +9359,12 @@ async fn mysql_epoch_fenced_held_order_upsert(
     let o = &order;
     if order_exists {
         sqlx::query(
-            "UPDATE orders SET shiftId = ?, employeeId = ?, subtotal = ?, discountId = ?,
+            "UPDATE orders SET shiftId = ?, customerId = ?, employeeId = ?, subtotal = ?, discountId = ?,
                     discountAmount = ?, taxTotal = ?, total = ?, tillNumber = ?, notes = ?,
                     createdAt = ?, updatedAt = ? WHERE id = ? AND status = 'hold'",
         )
         .bind(&o.shift_id)
+        .bind(&o.customer_id)
         .bind(&o.employee_id)
         .bind(o.subtotal)
         .bind(&o.discount_id)
@@ -7126,10 +9384,11 @@ async fn mysql_epoch_fenced_held_order_upsert(
              (id, shiftId, customerId, employeeId, orderNumber, receiptKey, type, status,
               originalOrderId, subtotal, discountId, discountAmount, taxTotal, total,
               tillNumber, notes, paymentMethod, amountTendered, createdAt, completedAt, updatedAt)
-             VALUES (?, ?, '', ?, 0, '', 'sale', 'hold', '', ?, ?, ?, ?, ?, ?, ?, '', 0, ?, NULL, ?)",
+             VALUES (?, ?, ?, ?, 0, NULL, 'sale', 'hold', '', ?, ?, ?, ?, ?, ?, ?, '', 0, ?, NULL, ?)",
         )
         .bind(&o.id)
         .bind(&o.shift_id)
+        .bind(&o.customer_id)
         .bind(&o.employee_id)
         .bind(o.subtotal)
         .bind(&o.discount_id)
@@ -7150,8 +9409,7 @@ async fn mysql_epoch_fenced_held_order_line_upsert(
     tx: &mut sqlx::Transaction<'_, MySql>,
     data: &serde_json::Value,
 ) -> Result<(), sqlx::Error> {
-    let line: OrderLineRecord = serde_json::from_value(data.clone())
-        .map_err(|error| account_protocol_error(format!("Invalid held-order line: {error}")))?;
+    let line = decode_held_line(data)?;
     validate_held_order_line_record(&line)?;
     let parent: Option<(String, String, String, String, String, i64)> = sqlx::query_as(
         "SELECT CAST(COALESCE(type, '') AS CHAR), CAST(COALESCE(status, '') AS CHAR),
@@ -7244,6 +9502,76 @@ async fn mysql_epoch_fenced_held_order_line_upsert(
     Ok(())
 }
 
+async fn held_snapshot_matches(
+    tx: &mut sqlx::Transaction<'_, MySql>, table: &str, data: &serde_json::Value,
+) -> Result<bool, sqlx::Error> {
+    // Both callers supply serialized native records, never arbitrary columns.
+    let fields = data.as_object().ok_or_else(|| account_protocol_error("Invalid held snapshot"))?
+        .iter().filter(|(key, _)| key.as_str() != "updatedAt")
+        .map(|(key, value)| Ok((key, value.is_string(), json_mysql_value(value)?)))
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let mut query = QueryBuilder::<MySql>::new(format!("SELECT COUNT(*) FROM {} WHERE ", mysql_identifier(table)));
+    let mut first = true;
+    for (key, text, value) in &fields {
+        if !first { query.push(" AND "); }
+        first = false;
+        if *text {
+            query.push(format!("BINARY COALESCE({}, '') = BINARY ", mysql_identifier(key)));
+        } else {
+            query.push(format!("COALESCE({}, 0) = ", mysql_identifier(key)));
+        }
+        push_mysql_query_value(&mut query, value);
+    }
+    let count: i64 = query.build_query_scalar().fetch_one(&mut **tx).await?;
+    Ok(count == 1)
+}
+
+async fn mysql_epoch_fenced_held_order_bundle(
+    tx: &mut sqlx::Transaction<'_, MySql>, data: &serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let order = decode_held_order(&data["order"])?;
+    validate_held_order_record(&order)?;
+    let raw_lines = data["lines"].as_array().filter(|lines| !lines.is_empty() && lines.len() <= 1998)
+        .ok_or_else(|| account_protocol_error("A held trolley needs matching item lines"))?;
+    let mut ids = HashSet::new();
+    let mut lines = Vec::new();
+    for raw in raw_lines {
+        let line = decode_held_line(raw)?;
+        validate_held_order_line_record(&line)?;
+        if line.order_id != order.id || !ids.insert(line.id.clone()) {
+            return Err(account_protocol_error("Held trolley lines do not match their order"));
+        }
+        lines.push(line);
+    }
+    let tombstoned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tombstones WHERE table_name = 'orders' AND row_id = ?")
+        .bind(&order.id).fetch_one(&mut **tx).await?;
+    if tombstoned != 0 { return Err(sync_conflict("held order was already retrieved or deleted")); }
+    let existing: Option<String> = sqlx::query_scalar("SELECT CAST(id AS CHAR) FROM orders WHERE id = ? FOR UPDATE")
+        .bind(&order.id).fetch_optional(&mut **tx).await?;
+    if existing.is_some() {
+        if !held_snapshot_matches(tx, "orders", &serde_json::to_value(&order).unwrap()).await? {
+            return Err(sync_conflict("shared held trolley differs from this upload"));
+        }
+        let saved_ids: Vec<String> = sqlx::query_scalar("SELECT CAST(id AS CHAR) FROM order_lines WHERE orderId = ? FOR UPDATE")
+            .bind(&order.id).fetch_all(&mut **tx).await?;
+        if saved_ids.iter().any(|id| !ids.contains(id)) {
+            return Err(sync_conflict("shared held trolley has different item lines"));
+        }
+        for line in &lines {
+            if saved_ids.contains(&line.id)
+                && !held_snapshot_matches(tx, "order_lines", &serde_json::to_value(line).unwrap()).await? {
+                return Err(sync_conflict("shared held trolley item was changed"));
+            }
+        }
+    } else {
+        mysql_epoch_fenced_held_order_upsert(tx, &serde_json::to_value(&order).unwrap()).await?;
+    }
+    for line in lines {
+        mysql_epoch_fenced_held_order_line_upsert(tx, &serde_json::to_value(line).unwrap()).await?;
+    }
+    Ok(())
+}
+
 async fn mysql_epoch_fenced_held_order_remove(
     tx: &mut sqlx::Transaction<'_, MySql>,
     data: &serde_json::Value,
@@ -7287,6 +9615,139 @@ async fn mysql_epoch_fenced_held_order_remove(
     Ok(result.rows_affected() == 1)
 }
 
+const PROMOTION_GROUP_TEXT: &[&str] = &["id", "name", "startAt", "endAt"];
+const PROMOTION_DISCOUNT_TEXT: &[&str] = &["id", "name", "type", "kind", "groupId", "startAt", "endAt"];
+const PROMOTION_DISCOUNT_NUMBERS: &[&str] = &["value", "minQuantity", "secondPrice", "bundleQuantity", "bundlePrice", "priority", "maxApplications"];
+
+// Sync timestamps describe arrival at MariaDB, not the version the user edited.
+// Compare the complete business snapshot instead, allowing a queued A -> B -> C
+// chain and exact replay without ignoring edits made by another till.
+fn normalized_promotion_snapshot(snapshot: &serde_json::Value) -> serde_json::Value {
+    fn row(value: &serde_json::Value, text: &[&str], numbers: &[&str], booleans: &[&str]) -> serde_json::Value {
+        let mut result = serde_json::Map::new();
+        for field in text {
+            result.insert((*field).into(), serde_json::Value::from(value[*field].as_str().unwrap_or_default()));
+        }
+        for field in numbers {
+            let v = &value[*field];
+            if *field == "maxApplications" && (v.is_null() || v.as_str() == Some("")) {
+                result.insert((*field).into(), serde_json::Value::Null);
+                continue;
+            }
+            let default = if *field == "minQuantity" { 1.0 } else { 0.0 };
+            let number = v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok())).unwrap_or(default);
+            result.insert((*field).into(), serde_json::json!(number));
+        }
+        for field in booleans {
+            let v = &value[*field];
+            let active = if v.is_null() { *field == "isActive" } else {
+                v.as_bool().unwrap_or_else(|| v.as_i64() == Some(1) || matches!(v.as_str(), Some("1" | "true")))
+            };
+            result.insert((*field).into(), serde_json::Value::from(active));
+        }
+        serde_json::Value::Object(result)
+    }
+    let mut discounts = snapshot["discounts"].as_array().into_iter().flatten()
+        .map(|value| row(value, PROMOTION_DISCOUNT_TEXT, PROMOTION_DISCOUNT_NUMBERS, &["isActive", "autoApply"]))
+        .collect::<Vec<_>>();
+    discounts.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    let mut items = snapshot["items"].as_array().into_iter().flatten()
+        .map(|value| row(value, &["id", "groupId", "productId"], &[], &[])).collect::<Vec<_>>();
+    items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    serde_json::json!({
+        "group": if snapshot["group"].is_null() { serde_json::Value::Null }
+            else { row(&snapshot["group"], PROMOTION_GROUP_TEXT, &[], &["isActive"]) },
+        "discounts": discounts, "items": items,
+    })
+}
+
+#[derive(Debug, PartialEq)]
+enum PromotionSyncDecision { AlreadyApplied, Apply, Legacy }
+
+fn promotion_sync_decision(
+    current: &serde_json::Value, desired: &serde_json::Value, base: Option<&serde_json::Value>,
+) -> Result<PromotionSyncDecision, sqlx::Error> {
+    let current = normalized_promotion_snapshot(current);
+    if current == normalized_promotion_snapshot(desired) {
+        return Ok(PromotionSyncDecision::AlreadyApplied);
+    }
+    match base {
+        Some(base) if base.is_object() && base["discounts"].is_array() && base["items"].is_array() => {
+            if current != normalized_promotion_snapshot(base) {
+                return Err(sync_conflict("promotion was changed on another till; review the current offer before saving again"));
+            }
+            Ok(PromotionSyncDecision::Apply)
+        }
+        Some(_) => Err(account_protocol_error("Promotion before-state is invalid")),
+        None => Ok(PromotionSyncDecision::Legacy),
+    }
+}
+
+fn validate_promotion_numbers(discount: &serde_json::Value) -> Result<(), sqlx::Error> {
+    for field in ["minQuantity", "bundleQuantity", "maxApplications"] {
+        if discount[field].is_null() { continue; }
+        let minimum = if field == "maxApplications" { 1 } else { 0 };
+        if discount[field].as_i64().is_none_or(|value| value < minimum || value > i32::MAX as i64) {
+            return Err(account_protocol_error(format!("Promotion {field} is outside the supported quantity range")));
+        }
+    }
+    for field in ["secondPrice", "bundlePrice"] {
+        if discount[field].is_null() { continue; }
+        if discount[field].as_i64().is_none_or(|value| !(0..=9_007_199_254_740_991).contains(&value)) {
+            return Err(account_protocol_error(format!("Promotion {field} must be a safe, nonnegative penny amount")));
+        }
+    }
+    let kind = discount["kind"].as_str().unwrap_or_default();
+    match kind {
+        "bundle_fixed_price" if discount["bundleQuantity"].as_i64().unwrap_or(0) < 2
+            || discount["bundlePrice"].as_i64().unwrap_or(0) <= 0 => {
+            return Err(account_protocol_error("A bundle needs at least two items and a positive price"));
+        }
+        "bogo_fixed_price" if discount["minQuantity"].as_i64().unwrap_or(0) < 1 => {
+            return Err(account_protocol_error("BOGO buy quantity must be positive"));
+        }
+        "temporary_item" | "manual_percent" => {
+            let value = discount["value"].as_f64().unwrap_or(f64::NAN);
+            let percentage = discount["type"].as_str() == Some("percentage");
+            if !value.is_finite() || value <= 0.0 || (percentage && value > 100.0)
+                || (!percentage && (value.fract() != 0.0 || value > 9_007_199_254_740_991.0)) {
+                return Err(account_protocol_error("Promotion discount value is invalid"));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn mysql_promotion_snapshot(
+    tx: &mut sqlx::Transaction<'_, MySql>, group_id: &str, discount_ids: &[String],
+) -> Result<serde_json::Value, sqlx::Error> {
+    async fn rows(tx: &mut sqlx::Transaction<'_, MySql>, table: &str, fields: &[&str], predicate: &str, ids: &[String]) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        let fields = fields.iter().map(|field| format!("'{field}', {}", mysql_identifier(field))).collect::<Vec<_>>().join(", ");
+        let sql = format!("SELECT CAST(JSON_OBJECT({fields}) AS CHAR) FROM {} WHERE {predicate} FOR UPDATE", mysql_identifier(table));
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for id in ids { query = query.bind(id); }
+        query.fetch_all(&mut **tx).await?.into_iter()
+            .map(|row| serde_json::from_str(&row).map_err(|_| account_protocol_error("Cannot decode current promotion"))).collect()
+    }
+    let group = if group_id.is_empty() { None } else {
+        let fields = [PROMOTION_GROUP_TEXT, &["isActive"]].concat();
+        rows(tx, "promo_groups", &fields, "id = ?", &[group_id.to_string()]).await?.into_iter().next()
+    };
+    let mut params = discount_ids.to_vec();
+    let mut predicates = Vec::new();
+    if !params.is_empty() { predicates.push(format!("id IN ({})", vec!["?"; params.len()].join(", "))); }
+    if !group_id.is_empty() { predicates.push("groupId = ?".into()); params.push(group_id.to_string()); }
+    let discounts = if predicates.is_empty() { vec![] } else {
+        let fields = [PROMOTION_DISCOUNT_TEXT, PROMOTION_DISCOUNT_NUMBERS, &["isActive", "autoApply"]].concat();
+        rows(tx, "discounts", &fields, &predicates.join(" OR "), &params).await?
+    };
+    let items = if group_id.is_empty() { vec![] } else {
+        rows(tx, "promo_group_items", &["id", "groupId", "productId"], "groupId = ?", &[group_id.to_string()]).await?
+    };
+    Ok(serde_json::json!({"group": group, "discounts": discounts, "items": items}))
+}
+
 async fn mysql_epoch_fenced_promotion_bundle(
     tx: &mut sqlx::Transaction<'_, MySql>,
     data: &serde_json::Value,
@@ -7300,6 +9761,7 @@ async fn mysql_epoch_fenced_promotion_bundle(
     let discount = object
         .get("discount")
         .ok_or_else(|| account_protocol_error("Promotion discount is missing"))?;
+    validate_promotion_numbers(discount)?;
     let items = object
         .get("items")
         .and_then(serde_json::Value::as_array)
@@ -7334,17 +9796,17 @@ async fn mysql_epoch_fenced_promotion_bundle(
         }
     }
 
-    let group_id = group
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| account_protocol_error("Promotion group id is missing"))?;
+    let group_id = if group.is_null() { "" } else {
+        group.get("id").and_then(serde_json::Value::as_str).filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| account_protocol_error("Promotion group id is missing"))?
+    };
     let discount_id = discount
         .get("id")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| account_protocol_error("Promotion discount id is missing"))?;
-    if discount.get("groupId").and_then(serde_json::Value::as_str) != Some(group_id) {
+    if discount.get("groupId").and_then(serde_json::Value::as_str).unwrap_or_default() != group_id
+        || (group_id.is_empty() && !items.is_empty()) {
         return Err(account_protocol_error(
             "Promotion discount does not belong to its group",
         ));
@@ -7375,7 +9837,17 @@ async fn mysql_epoch_fenced_promotion_bundle(
             ));
         }
     }
-    let mut protected_rows = vec![("promo_groups", group_id), ("discounts", discount_id)];
+    let current = mysql_promotion_snapshot(tx, group_id, &[discount_id.to_string()]).await?;
+    let base = object.get("baseSnapshot");
+    let previous_discounts = base.unwrap_or(&current)["discounts"].as_array().cloned().unwrap_or_default();
+    let mut desired_discounts = previous_discounts.into_iter().filter(|row| row["id"].as_str() != Some(discount_id)).collect::<Vec<_>>();
+    desired_discounts.push(discount.clone());
+    let desired = serde_json::json!({ "group": group, "discounts": desired_discounts, "items": items });
+    let decision = promotion_sync_decision(&current, &desired, base)?;
+    if decision == PromotionSyncDecision::AlreadyApplied { return Ok(()); }
+
+    let mut protected_rows = vec![("discounts", discount_id)];
+    if !group_id.is_empty() { protected_rows.push(("promo_groups", group_id)); }
     protected_rows.extend(item_ids_seen.iter().map(|id| ("promo_group_items", *id)));
     for (table, row_id) in protected_rows {
         let tombstoned: i64 = sqlx::query_scalar(
@@ -7398,7 +9870,7 @@ async fn mysql_epoch_fenced_promotion_bundle(
         .filter_map(|row| row.get("updatedAt").and_then(serde_json::Value::as_str))
         .max()
         .unwrap_or_default();
-    if !incoming_revision.is_empty() {
+    if decision == PromotionSyncDecision::Legacy && !incoming_revision.is_empty() {
         let remote_revision: Option<String> = sqlx::query_scalar(
             "SELECT MAX(revision) FROM (
                SELECT DATE_FORMAT(updatedAt, '%Y-%m-%dT%H:%i:%s.%fZ') AS revision
@@ -7437,8 +9909,14 @@ async fn mysql_epoch_fenced_promotion_bundle(
             mysql_epoch_fenced_outbox_upsert(tx, "products", &product, "id", true).await?;
         }
     }
-    mysql_epoch_fenced_outbox_upsert(tx, "promo_groups", group, "id", true).await?;
-    mysql_epoch_fenced_outbox_upsert(tx, "discounts", discount, "id", true).await?;
+    // The CAS lock above protects new packages; comparing per-row server arrival
+    // times again would reject legitimate offline edits to unchanged members.
+    let reject_newer = decision == PromotionSyncDecision::Legacy;
+    if !group_id.is_empty() {
+        mysql_epoch_fenced_outbox_upsert(tx, "promo_groups", group, "id", reject_newer).await?;
+    }
+    mysql_epoch_fenced_outbox_upsert(tx, "discounts", discount, "id", reject_newer).await?;
+    if group_id.is_empty() { return Ok(()); }
 
     let mut item_ids = Vec::new();
     for item in &items {
@@ -7460,7 +9938,7 @@ async fn mysql_epoch_fenced_promotion_bundle(
         .bind(item_id)
         .execute(&mut **tx)
         .await?;
-        mysql_epoch_fenced_outbox_upsert(tx, "promo_group_items", item, "id", true).await?;
+        mysql_epoch_fenced_outbox_upsert(tx, "promo_group_items", item, "id", reject_newer).await?;
         item_ids.push(item_id.to_string());
     }
     if item_ids.is_empty() {
@@ -7528,6 +10006,13 @@ async fn mysql_epoch_fenced_promotion_delete(
     }
     discount_ids.sort();
     discount_ids.dedup();
+    if let Some(base) = object.get("baseSnapshot") {
+        let current = mysql_promotion_snapshot(tx, group_id, &discount_ids).await?;
+        let desired = serde_json::json!({ "group": null, "discounts": [], "items": [] });
+        if promotion_sync_decision(&current, &desired, Some(base))? == PromotionSyncDecision::AlreadyApplied {
+            return Ok(());
+        }
+    }
     if !group_id.is_empty() {
         sqlx::query("DELETE FROM promo_group_items WHERE groupId = ?")
             .bind(group_id)
@@ -7577,6 +10062,15 @@ async fn execute_mysql_epoch_fenced_outbox_operation(
     assert_mysql_restore_writes_allowed(&mut tx).await?;
     assert_mysql_server_data_epoch(&mut tx, server_data_epoch).await?;
     match operation {
+        "customerProfile" if table == "customers" && id_key == "id" => {
+            let (customer, before) = customer_profile_operation_data(data)?;
+            mysql_epoch_fenced_outbox_upsert_with_customer_base(
+                &mut tx, "customers", &customer, "id", false, Some(before),
+            ).await?;
+        }
+        "heldOrderBundle" if table == "orders" => {
+            mysql_epoch_fenced_held_order_bundle(&mut tx, data).await?;
+        }
         "upsert" if table == "orders" => {
             mysql_epoch_fenced_held_order_upsert(&mut tx, data).await?;
         }
@@ -7707,8 +10201,10 @@ pub async fn commit_mysql_outbox_operation(
 pub async fn claim_mysql_held_order(
     mysql_uri: String,
     order_id: String,
+    claim_id: String,
     server_data_epoch: Option<String>,
 ) -> Result<bool, String> {
+    if claim_id.len() < 16 || claim_id.len() > 64 { return Err("A persistent trolley claim ID is required".into()); }
     let pool = connect_mysql_for_pos(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
@@ -7719,12 +10215,31 @@ pub async fn claim_mysql_held_order(
     assert_mysql_server_data_epoch(&mut tx, server_data_epoch.as_deref().unwrap_or("").trim())
         .await
         .map_err(|error| error.to_string())?;
+    let existing: Option<(String, String)> = sqlx::query_as(
+        "SELECT CAST(claimId AS CHAR), CAST(serverDataEpoch AS CHAR) FROM pos_held_order_claims WHERE orderId = ? AND serverDataEpoch = ?")
+        .bind(&order_id).bind(server_data_epoch.as_deref().unwrap_or("")).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?;
+    if let Some((owner, epoch)) = existing {
+        return Ok(owner == claim_id && epoch == server_data_epoch.as_deref().unwrap_or(""));
+    }
     let removed =
-        mysql_epoch_fenced_held_order_remove(&mut tx, &serde_json::json!({ "id": order_id }))
+        mysql_epoch_fenced_held_order_remove(&mut tx, &serde_json::json!({ "id": &order_id }))
             .await
             .map_err(|error| error.to_string())?;
+    if removed {
+        sqlx::query("INSERT INTO pos_held_order_claims (orderId, claimId, serverDataEpoch, claimedAt) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE claimId = VALUES(claimId), serverDataEpoch = VALUES(serverDataEpoch), claimedAt = VALUES(claimedAt)")
+            .bind(&order_id).bind(&claim_id).bind(server_data_epoch.as_deref().unwrap_or(""))
+            .bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    }
     tx.commit().await.map_err(|error| error.to_string())?;
-    Ok(removed)
+    if removed { return Ok(true); }
+    // Another claimant may have committed while our DELETE waited for its row
+    // lock. A fresh read resolves a retry of our own previously committed claim.
+    let owner: Option<(String,)> = sqlx::query_as("SELECT CAST(claimId AS CHAR) FROM pos_held_order_claims WHERE orderId = ? AND serverDataEpoch = ?")
+        .bind(&order_id).bind(server_data_epoch.as_deref().unwrap_or("")).fetch_optional(&pool).await.map_err(|e| e.to_string())?;
+    match owner {
+        Some((owner,)) => Ok(owner == claim_id),
+        None => Err("HELD_ORDER_NOT_SHARED: This trolley is not available on the main database. Check its pending upload; it has not been confirmed as retrieved by another till.".into()),
+    }
 }
 
 #[tauri::command]
@@ -7765,6 +10280,94 @@ pub async fn save_online_customer_account_config(
         ),
     }
     Ok(account)
+}
+
+#[tauri::command]
+pub async fn adjust_local_customer_loyalty(
+    app: AppHandle,
+    input: CustomerLoyaltyAdjustmentInput,
+) -> Result<CustomerLoyaltyAdjustmentResult, String> {
+    let input =
+        normalize_customer_loyalty_adjustment_input(input).map_err(|error| error.to_string())?;
+    let uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
+    let pool = SqlitePool::connect(&uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    adjust_sqlite_customer_loyalty(&pool, &input)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn adjust_online_customer_loyalty(
+    app: AppHandle,
+    mysql_uri: String,
+    input: CustomerLoyaltyAdjustmentInput,
+) -> Result<CustomerLoyaltyAdjustmentResult, String> {
+    let input =
+        normalize_customer_loyalty_adjustment_input(input).map_err(|error| error.to_string())?;
+    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    // Verify the permanent trigger layer before taking the in-transaction
+    // close, restore, dataset-epoch, customer, and actor locks below.
+    ensure_mysql_guarded_preflight_v4(&mysql_pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = {
+        let mut committed = None;
+        let mut failure = None;
+        for attempt in 0..MYSQL_TRANSACTION_RETRY_ATTEMPTS {
+            match adjust_mysql_customer_loyalty(&mysql_pool, &input).await {
+                Ok(result) => {
+                    committed = Some(result);
+                    break;
+                }
+                Err(error)
+                    if attempt + 1 < MYSQL_TRANSACTION_RETRY_ATTEMPTS
+                        && is_retryable_mysql_transaction_error(&error) =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        match (committed, failure) {
+            (Some(result), _) => result,
+            (_, Some(error)) => return Err(error.to_string()),
+            _ => unreachable!("MariaDB transaction retry loop always returns"),
+        }
+    };
+
+    // MariaDB is authoritative. Do not report a committed correction as a
+    // failure merely because this till's disposable cache could not be
+    // refreshed; normal sync can repair it.
+    match local_db_path(&app) {
+        Ok(local_path) => {
+            let local_uri = format!("sqlite://{}?mode=rwc", local_path.display());
+            match SqlitePool::connect(&local_uri).await {
+                Ok(local_pool) => {
+                    if let Err(error) =
+                        cache_sqlite_customer_loyalty_adjustment(&local_pool, &result).await
+                    {
+                        eprintln!(
+                            "MariaDB accepted the loyalty correction but the local cache update failed; background sync will repair it: {error}"
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "MariaDB accepted the loyalty correction but the local cache could not be opened; background sync will repair it: {error}"
+                ),
+            }
+        }
+        Err(error) => eprintln!(
+            "MariaDB accepted the loyalty correction but the local cache path was unavailable; background sync will repair it: {error}"
+        ),
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -8375,6 +10978,21 @@ async fn latest_system_report_marker(
     .await
 }
 
+async fn latest_effective_till_report_marker(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    till_number: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(markerTime AS CHAR) FROM till_report_markers
+         WHERE type = 'period' AND (tillNumber = '' OR tillNumber = ?)
+         ORDER BY markerTime DESC LIMIT 1",
+    )
+    .bind(till_number)
+    .fetch_optional(&mut **tx)
+    .await?;
+    canonical_optional_report_epoch(marker.as_deref())
+}
+
 fn validate_whole_system_close_owner(
     barrier: &WholeSystemCloseBarrierResult,
     token: &str,
@@ -8414,6 +11032,26 @@ fn mysql_whole_system_close_readiness_select() -> String {
     )
 }
 
+struct WholeSystemCloseTillReadiness {
+    till_id: String,
+    till_name: String,
+    online: i64,
+    protocol: i64,
+    observed_token: String,
+    observed_phase: String,
+    outbox: i64,
+    terminals: i64,
+    conflicts: i64,
+}
+
+fn whole_system_close_till_label(till_id: &str, till_name: &str, duplicate_name: bool) -> String {
+    if !duplicate_name || till_id.trim().is_empty() {
+        return till_name.into();
+    }
+    let short_id = till_id.chars().take(8).collect::<String>();
+    format!("{till_name} [{short_id}]")
+}
+
 async fn whole_system_close_readiness_issues(
     tx: &mut sqlx::Transaction<'_, MySql>,
     token: &str,
@@ -8426,31 +11064,57 @@ async fn whole_system_close_readiness_issues(
             "No active installed till is registered in MariaDB".into()
         ]);
     }
+    let readiness = rows
+        .into_iter()
+        .map(|row| {
+            Ok(WholeSystemCloseTillReadiness {
+                till_id: row.try_get("tillId")?,
+                till_name: row.try_get("tillName")?,
+                online: row.try_get("isOnline")?,
+                protocol: row.try_get("protocolVersion")?,
+                observed_token: row.try_get("barrierToken")?,
+                observed_phase: row.try_get("barrierPhase")?,
+                outbox: row.try_get("outboxCount")?,
+                terminals: row.try_get("terminalCount")?,
+                conflicts: row.try_get("conflictCount")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let mut name_counts = HashMap::<String, usize>::new();
+    for till in &readiness {
+        *name_counts
+            .entry(till.till_name.trim().to_lowercase())
+            .or_default() += 1;
+    }
+
     let mut issues = Vec::new();
-    for row in rows {
-        let name: String = row.try_get("tillName")?;
-        let online: i64 = row.try_get("isOnline")?;
-        let protocol: i64 = row.try_get("protocolVersion")?;
-        let observed_token: String = row.try_get("barrierToken")?;
-        let observed_phase: String = row.try_get("barrierPhase")?;
-        let outbox: i64 = row.try_get("outboxCount")?;
-        let terminals: i64 = row.try_get("terminalCount")?;
-        let conflicts: i64 = row.try_get("conflictCount")?;
-        if online == 0 {
-            issues.push(format!("{name} is offline"));
-        } else if protocol < WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION {
-            issues.push(format!("{name} must update to the current close protocol"));
-        } else if observed_token != token || observed_phase != phase {
-            issues.push(format!("{name} has not acknowledged the {phase} phase"));
-        } else if outbox > 0 {
-            issues.push(format!("{name} still has {outbox} queued change(s)"));
-        } else if conflicts > 0 {
+    for till in readiness {
+        let duplicate_name = name_counts
+            .get(&till.till_name.trim().to_lowercase())
+            .copied()
+            .unwrap_or_default()
+            > 1;
+        let label = whole_system_close_till_label(&till.till_id, &till.till_name, duplicate_name);
+        if till.online == 0 {
+            issues.push(format!("{label} is offline"));
+        } else if till.protocol < WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION {
+            issues.push(format!("{label} must update to the current close protocol"));
+        } else if till.observed_token != token || till.observed_phase != phase {
+            issues.push(format!("{label} has not acknowledged the {phase} phase"));
+        } else if till.outbox > 0 {
             issues.push(format!(
-                "{name} has {conflicts} unresolved sync conflict(s)"
+                "{label} still has {} queued change(s)",
+                till.outbox
             ));
-        } else if terminals > 0 {
+        } else if till.conflicts > 0 {
             issues.push(format!(
-                "{name} has {terminals} terminal payment attempt(s) to recover"
+                "{label} has {} unresolved sync conflict(s)",
+                till.conflicts
+            ));
+        } else if till.terminals > 0 {
+            issues.push(format!(
+                "{label} has {} terminal payment attempt(s) to recover",
+                till.terminals
             ));
         }
     }
@@ -8486,6 +11150,38 @@ async fn assert_remote_terminal_journal_empty(
     Ok(())
 }
 
+async fn assert_remote_till_terminal_journal_empty(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    till_number: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'payment_terminal_attempts'",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if exists == 0 {
+        return Err(account_protocol_error(
+            "Till close cannot verify the remote terminal journal",
+        ));
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payment_terminal_attempts
+         WHERE (tillId = ? OR TRIM(COALESCE(tillId, '')) = '')
+           AND status IN ('prepared', 'started', 'uncertain', 'approved',
+                          'commit_failed', 'completion_pending')",
+    )
+    .bind(till_number)
+    .fetch_one(&mut **tx)
+    .await?;
+    if count > 0 {
+        return Err(account_protocol_error(format!(
+            "TERMINAL_RECOVERY_PENDING: this till has {count} card payment attempt(s) to complete or recover before its Z report can close"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_report_close_marker(
     latest_marker: Option<&str>,
     expected_marker: Option<&str>,
@@ -8498,6 +11194,155 @@ fn validate_report_close_marker(
     ))
 }
 
+fn canonical_optional_report_epoch(value: Option<&str>) -> Result<Option<String>, sqlx::Error> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(canonical_report_epoch)
+        .transpose()
+}
+
+fn canonical_report_period_bounds(
+    period_start: &str,
+    period_end: &str,
+) -> Result<(String, String), sqlx::Error> {
+    let start = canonical_report_epoch(period_start)?;
+    let end = canonical_report_epoch(period_end)?;
+    if start.is_empty() || end.is_empty() {
+        return Err(account_protocol_error(
+            "REPORT_PERIOD_INVALID: report period bounds are required",
+        ));
+    }
+    let start_stamp = chrono::DateTime::parse_from_rfc3339(&start)
+        .map_err(|error| account_protocol_error(format!("REPORT_PERIOD_INVALID: {error}")))?;
+    let end_stamp = chrono::DateTime::parse_from_rfc3339(&end)
+        .map_err(|error| account_protocol_error(format!("REPORT_PERIOD_INVALID: {error}")))?;
+    if start_stamp >= end_stamp {
+        return Err(account_protocol_error(
+            "REPORT_PERIOD_INVALID: report period start must be before its server cutoff",
+        ));
+    }
+    Ok((start, end))
+}
+
+fn validate_till_report_close_request(
+    latest_marker: Option<&str>,
+    expected_marker: Option<&str>,
+    period_start: &str,
+    period_end: &str,
+    latest_allowed_cutoff: &str,
+) -> Result<(String, String), sqlx::Error> {
+    let latest = canonical_optional_report_epoch(latest_marker)?;
+    let expected = canonical_optional_report_epoch(expected_marker)?;
+    validate_report_close_marker(latest.as_deref(), expected.as_deref())?;
+
+    let (start, end) = canonical_report_period_bounds(period_start, period_end)?;
+    let expected_start = latest.as_deref().unwrap_or(REPORT_PERIOD_ORIGIN);
+    if start != expected_start {
+        return Err(account_protocol_error(
+            "REPORT_PERIOD_CHANGED: the till report no longer starts at the latest effective marker; generate a fresh report",
+        ));
+    }
+    let latest_allowed = canonical_report_epoch(latest_allowed_cutoff)?;
+    if latest_allowed.is_empty() || end > latest_allowed {
+        return Err(account_protocol_error(
+            "REPORT_CUTOFF_INVALID: the till report cutoff is ahead of MariaDB server time",
+        ));
+    }
+    Ok((start, end))
+}
+
+/// Build a closable per-till report from one authoritative MariaDB snapshot.
+/// The barrier lock waits for every earlier financial writer and stays held
+/// until all report sections have been read. The sampled server tick is the
+/// exclusive upper bound: a later writer stamped on the same millisecond is
+/// deliberately deferred to the next period instead of racing this snapshot.
+#[tauri::command]
+pub async fn prepare_till_report_close(
+    mysql_uri: String,
+    till_number: String,
+) -> Result<PreparedTillReportClose, String> {
+    let till_number = till_number.trim();
+    if till_number.is_empty() {
+        return Err("A closable till report requires this till's stable ID".into());
+    }
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::time::timeout(
+        Duration::from_secs(WHOLE_SYSTEM_CLOSE_SCHEMA_PREPARE_TIMEOUT_SECONDS),
+        ensure_mysql_whole_system_close_schema(&pool),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "{WHOLE_SYSTEM_CLOSE_SETUP_TIMEOUT_CODE}: MariaDB report safety setup stayed busy; no till report was opened"
+        )
+    })?
+    .map_err(|error| error.to_string())?;
+
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    cleanup_expired_whole_system_close(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_mysql_restore_writes_allowed(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let barrier = locked_whole_system_close_barrier(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    if barrier.state != "idle" {
+        return Err(format!(
+            "{WHOLE_SYSTEM_CLOSE_IN_PROGRESS_CODE}: another report close is already in progress"
+        ));
+    }
+    assert_mysql_whole_system_close_guards_ready(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_remote_till_terminal_journal_empty(&mut tx, till_number)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let expected_last_marker = latest_effective_till_report_marker(&mut tx, till_number)
+        .await
+        .map_err(|error| error.to_string())?;
+    let period_start = expected_last_marker
+        .clone()
+        .unwrap_or_else(|| REPORT_PERIOD_ORIGIN.into());
+    let server_tick: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    let cutoff_at = canonical_report_epoch(&server_tick).map_err(|error| error.to_string())?;
+    canonical_report_period_bounds(&period_start, &cutoff_at).map_err(|error| error.to_string())?;
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS),
+        load_frozen_whole_system_report(&mut tx, &period_start, &cutoff_at, Some(till_number)),
+    )
+    .await;
+    let (overview, breakdown, top_products, till_summaries) = match report {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => return Err(error.to_string()),
+        Err(_) => {
+            return Err(format!(
+                "{WHOLE_SYSTEM_CLOSE_REPORT_TIMEOUT_CODE}: authoritative till report totals exceeded {WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS} seconds; try again"
+            ))
+        }
+    };
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok(PreparedTillReportClose {
+        expected_last_marker,
+        period_start,
+        cutoff_at,
+        overview,
+        breakdown,
+        top_products,
+        till_summaries,
+    })
+}
+
 #[tauri::command]
 pub async fn begin_whole_system_close(
     mysql_uri: String,
@@ -8506,11 +11351,19 @@ pub async fn begin_whole_system_close(
     if owner_till_id.trim().is_empty() {
         return Err("Whole-system close requires this till's stable ID".into());
     }
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    tokio::time::timeout(
+        Duration::from_secs(WHOLE_SYSTEM_CLOSE_SCHEMA_PREPARE_TIMEOUT_SECONDS),
+        ensure_mysql_whole_system_close_schema(&pool),
+    )
         .await
+        .map_err(|_| {
+            format!(
+                "{WHOLE_SYSTEM_CLOSE_SETUP_TIMEOUT_CODE}: MariaDB schema preparation stayed busy; no close token was created"
+            )
+        })?
         .map_err(|error| error.to_string())?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
     cleanup_expired_whole_system_close(&mut tx)
@@ -8567,10 +11420,10 @@ pub async fn freeze_whole_system_close(
     token: String,
     owner_till_id: String,
 ) -> Result<WholeSystemCloseBarrierResult, String> {
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    assert_mysql_whole_system_close_schema_ready(&pool)
         .await
         .map_err(|error| error.to_string())?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
@@ -8592,14 +11445,26 @@ pub async fn freeze_whole_system_close(
         .await
         .map_err(|error| error.to_string())?;
     if !issues.is_empty() {
-        return Err(format!(
-            "{WHOLE_SYSTEM_CLOSE_WAITING_CODE}: {}",
-            issues.join("; ")
-        ));
+        let message = format!("{WHOLE_SYSTEM_CLOSE_WAITING_CODE}: {}", issues.join("; "));
+        tx.rollback()
+            .await
+            .map_err(|error| format!("{message}; could not release the close lock: {error}"))?;
+        return Err(message);
     }
-    assert_remote_terminal_journal_empty(&mut tx)
-        .await
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = assert_remote_terminal_journal_empty(&mut tx).await {
+        let message = error.to_string();
+        tx.rollback().await.map_err(|rollback| {
+            format!("{message}; could not release the close lock: {rollback}")
+        })?;
+        return Err(message);
+    }
+    if let Err(error) = assert_mysql_whole_system_close_guards_ready(&mut tx).await {
+        let message = error.to_string();
+        tx.rollback().await.map_err(|rollback| {
+            format!("{message}; could not release the close lock: {rollback}")
+        })?;
+        return Err(message);
+    }
     // MariaDB business timestamps are millisecond-precision. Use the immediate
     // successor of one locked server-clock tick as the exclusive report end,
     // so a writer stamped on that tick is included and a later writer can
@@ -8642,10 +11507,10 @@ pub async fn abort_whole_system_close(
     token: String,
     owner_till_id: String,
 ) -> Result<(), String> {
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    assert_mysql_whole_system_close_barrier_ready(&pool)
         .await
         .map_err(|error| error.to_string())?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
@@ -8660,9 +11525,12 @@ pub async fn abort_whole_system_close(
         return Ok(());
     }
     if barrier.token != token.trim() || barrier.owner_till_id != owner_till_id.trim() {
-        return Err(
-            "WHOLE_SYSTEM_CLOSE_TOKEN_INVALID: another till owns this close barrier".into(),
-        );
+        let message =
+            "WHOLE_SYSTEM_CLOSE_TOKEN_INVALID: another till owns this close barrier".to_string();
+        tx.rollback()
+            .await
+            .map_err(|error| format!("{message}; could not release the close lock: {error}"))?;
+        return Err(message);
     }
     sqlx::query(
         "UPDATE pos_close_barrier
@@ -8690,12 +11558,21 @@ async fn purge_mysql_transactions_under_frozen_close(
     validate_whole_system_close_owner(&barrier, token, owner_till_id, "frozen")?;
     let issues = whole_system_close_readiness_issues(&mut tx, token, "frozen").await?;
     if !issues.is_empty() {
-        return Err(account_protocol_error(format!(
+        let error = account_protocol_error(format!(
             "{WHOLE_SYSTEM_CLOSE_WAITING_CODE}: {}",
             issues.join("; ")
-        )));
+        ));
+        tx.rollback().await?;
+        return Err(error);
     }
-    assert_remote_terminal_journal_empty(&mut tx).await?;
+    if let Err(error) = assert_remote_terminal_journal_empty(&mut tx).await {
+        tx.rollback().await?;
+        return Err(error);
+    }
+    if let Err(error) = assert_mysql_whole_system_close_guards_ready(&mut tx).await {
+        tx.rollback().await?;
+        return Err(error);
+    }
     if barrier.cutoff_at.trim().is_empty() {
         return Err(account_protocol_error(
             "Transaction purge requires a frozen server cutoff",
@@ -8852,10 +11729,10 @@ pub async fn purge_mysql_transactions(
     token: String,
     owner_till_id: String,
 ) -> Result<TransactionPurgeResult, String> {
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    assert_mysql_whole_system_close_schema_ready(&pool)
         .await
         .map_err(|error| error.to_string())?;
     purge_mysql_transactions_under_frozen_close(&pool, token.trim(), owner_till_id.trim(), false)
@@ -8863,19 +11740,260 @@ pub async fn purge_mysql_transactions(
         .map_err(|error| error.to_string())
 }
 
+const UNASSIGNED_TILL_SUMMARY_KEY: &str = "__unassigned__";
+
+fn empty_frozen_till_sales_summary(id: String, name: String) -> FrozenTillSalesSummary {
+    FrozenTillSalesSummary {
+        id,
+        name,
+        net_sales: 0,
+        gross_sales: 0,
+        refunds: 0,
+        tax_total: 0,
+        transactions: 0,
+        refund_transactions: 0,
+        items_sold: 0,
+        cash_total: 0,
+        card_total: 0,
+        tips_total: 0,
+        service_charge_total: 0,
+        cashback_total: 0,
+        loyalty_total: 0,
+        account_total: 0,
+        account_repayments_cash: 0,
+        account_repayments_card: 0,
+        account_repayments_other: 0,
+        account_tips_total: 0,
+        account_service_charge_total: 0,
+        account_cashback_total: 0,
+    }
+}
+
+async fn load_frozen_till_sales_summaries(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    start_time: &str,
+    end_time: &str,
+) -> Result<Vec<FrozenTillSalesSummary>, sqlx::Error> {
+    // Seed every real active register so a manager can see that an open till had
+    // no sales. The two compatibility placeholders are not physical tills, so
+    // omit them when idle; their names stay in register_names so exact-period
+    // sales or account-payment activity can still create a labelled row.
+    let register_rows = sqlx::query(
+        "SELECT CAST(id AS CHAR) AS id,
+                CAST(COALESCE(NULLIF(TRIM(name), ''), id) AS CHAR) AS name,
+                CAST(COALESCE(isActive, 1) AS SIGNED) AS isActive
+         FROM registers",
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut register_names = HashMap::<String, String>::new();
+    let mut summaries = HashMap::<String, FrozenTillSalesSummary>::new();
+    for row in register_rows {
+        let id = row
+            .try_get::<Option<String>, _>("id")?
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let name = row
+            .try_get::<Option<String>, _>("name")?
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| id.clone());
+        register_names.insert(id.clone(), name.clone());
+        let is_compatibility_placeholder = matches!(id.as_str(), "register-main" | "legacy-till");
+        if row.try_get::<i64, _>("isActive")? != 0 && !is_compatibility_placeholder {
+            summaries.insert(id.clone(), empty_frozen_till_sales_summary(id, name));
+        }
+    }
+
+    // Aggregate each order once. Correlated child sums avoid multiplying order
+    // totals when an order contains several lines or payment records.
+    let sales_rows = sqlx::query(
+        "SELECT CAST(COALESCE(NULLIF(TRIM(o.tillNumber), ''), '') AS CHAR) AS id,
+                CAST(COALESCE(SUM(o.total), 0) AS SIGNED) AS netSales,
+                CAST(COALESCE(SUM(CASE WHEN o.type != 'return'
+                     THEN o.total + COALESCE(o.discountAmount, 0) ELSE 0 END), 0) AS SIGNED) AS grossSales,
+                CAST(ABS(COALESCE(SUM(CASE WHEN o.total < 0 THEN o.total ELSE 0 END), 0)) AS SIGNED) AS refunds,
+                CAST(COALESCE(SUM(o.taxTotal), 0) AS SIGNED) AS taxTotal,
+                CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) AS transactions,
+                CAST(COALESCE(SUM(CASE WHEN o.type = 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) AS refundTransactions,
+                CAST(COALESCE(SUM((SELECT SUM(ol.quantity)
+                     FROM order_lines ol WHERE ol.orderId = o.id)), 0) AS SIGNED) AS itemsSold,
+                CAST(COALESCE(SUM((SELECT SUM(CASE
+                     WHEN COALESCE(p.cashAmount, 0) != 0 THEN p.cashAmount
+                     WHEN p.method = 'cash' THEN p.amount ELSE 0 END)
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS cashTotal,
+                CAST(COALESCE(SUM((SELECT SUM(CASE
+                     WHEN COALESCE(p.cardAmount, 0) != 0 THEN p.cardAmount
+                     WHEN p.method IN ('card', 'sumup', 'dojo', 'mobile') THEN p.amount ELSE 0 END)
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS cardTotal,
+                CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.tipsAmount, 0))
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS tipsTotal,
+                CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.serviceChargeAmount, 0))
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS serviceChargeTotal,
+                CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.cashbackAmount, 0))
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS cashbackTotal,
+                CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.loyaltyAmount, 0))
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS loyaltyTotal,
+                CAST(COALESCE(SUM((SELECT SUM(COALESCE(p.accountAmount, 0))
+                     FROM payments p WHERE p.orderId = o.id)), 0) AS SIGNED) AS accountTotal
+         FROM orders o
+         WHERE o.status IN ('completed','refunded','partially_refunded','voided')
+           AND o.status != 'voided'
+           AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
+           AND o.completedAt >= ? AND o.completedAt < ?
+         GROUP BY COALESCE(NULLIF(TRIM(o.tillNumber), ''), '')",
+    )
+    .bind(start_time)
+    .bind(end_time)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in sales_rows {
+        let raw_id = row
+            .try_get::<Option<String>, _>("id")?
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let key = if raw_id.is_empty() {
+            UNASSIGNED_TILL_SUMMARY_KEY.to_string()
+        } else {
+            raw_id
+        };
+        let name = if key == UNASSIGNED_TILL_SUMMARY_KEY {
+            "Unassigned / legacy".to_string()
+        } else {
+            register_names
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| key.clone())
+        };
+        let output_id = if key == UNASSIGNED_TILL_SUMMARY_KEY {
+            String::new()
+        } else {
+            key.clone()
+        };
+        let summary = summaries
+            .entry(key)
+            .or_insert_with(|| empty_frozen_till_sales_summary(output_id, name));
+        summary.net_sales = row.try_get("netSales")?;
+        summary.gross_sales = row.try_get("grossSales")?;
+        summary.refunds = row.try_get("refunds")?;
+        summary.tax_total = row.try_get("taxTotal")?;
+        summary.transactions = row.try_get("transactions")?;
+        summary.refund_transactions = row.try_get("refundTransactions")?;
+        summary.items_sold = row.try_get("itemsSold")?;
+        summary.cash_total = row.try_get("cashTotal")?;
+        summary.card_total = row.try_get("cardTotal")?;
+        summary.tips_total = row.try_get("tipsTotal")?;
+        summary.service_charge_total = row.try_get("serviceChargeTotal")?;
+        summary.cashback_total = row.try_get("cashbackTotal")?;
+        summary.loyalty_total = row.try_get("loyaltyTotal")?;
+        summary.account_total = row.try_get("accountTotal")?;
+    }
+
+    // Account repayments are cash movements, not new sales, but the existing
+    // TillSalesSummary contract exposes them per till for reconciliation.
+    let collection_rows = sqlx::query(
+        "SELECT CAST(COALESCE(NULLIF(TRIM(tillNumber), ''), '') AS CHAR) AS id,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0
+                     THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0
+                     THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
+                CAST(COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0
+                     THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsOther,
+                CAST(COALESCE(SUM(tipsAmount), 0) AS SIGNED) AS accountTipsTotal,
+                CAST(COALESCE(SUM(serviceChargeAmount), 0) AS SIGNED) AS accountServiceChargeTotal,
+                CAST(COALESCE(SUM(cashbackAmount), 0) AS SIGNED) AS accountCashbackTotal
+         FROM customer_account_entries
+         WHERE entryType = 'payment'
+           AND createdAt >= ? AND createdAt < ?
+         GROUP BY COALESCE(NULLIF(TRIM(tillNumber), ''), '')",
+    )
+    .bind(start_time)
+    .bind(end_time)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in collection_rows {
+        let raw_id = row
+            .try_get::<Option<String>, _>("id")?
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let key = if raw_id.is_empty() {
+            UNASSIGNED_TILL_SUMMARY_KEY.to_string()
+        } else {
+            raw_id
+        };
+        let name = if key == UNASSIGNED_TILL_SUMMARY_KEY {
+            "Unassigned / legacy".to_string()
+        } else {
+            register_names
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| key.clone())
+        };
+        let output_id = if key == UNASSIGNED_TILL_SUMMARY_KEY {
+            String::new()
+        } else {
+            key.clone()
+        };
+        let summary = summaries
+            .entry(key)
+            .or_insert_with(|| empty_frozen_till_sales_summary(output_id, name));
+        summary.account_repayments_cash = row.try_get("accountRepaymentsCash")?;
+        summary.account_repayments_card = row.try_get("accountRepaymentsCard")?;
+        summary.account_repayments_other = row.try_get("accountRepaymentsOther")?;
+        summary.account_tips_total = row.try_get("accountTipsTotal")?;
+        summary.account_service_charge_total = row.try_get("accountServiceChargeTotal")?;
+        summary.account_cashback_total = row.try_get("accountCashbackTotal")?;
+    }
+
+    let mut result: Vec<FrozenTillSalesSummary> = summaries.into_values().collect();
+    result.sort_by(|left, right| {
+        let left_unassigned = left.id.is_empty();
+        let right_unassigned = right.id.is_empty();
+        left_unassigned
+            .cmp(&right_unassigned)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    // Duplicate register display names are legal; disambiguate them so the
+    // printed close report still identifies each physical till.
+    let mut used_names = HashMap::<String, usize>::new();
+    for summary in &mut result {
+        let base_name = summary.name.clone();
+        let occurrence = used_names.entry(base_name.clone()).or_insert(0);
+        *occurrence += 1;
+        if *occurrence > 1 {
+            summary.name = format!("{base_name} ({occurrence})");
+        }
+    }
+    Ok(result)
+}
+
 async fn load_frozen_whole_system_report(
     tx: &mut sqlx::Transaction<'_, MySql>,
     start_time: &str,
     end_time: &str,
+    till_number: Option<&str>,
 ) -> Result<
     (
         FrozenSalesOverview,
         FrozenPaymentBreakdown,
         Vec<FrozenTopProduct>,
+        Vec<FrozenTillSalesSummary>,
     ),
     sqlx::Error,
 > {
-    let revenue = sqlx::query(
+    let till_filter = if till_number.is_some() {
+        " AND o.tillNumber = ?"
+    } else {
+        ""
+    };
+    let revenue_sql = format!(
         "SELECT CAST(COALESCE(SUM(o.total), 0) AS SIGNED) AS totalRevenue,
                 CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) AS SIGNED) AS saleRevenue,
                 CAST(COALESCE(SUM(CASE WHEN o.type != 'return' THEN 1 ELSE 0 END), 0) AS SIGNED) AS totalTransactions,
@@ -8884,24 +12002,28 @@ async fn load_frozen_whole_system_report(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?",
-    )
-    .bind(start_time)
-    .bind(end_time)
-    .fetch_one(&mut **tx)
-    .await?;
-    let items: i64 = sqlx::query_scalar(
+           AND o.completedAt >= ? AND o.completedAt < ?{till_filter}"
+    );
+    let mut revenue_query = sqlx::query(&revenue_sql).bind(start_time).bind(end_time);
+    if let Some(till_number) = till_number {
+        revenue_query = revenue_query.bind(till_number);
+    }
+    let revenue = revenue_query.fetch_one(&mut **tx).await?;
+    let items_sql = format!(
         "SELECT CAST(COALESCE(SUM(ol.quantity), 0) AS SIGNED)
          FROM order_lines ol JOIN orders o ON ol.orderId = o.id
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?",
-    )
-    .bind(start_time)
-    .bind(end_time)
-    .fetch_one(&mut **tx)
-    .await?;
+           AND o.completedAt >= ? AND o.completedAt < ?{till_filter}"
+    );
+    let mut items_query = sqlx::query_scalar(&items_sql)
+        .bind(start_time)
+        .bind(end_time);
+    if let Some(till_number) = till_number {
+        items_query = items_query.bind(till_number);
+    }
+    let items: i64 = items_query.fetch_one(&mut **tx).await?;
     let total_revenue: i64 = revenue.try_get("totalRevenue")?;
     let sale_revenue: i64 = revenue.try_get("saleRevenue")?;
     let transactions: i64 = revenue.try_get("totalTransactions")?;
@@ -8917,10 +12039,13 @@ async fn load_frozen_whole_system_report(
         total_items_sold: items,
     };
 
-    let payments = sqlx::query(
+    let payments_sql = format!(
         "SELECT
             CAST(COALESCE(SUM(p.totalCash), 0) AS SIGNED) AS totalCash,
             CAST(COALESCE(SUM(p.totalCard), 0) AS SIGNED) AS totalCard,
+            CAST(COALESCE(SUM(p.tipsTotal), 0) AS SIGNED) AS tipsTotal,
+            CAST(COALESCE(SUM(p.serviceChargeTotal), 0) AS SIGNED) AS serviceChargeTotal,
+            CAST(COALESCE(SUM(p.cashbackTotal), 0) AS SIGNED) AS cashbackTotal,
             CAST(COALESCE(SUM(p.totalLoyalty), 0) AS SIGNED) AS totalLoyalty,
             CAST(COALESCE(SUM(p.totalAccount), 0) AS SIGNED) AS totalAccount,
             CAST(COALESCE(SUM(CASE WHEN p.orderId IS NULL THEN o.total ELSE 0 END), 0) AS SIGNED) AS unrecordedAmount,
@@ -8936,6 +12061,9 @@ async fn load_frozen_whole_system_report(
             SELECT orderId,
                 SUM(CASE WHEN COALESCE(cashAmount, 0) != 0 THEN cashAmount WHEN method = 'cash' THEN amount ELSE 0 END) AS totalCash,
                 SUM(CASE WHEN COALESCE(cardAmount, 0) != 0 THEN cardAmount WHEN method IN ('card', 'sumup', 'dojo', 'mobile') THEN amount ELSE 0 END) AS totalCard,
+                SUM(COALESCE(tipsAmount, 0)) AS tipsTotal,
+                SUM(COALESCE(serviceChargeAmount, 0)) AS serviceChargeTotal,
+                SUM(COALESCE(cashbackAmount, 0)) AS cashbackTotal,
                 SUM(COALESCE(loyaltyAmount, 0)) AS totalLoyalty,
                 SUM(COALESCE(accountAmount, 0)) AS totalAccount,
                 MAX(CASE WHEN COALESCE(cashAmount, 0) != 0 OR method = 'cash' THEN 1 ELSE 0 END) AS hasCash,
@@ -8947,18 +12075,22 @@ async fn load_frozen_whole_system_report(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?",
-    )
-    .bind(start_time)
-    .bind(end_time)
-    .fetch_one(&mut **tx)
-    .await?;
+           AND o.completedAt >= ? AND o.completedAt < ?{till_filter}"
+    );
+    let mut payments_query = sqlx::query(&payments_sql).bind(start_time).bind(end_time);
+    if let Some(till_number) = till_number {
+        payments_query = payments_query.bind(till_number);
+    }
+    let payments = payments_query.fetch_one(&mut **tx).await?;
     let account_activity = sqlx::query(
         "SELECT
             CAST(COALESCE(SUM(CASE WHEN entryType = 'charge' THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountCharges,
             CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCash,
             CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsCard,
             CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' AND paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS SIGNED) AS accountRepaymentsOther,
+            CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' THEN tipsAmount ELSE 0 END), 0) AS SIGNED) AS accountTipsTotal,
+            CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' THEN serviceChargeAmount ELSE 0 END), 0) AS SIGNED) AS accountServiceChargeTotal,
+            CAST(COALESCE(SUM(CASE WHEN entryType = 'payment' THEN cashbackAmount ELSE 0 END), 0) AS SIGNED) AS accountCashbackTotal,
             CAST(COALESCE(SUM(CASE WHEN entryType NOT IN ('charge', 'payment') THEN amountPence ELSE 0 END), 0) AS SIGNED) AS accountAdjustments
          FROM customer_account_entries
          WHERE createdAt >= ? AND createdAt < ?",
@@ -8984,6 +12116,9 @@ async fn load_frozen_whole_system_report(
     let breakdown = FrozenPaymentBreakdown {
         total_cash: payments.try_get("totalCash")?,
         total_card: payments.try_get("totalCard")?,
+        tips_total: payments.try_get("tipsTotal")?,
+        service_charge_total: payments.try_get("serviceChargeTotal")?,
+        cashback_total: payments.try_get("cashbackTotal")?,
         total_loyalty: payments.try_get("totalLoyalty")?,
         total_account: payments.try_get("totalAccount")?,
         cash_tx_count: payments.try_get("cashTxCount")?,
@@ -8995,6 +12130,9 @@ async fn load_frozen_whole_system_report(
         account_repayments_cash: account_activity.try_get("accountRepaymentsCash")?,
         account_repayments_card: account_activity.try_get("accountRepaymentsCard")?,
         account_repayments_other: account_activity.try_get("accountRepaymentsOther")?,
+        account_tips_total: account_activity.try_get("accountTipsTotal")?,
+        account_service_charge_total: account_activity.try_get("accountServiceChargeTotal")?,
+        account_cashback_total: account_activity.try_get("accountCashbackTotal")?,
         account_adjustments: account_activity.try_get("accountAdjustments")?,
         opening_account_owed: opening,
         closing_account_owed: closing,
@@ -9004,7 +12142,7 @@ async fn load_frozen_whole_system_report(
         unrecorded_tx_count: payments.try_get("unrecordedTxCount")?,
     };
 
-    let top_rows = sqlx::query(
+    let top_products_sql = format!(
         "SELECT CAST(ol.productName AS CHAR) AS name,
                 CAST(COALESCE(pr.sku, '') AS CHAR) AS sku,
                 CAST(SUM(ol.quantity) AS SIGNED) AS qtySold,
@@ -9016,15 +12154,18 @@ async fn load_frozen_whole_system_report(
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?
+           AND o.completedAt >= ? AND o.completedAt < ?{till_filter}
          GROUP BY ol.productId, ol.productName, pr.sku
          HAVING SUM(ol.quantity) != 0 OR SUM(ol.lineTotal) != 0
-         ORDER BY qtySold DESC LIMIT 10",
-    )
-    .bind(start_time)
-    .bind(end_time)
-    .fetch_all(&mut **tx)
-    .await?;
+         ORDER BY qtySold DESC LIMIT 10"
+    );
+    let mut top_products_query = sqlx::query(&top_products_sql)
+        .bind(start_time)
+        .bind(end_time);
+    if let Some(till_number) = till_number {
+        top_products_query = top_products_query.bind(till_number);
+    }
+    let top_rows = top_products_query.fetch_all(&mut **tx).await?;
     let top_products = top_rows
         .into_iter()
         .map(|row| {
@@ -9039,7 +12180,24 @@ async fn load_frozen_whole_system_report(
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
-    Ok((overview, breakdown, top_products))
+    let mut till_summaries = load_frozen_till_sales_summaries(tx, start_time, end_time).await?;
+    if let Some(till_number) = till_number {
+        till_summaries.retain(|summary| summary.id == till_number);
+        if till_summaries.is_empty() {
+            let name: Option<String> = sqlx::query_scalar(
+                "SELECT CAST(COALESCE(NULLIF(TRIM(name), ''), id) AS CHAR)
+                 FROM registers WHERE id = ? LIMIT 1",
+            )
+            .bind(till_number)
+            .fetch_optional(&mut **tx)
+            .await?;
+            till_summaries.push(empty_frozen_till_sales_summary(
+                till_number.to_string(),
+                name.unwrap_or_else(|| till_number.to_string()),
+            ));
+        }
+    }
+    Ok((overview, breakdown, top_products, till_summaries))
 }
 
 #[tauri::command]
@@ -9052,10 +12210,10 @@ pub async fn get_frozen_whole_system_report(
     if period_start.trim().is_empty() {
         return Err("Whole-system report period start is missing".into());
     }
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    assert_mysql_whole_system_close_schema_ready(&pool)
         .await
         .map_err(|error| error.to_string())?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
@@ -9071,14 +12229,26 @@ pub async fn get_frozen_whole_system_report(
         .await
         .map_err(|error| error.to_string())?;
     if !issues.is_empty() {
-        return Err(format!(
-            "{WHOLE_SYSTEM_CLOSE_WAITING_CODE}: {}",
-            issues.join("; ")
-        ));
+        let message = format!("{WHOLE_SYSTEM_CLOSE_WAITING_CODE}: {}", issues.join("; "));
+        tx.rollback()
+            .await
+            .map_err(|error| format!("{message}; could not release the close lock: {error}"))?;
+        return Err(message);
     }
-    assert_remote_terminal_journal_empty(&mut tx)
-        .await
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = assert_remote_terminal_journal_empty(&mut tx).await {
+        let message = error.to_string();
+        tx.rollback().await.map_err(|rollback| {
+            format!("{message}; could not release the close lock: {rollback}")
+        })?;
+        return Err(message);
+    }
+    if let Err(error) = assert_mysql_whole_system_close_guards_ready(&mut tx).await {
+        let message = error.to_string();
+        tx.rollback().await.map_err(|rollback| {
+            format!("{message}; could not release the close lock: {rollback}")
+        })?;
+        return Err(message);
+    }
     let latest_marker = latest_system_report_marker(&mut tx, true)
         .await
         .map_err(|error| error.to_string())?;
@@ -9104,10 +12274,30 @@ pub async fn get_frozen_whole_system_report(
     .execute(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;
-    let (overview, breakdown, top_products) =
-        load_frozen_whole_system_report(&mut tx, &period_start, &barrier.cutoff_at)
-            .await
-            .map_err(|error| error.to_string())?;
+    let report = tokio::time::timeout(
+        Duration::from_secs(WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS),
+        load_frozen_whole_system_report(&mut tx, &period_start, &barrier.cutoff_at, None),
+    )
+    .await;
+    let (overview, breakdown, top_products, till_summaries) = match report {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            tx.rollback().await.map_err(|rollback| {
+                format!("{message}; could not release the close lock: {rollback}")
+            })?;
+            return Err(message);
+        }
+        Err(_) => {
+            let message = format!(
+                "{WHOLE_SYSTEM_CLOSE_REPORT_TIMEOUT_CODE}: frozen report totals exceeded {WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS} seconds; try again"
+            );
+            tx.rollback().await.map_err(|rollback| {
+                format!("{message}; could not release the close lock: {rollback}")
+            })?;
+            return Err(message);
+        }
+    };
     tx.commit().await.map_err(|error| error.to_string())?;
     Ok(FrozenWholeSystemReport {
         token: token.trim().into(),
@@ -9117,6 +12307,7 @@ pub async fn get_frozen_whole_system_report(
         overview,
         breakdown,
         top_products,
+        till_summaries,
     })
 }
 
@@ -9132,10 +12323,10 @@ pub async fn finish_whole_system_close(
     {
         return Err("Invalid whole-system close completion request".into());
     }
-    let pool = connect_mysql_for_pos(&mysql_uri)
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
-    ensure_mysql_whole_system_close_schema(&pool)
+    assert_mysql_whole_system_close_schema_ready(&pool)
         .await
         .map_err(|error| error.to_string())?;
     let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
@@ -9152,6 +12343,13 @@ pub async fn finish_whole_system_close(
         "frozen",
     )
     .map_err(|error| error.to_string())?;
+    if let Err(error) = assert_mysql_whole_system_close_guards_ready(&mut tx).await {
+        let message = error.to_string();
+        tx.rollback().await.map_err(|rollback| {
+            format!("{message}; could not release the close lock: {rollback}")
+        })?;
+        return Err(message);
+    }
     let latest_marker = latest_system_report_marker(&mut tx, true)
         .await
         .map_err(|error| error.to_string())?;
@@ -9222,6 +12420,110 @@ pub async fn finish_whole_system_close(
     Ok(row)
 }
 
+/// Commit a per-till marker only if the effective till-or-system marker still
+/// matches the snapshot that the manager reviewed. The close barrier is the
+/// serialization point for current native writers and the permanent MariaDB
+/// guards, so marker comparison and insert are one authoritative transaction.
+#[tauri::command]
+pub async fn commit_till_report_close(
+    mysql_uri: String,
+    input: CommitTillReportCloseInput,
+) -> Result<ReportMarkerRecord, String> {
+    if input.id.trim().is_empty()
+        || input.till_number.trim().is_empty()
+        || input.period_start.trim().is_empty()
+        || input.period_end.trim().is_empty()
+    {
+        return Err("Invalid till report close request".into());
+    }
+    let pool = connect_mysql_for_whole_system_close(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_mysql_whole_system_close_schema_ready(&pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+    cleanup_expired_whole_system_close(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_mysql_restore_writes_allowed(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    let barrier = locked_whole_system_close_barrier(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    if barrier.state != "idle" {
+        return Err(format!(
+            "{WHOLE_SYSTEM_CLOSE_IN_PROGRESS_CODE}: another report close is already in progress"
+        ));
+    }
+    assert_mysql_whole_system_close_guards_ready(&mut tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_remote_till_terminal_journal_empty(&mut tx, input.till_number.trim())
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let latest_marker = latest_effective_till_report_marker(&mut tx, input.till_number.trim())
+        .await
+        .map_err(|error| error.to_string())?;
+    let server_tick: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    let latest_allowed_cutoff =
+        canonical_report_epoch(&server_tick).map_err(|error| error.to_string())?;
+    let (period_start, period_end) = validate_till_report_close_request(
+        latest_marker.as_deref(),
+        input.expected_last_marker.as_deref(),
+        &input.period_start,
+        &input.period_end,
+        &latest_allowed_cutoff,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let stamp: String =
+        sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    let row = ReportMarkerRecord {
+        id: input.id,
+        till_number: input.till_number.trim().into(),
+        marker_type: "period".into(),
+        marker_time: period_end.clone(),
+        period_start,
+        period_end,
+        employee_id: input.employee_id,
+        report_text: input.report_text,
+        report_total: input.report_total,
+        created_at: stamp.clone(),
+        updated_at: stamp,
+    };
+    sqlx::query(
+        "INSERT INTO till_report_markers
+            (id, tillNumber, type, markerTime, periodStart, periodEnd, employeeId,
+             reportText, reportTotal, createdAt, updatedAt)
+         VALUES (?, ?, 'period', ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&row.id)
+    .bind(&row.till_number)
+    .bind(&row.marker_time)
+    .bind(&row.period_start)
+    .bind(&row.period_end)
+    .bind(&row.employee_id)
+    .bind(&row.report_text)
+    .bind(row.report_total)
+    .bind(&row.created_at)
+    .bind(&row.updated_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok(row)
+}
+
 #[tauri::command]
 pub async fn allocate_mysql_till_sequence(mysql_uri: String) -> Result<i64, String> {
     let pool = connect_mysql_for_pos(&mysql_uri)
@@ -9244,6 +12546,762 @@ pub async fn allocate_mysql_till_sequence(mysql_uri: String) -> Result<i64, Stri
     .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     value.parse::<i64>().map_err(|e| e.to_string())
+}
+
+async fn run_mariadb_attendance_audit_import(
+    mysql: &MySqlPool,
+    local: &SqlitePool,
+    till_id: &str,
+) -> Result<AttendanceAuditImportResult, sqlx::Error> {
+    let committed_controlled_owner: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = ? LIMIT 1",
+    )
+    .bind(MARIADB_CONTROLLED_IMPORT_OWNER_KEY)
+    .fetch_optional(mysql)
+    .await?;
+    let bootstrap_done: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE `key` = 'bootstrap_done'")
+            .fetch_one(mysql)
+            .await?;
+    if committed_controlled_owner.as_deref() == Some(till_id) && bootstrap_done == 1 {
+        let ControlledImportGateClaim::RecoveredCommitted(server_data_epoch) =
+            claim_controlled_import_gate(mysql, till_id).await?
+        else {
+            return Err(account_protocol_error(
+                "CONTROLLED_IMPORT_STATE_CHANGED: completed import could not release maintenance",
+            ));
+        };
+        let employee_count = sqlx::query_scalar("SELECT COUNT(*) FROM employees")
+            .fetch_one(local)
+            .await?;
+        let attendance_count = sqlx::query_scalar("SELECT COUNT(*) FROM employee_attendance")
+            .fetch_one(local)
+            .await?;
+        let audit_count = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(local)
+            .await?;
+        return Ok(AttendanceAuditImportResult {
+            employee_count,
+            attendance_count,
+            audit_count,
+            server_data_epoch,
+        });
+    }
+
+    // BEGIN IMMEDIATE blocks local writers for validation and copying. The
+    // second pooled connection can run the existing read-only validators while
+    // every query observes the same no-writer SQLite state.
+    let mut local_snapshot = local.acquire().await?;
+    sqlx::query("PRAGMA busy_timeout = 5000")
+        .execute(&mut *local_snapshot)
+        .await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *local_snapshot)
+        .await?;
+    if let Err(error) = validate_restore_schema(local).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+        return Err(account_protocol_error(error));
+    }
+    if let Err(error) = validate_restore_data(local, false).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+        return Err(account_protocol_error(error));
+    }
+
+    let gate_claim = match claim_controlled_import_gate(mysql, till_id).await {
+        Ok(claim) => claim,
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+            return Err(error);
+        }
+    };
+    if let ControlledImportGateClaim::RecoveredCommitted(server_data_epoch) = gate_claim {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+        let employee_count = sqlx::query_scalar("SELECT COUNT(*) FROM employees")
+            .fetch_one(local)
+            .await?;
+        let attendance_count = sqlx::query_scalar("SELECT COUNT(*) FROM employee_attendance")
+            .fetch_one(local)
+            .await?;
+        let audit_count = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(local)
+            .await?;
+        return Ok(AttendanceAuditImportResult {
+            employee_count,
+            attendance_count,
+            audit_count,
+            server_data_epoch,
+        });
+    }
+
+    // Every remote table and bootstrap marker becomes visible in one commit
+    // while the durable restore gate blocks every other MariaDB session.
+    let mut mysql_tx = match mysql.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+            return match release_controlled_import_gate(mysql, till_id, &utc_stamp()).await {
+                Ok(()) => Err(error),
+                Err(release_error) => {
+                    Err(account_protocol_error(format!("{error}; {release_error}")))
+                }
+            };
+        }
+    };
+    let operation = async {
+        assert_mysql_restore_writes_allowed(&mut mysql_tx).await?;
+        assert_no_other_active_tills_in_restore(&mut mysql_tx, till_id).await?;
+        assert_no_active_terminal_attempts_in_restore(&mut mysql_tx).await?;
+
+        let local_terminal_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'payment_terminal_attempts'",
+        )
+        .fetch_one(&mut *local_snapshot)
+        .await?;
+        if local_terminal_table != 0 {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM payment_terminal_attempts
+                 WHERE status IN ('prepared', 'started', 'uncertain', 'approved',
+                                  'commit_failed', 'completion_pending')",
+            )
+            .fetch_one(&mut *local_snapshot)
+            .await?;
+            if active != 0 {
+                return Err(account_protocol_error(format!(
+                    "MariaDB import cannot continue while this till has {active} terminal payment attempt(s) needing completion or recovery"
+                )));
+            }
+        }
+
+        let local_shop_id: Option<String> = sqlx::query_scalar(
+            "SELECT shopId FROM app_identity WHERE id = 'main' LIMIT 1",
+        )
+        .fetch_optional(&mut *local_snapshot)
+        .await?;
+        let local_shop_id = local_shop_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                account_protocol_error(
+                    "DATABASE_IDENTITY_UNVERIFIED: local SQLite has no verified shop identity",
+                )
+            })?;
+        let remote_shop_id: Option<String> = sqlx::query_scalar(
+            "SELECT shopId FROM app_identity WHERE id = 'main' LIMIT 1 FOR UPDATE",
+        )
+        .fetch_optional(&mut *mysql_tx)
+        .await?;
+        if remote_shop_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .is_some_and(|value| value != local_shop_id)
+        {
+            return Err(account_protocol_error(
+                "DATABASE_IDENTITY_MISMATCH: local SQLite belongs to a different shop",
+            ));
+        }
+        let mut expected_counts = Vec::new();
+        let mut employee_count = 0;
+        let mut attendance_count = 0;
+        let mut audit_count = 0;
+        for table in MARIADB_CONTROLLED_IMPORT_COPY_TABLES {
+            let attendance_import = if *table == "employee_attendance" {
+                let token = random_record_id();
+                let connection_id = begin_attendance_audit_import(&mut mysql_tx, &token).await?;
+                Some((connection_id, token))
+            } else {
+                None
+            };
+            let copied = copy_restore_table_to_mysql_from_connection(
+                &mut *local_snapshot,
+                &mut mysql_tx,
+                table,
+            )
+            .await?;
+            if let Some((connection_id, token)) = attendance_import {
+                finish_attendance_audit_import(&mut mysql_tx, connection_id, &token).await?;
+            }
+            match *table {
+                "employees" => employee_count = copied,
+                "employee_attendance" => attendance_count = copied,
+                "audit_logs" => audit_count = copied,
+                _ => {}
+            }
+            if *table != "settings" {
+                expected_counts.push((*table, copied));
+            }
+        }
+
+        for (table, expected) in expected_counts {
+            let actual: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {}",
+                mysql_identifier(table)
+            ))
+            .fetch_one(&mut *mysql_tx)
+            .await?;
+            if actual != expected {
+                return Err(account_protocol_error(format!(
+                    "Controlled MariaDB import verification failed for {table}: expected {expected}, found {actual}"
+                )));
+            }
+        }
+        let server_data_epoch: String = sqlx::query_scalar(
+            "SELECT CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3),
+                    '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')",
+        )
+        .fetch_one(&mut *mysql_tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO settings (`key`, value, updatedAt)
+             VALUES ('bootstrap_done', '1', ?)
+             ON DUPLICATE KEY UPDATE value = '1', updatedAt = VALUES(updatedAt)",
+        )
+        .bind(&server_data_epoch)
+        .execute(&mut *mysql_tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO settings (`key`, value, updatedAt)
+             VALUES ('server_data_epoch', ?, ?)
+             ON DUPLICATE KEY UPDATE value = VALUES(value), updatedAt = VALUES(updatedAt)",
+        )
+        .bind(&server_data_epoch)
+        .bind(&server_data_epoch)
+        .execute(&mut *mysql_tx)
+        .await?;
+        sqlx::query("DELETE FROM sync_change_log")
+            .execute(&mut *mysql_tx)
+            .await?;
+        Ok::<_, sqlx::Error>(AttendanceAuditImportResult {
+            employee_count,
+            attendance_count,
+            audit_count,
+            server_data_epoch,
+        })
+    }
+    .await;
+
+    match operation {
+        Ok(result) => {
+            if let Err(error) = mysql_tx.commit().await {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+                // A failed commit is ambiguous. Keep the durable gate active so
+                // another till cannot observe or build on an uncertain import;
+                // retrying this same command performs committed-state recovery.
+                return Err(account_protocol_error(format!(
+                    "{MARIADB_RESTORE_MAINTENANCE_CODE}: controlled-import commit could not be confirmed ({error}); retry from this till"
+                )));
+            }
+            // This is a read-only snapshot. Rollback releases it without any
+            // accidental future write becoming part of the import boundary.
+            let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+            release_controlled_import_gate(mysql, till_id, &result.server_data_epoch).await?;
+            Ok(result)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = mysql_tx.rollback().await {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+                // Only a confirmed remote rollback may open maintenance again.
+                return Err(account_protocol_error(format!(
+                    "{MARIADB_RESTORE_MAINTENANCE_CODE}: {error}; MariaDB rollback could not be confirmed ({rollback_error}); retry from this till"
+                )));
+            }
+            let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+            match release_controlled_import_gate(mysql, till_id, &utc_stamp()).await {
+                Ok(()) => Err(error),
+                Err(release_error) => {
+                    Err(account_protocol_error(format!("{error}; {release_error}")))
+                }
+            }
+        }
+    }
+}
+
+/// Atomically bootstrap an empty MariaDB database from one complete local
+/// SQLite snapshot. The durable restore gate hides the entire transaction from
+/// every other till; only this exact connection/token suppresses duplicate
+/// attendance audits while original audit rows are copied.
+#[tauri::command]
+pub async fn import_mariadb_attendance_audit_snapshot(
+    app: AppHandle,
+    mysql_uri: String,
+    till_id: String,
+) -> Result<AttendanceAuditImportResult, String> {
+    if till_id.trim().is_empty() {
+        return Err("Controlled MariaDB import requires this till's stable ID".into());
+    }
+    let mysql = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET SESSION lock_wait_timeout = 8")
+        .execute(&mysql)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET SESSION innodb_lock_wait_timeout = 8")
+        .execute(&mysql)
+        .await
+        .map_err(|error| error.to_string())?;
+    let acquired: Option<i64> = sqlx::query_scalar("SELECT GET_LOCK(?, ?)")
+        .bind(MARIADB_ATTENDANCE_AUDIT_IMPORT_LOCK_NAME)
+        .bind(MARIADB_ATTENDANCE_AUDIT_IMPORT_LOCK_SECONDS)
+        .fetch_one(&mysql)
+        .await
+        .map_err(|error| error.to_string())?;
+    if acquired != Some(1) {
+        mysql.close().await;
+        return Err("Another till is already importing attendance history; try again".into());
+    }
+
+    let result = async {
+        let local_path = local_db_path(&app).map_err(|error| account_protocol_error(error))?;
+        if !local_path.exists() {
+            return Err(account_protocol_error("Local database does not exist"));
+        }
+        let local = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect(&format!("sqlite://{}?mode=rw", local_path.display()))
+            .await?;
+        ensure_mysql_restore_guard_schema(&mysql).await?;
+        ensure_mysql_whole_system_close_schema(&mysql).await?;
+        ensure_mysql_account_ledger_guards(&mysql).await?;
+        assert_attendance_audit_import_schema_ready(&mysql).await?;
+        assert_employee_profile_authority_schema_ready(&mysql).await?;
+        let imported = run_mariadb_attendance_audit_import(&mysql, &local, till_id.trim()).await;
+        local.close().await;
+        imported
+    }
+    .await;
+
+    // Defense in depth for every error/commit path. A committed import has no
+    // marker; a rolled-back one loses it atomically. Clearing both makes a
+    // reused pooled session incapable of suppressing a later live audit.
+    let _ = sqlx::query("SET @lbj_pos_attendance_audit_import = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query("SET @lbj_pos_employee_profile_authority = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query("SET @lbj_pos_restore_bypass = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query(
+        "DELETE FROM pos_attendance_audit_import_sessions
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mysql)
+    .await;
+    let _ = sqlx::query(
+        "DELETE FROM pos_employee_profile_write_authority
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mysql)
+    .await;
+    let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
+        .bind(MARIADB_ATTENDANCE_AUDIT_IMPORT_LOCK_NAME)
+        .execute(&mysql)
+        .await;
+    mysql.close().await;
+    result.map_err(|error| error.to_string())
+}
+
+async fn run_mariadb_employee_profile_cas(
+    mysql: &MySqlPool,
+    employee: &EmployeeProfileRecord,
+    expected_updated_at: Option<&str>,
+    actor_employee_id: &str,
+    actor_expected_updated_at: &str,
+) -> Result<EmployeeProfileRecord, sqlx::Error> {
+    let mut tx = mysql.begin().await?;
+    let operation = async {
+        assert_mysql_restore_writes_allowed(&mut tx).await?;
+        // Staff authorization changes are rare. Locking the complete set gives
+        // first-admin creation and the last-admin invariant one serialization
+        // point, including the empty-table next-key gap.
+        let locked_employees = lock_all_employee_profiles(&mut tx).await?;
+        let before = locked_employees
+            .iter()
+            .find(|current| current.id == employee.id)
+            .cloned();
+        if !employee_profile_credentials_allowed(before.as_ref(), employee) {
+            return Err(account_protocol_error(
+                "EMPLOYEE_PROFILE_PIN_INVALID: new or changed staff credentials require a secure PIN reset",
+            ));
+        }
+        let audit_actor = if actor_employee_id.is_empty() {
+            assert_first_admin_bootstrap_allowed(employee, &locked_employees)?;
+            "system/bootstrap".to_string()
+        } else {
+            let actor = authorize_employee_profile_actor(
+                &mut tx,
+                actor_employee_id,
+                actor_expected_updated_at,
+            )
+            .await?;
+            assert_employee_profile_actor_scope(&actor, before.as_ref(), employee)?;
+            actor.id
+        };
+        match (expected_updated_at, before.as_ref()) {
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"));
+            }
+            (Some(expected), Some(current)) if current.updated_at != expected => {
+                return Err(account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"));
+            }
+            _ => {}
+        }
+
+        let token = random_record_id();
+        let connection_id = begin_employee_profile_authority(&mut tx, &token).await?;
+        let stamp = "CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')";
+        if expected_updated_at.is_none() {
+            sqlx::query(&format!(
+                "INSERT INTO employees
+                    (id, storeId, name, pin, pinHash, role, email, isActive,
+                     createdAt, updatedAt)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {stamp})"
+            ))
+            .bind(&employee.id)
+            .bind(&employee.store_id)
+            .bind(&employee.name)
+            .bind(&employee.pin)
+            .bind(&employee.pin_hash)
+            .bind(&employee.role)
+            .bind(&employee.email)
+            .bind(i64::from(employee.is_active))
+            .bind(&employee.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                if error
+                    .as_database_error()
+                    .and_then(|db| db.code())
+                    .as_deref()
+                    == Some("1062")
+                {
+                    account_protocol_error("EMPLOYEE_PROFILE_CONFLICT")
+                } else {
+                    error
+                }
+            })?;
+        } else {
+            let result = sqlx::query(&format!(
+                "UPDATE employees e
+                 LEFT JOIN employee_attendance attendance
+                   ON attendance.employeeId = e.id AND attendance.status = 'open'
+                 SET e.storeId = ?, e.name = ?, e.pin = ?, e.pinHash = ?,
+                     e.role = ?, e.email = ?, e.isActive = ?, e.updatedAt = {stamp}
+                 WHERE BINARY e.id = BINARY ?
+                   AND BINARY COALESCE(e.updatedAt, '') = BINARY ?
+                   AND (? <> 0 OR attendance.id IS NULL)"
+            ))
+            .bind(&employee.store_id)
+            .bind(&employee.name)
+            .bind(&employee.pin)
+            .bind(&employee.pin_hash)
+            .bind(&employee.role)
+            .bind(&employee.email)
+            .bind(i64::from(employee.is_active))
+            .bind(&employee.id)
+            .bind(expected_updated_at.unwrap_or_default())
+            .bind(i64::from(employee.is_active))
+            .execute(&mut *tx)
+            .await?;
+            if result.rows_affected() != 1 {
+                let open_attendance: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM employee_attendance
+                     WHERE BINARY employeeId = BINARY ? AND status = 'open'",
+                )
+                .bind(&employee.id)
+                .fetch_one(&mut *tx)
+                .await?;
+                return Err(account_protocol_error(if !employee.is_active && open_attendance > 0 {
+                    "ATTENDANCE_OPEN_SESSION"
+                } else {
+                    "EMPLOYEE_PROFILE_CONFLICT"
+                }));
+            }
+        }
+
+        let saved = select_employee_profile_for_update(&mut tx, &employee.id)
+            .await?
+            .ok_or_else(|| account_protocol_error("Could not confirm the staff change in MariaDB"))?;
+        let authoritative_employees = lock_all_employee_profiles(&mut tx).await?;
+        if !authoritative_employees.iter().any(employee_is_usable_admin) {
+            return Err(account_protocol_error(
+                "LAST_ACTIVE_ADMIN_REQUIRED: at least one active administrator with a usable PIN must remain",
+            ));
+        }
+        let audit_id = random_record_id();
+        let old_data = before
+            .as_ref()
+            .map(employee_profile_audit_json)
+            .unwrap_or_default();
+        let new_data = employee_profile_audit_json(&saved);
+        sqlx::query(&format!(
+            "INSERT INTO audit_logs
+                (id, employeeId, action, entityType, entityId,
+                 oldData, newData, createdAt, updatedAt)
+             VALUES (?, ?, ?, 'employee', ?, ?, ?, {stamp}, {stamp})"
+        ))
+        .bind(&audit_id)
+        .bind(&audit_actor)
+        .bind(if before.is_some() {
+            "employee_updated"
+        } else {
+            "employee_created"
+        })
+        .bind(&saved.id)
+        .bind(old_data)
+        .bind(new_data)
+        .execute(&mut *tx)
+        .await?;
+        finish_employee_profile_authority(&mut tx, connection_id, &token).await?;
+        Ok::<_, sqlx::Error>(saved)
+    }
+    .await;
+
+    match operation {
+        Ok(saved) => {
+            tx.commit().await?;
+            Ok(saved)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+fn legacy_pin_sha256(pin: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("pos-pin-v1:{pin}").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn legacy_employee_pin_matches(employee: &EmployeeProfileRecord, candidate: &str) -> bool {
+    if employee.pin_hash.is_empty() {
+        is_valid_legacy_plaintext_pin(&employee.pin) && employee.pin == candidate
+    } else {
+        is_valid_legacy_sha256_pin_hash(&employee.pin_hash)
+            && employee
+                .pin_hash
+                .eq_ignore_ascii_case(&legacy_pin_sha256(candidate))
+    }
+}
+
+async fn run_mariadb_employee_legacy_pin_upgrade(
+    mysql: &MySqlPool,
+    employee_id: &str,
+    expected_updated_at: &str,
+    old_pin: &str,
+    new_pin_hash: &str,
+) -> Result<EmployeeProfileRecord, sqlx::Error> {
+    let mut tx = mysql.begin().await?;
+    let operation = async {
+        assert_mysql_restore_writes_allowed(&mut tx).await?;
+        let before = select_employee_profile_for_update(&mut tx, employee_id)
+            .await?
+            .ok_or_else(|| account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"))?;
+        if before.updated_at != expected_updated_at {
+            return Err(account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"));
+        }
+        if !before.is_active
+            || !matches!(
+                before.role.as_str(),
+                "admin" | "manager" | "supervisor" | "cashier"
+            )
+        {
+            return Err(account_protocol_error(
+                "EMPLOYEE_PROFILE_ACTOR_STALE: this staff account can no longer sign in",
+            ));
+        }
+        if !legacy_employee_pin_matches(&before, old_pin) {
+            return Err(account_protocol_error(
+                "EMPLOYEE_PROFILE_LEGACY_PIN_MISMATCH: the authoritative legacy PIN changed",
+            ));
+        }
+
+        let token = random_record_id();
+        let connection_id = begin_employee_profile_authority(&mut tx, &token).await?;
+        let stamp = "CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')";
+        let updated = sqlx::query(&format!(
+            "UPDATE employees SET pin = '', pinHash = ?, updatedAt = {stamp}
+             WHERE BINARY id = BINARY ?
+               AND BINARY COALESCE(updatedAt, '') = BINARY ?"
+        ))
+        .bind(new_pin_hash)
+        .bind(employee_id)
+        .bind(expected_updated_at)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"));
+        }
+        let saved = select_employee_profile_for_update(&mut tx, employee_id)
+            .await?
+            .ok_or_else(|| account_protocol_error("EMPLOYEE_PROFILE_CONFLICT"))?;
+        sqlx::query(&format!(
+            "INSERT INTO audit_logs
+                (id, employeeId, action, entityType, entityId,
+                 oldData, newData, createdAt, updatedAt)
+             VALUES (?, ?, 'employee_pin_hash_upgraded', 'employee', ?, ?, ?, {stamp}, {stamp})"
+        ))
+        .bind(random_record_id())
+        .bind(employee_id)
+        .bind(employee_id)
+        .bind(employee_profile_audit_json(&before))
+        .bind(employee_profile_audit_json(&saved))
+        .execute(&mut *tx)
+        .await?;
+        finish_employee_profile_authority(&mut tx, connection_id, &token).await?;
+        Ok::<_, sqlx::Error>(saved)
+    }
+    .await;
+    match operation {
+        Ok(saved) => {
+            tx.commit().await?;
+            Ok(saved)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// Narrow self-service migration used only immediately after a successful
+/// authoritative legacy-PIN login. It cannot change role, activation, or any
+/// profile field besides the credential representation and server timestamp.
+#[tauri::command]
+pub async fn upgrade_mariadb_employee_legacy_pin(
+    mysql_uri: String,
+    employee_id: String,
+    expected_updated_at: String,
+    old_pin: String,
+    new_pin_hash: String,
+) -> Result<EmployeeProfileRecord, String> {
+    if employee_id.trim().is_empty()
+        || expected_updated_at.trim().is_empty()
+        || !is_valid_legacy_plaintext_pin(&old_pin)
+        || !is_valid_pbkdf2_pin_hash(&new_pin_hash)
+    {
+        return Err("Invalid legacy PIN upgrade request".into());
+    }
+    let mysql = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET SESSION innodb_lock_wait_timeout = 5")
+        .execute(&mysql)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = async {
+        assert_employee_profile_authority_schema_ready(&mysql).await?;
+        run_mariadb_employee_legacy_pin_upgrade(
+            &mysql,
+            employee_id.trim(),
+            expected_updated_at.trim(),
+            &old_pin,
+            &new_pin_hash,
+        )
+        .await
+    }
+    .await;
+    let _ = sqlx::query("SET @lbj_pos_employee_profile_authority = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query(
+        "DELETE FROM pos_employee_profile_write_authority
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mysql)
+    .await;
+    mysql.close().await;
+    result.map_err(|error| error.to_string())
+}
+
+/// Server-authoritative staff mutation. The short-lived write authority, CAS,
+/// employee row, and redacted audit event all commit or roll back together.
+#[tauri::command]
+pub async fn save_mariadb_employee_profile_cas(
+    mysql_uri: String,
+    employee: EmployeeProfileRecord,
+    expected_updated_at: Option<String>,
+    actor_employee_id: String,
+    actor_expected_updated_at: String,
+) -> Result<EmployeeProfileRecord, String> {
+    if employee.id.trim().is_empty() || employee.name.trim().is_empty() {
+        return Err("Staff ID and name are required".into());
+    }
+    let bootstrap_actor = actor_employee_id.trim().is_empty();
+    if bootstrap_actor
+        && (expected_updated_at.is_some() || employee.role != "admin" || !employee.is_active)
+    {
+        return Err("The manager authorizing this staff change is required".into());
+    }
+    if !bootstrap_actor && actor_expected_updated_at.trim().is_empty() {
+        return Err("The authorizing staff session is stale; sign in again".into());
+    }
+    if let Some(expected) = expected_updated_at.as_deref() {
+        if expected.trim().is_empty() {
+            return Err("EMPLOYEE_PROFILE_CONFLICT: the expected staff version is missing".into());
+        }
+    }
+    if !matches!(
+        employee.role.as_str(),
+        "admin" | "manager" | "supervisor" | "cashier" | "attendance"
+    ) {
+        return Err("Choose a valid staff role".into());
+    }
+
+    let mysql = connect_mysql_for_pos(&mysql_uri)
+        .await
+        .map_err(|error| error.to_string())?;
+    sqlx::query("SET SESSION innodb_lock_wait_timeout = 5")
+        .execute(&mysql)
+        .await
+        .map_err(|error| error.to_string())?;
+    let bootstrap_lock = if bootstrap_actor {
+        let acquired: Option<i64> = sqlx::query_scalar("SELECT GET_LOCK(?, 5)")
+            .bind(MARIADB_EMPLOYEE_ADMIN_BOOTSTRAP_LOCK_NAME)
+            .fetch_one(&mysql)
+            .await
+            .map_err(|error| error.to_string())?;
+        if acquired != Some(1) {
+            mysql.close().await;
+            return Err("Another till is creating the first administrator; try again".into());
+        }
+        true
+    } else {
+        false
+    };
+    let result = async {
+        assert_employee_profile_authority_schema_ready(&mysql).await?;
+        run_mariadb_employee_profile_cas(
+            &mysql,
+            &employee,
+            expected_updated_at.as_deref(),
+            actor_employee_id.trim(),
+            actor_expected_updated_at.trim(),
+        )
+        .await
+    }
+    .await;
+    let _ = sqlx::query("SET @lbj_pos_employee_profile_authority = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query(
+        "DELETE FROM pos_employee_profile_write_authority
+         WHERE connectionId = CONNECTION_ID()",
+    )
+    .execute(&mysql)
+    .await;
+    if bootstrap_lock {
+        let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
+            .bind(MARIADB_EMPLOYEE_ADMIN_BOOTSTRAP_LOCK_NAME)
+            .execute(&mysql)
+            .await;
+    }
+    mysql.close().await;
+    result.map_err(|error| error.to_string())
 }
 
 async fn validate_mariadb_restore_identity(
@@ -9290,11 +13348,74 @@ async fn validate_mariadb_restore_identity(
     Ok(())
 }
 
+async fn validate_mariadb_restore_identity_from_connection(
+    local: &mut SqliteConnection,
+    tx: &mut sqlx::Transaction<'_, MySql>,
+) -> Result<(), sqlx::Error> {
+    let local_shop_id: Option<String> =
+        sqlx::query_scalar("SELECT shopId FROM app_identity WHERE id = 'main' LIMIT 1")
+            .fetch_optional(&mut *local)
+            .await?;
+    let local_shop_id = local_shop_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            account_protocol_error(
+                "DATABASE_IDENTITY_UNVERIFIED: restored SQLite has no verified shop identity",
+            )
+        })?;
+    let remote_shop_id: Option<String> =
+        sqlx::query_scalar("SELECT shopId FROM app_identity WHERE id = 'main' LIMIT 1")
+            .fetch_optional(&mut **tx)
+            .await?;
+    if let Some(remote_shop_id) = remote_shop_id.filter(|value| !value.trim().is_empty()) {
+        if remote_shop_id != local_shop_id {
+            return Err(account_protocol_error(
+                "DATABASE_IDENTITY_MISMATCH: restored SQLite belongs to a different shop",
+            ));
+        }
+    } else {
+        let populated: i64 = sqlx::query_scalar(
+            "SELECT
+               (SELECT COUNT(*) FROM products)
+             + (SELECT COUNT(*) FROM categories)
+             + (SELECT COUNT(*) FROM orders)
+             + (SELECT COUNT(*) FROM customers)",
+        )
+        .fetch_one(&mut **tx)
+        .await?;
+        if populated > 0 {
+            return Err(account_protocol_error(
+                "DATABASE_IDENTITY_UNVERIFIED: populated MariaDB has no verified shop identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn run_mariadb_restore_replacement(
     mysql: &MySqlPool,
     local: &SqlitePool,
     till_id: &str,
 ) -> Result<MariaDbRestoreResult, sqlx::Error> {
+    // Freeze and validate the local source before activating durable MariaDB
+    // maintenance. A busy/corrupt SQLite file therefore cannot strand every
+    // till behind a restore gate that never began copying.
+    let mut local_snapshot = local.acquire().await?;
+    sqlx::query("PRAGMA busy_timeout = 5000")
+        .execute(&mut *local_snapshot)
+        .await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *local_snapshot)
+        .await?;
+    if let Err(error) = validate_restore_schema(local).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+        return Err(account_protocol_error(error));
+    }
+    if let Err(error) = validate_restore_data(local, false).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *local_snapshot).await;
+        return Err(account_protocol_error(error));
+    }
+
     let existing_marker: Option<String> =
         sqlx::query_scalar("SELECT value FROM settings WHERE `key` = ? LIMIT 1")
             .bind(MARIADB_RESTORE_MAINTENANCE_KEY)
@@ -9413,17 +13534,8 @@ async fn run_mariadb_restore_replacement(
     // permanent triggers even if it appears immediately after this query.
     assert_no_other_active_tills_in_restore(&mut tx, till_id).await?;
     assert_no_active_terminal_attempts_in_restore(&mut tx).await?;
-    assert_no_active_local_terminal_attempts_in_restore(local).await?;
-    validate_mariadb_restore_identity(local, &mut tx).await?;
-
-    let local_products: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products")
-        .fetch_one(local)
-        .await?;
-    if local_products == 0 {
-        return Err(account_protocol_error(
-            "This till has no restored products to upload",
-        ));
-    }
+    assert_no_active_local_terminal_attempts_from_connection(&mut *local_snapshot).await?;
+    validate_mariadb_restore_identity_from_connection(&mut *local_snapshot, &mut tx).await?;
 
     for table in MARIADB_RESTORE_DELETE_TABLES {
         let exists: i64 = sqlx::query_scalar(
@@ -9448,7 +13560,19 @@ async fn run_mariadb_restore_replacement(
     .await?;
     let mut expected_counts = Vec::new();
     for table in MARIADB_RESTORE_COPY_TABLES {
-        let copied = copy_restore_table_to_mysql(local, &mut tx, table).await?;
+        let attendance_import = if *table == "employee_attendance" {
+            let token = random_record_id();
+            let connection_id = begin_attendance_audit_import(&mut tx, &token).await?;
+            Some((connection_id, token))
+        } else {
+            None
+        };
+        let copied =
+            copy_restore_table_to_mysql_from_connection(&mut *local_snapshot, &mut tx, table)
+                .await?;
+        if let Some((connection_id, token)) = attendance_import {
+            finish_attendance_audit_import(&mut tx, connection_id, &token).await?;
+        }
         if *table != "settings" {
             expected_counts.push((*table, copied));
         }
@@ -9508,6 +13632,9 @@ async fn run_mariadb_restore_replacement(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    sqlx::query("ROLLBACK")
+        .execute(&mut *local_snapshot)
+        .await?;
 
     // Committed data is now coherent. Open the gate first, then remove the
     // legacy marker. A crash before this point leaves a fail-closed retry.
@@ -9552,9 +13679,9 @@ pub async fn replace_mariadb_from_local_restore(
     if !local_path.exists() {
         return Err("Local restored database does not exist".into());
     }
-    let local_uri = format!("sqlite://{}?mode=ro", local_path.display());
+    let local_uri = format!("sqlite://{}?mode=rw", local_path.display());
     let local = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(2)
         .connect(&local_uri)
         .await
         .map_err(|error| format!("Could not open restored SQLite: {error}"))?;
@@ -9579,11 +13706,19 @@ pub async fn replace_mariadb_from_local_restore(
         ensure_mysql_restore_guard_schema(&mysql).await?;
         ensure_mysql_whole_system_close_schema(&mysql).await?;
         ensure_mysql_account_ledger_guards(&mysql).await?;
+        assert_attendance_audit_import_schema_ready(&mysql).await?;
+        assert_employee_profile_authority_schema_ready(&mysql).await?;
         run_mariadb_restore_replacement(&mysql, &local, till_id.trim()).await
     }
     .await;
     // Never let a bypass escape into later work on this pooled session.
     let _ = sqlx::query("SET @lbj_pos_restore_bypass = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query("SET @lbj_pos_attendance_audit_import = NULL")
+        .execute(&mysql)
+        .await;
+    let _ = sqlx::query("SET @lbj_pos_employee_profile_authority = NULL")
         .execute(&mysql)
         .await;
     let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
@@ -10442,7 +14577,8 @@ fn quote_sqlite_text(value: &str) -> String {
 }
 
 const PRESERVED_LOCAL_SETTING_FILTER: &str = "key IN (
-        'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_name_manual', 'till_seq',
+        'pos_mode', 'mysql_config', 'device_operating_mode',
+        'till_id', 'till_name', 'till_name_manual', 'till_seq',
         'receipt_number_high_water', 'automatic_setup_backup_enabled',
         'automatic_setup_backup_time', 'automatic_setup_backup_directory', 'backup_directory',
         'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
@@ -11027,6 +15163,152 @@ mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
+    fn customer_profile_test_snapshot(phone: &str, notes: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "customer-1", "name": "Customer", "phone": phone,
+            "email": "", "postcode": "SW1A 1AA", "loyaltyCode": "MEMBER-1",
+            "notes": notes, "loyaltyPoints": 150, "updatedAt": "old timestamp",
+        })
+    }
+
+    #[test]
+    fn customer_profile_cas_rejects_stale_edits_and_accepts_exact_retries() {
+        let original = customer_profile_test_snapshot("111", "Original");
+        let first_till = customer_profile_test_snapshot("222", "Original");
+        let second_till = customer_profile_test_snapshot("111", "New notes");
+        assert_eq!(customer_profile_sync_decision(Some(&original), &first_till, Some(&original)).unwrap(), CustomerProfileSyncDecision::Apply);
+        let error = customer_profile_sync_decision(Some(&first_till), &second_till, Some(&original)).unwrap_err().to_string();
+        assert!(error.contains("CUSTOMER_PROFILE_CONFLICT"));
+        assert_eq!(customer_profile_sync_decision(Some(&first_till), &first_till, Some(&original)).unwrap(), CustomerProfileSyncDecision::AlreadyApplied);
+        assert!(customer_profile_sync_decision(Some(&second_till), &first_till, Some(&original)).is_err(), "Retry must not overwrite a later different profile");
+    }
+
+    #[test]
+    fn customer_profile_cas_ignores_balance_and_timestamp_but_detects_deletion() {
+        let original = customer_profile_test_snapshot("111", "Original");
+        let mut earned_points = original.clone();
+        earned_points["loyaltyPoints"] = serde_json::json!(300);
+        earned_points["updatedAt"] = serde_json::json!("new server timestamp");
+        earned_points["email"] = serde_json::Value::Null;
+        let desired = customer_profile_test_snapshot("111", "New notes");
+        assert_eq!(customer_profile_sync_decision(Some(&earned_points), &desired, Some(&original)).unwrap(), CustomerProfileSyncDecision::Apply);
+        assert!(customer_profile_sync_decision(None, &desired, Some(&original)).is_err());
+        assert!(customer_profile_sync_decision(Some(&original), &desired, Some(&serde_json::Value::Null)).is_err());
+        assert_eq!(customer_profile_sync_decision(None, &desired, Some(&serde_json::Value::Null)).unwrap(), CustomerProfileSyncDecision::Apply);
+    }
+
+    #[test]
+    fn customer_profile_legacy_sync_cannot_overwrite_profiles_or_balances() {
+        let current = customer_profile_test_snapshot("222", "Original");
+        let stale = customer_profile_test_snapshot("111", "Original");
+        assert!(customer_profile_sync_decision(Some(&current), &stale, None).is_err());
+        // Returning AlreadyApplied exits before building any SQL update, even
+        // if a legacy full-row payload includes an obsolete loyalty balance.
+        let stale_points_only = serde_json::json!({"id": "customer-1", "loyaltyPoints": 0});
+        assert_eq!(customer_profile_sync_decision(Some(&current), &stale_points_only, None).unwrap(), CustomerProfileSyncDecision::AlreadyApplied);
+        assert_eq!(customer_profile_sync_decision(Some(&current), &current, None).unwrap(), CustomerProfileSyncDecision::AlreadyApplied);
+        assert!(customer_profile_sync_decision(None, &stale, None).is_err(), "Do not silently discard legacy points when the customer is missing");
+        let mut legacy_create = stale;
+        legacy_create["loyaltyPoints"] = serde_json::json!(0);
+        assert_eq!(customer_profile_sync_decision(None, &legacy_create, None).unwrap(), CustomerProfileSyncDecision::Apply);
+    }
+
+    #[test]
+    fn customer_profile_payload_requires_a_complete_base_and_discards_financial_fields() {
+        let customer = customer_profile_test_snapshot("111", "Original");
+        let mut payload = serde_json::json!({"id": "customer-1", "customer": customer, "before": null});
+        let (profile, _) = customer_profile_operation_data(&payload).unwrap();
+        assert!(profile.get("loyaltyPoints").is_none());
+        assert!(profile.get("updatedAt").is_none());
+        payload.as_object_mut().unwrap().remove("before");
+        assert!(customer_profile_operation_data(&payload).is_err());
+        payload["before"] = serde_json::json!({"phone": "111"});
+        assert!(customer_profile_operation_data(&payload).is_err());
+        payload["before"] = customer;
+        payload["before"]["id"] = serde_json::json!("other-customer");
+        assert!(customer_profile_operation_data(&payload).is_err());
+    }
+
+    fn promotion_test_snapshot(price: i64, stamp: &str) -> serde_json::Value {
+        serde_json::json!({
+            "group": {"id": "g", "name": "Offer", "isActive": true, "updatedAt": stamp},
+            "discounts": [{"id": "d", "groupId": "g", "kind": "bundle_fixed_price", "type": "fixed",
+                "bundleQuantity": 2, "bundlePrice": price, "isActive": true, "autoApply": true, "updatedAt": stamp}],
+            "items": [{"id": "i", "groupId": "g", "productId": "p", "updatedAt": stamp}],
+        })
+    }
+
+    #[test]
+    fn promotion_sync_offline_edit_chain_ignores_server_arrival_timestamps() {
+        let a = promotion_test_snapshot(500, "09:00");
+        let b = promotion_test_snapshot(400, "09:01");
+        let c = promotion_test_snapshot(300, "09:02");
+        let server_a = promotion_test_snapshot(500, "11:00");
+        let server_b = promotion_test_snapshot(400, "11:01");
+        assert_eq!(promotion_sync_decision(&server_a, &b, Some(&a)).unwrap(), PromotionSyncDecision::Apply);
+        assert_eq!(promotion_sync_decision(&server_b, &c, Some(&b)).unwrap(), PromotionSyncDecision::Apply);
+    }
+
+    #[test]
+    fn promotion_sync_ack_retry_is_a_noop_but_does_not_overwrite_other_till() {
+        let a = promotion_test_snapshot(500, "09:00");
+        let b = promotion_test_snapshot(400, "09:01");
+        let saved_b = promotion_test_snapshot(400, "11:00");
+        assert_eq!(promotion_sync_decision(&saved_b, &b, Some(&a)).unwrap(), PromotionSyncDecision::AlreadyApplied);
+        let other_till = promotion_test_snapshot(350, "08:00");
+        assert!(promotion_sync_decision(&other_till, &b, Some(&a)).unwrap_err().to_string().contains("SYNC_CONFLICT"));
+    }
+
+    #[test]
+    fn promotion_sync_normalizes_nulls_booleans_and_metadata() {
+        let a = promotion_test_snapshot(500, "09:00");
+        let mut remote = a.clone();
+        remote["group"]["isActive"] = serde_json::json!(1);
+        remote["group"]["startAt"] = serde_json::Value::Null;
+        remote["group"]["createdAt"] = serde_json::json!("server metadata");
+        remote["discounts"][0]["bundlePrice"] = serde_json::json!("500");
+        remote["discounts"][0]["autoApply"] = serde_json::json!(1);
+        assert_eq!(normalized_promotion_snapshot(&a), normalized_promotion_snapshot(&remote));
+    }
+
+    #[test]
+    fn promotion_sync_removed_member_is_a_conflict_not_a_deleted_offer() {
+        let a = promotion_test_snapshot(500, "09:00");
+        let mut remote = a.clone();
+        remote["items"] = serde_json::json!([]);
+        let b = promotion_test_snapshot(400, "09:01");
+        assert!(promotion_sync_decision(&remote, &b, Some(&a)).is_err());
+        assert!(remote["group"].is_object());
+    }
+
+    #[test]
+    fn promotion_sync_delete_retry_and_manual_percentage_are_supported() {
+        let empty = serde_json::json!({"group": null, "discounts": [], "items": []});
+        let manual = serde_json::json!({"group": null, "discounts": [{"id": "d", "kind": "manual_percent", "value": 10}], "items": []});
+        assert_eq!(promotion_sync_decision(&empty, &manual, Some(&empty)).unwrap(), PromotionSyncDecision::Apply);
+        assert_eq!(promotion_sync_decision(&empty, &empty, Some(&manual)).unwrap(), PromotionSyncDecision::AlreadyApplied);
+        assert_eq!(promotion_sync_decision(&manual, &manual, None).unwrap(), PromotionSyncDecision::AlreadyApplied);
+    }
+
+    #[test]
+    fn promotion_sync_rejects_schema_overflow_and_invalid_price_values() {
+        let valid = promotion_test_snapshot(500, "09:00")["discounts"][0].clone();
+        validate_promotion_numbers(&valid).unwrap();
+        for (field, value) in [
+            ("bundleQuantity", serde_json::json!(2_147_483_648_i64)),
+            ("minQuantity", serde_json::json!(1.5)),
+            ("maxApplications", serde_json::json!(0)),
+            ("bundlePrice", serde_json::json!(9_007_199_254_740_992_i64)),
+            ("secondPrice", serde_json::json!(-1)),
+        ] {
+            let mut discount = valid.clone();
+            discount[field] = value;
+            assert!(validate_promotion_numbers(&discount).is_err(), "{field}");
+        }
+        let percentage = serde_json::json!({"kind":"manual_percent", "type":"percentage", "value":101});
+        assert!(validate_promotion_numbers(&percentage).is_err());
+    }
+
     static REAL_MARIADB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn temporary_backup_test_dir(label: &str) -> PathBuf {
@@ -11182,6 +15464,50 @@ mod tests {
     }
 
     #[test]
+    fn whole_system_close_duplicate_till_names_include_a_safe_short_id() {
+        assert_eq!(
+            whole_system_close_till_label("8f12637f-674f-4b47-a4f3-172ee8ebb2b2", "Till 1", false,),
+            "Till 1"
+        );
+        assert_eq!(
+            whole_system_close_till_label("8f12637f-674f-4b47-a4f3-172ee8ebb2b2", "Till 1", true,),
+            "Till 1 [8f12637f]"
+        );
+        assert_eq!(
+            whole_system_close_till_label("تۆمارکەر-دوو", "Till 1", true),
+            "Till 1 [تۆمارکەر]"
+        );
+    }
+
+    #[test]
+    fn whole_system_close_setup_and_barrier_locks_are_bounded_and_abort_is_minimal() {
+        assert_eq!(
+            MYSQL_WHOLE_SYSTEM_CLOSE_METADATA_TIMEOUT_SQL,
+            "SET SESSION lock_wait_timeout = 5"
+        );
+        assert_eq!(
+            MYSQL_WHOLE_SYSTEM_CLOSE_ROW_TIMEOUT_SQL,
+            "SET SESSION innodb_lock_wait_timeout = 5"
+        );
+        assert!((5..=30).contains(&WHOLE_SYSTEM_CLOSE_SCHEMA_PREPARE_TIMEOUT_SECONDS));
+        assert!(WHOLE_SYSTEM_CLOSE_SETUP_TIMEOUT_CODE.contains("SETUP_TIMEOUT"));
+        assert!((10..=30).contains(&WHOLE_SYSTEM_CLOSE_REPORT_LOAD_TIMEOUT_SECONDS));
+        assert!(WHOLE_SYSTEM_CLOSE_REPORT_TIMEOUT_CODE.contains("REPORT_TIMEOUT"));
+
+        assert!(MYSQL_CLOSE_BARRIER_READY_COLUMN_COUNT_SELECT
+            .contains("TABLE_NAME = 'pos_close_barrier'"));
+        for nonessential in [
+            "till_presence",
+            "pos_restore_gate",
+            "pos_customer_write_locks",
+            "lastClosedAt",
+            "TRIGGERS",
+        ] {
+            assert!(!MYSQL_CLOSE_BARRIER_READY_COLUMN_COUNT_SELECT.contains(nonessential));
+        }
+    }
+
+    #[test]
     fn mariadb_v4_guard_definition_requires_current_body_and_metadata() {
         let identity_guard = mysql_customer_guard_v4_sql("orders", "UPDATE");
         let statement = mysql_guarded_preflight_v4_sql(
@@ -11297,19 +15623,213 @@ mod tests {
     fn restore_upload_never_copies_device_or_control_settings() {
         for key in [
             "mysql_config",
+            "device_operating_mode",
             "till_id",
             "receipt_printer_name",
             "restore_pending_mariadb_replace",
             "restore_maintenance_owner",
+            "staff_attendance_import_owner",
             "server_data_epoch",
             "server_data_epoch_seen",
             "report_epoch_cache",
             "sync_ts_products",
+            " STAFF_ATTENDANCE_IMPORT_OWNER ",
+            "SYNC_TS_EMPLOYEES",
         ] {
             assert!(!is_restore_pushable_setting_key(key), "{key}");
         }
         assert!(is_restore_pushable_setting_key("store_info"));
         assert!(is_restore_pushable_setting_key("receipt_design"));
+    }
+
+    fn test_employee(id: &str, role: &str, pin: &str, pin_hash: &str) -> EmployeeProfileRecord {
+        EmployeeProfileRecord {
+            id: id.into(),
+            store_id: "store-main".into(),
+            name: "Test employee".into(),
+            pin: pin.into(),
+            pin_hash: pin_hash.into(),
+            role: role.into(),
+            email: String::new(),
+            is_active: true,
+            created_at: "2026-08-22T10:00:00.000Z".into(),
+            updated_at: "2026-08-22T10:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn native_employee_pin_validation_matches_runtime_formats() {
+        let valid_pbkdf2 = concat!(
+            "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        );
+        assert!(is_valid_pbkdf2_pin_hash(valid_pbkdf2));
+        for invalid in [
+            "pbkdf2-sha256$99999$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "pbkdf2-sha256$1000001$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "pbkdf2-sha256$210000$not-base64!$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$short",
+            "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==",
+        ] {
+            assert!(!is_valid_pbkdf2_pin_hash(invalid), "{invalid}");
+        }
+        let digest = STANDARD_BASE64.encode([0_u8; 32]);
+        for invalid_salt_size in [15_usize, 65] {
+            let salt = STANDARD_BASE64.encode(vec![0_u8; invalid_salt_size]);
+            assert!(!is_valid_pbkdf2_pin_hash(&format!(
+                "pbkdf2-sha256$210000${salt}${digest}"
+            )));
+        }
+        let salt = STANDARD_BASE64.encode([0_u8; 16]);
+        for invalid_digest_size in [31_usize, 33] {
+            let invalid_digest = STANDARD_BASE64.encode(vec![0_u8; invalid_digest_size]);
+            assert!(!is_valid_pbkdf2_pin_hash(&format!(
+                "pbkdf2-sha256$210000${salt}${invalid_digest}"
+            )));
+        }
+        assert!(employee_has_valid_runtime_pin(&test_employee(
+            "legacy-hash",
+            "admin",
+            "",
+            &"a".repeat(64),
+        )));
+        assert!(employee_has_valid_runtime_pin(&test_employee(
+            "legacy-plain",
+            "admin",
+            "1234",
+            "",
+        )));
+        assert!(!employee_has_valid_runtime_pin(&test_employee(
+            "bad-prefix",
+            "admin",
+            "",
+            "pbkdf2-sha256$210000$bad$bad",
+        )));
+        assert_eq!(
+            legacy_pin_sha256("2468"),
+            "16049d6bc2114d422dd7abe6280a96052677d2d0187f1646ea654c71bee11ad1"
+        );
+        let uppercase_legacy = test_employee(
+            "legacy-upper",
+            "cashier",
+            "",
+            &legacy_pin_sha256("2468").to_ascii_uppercase(),
+        );
+        assert!(legacy_employee_pin_matches(&uppercase_legacy, "2468"));
+        assert!(!legacy_employee_pin_matches(&uppercase_legacy, "1357"));
+    }
+
+    #[test]
+    fn native_employee_authority_queries_normalize_unsigned_mariadb_values() {
+        assert_eq!(
+            MYSQL_SIGNED_CONNECTION_ID_SELECT,
+            "SELECT CAST(CONNECTION_ID() AS SIGNED)"
+        );
+        assert_eq!(
+            MYSQL_SIGNED_EMPLOYEE_ACTIVE_PROJECTION,
+            "CAST(COALESCE(isActive, 0) AS SIGNED) AS isActive"
+        );
+    }
+
+    #[test]
+    fn usable_admin_invariant_rejects_inactive_or_malformed_credentials() {
+        let mut valid = test_employee("admin", "admin", "1234", "");
+        assert!(employee_is_usable_admin(&valid));
+        valid.is_active = false;
+        assert!(!employee_is_usable_admin(&valid));
+        let malformed = test_employee("bad-admin", "admin", "", "pbkdf2-sha256$210000$bad$bad");
+        assert!(!employee_is_usable_admin(&malformed));
+    }
+
+    #[test]
+    fn employee_profile_cas_preserves_legacy_credentials_but_never_creates_them() {
+        let legacy = test_employee("cashier", "cashier", "1234", "");
+        assert!(employee_profile_credentials_allowed(Some(&legacy), &legacy));
+        assert!(!employee_profile_credentials_allowed(None, &legacy));
+
+        let legacy_sha = test_employee("manager", "manager", "", &"A".repeat(64));
+        assert!(employee_profile_credentials_allowed(
+            Some(&legacy_sha),
+            &legacy_sha
+        ));
+        assert!(!employee_profile_credentials_allowed(None, &legacy_sha));
+
+        let hash = concat!(
+            "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        );
+        let pbkdf = test_employee("new", "cashier", "", hash);
+        assert!(employee_profile_credentials_allowed(None, &pbkdf));
+        let mixed = EmployeeProfileRecord {
+            pin: "1234".into(),
+            ..pbkdf.clone()
+        };
+        assert!(!employee_profile_credentials_allowed(None, &mixed));
+        assert!(!employee_profile_credentials_allowed(Some(&mixed), &mixed));
+
+        let changed_to_legacy = EmployeeProfileRecord {
+            pin: "9876".into(),
+            pin_hash: String::new(),
+            ..pbkdf
+        };
+        assert!(!employee_profile_credentials_allowed(
+            Some(&legacy),
+            &changed_to_legacy
+        ));
+    }
+
+    #[test]
+    fn first_admin_bootstrap_requires_a_truly_empty_staff_table() {
+        let hash = concat!(
+            "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+        );
+        let admin = test_employee("admin", "admin", "", hash);
+        assert!(assert_first_admin_bootstrap_allowed(&admin, &[]).is_ok());
+        let inactive_cashier = EmployeeProfileRecord {
+            is_active: false,
+            ..test_employee("cashier", "cashier", "1234", "")
+        };
+        assert!(assert_first_admin_bootstrap_allowed(&admin, &[inactive_cashier]).is_err());
+    }
+
+    #[test]
+    fn delegated_staff_editor_cannot_mint_or_modify_admin_access() {
+        let manager = test_employee("manager", "manager", "1234", "");
+        let cashier = test_employee("cashier", "cashier", "2468", "");
+        let promoted = EmployeeProfileRecord {
+            role: "admin".into(),
+            ..cashier.clone()
+        };
+        assert!(assert_employee_profile_actor_scope(&manager, Some(&cashier), &promoted).is_err());
+        let admin = test_employee("admin", "admin", "1357", "");
+        assert!(assert_employee_profile_actor_scope(&manager, Some(&admin), &admin).is_err());
+        let renamed = EmployeeProfileRecord {
+            name: "Renamed cashier".into(),
+            ..cashier.clone()
+        };
+        assert!(assert_employee_profile_actor_scope(&manager, Some(&cashier), &renamed).is_ok());
+        assert!(assert_employee_profile_actor_scope(&admin, Some(&cashier), &promoted).is_ok());
+    }
+
+    #[test]
+    fn controlled_import_covers_every_authority_and_history_table() {
+        for table in [
+            "employees",
+            "employee_attendance",
+            "audit_logs",
+            "customers",
+            "customer_account_entries",
+            "orders",
+            "payments",
+            "settings",
+            "tombstones",
+        ] {
+            assert!(
+                MARIADB_CONTROLLED_IMPORT_COPY_TABLES.contains(&table),
+                "{table}"
+            );
+        }
     }
 
     #[test]
@@ -11558,6 +16078,7 @@ mod tests {
                 "CREATE TABLE tombstones (id TEXT PRIMARY KEY, table_name TEXT)",
                 "INSERT INTO settings VALUES ('till_id', 'source-till', '')",
                 "INSERT INTO settings VALUES ('till_name', 'Source Till', '')",
+                "INSERT INTO settings VALUES ('device_operating_mode', 'back_office', '')",
                 "INSERT INTO settings VALUES ('receipt_printer_name', 'Source Printer', '')",
                 "INSERT INTO settings VALUES ('store_info', '{\"name\":\"Backup Store\"}', '')",
                 "INSERT INTO employees VALUES ('backup-employee', 'Backup Employee')",
@@ -11585,6 +16106,7 @@ mod tests {
                 "CREATE TABLE registers (id TEXT PRIMARY KEY, storeId TEXT, name TEXT NOT NULL, isActive INTEGER DEFAULT 1, createdAt TEXT, updatedAt TEXT)",
                 "INSERT INTO settings VALUES ('till_id', 'target-till', '')",
                 "INSERT INTO settings VALUES ('till_name', 'Front Till', '')",
+                "INSERT INTO settings VALUES ('device_operating_mode', 'checkout', '')",
                 "INSERT INTO settings VALUES ('receipt_printer_name', 'Target Printer', '')",
                 "INSERT INTO settings VALUES ('store_info', '{\"name\":\"Current Store\"}', '')",
                 "INSERT INTO employees VALUES ('current-employee', 'Current Employee')",
@@ -11638,6 +16160,13 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(printer_setting, "Target Printer");
+            let device_mode: String = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key = 'device_operating_mode'",
+            )
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
+            assert_eq!(device_mode, "checkout");
 
             let queued_tables: Vec<String> =
                 sqlx::query_scalar("SELECT table_name FROM _offline_queue ORDER BY table_name")
@@ -11675,6 +16204,7 @@ mod tests {
                 "INSERT INTO settings VALUES ('till_seq', '4', '')",
                 "INSERT INTO settings VALUES ('pos_mode', 'multi', '')",
                 "INSERT INTO settings VALUES ('mysql_config', '{\"host\":\"source\"}', '')",
+                "INSERT INTO settings VALUES ('device_operating_mode', 'back_office', '')",
                 "INSERT INTO settings VALUES ('receipt_printer_name', 'Source Star Printer', '')",
                 "INSERT INTO settings VALUES ('receipt_printer_module_id', 'source-sdk', '')",
                 "INSERT INTO settings VALUES ('label_printer_device_path', 'COM9', '')",
@@ -11723,6 +16253,12 @@ mod tests {
                     .fetch_one(&restored_pool)
                     .await
                     .unwrap();
+            let device_mode_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM settings WHERE key = 'device_operating_mode'",
+            )
+            .fetch_one(&restored_pool)
+            .await
+            .unwrap();
             let restored_mode: String =
                 sqlx::query_scalar("SELECT value FROM settings WHERE key = 'pos_mode'")
                     .fetch_one(&restored_pool)
@@ -11738,6 +16274,7 @@ mod tests {
             assert_eq!(identity_count, 0);
             assert_eq!(hardware_setting_count, 0);
             assert_eq!(mysql_config_count, 0);
+            assert_eq!(device_mode_count, 0);
             assert_eq!(restored_mode, "multi");
             assert_eq!(restore_marker_count, 1);
             assert_eq!(design_count, 1);
@@ -11983,13 +16520,13 @@ mod tests {
         for sql in [
             "CREATE TABLE orders (id TEXT PRIMARY KEY, shiftId TEXT, customerId TEXT, employeeId TEXT, orderNumber INTEGER, receiptKey TEXT UNIQUE, type TEXT, status TEXT, originalOrderId TEXT, subtotal INTEGER, discountId TEXT, discountAmount INTEGER, taxTotal INTEGER, total INTEGER, tillNumber TEXT, notes TEXT, paymentMethod TEXT, amountTendered INTEGER, createdAt TEXT, completedAt TEXT, updatedAt TEXT)",
             "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT, productId TEXT, productName TEXT, quantity INTEGER, unitPrice INTEGER, costPrice INTEGER, discountId TEXT, discountAmount INTEGER, taxRate REAL, taxAmount INTEGER, lineTotal INTEGER, isPriceOverride INTEGER, originalPrice INTEGER, notes TEXT, updatedAt TEXT)",
-            "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT, method TEXT, amount INTEGER, cashAmount INTEGER, cardAmount INTEGER, loyaltyAmount INTEGER DEFAULT 0, accountAmount INTEGER DEFAULT 0, reference TEXT, changeGiven INTEGER, createdAt TEXT, updatedAt TEXT)",
+            "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT, method TEXT, amount INTEGER, cashAmount INTEGER, cardAmount INTEGER, loyaltyAmount INTEGER DEFAULT 0, accountAmount INTEGER DEFAULT 0, tipsAmount INTEGER NOT NULL DEFAULT 0, serviceChargeAmount INTEGER NOT NULL DEFAULT 0, cashbackAmount INTEGER NOT NULL DEFAULT 0, reference TEXT, changeGiven INTEGER, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE products (id TEXT PRIMARY KEY, stockLevel INTEGER, updatedAt TEXT)",
             "CREATE TABLE inventory_logs (id TEXT PRIMARY KEY, productId TEXT, quantityChange INTEGER, type TEXT, referenceId TEXT, employeeId TEXT, notes TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE audit_logs (id TEXT PRIMARY KEY, employeeId TEXT, action TEXT, entityType TEXT, entityId TEXT, oldData TEXT, newData TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE customers (id TEXT PRIMARY KEY, loyaltyPoints INTEGER, updatedAt TEXT)",
             "CREATE TABLE customer_accounts (id TEXT PRIMARY KEY, customerId TEXT NOT NULL UNIQUE, isEnabled INTEGER NOT NULL DEFAULT 0, creditLimitPence INTEGER NOT NULL DEFAULT 0, balancePence INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
-            "CREATE TABLE customer_account_entries (id TEXT PRIMARY KEY, accountId TEXT NOT NULL, customerId TEXT NOT NULL, orderId TEXT NOT NULL DEFAULT '', entryType TEXT NOT NULL, amountPence INTEGER NOT NULL, paymentMethod TEXT NOT NULL DEFAULT '', reference TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', receiptNumber INTEGER NOT NULL DEFAULT 0, receiptKey TEXT NOT NULL DEFAULT '', employeeId TEXT NOT NULL DEFAULT '', tillNumber TEXT NOT NULL DEFAULT '', shiftId TEXT NOT NULL DEFAULT '', idempotencyKey TEXT NOT NULL UNIQUE, reversesEntryId TEXT NOT NULL DEFAULT '', balanceAfterPence INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
+            "CREATE TABLE customer_account_entries (id TEXT PRIMARY KEY, accountId TEXT NOT NULL, customerId TEXT NOT NULL, orderId TEXT NOT NULL DEFAULT '', entryType TEXT NOT NULL, amountPence INTEGER NOT NULL, paymentMethod TEXT NOT NULL DEFAULT '', tipsAmount INTEGER NOT NULL DEFAULT 0, serviceChargeAmount INTEGER NOT NULL DEFAULT 0, cashbackAmount INTEGER NOT NULL DEFAULT 0, reference TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', receiptNumber INTEGER NOT NULL DEFAULT 0, receiptKey TEXT NOT NULL DEFAULT '', employeeId TEXT NOT NULL DEFAULT '', tillNumber TEXT NOT NULL DEFAULT '', shiftId TEXT NOT NULL DEFAULT '', idempotencyKey TEXT NOT NULL UNIQUE, reversesEntryId TEXT NOT NULL DEFAULT '', balanceAfterPence INTEGER NOT NULL DEFAULT 0, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
             "CREATE TABLE loyalty_logs (id TEXT PRIMARY KEY, customerId TEXT, orderId TEXT, pointsChange INTEGER, reason TEXT, createdAt TEXT, updatedAt TEXT)",
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updatedAt TEXT)",
             "CREATE TABLE till_report_markers (id TEXT PRIMARY KEY, tillNumber TEXT, markerTime TEXT)",
@@ -12008,6 +16545,311 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    async fn install_loyalty_adjustment_test_actor(
+        pool: &SqlitePool,
+        id: &str,
+        role: &str,
+        is_active: bool,
+        updated_at: &str,
+    ) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS employees (
+                id TEXT PRIMARY KEY, role TEXT, isActive INTEGER, updatedAt TEXT
+             )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO employees (id, role, isActive, updatedAt)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(role)
+        .bind(if is_active { 1 } else { 0 })
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn loyalty_adjustment_input(
+        id: &str,
+        expected_points: i64,
+        new_points: i64,
+    ) -> CustomerLoyaltyAdjustmentInput {
+        CustomerLoyaltyAdjustmentInput {
+            id: id.into(),
+            customer_id: "customer-1".into(),
+            expected_points,
+            new_points,
+            reason: "Correct an earlier points mistake".into(),
+            employee_id: "admin-1".into(),
+            actor_expected_updated_at: "2026-09-04T12:00:00.000Z".into(),
+            created_at: "2026-09-04T12:05:00.000Z".into(),
+            server_data_epoch: String::new(),
+        }
+    }
+
+    #[test]
+    fn loyalty_adjustment_validation_and_permissions_match_the_renderer_policy() {
+        let mut valid = loyalty_adjustment_input("adjust-validation", 150, 125);
+        valid.reason = "ڕاستکردنەوە".repeat(20);
+        assert!(normalize_customer_loyalty_adjustment_input(valid).is_ok());
+
+        let mut short_reason = loyalty_adjustment_input("adjust-short", 150, 125);
+        short_reason.reason = "no".into();
+        assert!(normalize_customer_loyalty_adjustment_input(short_reason).is_err());
+        let mut long_reason = loyalty_adjustment_input("adjust-long", 150, 125);
+        long_reason.reason = "ڕ".repeat(241);
+        assert!(normalize_customer_loyalty_adjustment_input(long_reason).is_err());
+        let mut negative = loyalty_adjustment_input("adjust-negative", 150, -1);
+        assert!(normalize_customer_loyalty_adjustment_input(negative.clone()).is_err());
+        negative.new_points = MAX_LOYALTY_POINTS + 1;
+        assert!(normalize_customer_loyalty_adjustment_input(negative).is_err());
+
+        let negative_start = loyalty_adjustment_input("adjust-refund-debt", -100, 0);
+        assert!(normalize_customer_loyalty_adjustment_input(negative_start).is_ok());
+        for (expected, corrected) in [
+            (i32::MIN as i64 - 1, 0),
+            (i32::MIN as i64, 0), // balance fits, but movement overflows the ledger
+            (-100, MAX_LOYALTY_POINTS),
+            (-100, -1),
+            (i64::MIN, i64::MAX),
+        ] {
+            assert!(normalize_customer_loyalty_adjustment_input(
+                loyalty_adjustment_input("adjust-range", expected, corrected),
+            ).is_err(), "{expected} -> {corrected}");
+        }
+
+        assert!(configured_role_can_adjust_customer_loyalty(
+            " manager ",
+            None
+        ));
+        assert!(configured_role_can_adjust_customer_loyalty(
+            "manager",
+            Some("not-json")
+        ));
+        assert!(!configured_role_can_adjust_customer_loyalty(
+            "manager",
+            Some(r#"{"version":6,"roles":{"manager":["open_customers"]}}"#)
+        ));
+        assert!(configured_role_can_adjust_customer_loyalty(
+            "manager",
+            Some(
+                r#"{"version":7,"roles":{"manager":["open_customers","adjust_customer_loyalty"]}}"#
+            )
+        ));
+        assert!(configured_role_can_adjust_customer_loyalty(
+            "admin",
+            Some(r#"{"roles":{"admin":[]}}"#)
+        ));
+        assert!(!configured_role_can_adjust_customer_loyalty(
+            "attendance",
+            Some(r#"{"roles":{"attendance":["adjust_customer_loyalty"]}}"#)
+        ));
+    }
+
+    #[test]
+    fn local_loyalty_adjustment_repairs_refund_debt_with_cas_and_idempotency() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            install_loyalty_adjustment_test_actor(
+                &pool, "admin-1", "admin", true, "2026-09-04T12:00:00.000Z",
+            ).await;
+            // The sale/refund ledger may legitimately become negative once
+            // earned points have been spent before their sale is refunded.
+            sqlx::query("UPDATE customers SET loyaltyPoints = -100 WHERE id = 'customer-1'")
+                .execute(&pool).await.unwrap();
+            let stale = normalize_customer_loyalty_adjustment_input(
+                loyalty_adjustment_input("adjust-stale-negative", -99, 0),
+            ).unwrap();
+            assert!(adjust_sqlite_customer_loyalty(&pool, &stale).await.unwrap_err()
+                .to_string().contains("CUSTOMER_LOYALTY_CONFLICT"));
+            let input = normalize_customer_loyalty_adjustment_input(
+                loyalty_adjustment_input("adjust-refund-debt", -100, 0),
+            ).unwrap();
+            let first = adjust_sqlite_customer_loyalty(&pool, &input).await.unwrap();
+            assert_eq!(first.loyalty_points, 0);
+            assert_eq!(first.entry.points_change, 100);
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&first.audit.old_data).unwrap()["loyaltyPoints"], -100);
+            let replay = adjust_sqlite_customer_loyalty(&pool, &input).await.unwrap();
+            assert_eq!(replay.entry, first.entry);
+            assert_eq!(replay.audit, first.audit);
+            let mut changed_retry = input;
+            changed_retry.new_points = 25;
+            assert!(adjust_sqlite_customer_loyalty(&pool, &changed_retry).await.unwrap_err()
+                .to_string().contains("CUSTOMER_LOYALTY_IDEMPOTENCY_CONFLICT"));
+            let counts: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT loyaltyPoints FROM customers WHERE id = 'customer-1'),
+                        (SELECT COUNT(*) FROM loyalty_logs), (SELECT COUNT(*) FROM audit_logs)",
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(counts, (0, 1, 1));
+            pool.close().await;
+        });
+    }
+
+    #[test]
+    fn local_loyalty_adjustment_is_atomic_audited_and_retry_safe() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            install_loyalty_adjustment_test_actor(
+                &pool,
+                "admin-1",
+                "admin",
+                true,
+                "2026-09-04T12:00:00.000Z",
+            )
+            .await;
+            let input = loyalty_adjustment_input("adjust-success", 150, 25);
+            let first = adjust_sqlite_customer_loyalty(&pool, &input).await.unwrap();
+            assert_eq!(first.customer_id, "customer-1");
+            assert_eq!(first.loyalty_points, 25);
+            assert_eq!(first.entry.points_change, -125);
+            assert_eq!(first.entry.order_id, "");
+            assert_eq!(
+                first.entry.reason,
+                "manual_adjustment: Correct an earlier points mistake"
+            );
+            assert_eq!(first.audit.action, "customer_loyalty_adjusted");
+            assert_eq!(first.audit.entity_type, "customer");
+            assert_eq!(first.audit.employee_id, "admin-1");
+
+            let mut retry = input.clone();
+            retry.created_at = "2026-09-04T12:06:00.000Z".into();
+            retry.actor_expected_updated_at = "a retry need not reuse an auth snapshot".into();
+            let replay = adjust_sqlite_customer_loyalty(&pool, &retry).await.unwrap();
+            assert_eq!(replay.entry, first.entry);
+            assert_eq!(replay.audit, first.audit);
+            assert_eq!(replay.loyalty_points, 25);
+
+            let customer_points: i64 =
+                sqlx::query_scalar("SELECT loyaltyPoints FROM customers WHERE id = 'customer-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let loyalty_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM loyalty_logs WHERE id = 'adjust-success'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let audit_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id = 'adjust-success'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((customer_points, loyalty_count, audit_count), (25, 1, 1));
+
+            let mut mismatched = retry;
+            mismatched.reason = "A different correction".into();
+            let error = adjust_sqlite_customer_loyalty(&pool, &mismatched)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("CUSTOMER_LOYALTY_IDEMPOTENCY_CONFLICT"));
+            pool.close().await;
+        });
+    }
+
+    #[test]
+    fn local_loyalty_adjustment_rolls_back_conflicts_and_unauthorized_changes() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            install_loyalty_adjustment_test_actor(
+                &pool,
+                "admin-1",
+                "admin",
+                true,
+                "2026-09-04T12:00:00.000Z",
+            )
+            .await;
+
+            let stale = loyalty_adjustment_input("adjust-stale", 149, 10);
+            let stale_error = adjust_sqlite_customer_loyalty(&pool, &stale)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(stale_error.contains("CUSTOMER_LOYALTY_CONFLICT"));
+
+            let mut stale_actor = loyalty_adjustment_input("adjust-stale-actor", 150, 10);
+            stale_actor.actor_expected_updated_at = "2026-09-04T11:00:00.000Z".into();
+            let actor_error = adjust_sqlite_customer_loyalty(&pool, &stale_actor)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(actor_error.contains("CUSTOMER_LOYALTY_ACTOR_STALE"));
+
+            sqlx::query(
+                "INSERT INTO audit_logs
+                    (id, employeeId, action, entityType, entityId,
+                     oldData, newData, createdAt, updatedAt)
+                 VALUES ('adjust-audit-collision', 'someone-else', 'other_action',
+                         'other', 'other', '{}', '{}', '', '')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let collision = loyalty_adjustment_input("adjust-audit-collision", 150, 10);
+            let collision_error = adjust_sqlite_customer_loyalty(&pool, &collision)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(collision_error.contains("CUSTOMER_LOYALTY_IDEMPOTENCY_CONFLICT"));
+
+            let customer_points: i64 =
+                sqlx::query_scalar("SELECT loyaltyPoints FROM customers WHERE id = 'customer-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let loyalty_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM loyalty_logs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!((customer_points, loyalty_count), (150, 0));
+            pool.close().await;
+        });
+    }
+
+    #[test]
+    fn manual_loyalty_history_survives_receipt_history_purge() {
+        tauri::async_runtime::block_on(async {
+            let pool = purge_test_pool().await;
+            install_loyalty_adjustment_test_actor(
+                &pool,
+                "admin-1",
+                "admin",
+                true,
+                "2026-09-04T12:00:00.000Z",
+            )
+            .await;
+            let input = loyalty_adjustment_input("adjust-survives-purge", 150, 125);
+            adjust_sqlite_customer_loyalty(&pool, &input).await.unwrap();
+
+            purge_sqlite_transactions_before(&pool, "2026-09-05T00:00:00.000Z", &[], false)
+                .await
+                .unwrap();
+            let customer_points: i64 =
+                sqlx::query_scalar("SELECT loyaltyPoints FROM customers WHERE id = 'customer-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let loyalty_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM loyalty_logs WHERE id = 'adjust-survives-purge'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let audit_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs WHERE id = 'adjust-survives-purge'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((customer_points, loyalty_count, audit_count), (125, 1, 1));
+            pool.close().await;
+        });
     }
 
     async fn purge_test_pool() -> SqlitePool {
@@ -12199,6 +17041,9 @@ mod tests {
                 entryType VARCHAR(32) NOT NULL DEFAULT 'adjustment',
                 amountPence BIGINT NOT NULL DEFAULT 0,
                 paymentMethod VARCHAR(16) NOT NULL DEFAULT '',
+                tipsAmount BIGINT NOT NULL DEFAULT 0,
+                serviceChargeAmount BIGINT NOT NULL DEFAULT 0,
+                cashbackAmount BIGINT NOT NULL DEFAULT 0,
                 reference TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 receiptNumber BIGINT NOT NULL DEFAULT 0,
@@ -12262,6 +17107,9 @@ mod tests {
                 cardAmount BIGINT NOT NULL DEFAULT 0,
                 loyaltyAmount BIGINT NOT NULL DEFAULT 0,
                 accountAmount BIGINT NOT NULL DEFAULT 0,
+                tipsAmount BIGINT NOT NULL DEFAULT 0,
+                serviceChargeAmount BIGINT NOT NULL DEFAULT 0,
+                cashbackAmount BIGINT NOT NULL DEFAULT 0,
                 reference TEXT,
                 changeGiven BIGINT NOT NULL DEFAULT 0,
                 createdAt TEXT,
@@ -12326,6 +17174,15 @@ mod tests {
              ) ENGINE=InnoDB",
         ] {
             sqlx::query(sql).execute(pool).await?;
+        }
+        for table in ["payments", "customer_account_entries"] {
+            for column in ["tipsAmount", "serviceChargeAmount", "cashbackAmount"] {
+                sqlx::query(&format!(
+                    "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} BIGINT NOT NULL DEFAULT 0"
+                ))
+                .execute(pool)
+                .await?;
+            }
         }
         sqlx::query(
             "INSERT IGNORE INTO pos_schema_migrations (name, appliedAt)
@@ -12438,6 +17295,9 @@ mod tests {
                 amount: 100,
                 cash_amount: 100,
                 card_amount: 0,
+                tips_amount: 0,
+                service_charge_amount: 0,
+                cashback_amount: 0,
                 loyalty_amount: 0,
                 account_amount: 0,
                 reference: "".into(),
@@ -12481,11 +17341,100 @@ mod tests {
         assert!(validate_held_order_record(&sale.order).is_ok());
         assert!(validate_held_order_line_record(&sale.lines[0]).is_ok());
 
+        let mut sqlite_snapshot = serde_json::to_value(&sale.order).unwrap();
+        sqlite_snapshot["receiptKey"] = serde_json::Value::Null;
+        sqlite_snapshot["customerId"] = serde_json::json!("selected-customer");
+        let decoded = decode_held_order(&sqlite_snapshot).unwrap();
+        assert!(validate_held_order_record(&decoded).is_ok());
+        assert_eq!(decoded.customer_id, "selected-customer");
+        sqlite_snapshot["id"] = serde_json::Value::Null;
+        assert!(decode_held_order(&sqlite_snapshot).is_err());
+
         sale.order.receipt_key = "till-1:42".into();
         assert!(validate_held_order_record(&sale.order).is_err());
         sale.order.receipt_key.clear();
         sale.order.status = "completed".into();
         assert!(validate_held_order_record(&sale.order).is_err());
+    }
+
+    #[test]
+    fn real_mariadb_held_claim_retry_keeps_one_owner_when_configured() {
+        let Ok(uri) = std::env::var("POS_TEST_MYSQL_URI") else { return; };
+        assert!(uri.contains("pos_audit_") || uri.contains("pos_test_"), "Use a disposable database");
+        let _serial = REAL_MARIADB_TEST_LOCK.lock().unwrap();
+        tauri::async_runtime::block_on(async {
+            let pool = MySqlPool::connect(&uri).await.unwrap();
+            ensure_mysql_restore_guard_schema(&pool).await.unwrap();
+            ensure_mysql_whole_system_close_schema(&pool).await.unwrap();
+            let epoch = configured_mariadb_server_epoch(&pool).await;
+            let id = format!("hold-test-{:016x}", rand::random::<u64>());
+            let mut sale = bundle(&id, "", "unused-payment");
+            // Use the normal first-administrator workflow, including credential
+            // validation and write-authority triggers, on this empty test DB.
+            let employee_id = "held-recovery-test-admin";
+            let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM employees WHERE id = ?")
+                .bind(employee_id).fetch_one(&pool).await.unwrap();
+            if existing == 0 {
+                let test_hash = concat!("pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$",
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+                save_mariadb_employee_profile_cas(uri.clone(),
+                    test_employee(employee_id, "admin", "", test_hash), None,
+                    String::new(), String::new()).await.unwrap();
+            }
+            sale.order.employee_id = employee_id.into();
+            sale.order.order_number = 0;
+            sale.order.status = "hold".into();
+            sale.order.payment_method.clear();
+            sale.order.amount_tendered = 0;
+            sale.order.completed_at.clear();
+            // Exercise the REAL full SQLite-shaped payload (including the NULL
+            // receipt field that caused the regression), not just a typed header.
+            let mut payload = serde_json::json!({"order": sale.order, "lines": sale.lines});
+            payload["order"]["receiptKey"] = serde_json::Value::Null;
+            let mut tx = pool.begin().await.unwrap();
+            mysql_epoch_fenced_held_order_bundle(&mut tx, &payload).await.unwrap();
+            let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE id = ?")
+                .bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(visible, 0, "Other tills must not see the header before all lines commit");
+            tx.commit().await.unwrap();
+            // A lost upload response is safely replayed without duplicating
+            // lines or treating the server timestamp as a competing edit.
+            execute_mysql_epoch_fenced_outbox_operation(&pool, "orders", "heldOrderBundle", &payload, "id", &epoch).await.unwrap();
+            let line_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM order_lines WHERE orderId = ?")
+                .bind(&id).fetch_one(&pool).await.unwrap();
+            assert_eq!(line_count, 1);
+            // Multiple unpaid holds must coexist under the unique receipt-key
+            // index: MariaDB stores SQL NULL, not a shared empty receipt string.
+            let second_id = format!("hold-test-{:016x}", rand::random::<u64>());
+            let mut second = payload.clone();
+            second["order"]["id"] = serde_json::json!(second_id);
+            second["lines"][0]["id"] = serde_json::json!(format!("line-{second_id}"));
+            second["lines"][0]["orderId"] = serde_json::json!(second_id);
+            execute_mysql_epoch_fenced_outbox_operation(&pool, "orders", "heldOrderBundle", &second, "id", &epoch).await.unwrap();
+            let unreceipted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE id IN (?, ?) AND receiptKey IS NULL")
+                .bind(&id).bind(&second_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(unreceipted, 2);
+            execute_mysql_epoch_fenced_outbox_operation(&pool, "orders", "heldOrderBundle", &second, "id", &epoch).await.unwrap();
+            let mut invalid = payload.clone();
+            let bad_id = format!("bad-hold-{:016x}", rand::random::<u64>());
+            invalid["order"]["id"] = serde_json::json!(bad_id);
+            invalid["lines"][0]["orderId"] = serde_json::json!(bad_id);
+            // Reusing the original line's ID must fail after header insertion
+            // and roll back that header, not leave a partly shared trolley.
+            assert!(execute_mysql_epoch_fenced_outbox_operation(&pool, "orders", "heldOrderBundle", &invalid, "id", &epoch).await.is_err());
+            let bad_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE id = ?")
+                .bind(&bad_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(bad_count, 0);
+            let missing = claim_mysql_held_order(uri.clone(), bad_id, "missing-hold-owner".into(), Some(epoch.clone())).await.unwrap_err();
+            assert!(missing.contains("HELD_ORDER_NOT_SHARED"));
+            let owner = "persistent-claim-owner".to_string();
+            assert!(claim_mysql_held_order(uri.clone(), id.clone(), owner.clone(), Some(epoch.clone())).await.unwrap());
+            // Simulate losing the first success response and restarting the UI.
+            assert!(claim_mysql_held_order(uri.clone(), id.clone(), owner, Some(epoch.clone())).await.unwrap());
+            assert!(execute_mysql_epoch_fenced_outbox_operation(&pool, "orders", "heldOrderBundle", &payload, "id", &epoch).await.is_err(), "An old upload must never resurrect a claimed hold");
+            assert!(!claim_mysql_held_order(uri.clone(), id, "another-till-claim".into(), Some(epoch.clone())).await.unwrap());
+            assert!(claim_mysql_held_order(uri, second_id, "second-trolley-owner".into(), Some(epoch)).await.unwrap());
+        });
     }
 
     async fn enable_test_account(pool: &SqlitePool, credit_limit_pence: i64) {
@@ -12515,6 +17464,9 @@ mod tests {
             entry_type: entry_type.into(),
             amount_pence,
             payment_method: payment_method.into(),
+            tips_amount: 0,
+            service_charge_amount: 0,
+            cashback_amount: 0,
             reference: String::new(),
             description: if entry_type == "adjustment" {
                 "Test adjustment".into()
@@ -12601,6 +17553,17 @@ mod tests {
         assert!(
             tick < cutoff.as_str(),
             "an equal-tick writer must be included"
+        );
+    }
+
+    #[test]
+    fn per_till_snapshot_uses_the_exact_server_tick_as_its_exclusive_bound() {
+        let tick = "2026-07-29T12:00:00.123000Z";
+        let cutoff = canonical_report_epoch(tick).unwrap();
+        assert_eq!(cutoff, "2026-07-29T12:00:00.123Z");
+        assert!(
+            "2026-07-29T12:00:00.123Z" >= cutoff.as_str(),
+            "a same-tick writer released after the snapshot must be deferred by the report's < cutoff predicate"
         );
     }
 
@@ -12910,6 +17873,160 @@ mod tests {
                 created_at: stamp,
             },
         }
+    }
+
+    fn terminal_extras_sale(id: &str) -> SaleBundle {
+        let mut sale = bundle(id, "", &format!("payment-{id}"));
+        sale.payment.method = "dojo".into();
+        sale.order.payment_method = "dojo".into();
+        sale.payment.cash_amount = 0;
+        sale.payment.card_amount = 100;
+        sale.payment.tips_amount = 20;
+        sale.payment.service_charge_amount = 5;
+        sale.payment.cashback_amount = 200;
+        sale.payment.reference = format!("Dojo pi-{id}");
+        sale
+    }
+
+    #[test]
+    fn terminal_extras_legacy_payloads_default_to_zero_and_validate_separately() {
+        let sale = terminal_extras_sale("extras-legacy");
+        let mut value = serde_json::to_value(&sale).unwrap();
+        let payment = value["payment"].as_object_mut().unwrap();
+        for field in ["tipsAmount", "serviceChargeAmount", "cashbackAmount"] {
+            payment.remove(field);
+        }
+        let legacy: SaleBundle = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.payment.tips_amount, 0);
+        assert_eq!(legacy.payment.service_charge_amount, 0);
+        assert_eq!(legacy.payment.cashback_amount, 0);
+        // Persisted online-intent requests compare serialized JSON: zero additions
+        // must preserve the old shape so upgrades can safely replay them.
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        for field in ["tipsAmount", "serviceChargeAmount", "cashbackAmount"] {
+            assert!(legacy_json["payment"].get(field).is_none());
+        }
+        let sale_json = serde_json::to_value(&sale).unwrap();
+        assert_eq!(sale_json["payment"]["tipsAmount"], 20);
+        assert_eq!(sale_json["payment"]["serviceChargeAmount"], 5);
+        assert_eq!(sale_json["payment"]["cashbackAmount"], 200);
+        let legacy_account = account_change("legacy-account", "", "payment", -40, "card");
+        let legacy_account_json = serde_json::to_value(&legacy_account).unwrap();
+        for field in ["tipsAmount", "serviceChargeAmount", "cashbackAmount"] {
+            assert!(legacy_account_json.get(field).is_none());
+        }
+        let parsed_account: CustomerAccountChange = serde_json::from_value(legacy_account_json).unwrap();
+        assert_eq!(parsed_account, legacy_account);
+        assert_eq!(payment_allocation(&sale.payment).unwrap(), (0, 100, 0, 0));
+        validate_sale_terminal_extras(&sale).unwrap();
+        assert_eq!(checked_card_collection(100, checked_terminal_extras(20, 5, 200).unwrap()).unwrap(), 325);
+
+        for invalid in [-1, i64::MAX] {
+            let mut changed = sale.clone();
+            changed.payment.tips_amount = invalid;
+            assert!(validate_sale_terminal_extras(&changed).is_err());
+        }
+        let mut refund = sale.clone();
+        refund.order.order_type = "return".into();
+        assert!(validate_sale_terminal_extras(&refund).is_err());
+        let mut cash_only = sale;
+        cash_only.payment.cash_amount = 100;
+        cash_only.payment.card_amount = 0;
+        assert!(validate_sale_terminal_extras(&cash_only).is_err());
+    }
+
+    #[test]
+    fn terminal_extras_sale_persists_and_replays_without_changing_product_revenue() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let sale = terminal_extras_sale("extras-sale");
+            let first = insert_sqlite_bundle_with_outbox(&pool, &sale, Some("extras-outbox")).await.unwrap();
+            let replay = insert_sqlite_bundle_with_outbox(&pool, &sale, Some("extras-outbox")).await.unwrap();
+            assert_eq!(first.payment, replay.payment);
+            let row: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT o.total, p.amount, p.cardAmount, p.tipsAmount, p.serviceChargeAmount,
+                        p.cashbackAmount, p.cashAmount - p.cashbackAmount
+                 FROM orders o JOIN payments p ON p.orderId = o.id WHERE o.id = 'extras-sale'",
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(row, (100, 100, 100, 20, 5, 200, -200));
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payments").fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 1);
+            let mut changed = sale;
+            changed.payment.cashback_amount += 1;
+            assert!(insert_sqlite_bundle_with_outbox(&pool, &changed, Some("extras-outbox")).await.is_err());
+        });
+    }
+
+    #[test]
+    fn terminal_extras_goods_refund_retains_additions_and_void_is_rejected() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let sale = terminal_extras_sale("extras-refund");
+            insert_sqlite_bundle(&pool, &sale).await.unwrap();
+            let mut void = void_bundle("extras-void", "extras-refund");
+            void.payment.method = "dojo".into();
+            void.order.payment_method = "dojo".into();
+            void.payment.cash_amount = 0;
+            void.payment.card_amount = -100;
+            assert!(insert_sqlite_bundle(&pool, &void).await.unwrap_err().to_string().contains("cannot be voided"));
+
+            let mut refund = refund_bundle("extras-product-refund", "extras-refund", 100, "refunded");
+            refund.payment.method = "dojo".into();
+            refund.order.payment_method = "dojo".into();
+            refund.payment.cash_amount = 0;
+            refund.payment.card_amount = -100;
+            insert_sqlite_bundle(&pool, &refund).await.unwrap();
+            let totals: (i64, i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT SUM(amount), SUM(cardAmount), SUM(tipsAmount), SUM(serviceChargeAmount), SUM(cashbackAmount) FROM payments",
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(totals, (0, 0, 20, 5, 200));
+        });
+    }
+
+    #[test]
+    fn terminal_extras_account_repayment_preserves_base_debt_and_idempotency() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 500).await;
+            let opening = account_change("extras-opening", "", "opening_balance", 100, "");
+            post_sqlite_customer_account_entry(&pool, &opening).await.unwrap();
+            let mut payment = account_change("extras-repayment", "", "payment", -40, "card");
+            payment.reference = "Dojo pi-repayment".into();
+            payment.tips_amount = 10;
+            payment.service_charge_amount = 5;
+            payment.cashback_amount = 200;
+            let first = post_sqlite_customer_account_entry(&pool, &payment).await.unwrap();
+            assert_eq!(first.account.balance_pence, 60);
+            assert_eq!(first.entry.amount_pence, -40);
+            assert_eq!((first.entry.tips_amount, first.entry.service_charge_amount, first.entry.cashback_amount), (10, 5, 200));
+            let replay = post_sqlite_customer_account_entry(&pool, &payment).await.unwrap();
+            assert_eq!(replay.account.balance_pence, 60);
+            assert_eq!(replay.entry.cashback_amount, 200);
+            payment.tips_amount += 1;
+            assert!(post_sqlite_customer_account_entry(&pool, &payment).await.unwrap_err().to_string().contains("idempotency conflict"));
+
+            let cache = test_pool().await;
+            cache_sqlite_customer_account_mutation(&cache, &first).await.unwrap();
+            let mut tx = cache.begin().await.unwrap();
+            payment.tips_amount -= 1;
+            let cached = find_sqlite_account_entry(&mut tx, &payment).await.unwrap().unwrap();
+            assert!(entry_matches_change(&cached, &payment));
+        });
+    }
+
+    #[test]
+    fn terminal_extras_account_additions_require_card_payment_and_safe_total() {
+        let mut payment = account_change("extras-shape", "", "payment", -40, "card");
+        payment.reference = "Dojo pi-shape".into();
+        payment.tips_amount = 10;
+        validate_account_change_shape(&payment).unwrap();
+        payment.payment_method = "cash".into();
+        assert!(validate_account_change_shape(&payment).is_err());
+        payment.payment_method = "card".into();
+        payment.tips_amount = MAX_SAFE_TERMINAL_MONEY;
+        assert!(validate_account_change_shape(&payment).is_err());
+        payment.tips_amount = -1;
+        assert!(validate_account_change_shape(&payment).is_err());
     }
 
     #[test]
@@ -13377,6 +18494,54 @@ mod tests {
     }
 
     #[test]
+    fn till_close_cas_uses_the_effective_marker_and_server_bounded_period() {
+        let (start, end) = validate_till_report_close_request(
+            Some("2026-07-27T12:00:00.000000Z"),
+            Some("2026-07-27T12:00:00.000Z"),
+            "2026-07-27T12:00:00.000Z",
+            "2026-07-27T13:00:00.000Z",
+            "2026-07-27T13:00:01.000Z",
+        )
+        .unwrap();
+        assert_eq!(start, "2026-07-27T12:00:00.000Z");
+        assert_eq!(end, "2026-07-27T13:00:00.000Z");
+
+        let changed = validate_till_report_close_request(
+            Some("2026-07-27T12:01:00.000Z"),
+            Some("2026-07-27T12:00:00.000Z"),
+            "2026-07-27T12:00:00.000Z",
+            "2026-07-27T13:00:00.000Z",
+            "2026-07-27T13:00:01.000Z",
+        )
+        .unwrap_err();
+        assert!(changed.to_string().contains("REPORT_PERIOD_CHANGED"));
+
+        let future_cutoff = validate_till_report_close_request(
+            None,
+            None,
+            REPORT_PERIOD_ORIGIN,
+            "2026-07-27T13:00:02.000Z",
+            "2026-07-27T13:00:01.000Z",
+        )
+        .unwrap_err();
+        assert!(future_cutoff.to_string().contains("REPORT_CUTOFF_INVALID"));
+    }
+
+    #[test]
+    fn report_period_bounds_reject_empty_or_reversed_cutoffs() {
+        assert!(canonical_report_period_bounds(
+            "2026-07-27T12:00:00.000Z",
+            "2026-07-27T12:00:00.000Z",
+        )
+        .is_err());
+        assert!(canonical_report_period_bounds(
+            "2026-07-27T12:00:01.000Z",
+            "2026-07-27T12:00:00.000Z",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn account_limit_failure_rolls_back_the_entire_sale() {
         tauri::async_runtime::block_on(async {
             let pool = test_pool().await;
@@ -13613,6 +18778,108 @@ mod tests {
     }
 
     #[test]
+    fn stock_receipt_rejects_values_that_cannot_sync_or_render_exactly() {
+        let mut oversized_quantity = stock_receipt_bundle();
+        oversized_quantity.lines[0].quantity = i32::MAX as i64 + 1;
+        oversized_quantity.lines[0].unit_cost = 0;
+        oversized_quantity.receipt.total_cost = 0;
+        assert!(validate_stock_receipt_bundle(&oversized_quantity).is_err());
+
+        let mut oversized_money = stock_receipt_bundle();
+        oversized_money.lines[0].quantity = 1;
+        oversized_money.lines[0].unit_cost = MAX_STOCK_RECEIPT_MONEY + 1;
+        oversized_money.receipt.total_cost = MAX_STOCK_RECEIPT_MONEY + 1;
+        assert!(validate_stock_receipt_bundle(&oversized_money).is_err());
+
+        let mut oversized_total = stock_receipt_bundle();
+        oversized_total.lines[0].quantity = 2;
+        oversized_total.lines[0].unit_cost = MAX_STOCK_RECEIPT_MONEY;
+        oversized_total.receipt.total_cost = MAX_STOCK_RECEIPT_MONEY * 2;
+        assert!(validate_stock_receipt_bundle(&oversized_total).is_err());
+
+        let mut maximum = stock_receipt_bundle();
+        maximum.lines[0].quantity = 1;
+        maximum.lines[0].unit_cost = MAX_STOCK_RECEIPT_MONEY;
+        maximum.receipt.total_cost = MAX_STOCK_RECEIPT_MONEY;
+        assert!(validate_stock_receipt_bundle(&maximum).is_ok());
+    }
+
+    #[test]
+    fn stock_receipt_rejects_duplicate_record_ids_and_mismatched_audit_actor() {
+        for duplicate_log in [false, true] {
+            let mut receipt = stock_receipt_bundle();
+            let mut second = receipt.lines[0].clone();
+            second.product_id = "product-2".into();
+            if duplicate_log {
+                second.id = "line-2".into();
+            } else {
+                second.inventory_log_id = "log-2".into();
+            }
+            receipt.lines.push(second);
+            receipt.receipt.total_cost *= 2;
+            assert!(validate_stock_receipt_bundle(&receipt).is_err());
+        }
+
+        let mut receipt = stock_receipt_bundle();
+        receipt.audit.employee_id = "different-employee".into();
+        assert!(validate_stock_receipt_bundle(&receipt).is_err());
+    }
+
+    #[test]
+    fn stock_receipt_rejects_stock_overflow_without_committing_any_part() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let initial_stock = i32::MAX as i64 - 1;
+            sqlx::query("UPDATE products SET stockLevel = ? WHERE id = 'product-1'")
+                .bind(initial_stock)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let result = insert_sqlite_stock_receipt_bundle(
+                &pool,
+                &stock_receipt_bundle(),
+                Some("overflow-outbox"),
+            )
+            .await;
+            assert!(result.unwrap_err().to_string().contains("supported range"));
+            for table in ["stock_receipts", "stock_receipt_lines", "inventory_logs", "audit_logs", "_offline_queue"] {
+                let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {}", table))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(count, 0, "{} must roll back", table);
+            }
+            let stock: i64 = sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = 'product-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(stock, initial_stock);
+        });
+    }
+
+    #[test]
+    fn stock_receipt_handles_legacy_null_and_negative_stock() {
+        tauri::async_runtime::block_on(async {
+            for initial_stock in [None, Some(-5_i64), Some(i32::MAX as i64 - 3)] {
+                let pool = test_pool().await;
+                sqlx::query("UPDATE products SET stockLevel = ? WHERE id = 'product-1'")
+                    .bind(initial_stock)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                insert_sqlite_stock_receipt_bundle(&pool, &stock_receipt_bundle(), None)
+                    .await
+                    .unwrap();
+                let stock: i64 = sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = 'product-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(stock, initial_stock.unwrap_or(0) + 3);
+            }
+        });
+    }
+
+    #[test]
     fn stock_receipt_commits_once_with_its_outbox() {
         tauri::async_runtime::block_on(async {
             let pool = test_pool().await;
@@ -13838,6 +19105,32 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!((orders, logs, outbox, stock), (0, 0, 0, 10));
+        });
+    }
+
+    #[test]
+    fn real_mariadb_signed_employee_authority_values_decode_when_configured() {
+        let Ok(uri) = std::env::var("POS_TEST_MYSQL_URI") else {
+            return;
+        };
+        let _serial = REAL_MARIADB_TEST_LOCK.lock().unwrap();
+        tauri::async_runtime::block_on(async {
+            let pool = MySqlPool::connect(&uri).await.unwrap();
+            let connection_id: i64 = sqlx::query_scalar(MYSQL_SIGNED_CONNECTION_ID_SELECT)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let active_sql = format!(
+                "SELECT {MYSQL_SIGNED_EMPLOYEE_ACTIVE_PROJECTION}
+                   FROM (SELECT CAST(1 AS UNSIGNED) AS isActive) unsigned_employee"
+            );
+            let is_active: i64 = sqlx::query_scalar(&active_sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(connection_id > 0);
+            assert_eq!(is_active, 1);
+            pool.close().await;
         });
     }
 
@@ -14475,6 +19768,8 @@ mod tests {
                  ) ENGINE=InnoDB",
                 "CREATE TABLE IF NOT EXISTS orders (
                     id VARCHAR(36) PRIMARY KEY, total BIGINT DEFAULT 0,
+                    discountAmount BIGINT DEFAULT 0, taxTotal BIGINT DEFAULT 0,
+                    tillNumber VARCHAR(64),
                     type VARCHAR(32) NOT NULL DEFAULT 'sale',
                     status VARCHAR(32) NOT NULL DEFAULT 'completed', notes TEXT,
                     completedAt DATETIME(3) NULL
@@ -14488,12 +19783,18 @@ mod tests {
                     id VARCHAR(36) PRIMARY KEY, orderId VARCHAR(36), method VARCHAR(32),
                     amount BIGINT DEFAULT 0, cashAmount BIGINT DEFAULT 0,
                     cardAmount BIGINT DEFAULT 0, loyaltyAmount BIGINT DEFAULT 0,
-                    accountAmount BIGINT DEFAULT 0
+                    accountAmount BIGINT DEFAULT 0,
+                    tipsAmount BIGINT NOT NULL DEFAULT 0,
+                    serviceChargeAmount BIGINT NOT NULL DEFAULT 0,
+                    cashbackAmount BIGINT NOT NULL DEFAULT 0
                  ) ENGINE=InnoDB",
                 "CREATE TABLE IF NOT EXISTS customer_account_entries (
                     id VARCHAR(36) PRIMARY KEY, entryType VARCHAR(32),
                     paymentMethod VARCHAR(32), amountPence BIGINT DEFAULT 0,
-                    createdAt DATETIME(3) NULL
+                    tipsAmount BIGINT NOT NULL DEFAULT 0,
+                    serviceChargeAmount BIGINT NOT NULL DEFAULT 0,
+                    cashbackAmount BIGINT NOT NULL DEFAULT 0,
+                    tillNumber VARCHAR(64), createdAt DATETIME(3) NULL
                  ) ENGINE=InnoDB",
                 "CREATE TABLE IF NOT EXISTS payment_terminal_attempts (
                     id VARCHAR(64) PRIMARY KEY, status VARCHAR(32) NOT NULL
@@ -14512,19 +19813,39 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            for sql in [
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS discountAmount BIGINT DEFAULT 0",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS taxTotal BIGINT DEFAULT 0",
+                "ALTER TABLE orders ADD COLUMN IF NOT EXISTS tillNumber VARCHAR(64) NULL",
+                "ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS tillNumber VARCHAR(64) NULL",
+                "ALTER TABLE payment_terminal_attempts ADD COLUMN IF NOT EXISTS tillId VARCHAR(64) NULL",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS tipsAmount BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS serviceChargeAmount BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE payments ADD COLUMN IF NOT EXISTS cashbackAmount BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS tipsAmount BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS serviceChargeAmount BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE customer_account_entries ADD COLUMN IF NOT EXISTS cashbackAmount BIGINT NOT NULL DEFAULT 0",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
             ensure_mysql_whole_system_close_schema(&pool).await.unwrap();
             ensure_mysql_account_ledger_guards(&pool).await.unwrap();
 
             let suffix = format!("{:016x}", rand::random::<u64>());
             let till_id = format!("z-till-{suffix}");
+            let zero_till_id = format!("z-zero-till-{suffix}");
             let product_id = format!("z-product-{suffix}");
             let order_id = format!("z-order-{suffix}");
+            let legacy_order_id = format!("z-legacy-order-{suffix}");
+            let legacy_line_id = format!("z-legacy-line-{suffix}");
+            let legacy_payment_id = format!("z-legacy-payment-{suffix}");
             let stale_order_id = format!("z-stale-order-{suffix}");
             let account_payment_id = format!("z-account-other-{suffix}");
             let account_id = format!("z-account-{suffix}");
             let account_customer_id = format!("z-customer-{suffix}");
             let start_marker_id = format!("z-start-{suffix}");
             let finish_marker_id = format!("z-finish-{suffix}");
+            let till_finish_marker_id = format!("z-till-close-{suffix}");
             sqlx::query(
                 "UPDATE pos_close_barrier
                  SET token = '', state = 'idle', ownerTillId = '', requestedAt = NULL,
@@ -14552,18 +19873,21 @@ mod tests {
                 &product_id,
             )
             .await;
-            sqlx::query("DELETE FROM payments WHERE orderId = ?")
+            sqlx::query("DELETE FROM payments WHERE orderId IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM order_lines WHERE orderId = ?")
+            sqlx::query("DELETE FROM order_lines WHERE orderId IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM orders WHERE id = ?")
+            sqlx::query("DELETE FROM orders WHERE id IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -14584,14 +19908,25 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::query(
+                "INSERT INTO registers (id, name, isActive) VALUES (?, 'Z zero-sales till', 1)",
+            )
+            .bind(&zero_till_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
                 "INSERT INTO till_presence
                     (tillId, tillName, closeProtocolVersion, closeBarrierToken,
                      closeBarrierPhase, outboxCount, localTerminalAttemptCount,
                      syncConflictCount, barrierObservedAt, lastSeenAt)
                  VALUES (?, 'Z test till', ?, '', '', 0, 0, 0,
+                         NULL, UTC_TIMESTAMP(3)),
+                        (?, 'Z zero-sales till', ?, '', '', 0, 0, 0,
                          NULL, UTC_TIMESTAMP(3))",
             )
             .bind(&till_id)
+            .bind(WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION)
+            .bind(&zero_till_id)
             .bind(WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION)
             .execute(&pool)
             .await
@@ -14659,10 +19994,11 @@ mod tests {
                 "UPDATE till_presence
                  SET closeBarrierToken = ?, closeBarrierPhase = 'prepared',
                      barrierObservedAt = UTC_TIMESTAMP(3), lastSeenAt = UTC_TIMESTAMP(3)
-                 WHERE tillId = ?",
+                 WHERE tillId IN (?, ?)",
             )
             .bind(&token)
             .bind(&till_id)
+            .bind(&zero_till_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -14675,11 +20011,14 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::query(
-                "INSERT INTO orders (id, total, type, status, notes, completedAt)
-                 VALUES (?, 100, 'sale', 'completed', '',
+                "INSERT INTO orders
+                    (id, total, discountAmount, taxTotal, tillNumber,
+                     type, status, notes, completedAt)
+                 VALUES (?, 100, 20, 17, ?, 'sale', 'completed', '',
                          DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
             )
             .bind(&order_id)
+            .bind(&till_id)
             .execute(&mut *writer_tx)
             .await
             .unwrap();
@@ -14706,12 +20045,46 @@ mod tests {
             .await
             .unwrap();
             sqlx::query(
+                "INSERT INTO orders
+                    (id, total, discountAmount, taxTotal, tillNumber,
+                     type, status, notes, completedAt)
+                 VALUES (?, 40, 5, 7, '', 'sale', 'completed', '',
+                         DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
+            )
+            .bind(&legacy_order_id)
+            .execute(&mut *writer_tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO order_lines
+                    (id, orderId, productId, productName, quantity, lineTotal)
+                 VALUES (?, ?, ?, 'Z barrier product', 2, 40)",
+            )
+            .bind(&legacy_line_id)
+            .bind(&legacy_order_id)
+            .bind(&product_id)
+            .execute(&mut *writer_tx)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO payments
+                    (id, orderId, method, amount, cashAmount, cardAmount,
+                     loyaltyAmount, accountAmount)
+                 VALUES (?, ?, 'card', 40, 0, 40, 0, 0)",
+            )
+            .bind(&legacy_payment_id)
+            .bind(&legacy_order_id)
+            .execute(&mut *writer_tx)
+            .await
+            .unwrap();
+            sqlx::query(
                 "INSERT INTO customer_account_entries
                     (id, accountId, customerId, entryType, paymentMethod,
                      amountPence, reference, description, idempotencyKey,
-                     balanceAfterPence, createdAt, updatedAt)
+                     balanceAfterPence, tillNumber, createdAt, updatedAt)
                  VALUES (?, ?, ?, 'payment', 'other', -60, '',
                          'Whole-system close integration fixture', ?, -60,
+                         ?,
                          DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
                          DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
             )
@@ -14719,6 +20092,7 @@ mod tests {
             .bind(&account_id)
             .bind(&account_customer_id)
             .bind(format!("z-close:{suffix}"))
+            .bind(&till_id)
             .execute(&mut *writer_tx)
             .await
             .unwrap();
@@ -14779,9 +20153,10 @@ mod tests {
             sqlx::query(
                 "UPDATE till_presence
                  SET closeBarrierPhase = 'frozen', barrierObservedAt = UTC_TIMESTAMP(3),
-                     lastSeenAt = UTC_TIMESTAMP(3) WHERE tillId = ?",
+                     lastSeenAt = UTC_TIMESTAMP(3) WHERE tillId IN (?, ?)",
             )
             .bind(&till_id)
+            .bind(&zero_till_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -14793,10 +20168,49 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(snapshot.overview.total_revenue, 100);
-            assert_eq!(snapshot.overview.total_transactions, 1);
+            assert_eq!(snapshot.overview.total_revenue, 140);
+            assert_eq!(snapshot.overview.total_transactions, 2);
             assert_eq!(snapshot.breakdown.total_cash, 100);
+            assert_eq!(snapshot.breakdown.total_card, 40);
             assert_eq!(snapshot.breakdown.account_repayments_other, 60);
+            assert_eq!(snapshot.till_summaries.len(), 3);
+            let selling_till = snapshot
+                .till_summaries
+                .iter()
+                .find(|summary| summary.id == till_id)
+                .expect("selling till summary");
+            assert_eq!(selling_till.name, "Z test till");
+            assert_eq!(selling_till.net_sales, 100);
+            assert_eq!(selling_till.gross_sales, 120);
+            assert_eq!(selling_till.tax_total, 17);
+            assert_eq!(selling_till.transactions, 1);
+            assert_eq!(selling_till.items_sold, 1);
+            assert_eq!(selling_till.cash_total, 100);
+            assert_eq!(selling_till.card_total, 0);
+            assert_eq!(selling_till.account_repayments_other, 60);
+            let zero_sales_till = snapshot
+                .till_summaries
+                .iter()
+                .find(|summary| summary.id == zero_till_id)
+                .expect("active zero-sales till summary");
+            assert_eq!(zero_sales_till.name, "Z zero-sales till");
+            assert_eq!(zero_sales_till.net_sales, 0);
+            assert_eq!(zero_sales_till.gross_sales, 0);
+            assert_eq!(zero_sales_till.transactions, 0);
+            assert_eq!(zero_sales_till.items_sold, 0);
+            let legacy_till = snapshot
+                .till_summaries
+                .iter()
+                .find(|summary| summary.id.is_empty())
+                .expect("unassigned legacy till summary");
+            assert_eq!(legacy_till.name, "Unassigned / legacy");
+            assert_eq!(legacy_till.net_sales, 40);
+            assert_eq!(legacy_till.gross_sales, 45);
+            assert_eq!(legacy_till.tax_total, 7);
+            assert_eq!(legacy_till.transactions, 1);
+            assert_eq!(legacy_till.items_sold, 2);
+            assert_eq!(legacy_till.cash_total, 0);
+            assert_eq!(legacy_till.card_total, 40);
             assert_eq!(
                 snapshot.expected_last_marker.as_deref(),
                 Some(period_start.as_str())
@@ -14843,6 +20257,49 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(last_closed_after_finish, snapshot.cutoff_at);
+
+            // A whole-shop Z closes every till's previous period. A later till
+            // Z must not repeat the £1 sale included above, even when that till
+            // has never been individually closed. Its own close must also not
+            // advance the shop-wide period (otherwise the next shop report
+            // would silently omit sales on other tills).
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let till_after_system = prepare_till_report_close(uri.clone(), till_id.clone())
+                .await
+                .unwrap();
+            let system_cutoff = canonical_report_epoch(&snapshot.cutoff_at).unwrap();
+            assert_eq!(till_after_system.period_start, system_cutoff);
+            assert_eq!(till_after_system.overview.total_revenue, 0);
+            assert_eq!(till_after_system.overview.total_transactions, 0);
+            let till_closed = commit_till_report_close(
+                uri.clone(),
+                CommitTillReportCloseInput {
+                    id: till_finish_marker_id.clone(),
+                    till_number: till_id.clone(),
+                    expected_last_marker: till_after_system.expected_last_marker,
+                    period_start: till_after_system.period_start,
+                    period_end: till_after_system.cutoff_at,
+                    employee_id: "z-test-manager".into(),
+                    report_text: "Till close after whole-system close".into(),
+                    report_total: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let mut verify_markers = pool.begin().await.unwrap();
+            assert_eq!(
+                latest_system_report_marker(&mut verify_markers, false).await.unwrap(),
+                Some(snapshot.cutoff_at.clone()),
+            );
+            assert_eq!(
+                latest_effective_till_report_marker(&mut verify_markers, &till_id).await.unwrap(),
+                Some(till_closed.marker_time),
+            );
+            assert_eq!(
+                latest_effective_till_report_marker(&mut verify_markers, &zero_till_id).await.unwrap(),
+                Some(system_cutoff),
+            );
+            verify_markers.commit().await.unwrap();
             let stale_after_finish = sqlx::query(
                 "INSERT INTO orders (id, total, type, status, notes, completedAt)
                  VALUES (?, 100, 'sale', 'completed', '',
@@ -14888,18 +20345,21 @@ mod tests {
             .unwrap();
             assert_eq!(recovered_state, "idle");
 
-            sqlx::query("DELETE FROM payments WHERE orderId = ?")
+            sqlx::query("DELETE FROM payments WHERE orderId IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM order_lines WHERE orderId = ?")
+            sqlx::query("DELETE FROM order_lines WHERE orderId IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM orders WHERE id = ?")
+            sqlx::query("DELETE FROM orders WHERE id IN (?, ?)")
                 .bind(&order_id)
+                .bind(&legacy_order_id)
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -14916,6 +20376,11 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            sqlx::query("DELETE FROM till_report_markers WHERE id = ?")
+                .bind(&till_finish_marker_id)
+                .execute(&pool)
+                .await
+                .unwrap();
             sqlx::query("DELETE FROM products WHERE id = ?")
                 .bind(&product_id)
                 .execute(&pool)
@@ -14926,8 +20391,9 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("DELETE FROM registers WHERE id = ?")
+            sqlx::query("DELETE FROM registers WHERE id IN (?, ?)")
                 .bind(&till_id)
+                .bind(&zero_till_id)
                 .execute(&pool)
                 .await
                 .unwrap();

@@ -3,19 +3,41 @@
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import { formatMoney, settingsDB, storeDB } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { currentEmployee } from '$lib/stores/session';
+    import { currentEmployee, isSupportEmployee } from '$lib/stores/session';
     import { hasPermission } from '$lib/permissions';
-    import { isMultiMode } from '$lib/stores/connection';
+    import { isValidReportPeriod, requiresCoordinatedSystemCloseSession } from '$lib/reportMarkers';
+    import { isMultiMode, connectionState } from '$lib/stores/connection';
+    import { previousReportPeriod, reportChange, type ReportPeriod } from '$lib/reportComparison';
     import { getReceiptPrinterConfig, printEscposTextReport } from '$lib/printers';
+    import { paymentExtraReportRows, cashbackRecoveryMessage } from '$lib/paymentExtraPresentation';
+    import { loadDojoConfig, type DojoConfig } from '$lib/dojo';
+    import { getRecoverablePaymentTerminalAttempts, type TerminalPaymentAttempt } from '$lib/terminalAttempts';
+    import { runTerminalRecovery, cancelExpiredSandboxDojoPayment, type TerminalRecoveryResult } from '$lib/terminalRecovery';
+    import DojoExpiryReview from '$lib/components/DojoExpiryReview.svelte';
+    let showDojoExpiryReview = false;
+    let dojoExpiryAttempt: TerminalPaymentAttempt | null = null;
+    import {
+        isReportPaymentBlocker, readableReportPaymentBlocker, reportPaymentAmount,
+        reportPaymentStatus, reportPaymentRecoveryReason, canCancelExpiredTestPayment,
+        verifyCancelledReportPayment,
+    } from '$lib/reportPaymentRecovery';
     import {
         getReportSnapshot,
+        assertMariaDbCommerceWritesAllowed,
+        getReportComparisonTotals,
+        type ReportComparisonTotals,
+        type ReportSnapshot,
         getLastReportMarker,
         saveReportMarker,
+        prepareTillReportClose,
+        commitTillReportClose,
         beginWholeSystemClose,
         finishWholeSystemClose,
         abortWholeSystemClose,
+        isWholeSystemCloseReleaseUnconfirmed,
         getTillPeriodReport,
         getTillName,
         getOrCreateTillId,
@@ -25,6 +47,7 @@
         type TopProduct,
         type TillReportOption,
         type TillSalesSummary,
+        type TillPeriodReport,
         type DailySalesPoint,
         type BusinessSummary,
         type EmployeeSalesSummary,
@@ -89,6 +112,58 @@
     let appliedSortBy: 'quantity' | 'revenue' = 'quantity';
     const REPORT_LOAD_TIMEOUT_MS = 16_000;
 
+    let comparisonEnabled = false;
+    let comparisonLoading = false;
+    let comparisonError = '';
+    let comparisonSequence = 0;
+    let comparisonTotals: ReportComparisonTotals | null = null;
+    let comparisonPeriod: ReportPeriod | null = null;
+    let comparisonTarget: { startDate: string; endDate: string; till: string; source: ReportSnapshot['source'] } | null = null;
+
+    function clearComparison() {
+        comparisonSequence++;
+        comparisonTotals = null;
+        comparisonPeriod = null;
+        comparisonLoading = false;
+        comparisonError = '';
+    }
+
+    async function loadComparison() {
+        const target = comparisonTarget;
+        if (!comparisonEnabled || !target) return;
+        clearComparison();
+        const sequence = comparisonSequence;
+        comparisonLoading = true;
+        try {
+            const period = previousReportPeriod(target.startDate, target.endDate);
+            comparisonPeriod = period;
+            const result = await getReportComparisonTotals(period.startDate, period.endDate, target.source, target.till || undefined);
+            if (sequence !== comparisonSequence || !comparisonEnabled || comparisonTarget !== target) return;
+            comparisonTotals = result;
+        } catch (error) {
+            if (sequence !== comparisonSequence) return;
+            comparisonError = String(error).replace(/^Error:\s*/, '') || 'Could not load previous-period totals.';
+        } finally {
+            if (sequence === comparisonSequence) comparisonLoading = false;
+        }
+    }
+
+    function toggleComparison() {
+        comparisonEnabled = !comparisonEnabled;
+        clearComparison();
+        if (comparisonEnabled && reportReady) void loadComparison();
+    }
+
+    function comparisonLabel(current: number, previous: number): string {
+        const change = reportChange(current, previous);
+        if (!change) return 'Comparison unavailable';
+        if (change.direction === 'unchanged') return 'No change';
+        const amount = change.percent === null
+            ? formatMoney(Math.abs(change.delta))
+            : `${Math.abs(change.percent) < 0.1 ? '<0.1' : Math.abs(change.percent).toLocaleString('en-GB', { maximumFractionDigits: 1 })}%`;
+        return `${change.direction === 'up' ? 'Up' : 'Down'} ${amount}`;
+    }
+
     function clearReportResults() {
         overview = { totalRevenue: 0, totalTransactions: 0, refundTransactions: 0, avgTransactionValue: 0, totalItemsSold: 0 };
         breakdown = emptyPaymentBreakdown();
@@ -103,7 +178,7 @@
     let tillName = 'Till 1';
     let tillId = '';
     let showTillReport = false;
-    let tillReportData: { overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] } | null = null;
+    let tillReportData: TillPeriodReport | null = null;
     let tillReportPeriod = '';
     let tillReportTitle = '';
     let closeReportTillNumber = '';
@@ -115,11 +190,218 @@
     let closeReportCanEnd = false;
     let closeReportConfirming = false;
     let closeReportSaving = false;
+    let closeReportProblem = '';
+    let closeReportWarning = '';
     let reportPrintBusy = false;
     let closeReportPrintBusy = false;
     let periodReportBusy = false;
+    type PeriodReportAction = 'close-till' | 'close-system' | 'preview-till';
+    let periodReportAction: PeriodReportAction | null = null;
+    let periodReportStatus = '';
+    let periodReportAbortController: AbortController | null = null;
+    let periodReportCancelRequested = false;
+    let periodReportFallbackRequested = false;
+    let periodReportProblem = '';
+    let periodReportProblemOffline = false;
+    let pendingReportPayments: TerminalPaymentAttempt[] = [];
+    let paymentRecoveryBusy = false;
+    let paymentRecoveryLoading = false;
+    let paymentRecoveryNotice = '';
+    let paymentRecoveryLoadError = '';
+    let paymentRecoveryDisposed = false;
+    let showPaymentRecovery = false;
+    let paymentResultsCheckedAt = 0;
+    let recoveryDojoConfig: DojoConfig | null = null;
+    let showCancelTestPayment = false;
+    let cancelTestPayment: TerminalPaymentAttempt | null = null;
+    let paymentCancellationController: AbortController | null = null;
+    let paymentCancellationEmployeeId = '';
     $: canOpenReports = hasPermission($currentEmployee, 'open_reports', $settingsDB);
     $: canEndDay = hasPermission($currentEmployee, 'end_day_close', $settingsDB);
+    $: periodReportWaitingOffline = periodReportAction === 'close-system'
+        && /\boffline\b/i.test(periodReportStatus);
+    $: activeRecoveryAdministrator = $currentEmployee?.role === 'admin' && $currentEmployee?.isActive === true
+        && !isSupportEmployee($currentEmployee) && !$currentEmployee?.roleNeedsRepair && !$currentEmployee?.pinNeedsReset;
+    $: sandboxCancellationConnectionReady = $connectionState.mode === 'multi'
+        && $connectionState.mysqlOnline && $connectionState.mysqlReady;
+    $: paymentRecoveryBlocked = periodReportBusy || showTillReport || closeReportSaving || Boolean(wholeSystemCloseSession)
+        || paymentRecoveryBusy || paymentRecoveryLoading;
+    $: if (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady) showDojoExpiryReview = false;
+    $: if (showCancelTestPayment && (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady)) {
+        showCancelTestPayment = false;
+        cancelTestPayment = null;
+    }
+    $: if (paymentCancellationController && (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady
+        || $currentEmployee?.id !== paymentCancellationEmployeeId
+        || periodReportBusy || showTillReport || closeReportSaving || wholeSystemCloseSession)) {
+        paymentCancellationController.abort();
+    }
+
+    async function refreshReportPayments(): Promise<void> {
+        if (!isTauri() || paymentRecoveryDisposed || paymentRecoveryLoading) return;
+        paymentRecoveryLoading = true;
+        try {
+            const [sumup, dojo, config] = await Promise.all([
+                getRecoverablePaymentTerminalAttempts('sumup'),
+                getRecoverablePaymentTerminalAttempts('dojo'),
+                loadDojoConfig().catch(() => null),
+            ]);
+            if (paymentRecoveryDisposed) return;
+            pendingReportPayments = [...sumup, ...dojo].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+            recoveryDojoConfig = config;
+            paymentRecoveryLoadError = '';
+        } catch {
+            if (!paymentRecoveryDisposed) {
+                paymentRecoveryLoadError = 'Pending payment records could not be verified. Reconnect MariaDB and check again; do not retry the card.';
+                paymentResultsCheckedAt = 0;
+                recoveryDojoConfig = null;
+            }
+        } finally {
+            if (!paymentRecoveryDisposed) paymentRecoveryLoading = false;
+        }
+    }
+
+    function announceRecoveryCashback(result: TerminalRecoveryResult) {
+        for (const cashback of result.cashbackToReview) {
+            toast(cashbackRecoveryMessage(cashback), 'error', false, undefined, { persistent: true });
+        }
+    }
+
+    async function checkReportPaymentResults() {
+        if (paymentRecoveryBlocked || !(canEndDay || canOpenReports) || !isTauri()) return;
+        paymentRecoveryBusy = true;
+        paymentResultsCheckedAt = 0;
+        paymentRecoveryNotice = 'Checking the saved payments with their providers…';
+        showPaymentRecovery = true;
+        try {
+            // A failed close may have lost its UI token. Confirm the shared
+            // barrier is really idle before recovery can write any ledger rows.
+            if (isMultiMode()) await assertMariaDbCommerceWritesAllowed();
+            const result = await runTerminalRecovery();
+            announceRecoveryCashback(result);
+            if (paymentRecoveryDisposed) return;
+            await refreshReportPayments();
+            if (paymentRecoveryDisposed) return;
+            if (!paymentRecoveryLoadError) paymentResultsCheckedAt = Date.now();
+            paymentRecoveryNotice = result.errors.length > 0
+                ? 'Some results could not be verified. Check the payment connection and try again. The Z-report safety check remains active.'
+                : result.stillUncertain > 0 || pendingReportPayments.length > 0
+                    ? 'Some payments still need confirmation. Review the entries below; do not charge the customer again.'
+                    : 'No unresolved payments were found. Generate a fresh Z report to check every till and close the period.';
+        } catch {
+            if (!paymentRecoveryDisposed) paymentRecoveryNotice = 'Payment recovery could not run safely. Release any report close and reconnect MariaDB, then check again. No payment record was cleared.';
+        } finally {
+            if (!paymentRecoveryDisposed) paymentRecoveryBusy = false;
+        }
+    }
+
+    function requestCancelTestPayment(attempt: TerminalPaymentAttempt) {
+        if (paymentRecoveryBlocked || !sandboxCancellationConnectionReady
+            || !canCancelExpiredTestPayment(attempt, recoveryDojoConfig, activeRecoveryAdministrator)) return;
+        if (!paymentResultsCheckedAt || Date.now() - paymentResultsCheckedAt > 90_000) {
+            paymentRecoveryNotice = 'Press Check payment results first, then review the refreshed test payment before cancelling it.';
+            return;
+        }
+        cancelTestPayment = attempt;
+        showCancelTestPayment = true;
+    }
+
+    async function confirmCancelTestPayment() {
+        const attempt = cancelTestPayment;
+        cancelTestPayment = null;
+        if (!attempt || paymentRecoveryBlocked || !sandboxCancellationConnectionReady || !activeRecoveryAdministrator || !isTauri()) return;
+        if (!paymentResultsCheckedAt || Date.now() - paymentResultsCheckedAt > 90_000) {
+            paymentRecoveryNotice = 'The result check is no longer fresh. Check payment results again before cancelling.';
+            return;
+        }
+        paymentRecoveryBusy = true;
+        paymentResultsCheckedAt = 0;
+        showPaymentRecovery = true;
+        paymentRecoveryNotice = 'Cancelling the expired sandbox payment, then automatically verifying the final result…';
+        const controller = new AbortController();
+        const employeeId = $currentEmployee?.id;
+        const employeeVersion = $currentEmployee?.updatedAt;
+        paymentCancellationEmployeeId = employeeId || '';
+        paymentCancellationController = controller;
+        const canContinue = () => !paymentRecoveryDisposed && !controller.signal.aborted
+            && $currentEmployee?.id === employeeId && $currentEmployee?.updatedAt === employeeVersion
+            && activeRecoveryAdministrator && sandboxCancellationConnectionReady
+            && !periodReportBusy && !showTillReport && !closeReportSaving && !wholeSystemCloseSession;
+        const assertSafe = async () => {
+            await assertMariaDbCommerceWritesAllowed();
+            const config = await loadDojoConfig();
+            if (!config.apiKeyConfigured || config.apiEnvironment.toLowerCase() !== 'sandbox') {
+                throw new Error('Sandbox verification is no longer available');
+            }
+        };
+        let cancellationConfirmed = false;
+        try {
+            await assertMariaDbCommerceWritesAllowed();
+            const config = await loadDojoConfig();
+            if (!canContinue() || !canCancelExpiredTestPayment(attempt, config, activeRecoveryAdministrator)) {
+                throw new Error('Sandbox cancellation is no longer available');
+            }
+            await cancelExpiredSandboxDojoPayment(attempt.id);
+            cancellationConfirmed = true;
+            const outcome = await verifyCancelledReportPayment({
+                signal: controller.signal,
+                canContinue,
+                assertSafe,
+                recover: async () => {
+                    const result = await runTerminalRecovery('dojo');
+                    if (canContinue()) announceRecoveryCashback(result);
+                },
+                refreshResolved: async () => {
+                    await refreshReportPayments();
+                    return !paymentRecoveryLoadError
+                        && !pendingReportPayments.some(payment => payment.provider === 'dojo' && payment.id === attempt.id);
+                },
+                onSettling: () => {
+                    paymentRecoveryNotice = 'Sandbox cancellation confirmed. Waiting 31 seconds for the required final confirmation, then checking automatically. Keep this page open; no second click is needed.';
+                },
+            });
+            if (!paymentRecoveryDisposed) {
+                if (outcome !== 'stopped' && !paymentRecoveryLoadError) paymentResultsCheckedAt = Date.now();
+                paymentRecoveryNotice = outcome === 'resolved'
+                    ? pendingReportPayments.length > 0
+                        ? 'This test payment is resolved. Other payments still need confirmation; review the remaining entries below.'
+                        : 'Payment verification finished. No unresolved payments remain on this till. Generate a fresh Z report to check every till and close the period.'
+                    : outcome === 'stopped'
+                        ? 'Automatic verification stopped because the staff session, connection, or report-close state changed. The payment record stays protected. Check payment results when it is safe to continue.'
+                        : 'The automatic checks finished, but this payment is still unresolved. Its record stays protected. Check the payment connection, then check payment results again; do not charge the customer again.';
+            }
+        } catch {
+            // The provider may have captured while the dialog was open. Normal
+            // reconciliation decides the outcome; cancellation never force-clears.
+            if (!cancellationConfirmed && canContinue()) {
+                try {
+                    await assertSafe();
+                    if (canContinue()) {
+                        const result = await runTerminalRecovery('dojo');
+                        if (canContinue()) announceRecoveryCashback(result);
+                    }
+                } catch { /* Keep the existing journal and offer a fresh check. */ }
+            }
+            if (!paymentRecoveryDisposed) {
+                paymentRecoveryNotice = cancellationConfirmed
+                    ? 'Sandbox cancellation was confirmed, but automatic verification could not finish safely. The payment record stays protected. Check the connection and payment results again.'
+                    : 'Test cancellation could not be confirmed. The payment may have changed or the provider may be unavailable. Its record was not cleared; check payment results again.';
+            }
+        } finally {
+            if (canContinue()) await refreshReportPayments();
+            controller.abort();
+            if (!paymentRecoveryDisposed) {
+                paymentCancellationController = null;
+                paymentCancellationEmployeeId = '';
+                paymentRecoveryBusy = false;
+            }
+        }
+    }
+
+    function paymentRecoveryTimestamp(value: string): string {
+        const stamp = new Date(value);
+        return Number.isFinite(stamp.getTime()) ? stamp.toLocaleString('en-GB') : 'Date needs review';
+    }
 
     async function withReportTimeout<T>(operation: Promise<T>): Promise<T> {
         let timeoutId: ReturnType<typeof setTimeout>;
@@ -138,7 +420,11 @@
 
     async function loadData() {
         const sequence = ++loadSequence;
-        if (startDate > endDate) {
+        clearComparison();
+        comparisonTarget = null;
+        // Filters can still be edited while the query is running.
+        const requested = { startDate, endDate, till: selectedTill, sort: sortBy };
+        if (!startDate || !endDate || startDate > endDate) {
             reportError = 'Start date must be before the end date.';
             loadedReportKey = '';
             clearReportResults();
@@ -147,10 +433,10 @@
         }
         loading = true;
         reportError = '';
-        const till = selectedTill || undefined;
+        const till = requested.till || undefined;
         try {
             const snapshot = await withReportTimeout(
-                getReportSnapshot(startDate, endDate, sortBy, 10, till),
+                getReportSnapshot(requested.startDate, requested.endDate, requested.sort, 10, till),
             );
             if (sequence !== loadSequence) return;
             overview = snapshot.overview;
@@ -165,11 +451,12 @@
                 ? 'Browser Preview'
                 : snapshot.source === 'mariadb' ? 'Live MariaDB' : 'Local SQLite';
             reportError = snapshot.warning || '';
-            appliedStartDate = startDate;
-            appliedEndDate = endDate;
-            appliedTill = selectedTill;
-            appliedSortBy = sortBy;
-            loadedReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
+            appliedStartDate = requested.startDate;
+            appliedEndDate = requested.endDate;
+            appliedTill = requested.till;
+            appliedSortBy = requested.sort;
+            loadedReportKey = `${requested.startDate}|${requested.endDate}|${requested.till}|${requested.sort}`;
+            comparisonTarget = { ...requested, source: snapshot.source };
         } catch (error) {
             if (sequence !== loadSequence) return;
             console.error('Failed to load report:', error);
@@ -179,6 +466,7 @@
         }
         lastRefreshed = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         loading = false;
+        if (comparisonEnabled && loadedReportKey === `${startDate}|${endDate}|${selectedTill}|${sortBy}`) void loadComparison();
     }
 
     function datePresetRange(preset: DatePreset): [string, string] {
@@ -238,6 +526,7 @@
             ['Payment Method', 'Amount (GBP)', 'Transactions'],
             ['Cash', pounds(breakdown.totalCash), breakdown.cashTxCount],
             ['Card', pounds(breakdown.totalCard), breakdown.cardTxCount],
+            ...paymentExtraReportRows(breakdown).map(([label, amount]) => [label, pounds(amount)]),
             ['Loyalty Value', pounds(breakdown.totalLoyalty), breakdown.loyaltyTxCount],
             ['Pay Later', pounds(breakdown.totalAccount), breakdown.accountTxCount],
             ['Unrecorded', pounds(breakdown.unrecordedAmount), breakdown.unrecordedTxCount],
@@ -247,12 +536,19 @@
             ['New Pay Later Charges', pounds(breakdown.accountCharges)],
             ['Cash Payments Received', pounds(breakdown.accountRepaymentsCash)],
             ['Card Payments Received', pounds(breakdown.accountRepaymentsCard)],
+            ...paymentExtraReportRows(breakdown, true).map(([label, amount]) => [label, pounds(amount)]),
             ['Other Payments Received', pounds(breakdown.accountRepaymentsOther)],
             ['Adjustments / Refunds', pounds(breakdown.accountAdjustments)],
             ['Closing Account Balance', pounds(breakdown.closingAccountOwed)],
             [],
             ['Till', 'Net Sales', 'Gross Sales', 'Refunds', 'Tax', 'Sales', 'Refund Transactions', 'Items', 'Cash Sales', 'Card Sales', 'Loyalty Value', 'Pay Later', 'Account Cash Collected', 'Account Card Collected', 'Account Other Collected'],
             ...visibleTillSummaries.map(till => [till.name, pounds(till.netSales), pounds(till.grossSales), pounds(till.refunds), pounds(till.taxTotal), till.transactions, till.refundTransactions, till.itemsSold, pounds(till.cashTotal), pounds(till.cardTotal), pounds(till.loyaltyTotal), pounds(till.accountTotal), pounds(till.accountRepaymentsCash), pounds(till.accountRepaymentsCard), pounds(till.accountRepaymentsOther)]),
+            [],
+            ['Till Card Collections', 'Scope', 'Component', 'Amount (GBP)'],
+            ...visibleTillSummaries.flatMap(till => [
+                ...paymentExtraReportRows(till).map(([label, amount]) => [till.name, 'Sales', label, pounds(amount)]),
+                ...paymentExtraReportRows(till, true).map(([label, amount]) => [till.name, 'Account payments', label, pounds(amount)]),
+            ]),
             [],
             ['Employee', 'Net Sales', 'Gross Sales', 'Refunds', 'Sales', 'Refund Transactions', 'Average Transaction'],
             ...employeeSales.map(employee => [employee.employeeName, pounds(employee.netSales), pounds(employee.grossSales), pounds(employee.refunds), employee.transactions, employee.refundTransactions, pounds(employee.avgTransaction)]),
@@ -294,6 +590,7 @@
             ''.padEnd(32, '-'),
             `Cash: ${formatMoney(breakdown.totalCash)}`,
             `Card: ${formatMoney(breakdown.totalCard)}`,
+            ...paymentExtraReportRows(breakdown).map(([label, amount]) => `${label}: ${formatMoney(amount)}`),
             `Loyalty: ${formatMoney(breakdown.totalLoyalty)}`,
             `Pay later: ${formatMoney(breakdown.totalAccount)}`,
             ''.padEnd(32, '-'),
@@ -302,6 +599,7 @@
             `New charges: ${formatMoney(breakdown.accountCharges)}`,
             `Cash collected: ${formatMoney(breakdown.accountRepaymentsCash)}`,
             `Card collected: ${formatMoney(breakdown.accountRepaymentsCard)}`,
+            ...paymentExtraReportRows(breakdown, true).map(([label, amount]) => `${label}: ${formatMoney(amount)}`),
             `Other collected: ${formatMoney(breakdown.accountRepaymentsOther)}`,
             `Adjustments: ${formatMoney(breakdown.accountAdjustments)}`,
             `Closing account: ${formatAccountPosition(breakdown.closingAccountOwed)}`,
@@ -375,7 +673,8 @@
     function buildCloseReportText(
         title: string,
         period: string,
-        data: { overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] },
+        data: TillPeriodReport,
+        includeTillBreakdown: boolean,
     ) {
         const shopName = $storeDB.name?.trim() || 'Shop';
         const lines = [
@@ -388,9 +687,31 @@
             `Refunds: ${data.overview.refundTransactions}`,
             `Items sold: ${data.overview.totalItemsSold}`,
             `Avg sale: ${formatMoney(data.overview.avgTransactionValue)}`,
+        ];
+        if (includeTillBreakdown && data.tillSummaries.length > 0) {
+            lines.push(''.padEnd(32, '-'), 'Sales by till');
+            for (const till of data.tillSummaries) {
+                lines.push(
+                    till.name.slice(0, 32),
+                    `  Net: ${formatMoney(till.netSales)}`,
+                    `  Gross: ${formatMoney(till.grossSales)}`,
+                    `  Sales: ${till.transactions}`,
+                    `  Net items: ${till.itemsSold}`,
+                    `  Card sales: ${formatMoney(till.cardTotal)}`,
+                    ...paymentExtraReportRows(till).map(([label, amount]) => `  ${label}: ${formatMoney(amount)}`),
+                    `  Account card (debt): ${formatMoney(till.accountRepaymentsCard)}`,
+                    ...paymentExtraReportRows(till, true).map(([label, amount]) => `  Account ${label.toLowerCase()}: ${formatMoney(amount)}`),
+                );
+                if (till.refundTransactions > 0 || till.refunds > 0) {
+                    lines.push(`  Refunds: ${formatMoney(till.refunds)} (${till.refundTransactions})`);
+                }
+            }
+        }
+        lines.push(
             ''.padEnd(32, '-'),
             `Cash: ${formatMoney(data.breakdown.totalCash)}`,
             `Card: ${formatMoney(data.breakdown.totalCard)}`,
+            ...paymentExtraReportRows(data.breakdown).map(([label, amount]) => `${label}: ${formatMoney(amount)}`),
             `Loyalty: ${formatMoney(data.breakdown.totalLoyalty)}`,
             `Pay later: ${formatMoney(data.breakdown.totalAccount)}`,
             ''.padEnd(32, '-'),
@@ -399,10 +720,11 @@
             `New charges: ${formatMoney(data.breakdown.accountCharges)}`,
             `Cash collected: ${formatMoney(data.breakdown.accountRepaymentsCash)}`,
             `Card collected: ${formatMoney(data.breakdown.accountRepaymentsCard)}`,
+            ...paymentExtraReportRows(data.breakdown, true).map(([label, amount]) => `${label}: ${formatMoney(amount)}`),
             `Other collected: ${formatMoney(data.breakdown.accountRepaymentsOther)}`,
             `Adjustments: ${formatMoney(data.breakdown.accountAdjustments)}`,
             `Closing account: ${formatAccountPosition(data.breakdown.closingAccountOwed)}`,
-        ];
+        );
         if (data.breakdown.unrecordedAmount !== 0) {
             lines.push(`Unrecorded: ${formatMoney(data.breakdown.unrecordedAmount)}`);
         }
@@ -416,9 +738,38 @@
         return lines.join('\n');
     }
 
+    function readablePeriodReportError(error: unknown) {
+        return readableReportPaymentBlocker(String(error)
+            .replace(/^Error:\s*/i, '')
+            .replace(/^WHOLE_SYSTEM_CLOSE_WAITING:\s*/i, '')
+            .trim());
+    }
+
     async function previewPeriodReport(scope: 'till' | 'system', closePeriod: boolean) {
-        if (periodReportBusy) return;
+        if (periodReportBusy || paymentRecoveryBusy) return;
+        if (wholeSystemCloseSession) {
+            periodReportProblem =
+                'A previous whole-system close still owns the database lock. '
+                + 'Release that close before generating another report.';
+            periodReportProblemOffline = false;
+            toast(periodReportProblem, 'error');
+            return;
+        }
         periodReportBusy = true;
+        periodReportAction = scope === 'system'
+            ? 'close-system'
+            : closePeriod ? 'close-till' : 'preview-till';
+        periodReportStatus = scope === 'system'
+            ? 'Preparing the whole-system close…'
+            : 'Generating the till report…';
+        periodReportCancelRequested = false;
+        periodReportFallbackRequested = false;
+        periodReportProblem = '';
+        periodReportProblemOffline = false;
+        closeReportProblem = '';
+        closeReportWarning = '';
+        let closeAbortController: AbortController | null = null;
+        let launchTillFallback = false;
         try {
             const markerTill = scope === 'system' ? '' : tillId;
             const title = scope === 'system' ? 'Whole System Period Close Report' : `${tillName} Period Close Report`;
@@ -428,12 +779,51 @@
                 throw new Error('Manager permission is required to start a whole-system close');
             }
 
-            const session = coordinatedWholeSystemClose ? await beginWholeSystemClose() : null;
-            wholeSystemCloseSession = session;
-            const lastMarker = session ? session.expectedLastMarker : await getLastReportMarker(markerTill);
-            const nowStr = session?.cutoffAt ?? new Date().toISOString();
-            const periodStart = session?.periodStart ?? lastMarker ?? '2000-01-01T00:00:00.000Z';
-            const data = session?.report ?? await getTillPeriodReport(markerTill, periodStart, nowStr);
+            if (coordinatedWholeSystemClose) {
+                closeAbortController = new AbortController();
+                periodReportAbortController = closeAbortController;
+            }
+            const session = coordinatedWholeSystemClose
+                ? await beginWholeSystemClose({
+                    signal: closeAbortController!.signal,
+                    onProgress: ({ phase, message }) => {
+                        if (!periodReportCancelRequested || phase === 'cancelling') {
+                            periodReportStatus = message;
+                        }
+                    },
+                })
+                : null;
+            // Never replace an unreleased frozen token with null. The guard at
+            // the top also prevents a second preview while one is outstanding.
+            if (session) wholeSystemCloseSession = session;
+            periodReportStatus = 'Calculating report totals…';
+            const preparedTillClose = !session && closePeriod && isMultiMode() && scope === 'till'
+                ? await prepareTillReportClose(markerTill)
+                : null;
+            const readOptions = {
+                requireAuthoritative: closePeriod && isMultiMode(),
+            };
+            const lastMarker = session
+                ? session.expectedLastMarker
+                : preparedTillClose
+                    ? preparedTillClose.expectedLastMarker
+                    : await getLastReportMarker(markerTill, readOptions);
+            const nowStr = session?.cutoffAt
+                ?? preparedTillClose?.cutoffAt
+                ?? new Date().toISOString();
+            const periodStart = session?.periodStart
+                ?? preparedTillClose?.periodStart
+                ?? lastMarker
+                ?? '2000-01-01T00:00:00.000Z';
+            if (!isValidReportPeriod(periodStart, nowStr)) {
+                throw new Error(
+                    'The report period is empty or its cutoff is not after the latest marker. '
+                    + 'Check MariaDB server time and generate a fresh report.',
+                );
+            }
+            const data = session?.report
+                ?? preparedTillClose?.report
+                ?? await getTillPeriodReport(markerTill, periodStart, nowStr, readOptions);
             const period = lastMarker
                 ? `${new Date(lastMarker).toLocaleString('en-GB')} → ${new Date(nowStr).toLocaleString('en-GB')}`
                 : `All time → ${new Date(nowStr).toLocaleString('en-GB')}`;
@@ -444,18 +834,110 @@
             closeReportStart = periodStart;
             closeReportEnd = nowStr;
             closeReportExpectedMarker = lastMarker;
-            closeReportText = buildCloseReportText(title, period, data);
+            closeReportText = buildCloseReportText(title, period, data, scope === 'system');
             closeReportCanEnd = closePeriod;
             closeReportConfirming = false;
+            closeReportProblem = '';
+            closeReportWarning = data.warning || '';
             showTillReport = true;
         } catch (e) {
             const session = wholeSystemCloseSession;
-            wholeSystemCloseSession = null;
-            if (session) await abortWholeSystemClose(session.token).catch(() => undefined);
+            let sessionReleaseError: unknown = null;
+            if (session) {
+                try {
+                    await abortWholeSystemClose(session.token);
+                    if (wholeSystemCloseSession === session) wholeSystemCloseSession = null;
+                } catch (releaseError) {
+                    sessionReleaseError = releaseError;
+                }
+            }
             console.error(e);
-            toast(`Failed to generate report: ${e}`, 'error');
+            if (sessionReleaseError || isWholeSystemCloseReleaseUnconfirmed(e)) {
+                periodReportProblem =
+                    `The whole-system close lock could not be confirmed as released. `
+                    + `Do not try another close until MariaDB reconnects or the lock expires. `
+                    + readablePeriodReportError(sessionReleaseError || e);
+                // A per-till close is safe only after coordinated cleanup was
+                // confirmed. Do not offer the fallback while this lock may
+                // still be active.
+                periodReportProblemOffline = false;
+                toast(
+                    periodReportProblem,
+                    'error',
+                );
+            } else if (periodReportCancelRequested || closeAbortController?.signal.aborted) {
+                if (periodReportFallbackRequested) {
+                    launchTillFallback = true;
+                    toast('Whole-system close released. Opening this till’s Z report instead.', 'info');
+                } else {
+                    toast('Whole-system close cancelled. No reporting period was ended.', 'info');
+                }
+            } else {
+                periodReportProblem = readablePeriodReportError(e);
+                periodReportProblemOffline = /\boffline\b/i.test(periodReportProblem);
+                if (isReportPaymentBlocker(periodReportProblem)) showPaymentRecovery = true;
+                toast(`Failed to generate report: ${periodReportProblem}`, 'error');
+            }
         } finally {
             periodReportBusy = false;
+            periodReportAction = null;
+            periodReportStatus = '';
+            periodReportAbortController = null;
+            periodReportCancelRequested = false;
+            periodReportFallbackRequested = false;
+            if (isReportPaymentBlocker(periodReportProblem)) void refreshReportPayments();
+            if (launchTillFallback) {
+                queueMicrotask(() => void runTillDayReport());
+            }
+        }
+    }
+
+    function cancelPeriodReportGeneration() {
+        if (!periodReportBusy || periodReportAction !== 'close-system' || !periodReportAbortController) return;
+        periodReportCancelRequested = true;
+        periodReportStatus = 'Cancelling the whole-system close and releasing its lock…';
+        periodReportAbortController.abort();
+    }
+
+    function closeThisTillInstead() {
+        if (periodReportBusy) {
+            if (periodReportAction !== 'close-system' || !periodReportAbortController) return;
+            periodReportFallbackRequested = true;
+            cancelPeriodReportGeneration();
+            return;
+        }
+        void runTillDayReport();
+    }
+
+    function dismissPeriodReportProblem() {
+        periodReportProblem = '';
+        periodReportProblemOffline = false;
+    }
+
+    async function retryPendingWholeSystemCloseRelease() {
+        if (periodReportBusy || closeReportSaving || !wholeSystemCloseSession) return;
+        const session = wholeSystemCloseSession;
+        periodReportBusy = true;
+        periodReportAction = 'close-system';
+        periodReportStatus = 'Releasing the previous whole-system close lock…';
+        try {
+            await abortWholeSystemClose(session.token);
+            if (wholeSystemCloseSession === session) wholeSystemCloseSession = null;
+            periodReportProblem = '';
+            periodReportProblemOffline = false;
+            closeReportProblem = '';
+            closeReportWarning = '';
+            toast('Whole-system close lock released. You can generate a new report.', 'success');
+        } catch (error) {
+            periodReportProblem =
+                'The whole-system close lock could not be confirmed as released. '
+                + readablePeriodReportError(error);
+            periodReportProblemOffline = false;
+            toast(periodReportProblem, 'error');
+        } finally {
+            periodReportBusy = false;
+            periodReportAction = null;
+            periodReportStatus = '';
         }
     }
 
@@ -486,6 +968,17 @@
             toast('Manager permission required to end the reporting period', 'error');
             return;
         }
+        const coordinatedSession = wholeSystemCloseSession;
+        if (requiresCoordinatedSystemCloseSession(isMultiMode(), closeReportTillNumber)
+            && !coordinatedSession) {
+            closeReportCanEnd = false;
+            closeReportConfirming = false;
+            closeReportProblem =
+                'This whole-system snapshot no longer has a protected close session. '
+                + 'Close it and generate a fresh whole-system report.';
+            toast(closeReportProblem, 'error');
+            return;
+        }
         closeReportSaving = true;
         try {
             const markerDetails = {
@@ -494,9 +987,17 @@
                 reportTotal: tillReportData.overview.totalRevenue,
             };
             let marker: any;
-            if (wholeSystemCloseSession) {
-                marker = await finishWholeSystemClose(wholeSystemCloseSession, markerDetails);
-                wholeSystemCloseSession = null;
+            if (coordinatedSession) {
+                marker = await finishWholeSystemClose(coordinatedSession, markerDetails);
+                if (wholeSystemCloseSession === coordinatedSession) wholeSystemCloseSession = null;
+            } else if (isMultiMode() && closeReportTillNumber) {
+                marker = await commitTillReportClose(
+                    closeReportTillNumber,
+                    closeReportExpectedMarker,
+                    closeReportStart,
+                    closeReportEnd,
+                    markerDetails,
+                );
             } else {
                 marker = await saveReportMarker(closeReportTillNumber, closeReportStart, closeReportEnd, markerDetails);
             }
@@ -523,6 +1024,8 @@
             }
             closeReportCanEnd = false;
             closeReportConfirming = false;
+            closeReportProblem = '';
+            closeReportWarning = '';
             closeReportExpectedMarker = String(marker.markerTime || closeReportEnd);
             toast(
                 sentToOwnerApp
@@ -531,16 +1034,34 @@
                 sentToOwnerApp ? 'success' : 'info',
             );
         } catch (error) {
-            if (wholeSystemCloseSession) {
-                const session = wholeSystemCloseSession;
+            if (coordinatedSession) {
+                closeReportCanEnd = false;
+                closeReportConfirming = false;
                 try {
-                    await abortWholeSystemClose(session.token);
-                    wholeSystemCloseSession = null;
+                    await abortWholeSystemClose(coordinatedSession.token);
+                    if (wholeSystemCloseSession === coordinatedSession) wholeSystemCloseSession = null;
+                    closeReportProblem =
+                        'The app could not confirm that the whole-system period closed. '
+                        + 'Its database lock was released; close this window and generate a fresh report '
+                        + 'so the server’s latest marker is used.';
                 } catch (abortError) {
                     console.warn('Could not immediately release the whole-system close barrier:', abortError);
+                    closeReportProblem =
+                        'The app could not confirm that the whole-system period closed or that its lock was released. '
+                        + 'Press Close again to retry the lock release. Do not start another close yet.';
+                }
+            } else {
+                if (isMultiMode() && closeReportTillNumber) {
+                    closeReportCanEnd = false;
+                    closeReportConfirming = false;
+                    closeReportProblem =
+                        `Could not end this till period: ${readablePeriodReportError(error)} `
+                        + 'Close this window and generate a fresh till report before trying again.';
+                } else {
+                    closeReportProblem = `Could not end report period: ${readablePeriodReportError(error)}`;
                 }
             }
-            toast(`Could not end report period: ${error}`, 'error');
+            toast(closeReportProblem, 'error');
         } finally {
             closeReportSaving = false;
         }
@@ -548,20 +1069,39 @@
 
     async function closePeriodReportModal() {
         if (closeReportSaving) return;
-        showTillReport = false;
         closeReportConfirming = false;
-        if (!wholeSystemCloseSession) return;
+        if (!wholeSystemCloseSession) {
+            showTillReport = false;
+            closeReportProblem = '';
+            closeReportWarning = '';
+            return;
+        }
         const session = wholeSystemCloseSession;
+        closeReportSaving = true;
         try {
             await abortWholeSystemClose(session.token);
-            wholeSystemCloseSession = null;
+            if (wholeSystemCloseSession === session) wholeSystemCloseSession = null;
+            closeReportProblem = '';
+            closeReportWarning = '';
+            showTillReport = false;
         } catch (error) {
             console.warn('Could not immediately release the whole-system close barrier:', error);
-            toast('Could not release the close lock yet. It will expire automatically if MariaDB stays offline.', 'error');
+            closeReportCanEnd = false;
+            closeReportProblem =
+                'Could not confirm release of the whole-system close lock. '
+                + 'Press Close again to retry. Do not generate another close until this succeeds or the lock expires.';
+            toast(closeReportProblem, 'error');
+        } finally {
+            closeReportSaving = false;
         }
     }
 
     onDestroy(() => {
+        paymentRecoveryDisposed = true;
+        paymentCancellationController?.abort();
+        loadSequence++;
+        comparisonSequence++;
+        periodReportAbortController?.abort();
         if (wholeSystemCloseSession) void abortWholeSystemClose(wholeSystemCloseSession.token).catch(() => undefined);
     });
 
@@ -610,38 +1150,41 @@
     $: tillAccountRepaymentsCash = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCash, 0);
     $: tillAccountRepaymentsCard = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsCard, 0);
     $: tillAccountRepaymentsOther = tillTotals.reduce((sum, till) => sum + till.accountRepaymentsOther, 0);
-    $: maxTillNetSales = Math.max(1, ...tillTotals.map((till) => Math.abs(till.netSales)));
     $: summaryCards = [
-        { label: 'Net Sales', value: formatMoney(business.netSales), detail: 'After refunds and discounts', tone: 'text-success' },
-        { label: 'Gross Sales', value: formatMoney(business.grossSales), detail: 'Before refunds and discounts', tone: 'text-text-main' },
-        { label: 'Sales Transactions', value: String(overview.totalTransactions), detail: `${overview.refundTransactions} refund transactions`, tone: 'text-accent-primary' },
-        { label: 'Average Sale', value: formatMoney(overview.avgTransactionValue), detail: `${overview.totalItemsSold} items sold`, tone: 'text-warning' },
-        { label: 'Refunds', value: formatMoney(business.refunds), detail: `${business.voidTransactions} void transactions`, tone: 'text-danger' },
-        { label: 'Discounts', value: formatMoney(business.discountTotal), detail: `Tax collected ${formatMoney(business.taxTotal)}`, tone: 'text-warning' },
-        { label: 'Cost of Goods', value: formatMoney(business.costTotal), detail: 'Product cost total', tone: 'text-text-main' },
-        { label: 'Gross Profit', value: formatMoney(business.grossProfit), detail: 'After cost of goods', tone: business.grossProfit >= 0 ? 'text-success' : 'text-danger' },
+        { key: 'netSales', label: 'Net Sales', amount: business.netSales, value: formatMoney(business.netSales), detail: 'After refunds and discounts', featured: true },
+        { key: 'grossProfit', label: 'Gross Profit', amount: business.grossProfit, value: formatMoney(business.grossProfit), detail: 'After tax and cost of goods', featured: true },
+        { key: 'transactions', label: 'Sales Transactions', amount: overview.totalTransactions, value: String(overview.totalTransactions), detail: `${overview.refundTransactions} refund transactions`, featured: false },
+        { key: 'average', label: 'Average Sale', amount: overview.avgTransactionValue, value: formatMoney(overview.avgTransactionValue), detail: `${overview.totalItemsSold} items sold`, featured: false },
+        { key: 'grossSales', label: 'Gross Sales', amount: business.grossSales, value: formatMoney(business.grossSales), detail: 'Before refunds and discounts', featured: false },
+        { key: 'refunds', label: 'Refunds', amount: business.refunds, value: formatMoney(business.refunds), detail: `${business.voidTransactions} void transactions`, featured: false },
+        { key: 'discounts', label: 'Discounts', amount: business.discountTotal, value: formatMoney(business.discountTotal), detail: `Tax collected ${formatMoney(business.taxTotal)}`, featured: false },
+        { key: 'cost', label: 'Cost of Goods', amount: business.costTotal, value: formatMoney(business.costTotal), detail: 'Product cost total', featured: false },
     ];
     $: displayDailyTrend = filledDailyTrend(appliedStartDate, appliedEndDate, dailyTrend);
     $: maxDailySales = Math.max(1, ...displayDailyTrend.map((day) => Math.abs(day.netSales)));
     $: currentReportKey = `${startDate}|${endDate}|${selectedTill}|${sortBy}`;
     $: reportReady = !loading && loadedReportKey === currentReportKey;
     $: filtersDirty = Boolean(loadedReportKey && loadedReportKey !== currentReportKey);
+    // Restoring draft filters can make the displayed report current again.
+    // Failed comparisons stay manual retries, without a reactive request loop.
+    $: if (canOpenReports && comparisonEnabled && reportReady && comparisonTarget && !comparisonLoading && !comparisonTotals && !comparisonError) void loadComparison();
     $: activeDatePreset = selectedDatePreset(startDate, endDate);
     $: reconciliationDifference = business.grossSales - business.discountTotal - business.refunds - business.netSales;
     $: closeReportStartDay = closeReportStart ? localDateValue(new Date(closeReportStart)) : '';
     $: closeReportIncludesPreviousDays = Boolean(closeReportStartDay && closeReportStartDay < localDateValue(new Date()));
 </script>
 
+<DojoExpiryReview bind:show={showDojoExpiryReview} attempt={dojoExpiryAttempt} employeeId={activeRecoveryAdministrator ? $currentEmployee?.id || '' : ''}
+    onSaved={checkReportPaymentResults} />
 <MgmtPage title={canOpenReports ? 'Sales Reports' : 'End Day / Z Report'}>
-    <div class="report-page h-full overflow-y-auto p-3 md:p-5 xl:p-6 flex flex-col gap-4 md:gap-5">
+    <div class="report-page">
         {#if canOpenReports}
-        <section class="report-controls bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-            <div class="flex flex-col gap-4">
-                <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <section class="report-controls report-panel">
+            <div class="report-controls-stack">
+                <div class="report-controls-top">
                     <div class="min-w-0">
-                        <div class="text-xs font-black uppercase tracking-[0.16em] text-text-muted">Sales Report</div>
-                        <h2 class="m-0 mt-1 text-2xl md:text-3xl leading-tight">{reportPeriodLabel}</h2>
-                        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                        <h2 class="report-period">{reportPeriodLabel}</h2>
+                        <div class="report-metadata">
                             <span class="rounded-full border border-border-flat bg-bg-panel px-3 py-1 font-bold text-text-main">{selectedTillLabel}</span>
                             <span class="rounded-full px-3 py-1 font-bold {reportSource === 'Live MariaDB' ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}">{reportSource}</span>
                             {#if lastRefreshed}
@@ -649,11 +1192,11 @@
                             {/if}
                         </div>
                     </div>
-                    <div class="grid grid-cols-2 sm:flex gap-2">
-                        <button class="btn {activeDatePreset === 'today' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('today')}>Today</button>
-                        <button class="btn {activeDatePreset === 'week' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('week')}>7 Days</button>
-                        <button class="btn {activeDatePreset === 'month' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('month')}>This Month</button>
-                        <button class="btn {activeDatePreset === 'year' ? 'btn-primary' : 'btn-secondary'} !px-4 !py-2 !text-sm" disabled={loading} on:click={() => setDatePreset('year')}>This Year</button>
+                    <div class="report-date-presets" role="group" aria-label="Report date range">
+                        <button class="btn {activeDatePreset === 'today' ? 'btn-primary' : 'btn-secondary'}" aria-pressed={activeDatePreset === 'today'} disabled={loading} on:click={() => setDatePreset('today')}>Today</button>
+                        <button class="btn {activeDatePreset === 'week' ? 'btn-primary' : 'btn-secondary'}" aria-pressed={activeDatePreset === 'week'} disabled={loading} on:click={() => setDatePreset('week')}>7 Days</button>
+                        <button class="btn {activeDatePreset === 'month' ? 'btn-primary' : 'btn-secondary'}" aria-pressed={activeDatePreset === 'month'} disabled={loading} on:click={() => setDatePreset('month')}>This Month</button>
+                        <button class="btn {activeDatePreset === 'year' ? 'btn-primary' : 'btn-secondary'}" aria-pressed={activeDatePreset === 'year'} disabled={loading} on:click={() => setDatePreset('year')}>This Year</button>
                     </div>
                 </div>
 
@@ -698,128 +1241,83 @@
         </section>
 
         {#if reportError}
-            <div class="bg-warning/10 border border-warning/40 text-warning rounded-lg p-4">
+            <div class="report-alert bg-warning/10 border border-warning/40 text-warning rounded-lg">
                 <strong>Report warning:</strong> {reportError}
             </div>
         {/if}
         {#if reportReady && Math.abs(reconciliationDifference) > 1}
-            <div class="bg-danger/10 border border-danger/40 text-danger rounded-lg p-4">
+            <div class="report-alert bg-danger/10 border border-danger/40 text-danger rounded-lg">
                 <strong>Totals do not reconcile:</strong>
                 Gross sales minus discounts issued and customer refunds differs from net sales by {formatMoney(reconciliationDifference)}.
             </div>
         {/if}
 
-        <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-            {#each summaryCards as card}
-                <article class="bg-bg-card border border-border-flat rounded-lg p-4 min-w-0">
-                    <div class="text-[0.72rem] font-black uppercase tracking-[0.12em] text-text-muted">{card.label}</div>
-                    <div class="mt-2 text-[1.55rem] md:text-[1.8rem] font-extrabold font-serif leading-tight {card.tone}">{card.value}</div>
-                    <div class="mt-1 text-xs text-text-muted truncate">{card.detail}</div>
-                </article>
-            {/each}
+        <section class="report-performance" aria-labelledby="performance-heading">
+            <div class="report-performance-heading">
+                <h2 id="performance-heading">Performance overview</h2>
+                <label class="report-comparison-toggle">
+                    <input type="checkbox" checked={comparisonEnabled} disabled={!comparisonEnabled && !reportReady} on:change={toggleComparison} />
+                    <span>Compare previous period</span>
+                </label>
+            </div>
+            {#if comparisonEnabled && reportReady}
+                <div class="report-comparison-info" role="status">
+                    {#if comparisonPeriod}
+                        <span>Compared with <strong>{formatDateShort(comparisonPeriod.startDate)}{comparisonPeriod.startDate !== comparisonPeriod.endDate ? ` to ${formatDateShort(comparisonPeriod.endDate)}` : ''}</strong> · previous {comparisonPeriod.days} calendar {comparisonPeriod.days === 1 ? 'day' : 'days'} · {selectedTillLabel}</span>
+                        {#if appliedStartDate > localDateValue(new Date())}<span>Selected period has not started.</span>
+                        {:else if appliedEndDate >= localDateValue(new Date())}<span>Current period is still in progress.</span>{/if}
+                    {/if}
+                    {#if comparisonLoading}<span>Loading comparison…</span>{/if}
+                    {#if comparisonError}
+                        <span class="report-comparison-error">Comparison unavailable: {comparisonError}</span>
+                        <button type="button" class="report-comparison-retry" on:click={loadComparison}>Retry comparison</button>
+                    {/if}
+                </div>
+            {/if}
+            <div class="report-summary">
+                {#each summaryCards as card (card.key)}
+                    <article class="report-metric" class:featured={card.featured} class:negative={card.amount < 0} aria-label={card.label} style={`--metric-characters: ${Math.max(1, card.value.length)}`}>
+                        <div class="report-metric-label">{card.label}</div>
+                        <div class="report-metric-value">{card.value}</div>
+                        <div class="report-metric-detail">{card.detail}</div>
+                        {#if card.featured && comparisonEnabled && reportReady && comparisonTotals}
+                            {@const previous = card.key === 'netSales' ? comparisonTotals.netSales : comparisonTotals.grossProfit}
+                            <div class="report-metric-comparison">
+                                <span class:improved={card.amount > previous} class:declined={card.amount < previous}>{comparisonLabel(card.amount, previous)}</span>
+                                <span class="report-previous-value">Previous {formatMoney(previous)}</span>
+                            </div>
+                        {/if}
+                    </article>
+                {/each}
+            </div>
         </section>
 
-        <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-            <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
-                <div class="min-w-0">
-                    <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Till Totals</div>
-                    <h3 class="m-0 mt-1 text-xl leading-tight">Total sales by each till</h3>
-                    <p class="m-0 mt-1 text-sm text-text-muted">Compare every till for the selected period, with exact totals below.</p>
-                </div>
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm">
-                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
-                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Net Total</div>
-                        <div class="font-extrabold text-success">{formatMoney(tillNetTotal)}</div>
-                    </div>
-                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
-                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Gross</div>
-                        <div class="font-extrabold">{formatMoney(tillGrossTotal)}</div>
-                    </div>
-                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
-                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Transactions</div>
-                        <div class="font-extrabold text-accent-primary">{tillTransactionTotal}</div>
-                    </div>
-                    <div class="rounded-lg border border-border-flat bg-bg-panel px-3 py-2">
-                        <div class="text-[0.68rem] font-black uppercase tracking-[0.1em] text-text-muted">Items</div>
-                        <div class="font-extrabold">{tillItemTotal}</div>
-                    </div>
-                </div>
+        <section class="report-panel report-tills">
+            <div class="report-section-heading">
+                <div><h3>Sales by till</h3><p>Sales and returns for the selected period.</p></div>
+                <div class="report-till-total"><span>Net total</span><strong class:negative={tillNetTotal < 0}>{formatMoney(tillNetTotal)}</strong></div>
             </div>
-
             {#if tillTotals.length === 0}
-                <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No till sales for the selected period.</div>
+                <div class="report-empty">No till sales for the selected period.</div>
             {:else}
-                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {#each tillTotals as till}
-                        <article class="rounded-lg border border-border-flat bg-bg-panel p-4 min-w-0">
-                            <div class="flex items-start justify-between gap-3">
-                                <div class="min-w-0">
-                                    <div class="text-xs font-black uppercase tracking-[0.12em] text-text-muted">Till</div>
-                                    <div class="mt-1 truncate text-lg font-extrabold">{till.name}</div>
-                                </div>
-                                <div class="text-right">
-                                    <div class="text-xs text-text-muted">Net</div>
-                                    <div class="font-serif text-xl font-extrabold {till.netSales >= 0 ? 'text-success' : 'text-danger'}">{formatMoney(till.netSales)}</div>
-                                </div>
-                            </div>
-
-                            <div class="mt-4 h-2 overflow-hidden rounded-full bg-bg-card border border-border-flat">
-                                <div
-                                    class="h-full rounded-full {till.netSales < 0 ? 'bg-danger' : 'bg-accent-primary'}"
-                                    style="width: {till.netSales === 0 ? 0 : Math.max(6, (Math.abs(till.netSales) / maxTillNetSales) * 100)}%"
-                                ></div>
-                            </div>
-
-                            <div class="mt-4 grid grid-cols-3 gap-2 text-sm">
-                                <div>
-                                    <div class="text-[0.7rem] text-text-muted">Sales</div>
-                                    <div class="font-bold">{till.transactions}</div>
-                                </div>
-                                <div>
-                                    <div class="text-[0.7rem] text-text-muted">Refunds</div>
-                                    <div class="font-bold text-danger">{formatMoney(till.refunds)}</div>
-                                </div>
-                                <div>
-                                    <div class="text-[0.7rem] text-text-muted">Items</div>
-                                    <div class="font-bold">{till.itemsSold}</div>
-                                </div>
-                            </div>
-
-                            <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-text-muted">
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Cash</span>
-                                    <strong class="text-success">{formatMoney(till.cashTotal)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Card</span>
-                                    <strong class="text-accent-primary">{formatMoney(till.cardTotal)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Loyalty</span>
-                                    <strong class="text-text-main">{formatMoney(till.loyaltyTotal)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Pay later</span>
-                                    <strong class="text-warning">{formatMoney(till.accountTotal)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Account cash collected</span>
-                                    <strong class="text-success">{formatMoney(till.accountRepaymentsCash)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Account card collected</span>
-                                    <strong class="text-accent-primary">{formatMoney(till.accountRepaymentsCard)}</strong>
-                                </div>
-                                <div class="rounded-md bg-bg-card px-2 py-1.5">
-                                    <span class="block">Account other collected</span>
-                                    <strong class="text-text-main">{formatMoney(till.accountRepaymentsOther)}</strong>
-                                </div>
-                            </div>
-                        </article>
-                    {/each}
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this report region.) -->
+                <div class="report-table-wrap" role="region" aria-label="Sales by till" tabindex="0">
+                    <table class="tbl report-till-overview">
+                        <thead><tr><th scope="col">Till</th><th scope="col">Net sales</th><th scope="col">Gross sales</th><th scope="col">Refunds</th><th scope="col">Sales</th><th scope="col">Items</th></tr></thead>
+                        <tbody>
+                            {#each tillTotals as till}
+                                <tr><th scope="row">{till.name}</th><td class="font-bold {till.netSales < 0 ? 'text-danger' : ''}">{formatMoney(till.netSales)}</td><td>{formatMoney(till.grossSales)}</td><td>{formatMoney(till.refunds)}</td><td>{till.transactions}</td><td>{till.itemsSold}</td></tr>
+                            {/each}
+                        </tbody>
+                        {#if tillTotals.length > 1}
+                            <tfoot><tr><th scope="row">All tills</th><td class:text-danger={tillNetTotal < 0}>{formatMoney(tillNetTotal)}</td><td>{formatMoney(tillGrossTotal)}</td><td>{formatMoney(tillRefundTotal)}</td><td>{tillTransactionTotal}</td><td>{tillItemTotal}</td></tr></tfoot>
+                        {/if}
+                    </table>
                 </div>
-
-                <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                <details class="report-till-details">
+                    <summary>Full till breakdown <span>Payments, accounts, tax and transaction counts</span></summary>
+                <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this report region.) -->
+                <div class="report-table-wrap" role="region" aria-label="Full till breakdown" tabindex="0">
                     <table class="tbl">
                         <thead>
                             <tr>
@@ -844,9 +1342,9 @@
                             {#each tillTotals as till}
                                 <tr>
                                     <td class="font-bold">{till.name}</td>
-                                    <td class="font-bold text-success">{formatMoney(till.netSales)}</td>
+                                    <td class:text-danger={till.netSales < 0}>{formatMoney(till.netSales)}</td>
                                     <td>{formatMoney(till.grossSales)}</td>
-                                    <td class="text-danger">{formatMoney(till.refunds)}</td>
+                                    <td>{formatMoney(till.refunds)}</td>
                                     <td>{formatMoney(till.taxTotal)}</td>
                                     <td>{till.transactions}</td>
                                     <td>{till.refundTransactions}</td>
@@ -859,12 +1357,26 @@
                                     <td>{formatMoney(till.accountRepaymentsCard)}</td>
                                     <td>{formatMoney(till.accountRepaymentsOther)}</td>
                                 </tr>
+                                <tr>
+                                    <td colspan="15" class="text-xs text-text-muted whitespace-normal">
+                                        <div class="flex flex-wrap gap-x-4 gap-y-1"><strong>Sales card collections</strong>
+                                            {#each paymentExtraReportRows(till) as [label, amount]}
+                                                <span>{label}: <b>{formatMoney(amount)}</b></span>
+                                            {/each}
+                                        </div>
+                                        <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1"><strong>Account card collections</strong>
+                                            {#each paymentExtraReportRows(till, true) as [label, amount]}
+                                                <span>{label}: <b>{formatMoney(amount)}</b></span>
+                                            {/each}
+                                        </div>
+                                    </td>
+                                </tr>
                             {/each}
                             <tr class="bg-bg-panel font-extrabold">
                                 <td>Total</td>
-                                <td class="text-success">{formatMoney(tillNetTotal)}</td>
+                                <td class:text-danger={tillNetTotal < 0}>{formatMoney(tillNetTotal)}</td>
                                 <td>{formatMoney(tillGrossTotal)}</td>
-                                <td class="text-danger">{formatMoney(tillRefundTotal)}</td>
+                                <td>{formatMoney(tillRefundTotal)}</td>
                                 <td>{formatMoney(tillTaxTotal)}</td>
                                 <td>{tillTransactionTotal}</td>
                                 <td>{tillRefundTransactionTotal}</td>
@@ -880,26 +1392,27 @@
                         </tbody>
                     </table>
                 </div>
+                </details>
             {/if}
         </section>
 
-        <div class="grid grid-cols-1 lg:grid-cols-[1.15fr_0.85fr] gap-4 md:gap-5">
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+        <div class="report-analysis-grid">
+            <section class="report-panel">
                 <div class="flex items-start justify-between gap-3">
                     <div>
-                        <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Trend</div>
                         <h3 class="m-0 mt-1 text-xl">Daily sales</h3>
                     </div>
                     <span class="rounded-full bg-bg-panel border border-border-flat px-3 py-1 text-xs text-text-muted">{displayDailyTrend.length} days</span>
                 </div>
                 {#if dailyTrend.length === 0}
-                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No daily sales for the selected period.</div>
+                    <div class="report-empty">No daily sales for the selected period.</div>
                 {:else}
-                    <div class="mt-4 flex items-end gap-2 h-48 2xl:h-56 overflow-x-auto pb-2">
+                    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this report region.) -->
+                    <div class="report-trend-chart" role="region" aria-label="Daily sales chart" tabindex="0">
                         {#each displayDailyTrend as day}
-                            <div class="min-w-[58px] flex-1 h-full flex flex-col justify-end items-center gap-2" title={`${day.date}: ${formatMoney(day.netSales)} · ${day.transactions} transactions`}>
+                            <div class="report-trend-day" title={`${day.date}: ${formatMoney(day.netSales)} · ${day.transactions} transactions`}>
                                 <span class="text-[10px] font-bold text-text-muted">{formatMoney(day.netSales)}</span>
-                                <div class="w-full max-w-12 min-h-[3px] rounded-t {day.netSales < 0 ? 'bg-danger' : day.netSales === 0 ? 'bg-border-flat' : 'bg-accent-primary'}" style="height: {Math.max(2, (Math.abs(day.netSales) / maxDailySales) * 150)}px"></div>
+                                <div class="w-full max-w-12 min-h-[3px] rounded-t {day.netSales < 0 ? 'bg-danger' : day.netSales === 0 ? 'bg-border-flat' : 'bg-accent-primary'}" style="height: {Math.max(2, (Math.abs(day.netSales) / maxDailySales) * 110)}px"></div>
                                 <span class="text-[10px] text-text-muted">{new Date(`${day.date}T00:00:00`).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
                             </div>
                         {/each}
@@ -907,20 +1420,19 @@
                 {/if}
             </section>
 
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Payments</div>
+            <section class="report-panel">
                 <h3 class="m-0 mt-1 text-xl">Payment mix</h3>
-                <div class="mt-4 flex flex-col gap-3">
+                <div class="report-payment-bars">
                     <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                         <span class="text-sm font-bold text-text-muted">Cash</span>
-                        <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                        <div class="report-payment-track bg-bg-panel rounded-md overflow-hidden border border-border-flat">
                                 <div class="h-full rounded-md min-w-[2px] bg-success" style="width: {cashPercent}%"></div>
                         </div>
                         <span class="text-right text-sm font-bold">{cashPercent}%</span>
                     </div>
                     <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                         <span class="text-sm font-bold text-text-muted">Card</span>
-                        <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                        <div class="report-payment-track bg-bg-panel rounded-md overflow-hidden border border-border-flat">
                                 <div class="h-full rounded-md min-w-[2px] bg-accent-primary" style="width: {cardPercent}%"></div>
                         </div>
                         <span class="text-right text-sm font-bold">{cardPercent}%</span>
@@ -928,7 +1440,7 @@
                     {#if breakdown.totalLoyalty !== 0}
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Loyalty</span>
-                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                            <div class="report-payment-track bg-bg-panel rounded-md overflow-hidden border border-border-flat">
                                 <div class="h-full rounded-md min-w-[2px] bg-warning" style="width: {Math.max(0, loyaltyPercent)}%"></div>
                             </div>
                             <span class="text-right text-sm font-bold">{loyaltyPercent}%</span>
@@ -937,7 +1449,7 @@
                     {#if breakdown.totalAccount !== 0}
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Pay later</span>
-                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                            <div class="report-payment-track bg-bg-panel rounded-md overflow-hidden border border-border-flat">
                                 <div class="h-full rounded-md min-w-[2px] bg-danger" style="width: {Math.max(0, accountPercent)}%"></div>
                             </div>
                             <span class="text-right text-sm font-bold">{accountPercent}%</span>
@@ -946,7 +1458,7 @@
                     {#if breakdown.unrecordedAmount !== 0}
                         <div class="grid grid-cols-[72px_1fr_44px] items-center gap-3">
                             <span class="text-sm font-bold text-text-muted">Missing</span>
-                            <div class="h-8 bg-bg-panel rounded-md overflow-hidden border border-border-flat">
+                            <div class="report-payment-track bg-bg-panel rounded-md overflow-hidden border border-border-flat">
                                 <div class="h-full rounded-md min-w-[2px] bg-border-flat" style="width: {unrecordedPercent}%"></div>
                             </div>
                             <span class="text-right text-sm font-bold">{unrecordedPercent}%</span>
@@ -954,15 +1466,15 @@
                     {/if}
                 </div>
 
-                <div class="mt-5 grid grid-cols-2 gap-3">
+                <div class="report-payment-totals">
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Cash Sales</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-success">{formatMoney(breakdown.totalCash)}</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.totalCash)}</div>
                         <div class="text-xs text-text-muted">{breakdown.cashTxCount} transactions</div>
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Card Sales</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-accent-primary">{formatMoney(breakdown.totalCard)}</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.totalCard)}</div>
                         <div class="text-xs text-text-muted">{breakdown.cardTxCount} transactions</div>
                     </div>
                     {#if breakdown.totalLoyalty !== 0}
@@ -975,7 +1487,7 @@
                     {#if breakdown.totalAccount !== 0}
                         <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                             <div class="text-xs font-bold text-text-muted">Pay Later Sales</div>
-                            <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatMoney(breakdown.totalAccount)}</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.totalAccount)}</div>
                             <div class="text-xs text-text-muted">{breakdown.accountTxCount} transactions</div>
                         </div>
                     {/if}
@@ -996,27 +1508,45 @@
                 </div>
             </section>
 
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5 lg:col-span-2">
-                <div class="text-xs font-black uppercase tracking-[0.16em] text-warning">Shop Customer Accounts</div>
-                <h3 class="m-0 mt-1 text-xl">Shop-wide account balances and payments collected</h3>
+            <section class="report-panel">
+                <h3 class="m-0 mt-1 text-xl">Sales card collections</h3>
+                <p class="mt-1 text-sm text-text-muted">Card Sales above is the goods amount. Tips and service charge are recorded separately; cashback is collected on the card and paid out of the drawer, not sales revenue.</p>
+                <div class="report-account-grid">
+                    {#each paymentExtraReportRows(breakdown) as [label, amount]}
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                            <div class="text-xs font-bold text-text-muted">{label}</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(amount)}</div>
+                        </div>
+                    {/each}
+                </div>
+            </section>
+
+            <section class="report-panel report-accounts">
+                <h3 class="m-0 mt-1 text-xl">Customer accounts</h3>
                 <p class="mt-1 text-sm text-text-muted">This receivables statement covers the whole shop, even when a till is selected. Account payments are money collected, not new sales.</p>
-                <div class="mt-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div class="report-account-grid">
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Opening Account Position</div>
                         <div class="mt-1 font-serif text-xl font-extrabold">{formatAccountPosition(breakdown.openingAccountOwed)}</div>
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">New Pay Later Charges</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatMoney(breakdown.accountCharges)}</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountCharges)}</div>
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Cash Collected</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-success">{formatMoney(breakdown.accountRepaymentsCash)}</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountRepaymentsCash)}</div>
                     </div>
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
-                        <div class="text-xs font-bold text-text-muted">Card Collected</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-accent-primary">{formatMoney(breakdown.accountRepaymentsCard)}</div>
+                        <div class="text-xs font-bold text-text-muted">Card Applied to Account</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountRepaymentsCard)}</div>
                     </div>
+                    {#each paymentExtraReportRows(breakdown, true) as [label, amount]}
+                        <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                            <div class="text-xs font-bold text-text-muted">{label}</div>
+                            <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(amount)}</div>
+                        </div>
+                    {/each}
                     <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Other Collected</div>
                         <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountRepaymentsOther)}</div>
@@ -1025,22 +1555,22 @@
                         <div class="text-xs font-bold text-text-muted">Refunds / Adjustments</div>
                         <div class="mt-1 font-serif text-xl font-extrabold">{formatMoney(breakdown.accountAdjustments)}</div>
                     </div>
-                    <div class="rounded-lg border border-warning/50 bg-warning/10 p-3">
+                    <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
                         <div class="text-xs font-bold text-text-muted">Closing Account Position</div>
-                        <div class="mt-1 font-serif text-xl font-extrabold text-warning">{formatAccountPosition(breakdown.closingAccountOwed)}</div>
+                        <div class="mt-1 font-serif text-xl font-extrabold">{formatAccountPosition(breakdown.closingAccountOwed)}</div>
                     </div>
                 </div>
             </section>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-5">
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Products</div>
+        <div class="report-detail-grid">
+            <section class="report-panel report-products">
                 <h3 class="m-0 mt-1 text-xl">Top products by {appliedSortBy === 'revenue' ? 'revenue' : 'quantity'}</h3>
                 {#if topProducts.length === 0}
-                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No sales data for the selected period.</div>
+                    <div class="report-empty">No sales data for the selected period.</div>
                 {:else}
-                    <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this report region.) -->
+                    <div class="report-table-wrap" role="region" aria-label="Top products" tabindex="0">
                         <table class="tbl">
                             <thead>
                                 <tr>
@@ -1069,13 +1599,13 @@
                 {/if}
             </section>
 
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Staff</div>
+            <section class="report-panel">
                 <h3 class="m-0 mt-1 text-xl">Sales by employee</h3>
                 {#if employeeSales.length === 0}
-                    <div class="mt-4 rounded-lg border border-dashed border-border-flat p-8 text-center text-text-muted">No employee sales for the selected period.</div>
+                    <div class="report-empty">No employee sales for the selected period.</div>
                 {:else}
-                    <div class="mt-4 overflow-x-auto rounded-lg border border-border-flat">
+                    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to scroll this report region.) -->
+                    <div class="report-table-wrap" role="region" aria-label="Sales by employee" tabindex="0">
                         <table class="tbl">
                             <thead>
                                 <tr>
@@ -1092,9 +1622,9 @@
                                 {#each employeeSales as employee}
                                     <tr>
                                         <td class="font-bold">{employee.employeeName}</td>
-                                        <td class="text-success font-bold">{formatMoney(employee.netSales)}</td>
+                                        <td class:text-danger={employee.netSales < 0}>{formatMoney(employee.netSales)}</td>
                                         <td>{formatMoney(employee.grossSales)}</td>
-                                        <td class="text-danger">{formatMoney(employee.refunds)}</td>
+                                        <td>{formatMoney(employee.refunds)}</td>
                                         <td>{employee.transactions}</td>
                                         <td>{employee.refundTransactions}</td>
                                         <td>{formatMoney(employee.avgTransaction)}</td>
@@ -1107,8 +1637,8 @@
             </section>
         </div>
         {:else}
-            <section class="bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
-                <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Restricted Access</div>
+            <section class="report-panel">
+                <div class="report-section-eyebrow">Restricted Access</div>
                 <h2 class="m-0 mt-1 text-2xl leading-tight">End Day / Z Report</h2>
                 <p class="m-0 mt-2 text-sm text-text-muted">
                     This role can close a reporting period, but cannot browse sales reports, staff totals, products, or previous report ranges.
@@ -1117,25 +1647,153 @@
         {/if}
 
         {#if canOpenReports || canEndDay}
-        <section class="report-no-print bg-bg-card border border-border-flat rounded-lg p-4 md:p-5">
+        <section class="report-no-print report-panel report-close">
             <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
                 <div>
-                    <div class="text-xs font-black uppercase tracking-[0.16em] text-accent-primary">Close Reports</div>
                     <h3 class="m-0 mt-1 text-xl">Period close / Z reports</h3>
-                    <p class="m-0 mt-1 text-sm text-text-muted">Close uses the time from the last close to now, not automatically today's calendar sales.</p>
+                    <p class="m-0 mt-1 text-sm text-text-muted">Z reports close a trading period, not necessarily a calendar day. Preview (X) leaves the period open.</p>
+                    <p class="m-0 mt-1 text-xs text-text-muted">Whole-system close requires every active registered till. If another till is unavailable, you can safely close only this till instead.</p>
                 </div>
                 <div class="flex flex-wrap gap-3">
-                    <button class="btn btn-primary" disabled={!tillId || periodReportBusy} on:click={runTillDayReport}>
-                        {periodReportBusy ? 'Generating...' : 'Close This Till'}
+                    <button class="btn btn-primary" disabled={!tillId || periodReportBusy || paymentRecoveryBusy} on:click={runTillDayReport}>
+                        {periodReportBusy && periodReportAction === 'close-till' ? 'Generating…' : 'Close This Till'}
                     </button>
-                    <button class="btn btn-primary" disabled={periodReportBusy} on:click={runSystemDayReport}>
-                        {periodReportBusy ? 'Generating...' : 'Close Whole System'}
+                    <button class="btn btn-primary" disabled={periodReportBusy || paymentRecoveryBusy} on:click={runSystemDayReport}>
+                        {periodReportBusy && periodReportAction === 'close-system' ? 'Working…' : 'Close Whole System'}
                     </button>
-                    <button class="btn btn-secondary" disabled={!tillId || periodReportBusy} on:click={runTillFullReport}>
-                        {periodReportBusy ? 'Generating...' : 'Preview This Till'}
+                    <button class="btn btn-secondary" disabled={!tillId || periodReportBusy || paymentRecoveryBusy} on:click={runTillFullReport}>
+                        {periodReportBusy && periodReportAction === 'preview-till' ? 'Generating…' : 'Preview This Till (X)'}
                     </button>
                 </div>
             </div>
+            <details class="mt-4 rounded-lg border border-border-flat bg-bg-card p-3 text-sm">
+                <summary class="cursor-pointer font-bold">Which period does each report cover?</summary>
+                <div class="mt-3 grid gap-2 text-text-muted">
+                    <p class="m-0"><strong class="text-text-main">This till:</strong> starts after its last till Z close or the last whole-system Z close, whichever happened later. Closing it does not reset other tills.</p>
+                    <p class="m-0"><strong class="text-text-main">Whole system:</strong> includes every till since the last whole-system Z close, including sales already shown on a till report. Confirming it sets a new starting point for every till.</p>
+                    <p class="m-0">Do not add till Z reports to the whole-system total: they are different views of overlapping sales. The date filters above do not change a Z-report period. Canceling a close preview does not close anything.</p>
+                </div>
+            </details>
+            {#if !previewMode}
+                <details bind:open={showPaymentRecovery} class="mt-3 rounded-lg border border-warning/40 bg-warning/5 p-3">
+                    <summary class="cursor-pointer text-sm font-bold">
+                        Payment checks
+                        {#if pendingReportPayments.length > 0}
+                            — {pendingReportPayments.length} unresolved{pendingReportPayments.length === 1 ? ` · ${reportPaymentAmount(pendingReportPayments[0])}` : ''}
+                        {/if}
+                    </summary>
+                    <div class="mt-3 flex flex-col gap-3">
+                        <div class="flex flex-wrap items-start justify-between gap-3">
+                            <p class="m-0 min-w-0 flex-1 text-xs leading-relaxed text-text-muted">
+                                An unresolved payment is not an open terminal window. An expired session is not proof of failure. Check results before closing; do not charge the customer again.
+                            </p>
+                            <button type="button" class="btn btn-secondary shrink-0" disabled={paymentRecoveryBlocked} on:click={checkReportPaymentResults}>
+                                {paymentRecoveryBusy ? 'Checking…' : 'Check payment results'}
+                            </button>
+                        </div>
+                        {#if periodReportBusy || showTillReport || wholeSystemCloseSession || closeReportSaving}
+                            <p class="m-0 text-xs text-warning">Cancel or close the report preview first. Payment recovery is unavailable until its database lock is released.</p>
+                        {/if}
+                        {#if paymentRecoveryNotice}
+                            <p class="m-0 rounded-md bg-bg-card p-2 text-sm" role="status" aria-live="polite">{paymentRecoveryNotice}</p>
+                        {/if}
+                        {#if paymentRecoveryLoadError}
+                            <p class="m-0 text-sm text-danger" role="alert">{paymentRecoveryLoadError}</p>
+                        {/if}
+                        {#each pendingReportPayments as attempt (`${attempt.provider}:${attempt.id}`)}
+                            <article class="min-w-0 rounded-lg border border-border-flat bg-bg-card p-3">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <span class="text-base font-black">{attempt.provider === 'dojo' ? 'Dojo' : 'SumUp'} · {reportPaymentAmount(attempt)}</span>
+                                    <span class="text-xs font-bold text-warning">{reportPaymentStatus(attempt.status)}</span>
+                                </div>
+                                <p class="m-0 mt-1 text-xs text-text-muted">
+                                    {attempt.operationKind === 'refund' ? 'Refund' : attempt.operationKind === 'customer_account_payment' ? 'Customer account payment' : 'Sale'}
+                                    · {paymentRecoveryTimestamp(attempt.createdAt)}
+                                    · {allTills.find(till => till.id === attempt.tillId)?.name || (attempt.tillId === tillId ? tillName : 'Another / unassigned till')}
+                                </p>
+                                <p class="m-0 mt-2 text-xs leading-relaxed">{reportPaymentRecoveryReason(attempt)}</p>
+                                {#if activeRecoveryAdministrator && sandboxCancellationConnectionReady && attempt.provider === 'dojo'
+                                    && ['started', 'uncertain'].includes(attempt.status) && attempt.clientTransactionId && attempt.terminalSessionId && attempt.operationKind !== 'refund' && !attempt.operatorResolution}
+                                    <button type="button" class="btn btn-secondary mt-3" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt}
+                                        on:click={() => { dojoExpiryAttempt = attempt; showDojoExpiryReview = true; }}>Review expired payment</button>
+                                {/if}
+                                {#if sandboxCancellationConnectionReady && canCancelExpiredTestPayment(attempt, recoveryDojoConfig, activeRecoveryAdministrator)}
+                                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                                        <button type="button" class="btn btn-secondary" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt} on:click={() => requestCancelTestPayment(attempt)}>
+                                            Cancel expired test payment
+                                        </button>
+                                        <span class="text-xs text-text-muted">Sandbox only. Check results first.</span>
+                                    </div>
+                                {/if}
+                            </article>
+                        {/each}
+                    </div>
+                </details>
+            {/if}
+            {#if periodReportBusy && periodReportStatus}
+                <div
+                    class="mt-4 flex flex-col gap-3 rounded-lg border border-accent-primary/35 bg-accent-primary/10 p-3 sm:flex-row sm:items-center sm:justify-between"
+                    role="status"
+                    aria-live="polite"
+                >
+                    <div class="flex min-w-0 items-start gap-3">
+                        <span class="mt-1 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-accent-primary" aria-hidden="true"></span>
+                        <div class="min-w-0">
+                            <div class="text-xs font-black uppercase tracking-[0.14em] text-accent-primary">
+                                {periodReportAction === 'close-system' ? 'Whole-system close' : 'Report'}
+                            </div>
+                            <p class="m-0 mt-1 text-sm text-text-main">{readableReportPaymentBlocker(periodReportStatus)}</p>
+                            {#if isReportPaymentBlocker(periodReportStatus)}
+                                <p class="m-0 mt-1 text-xs text-text-muted">A saved card payment needs a confirmed result. Cancel this close, then use Payment checks above.</p>
+                            {/if}
+                        </div>
+                    </div>
+                    {#if periodReportAction === 'close-system' && periodReportAbortController}
+                        <div class="flex shrink-0 flex-wrap gap-2">
+                            {#if periodReportWaitingOffline}
+                                <button type="button" class="btn btn-primary" on:click={closeThisTillInstead}>
+                                    Close this till instead
+                                </button>
+                                <a class="btn btn-secondary" href="/settings/licence">Manage tills</a>
+                            {/if}
+                            <button
+                                type="button"
+                                class="btn btn-secondary"
+                                disabled={periodReportCancelRequested}
+                                on:click={cancelPeriodReportGeneration}
+                            >
+                                {periodReportCancelRequested ? 'Cancelling…' : 'Cancel'}
+                            </button>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+            {#if !periodReportBusy && periodReportProblem}
+                <div class="mt-4 flex flex-col gap-3 rounded-lg border border-danger/40 bg-danger/10 p-3 sm:flex-row sm:items-center sm:justify-between" role="alert">
+                    <div class="min-w-0">
+                        <div class="text-xs font-black uppercase tracking-[0.14em] text-danger">Z report was not closed</div>
+                        <p class="m-0 mt-1 text-sm text-text-main">{periodReportProblem}</p>
+                        {#if isReportPaymentBlocker(periodReportProblem)}
+                            <p class="m-0 mt-1 text-xs text-text-muted">No reporting period was closed. Use Payment checks above to confirm the payment outcome safely.</p>
+                        {/if}
+                    </div>
+                    <div class="flex shrink-0 flex-wrap gap-2">
+                        {#if wholeSystemCloseSession}
+                            <button type="button" class="btn btn-primary" on:click={retryPendingWholeSystemCloseRelease}>
+                                Retry lock release
+                            </button>
+                        {:else if periodReportProblemOffline && tillId}
+                            <button type="button" class="btn btn-primary" on:click={closeThisTillInstead}>
+                                Close this till instead
+                            </button>
+                            <a class="btn btn-secondary" href="/settings/licence">Manage tills</a>
+                        {/if}
+                        {#if !wholeSystemCloseSession}
+                            <button type="button" class="btn btn-secondary" on:click={dismissPeriodReportProblem}>Dismiss</button>
+                        {/if}
+                    </div>
+                </div>
+            {/if}
         </section>
         {/if}
     </div>
@@ -1151,11 +1809,26 @@
                     <h3 class="m-0 truncate text-lg">{tillReportTitle || `Till Report: ${tillName}`}</h3>
                     <div class="mt-1 text-xs text-text-muted">{tillReportPeriod}</div>
                 </div>
-                <button class="btn-icon shrink-0" aria-label="Close report preview" title="Close report preview" on:click={closePeriodReportModal}>
+                <button class="btn-icon shrink-0" disabled={closeReportSaving} aria-label="Close report preview" title="Close report preview" on:click={closePeriodReportModal}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="flex flex-col gap-3 p-3 md:p-4">
+            {#if closeReportProblem}
+                <div class="rounded-lg border border-danger/50 bg-danger/10 p-3 text-sm text-danger" role="alert">
+                    <div class="font-bold">This report cannot close</div>
+                    <p class="m-0 mt-1">{closeReportProblem}</p>
+                    {#if isReportPaymentBlocker(closeReportProblem)}
+                        <p class="m-0 mt-1 text-xs">Close this preview, then use Payment checks on the reports page. An unresolved payment must be confirmed before its period can close.</p>
+                    {/if}
+                </div>
+            {/if}
+            {#if closeReportWarning}
+                <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-warning" role="status">
+                    <div class="font-bold">Local preview</div>
+                    <p class="m-0 mt-1">{closeReportWarning}</p>
+                </div>
+            {/if}
             {#if closeReportIncludesPreviousDays}
                 <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                     This period started before today, so the total can include previous days.
@@ -1164,7 +1837,7 @@
             {#if closeReportCanEnd}
                 <div class="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                     {#if wholeSystemCloseSession}
-                        Whole-system financial writes are paused while this frozen snapshot is open. Press <strong>Close Period</strong> to save it, or close this window to release the pause.
+                        Whole-system financial writes are paused while this frozen snapshot is open. Press <strong>Close Period</strong> to save it, or close this window to release the pause. This is the consolidated store total; do not add separate till Z totals to it.
                     {:else}
                         This is only a preview. Press <strong>Close Period</strong> to close this report period and make the next report start from now.
                     {/if}
@@ -1200,6 +1873,61 @@
                 </div>
             </div>
 
+            {#if !closeReportTillNumber && tillReportData.tillSummaries.length > 0}
+                <section class="rounded-lg border border-border-flat bg-bg-panel p-3" aria-labelledby="close-sales-by-till-heading">
+                    <div class="flex items-start justify-between gap-3">
+                        <div>
+                            <div id="close-sales-by-till-heading" class="text-[0.65rem] font-black uppercase tracking-[0.14em] text-text-muted">Sales by till</div>
+                            <p class="m-0 mt-1 text-xs text-text-muted">Net sales and net items include returns.</p>
+                        </div>
+                        <div class="shrink-0 rounded-full border border-border-flat bg-bg-card px-2 py-1 text-[0.65rem] font-bold text-text-muted">
+                            {tillReportData.tillSummaries.length} {tillReportData.tillSummaries.length === 1 ? 'till' : 'tills'}
+                        </div>
+                    </div>
+                    <div class="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                        {#each tillReportData.tillSummaries as till}
+                            <article class="min-w-0 rounded-lg border border-border-flat bg-bg-card p-3">
+                                <div class="truncate text-sm font-extrabold text-text-main" title={till.name}>{till.name}</div>
+                                <div class="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
+                                    <div class="min-w-0">
+                                        <div class="text-[0.62rem] font-semibold uppercase tracking-wide text-text-muted">Net sales</div>
+                                        <div class="truncate text-base font-extrabold font-serif text-success">{formatMoney(till.netSales)}</div>
+                                    </div>
+                                    <div class="min-w-0">
+                                        <div class="text-[0.62rem] font-semibold uppercase tracking-wide text-text-muted">Gross sales</div>
+                                        <div class="truncate text-base font-extrabold font-serif text-text-main">{formatMoney(till.grossSales)}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[0.62rem] font-semibold uppercase tracking-wide text-text-muted">Sales</div>
+                                        <div class="text-sm font-extrabold text-accent-primary">{till.transactions}</div>
+                                    </div>
+                                    <div>
+                                        <div class="text-[0.62rem] font-semibold uppercase tracking-wide text-text-muted">Net items</div>
+                                        <div class="text-sm font-extrabold text-text-main">{till.itemsSold}</div>
+                                    </div>
+                                </div>
+                                {#if till.refundTransactions > 0 || till.refunds > 0}
+                                    <div class="mt-2 border-t border-border-flat pt-2 text-xs text-danger">
+                                        {till.refundTransactions} {till.refundTransactions === 1 ? 'refund' : 'refunds'} · {formatMoney(till.refunds)}
+                                    </div>
+                                {/if}
+                                <details class="mt-2 border-t border-border-flat pt-2 text-xs">
+                                    <summary>Card collections and cashback</summary>
+                                    <div class="mt-2 font-bold">Sales</div>
+                                    {#each paymentExtraReportRows(till) as [label, amount]}
+                                        <div class="flex justify-between gap-2"><span>{label}</span><b>{formatMoney(amount)}</b></div>
+                                    {/each}
+                                    <div class="mt-2 font-bold">Account payments</div>
+                                    {#each paymentExtraReportRows(till, true) as [label, amount]}
+                                        <div class="flex justify-between gap-2"><span>{label}</span><b>{formatMoney(amount)}</b></div>
+                                    {/each}
+                                </details>
+                            </article>
+                        {/each}
+                    </div>
+                </section>
+            {/if}
+
             <!-- Payment breakdown -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
                 <div class="bg-bg-panel border border-border-flat rounded-lg p-3 flex flex-col gap-0.5">
@@ -1231,13 +1959,26 @@
                 {/if}
             </div>
 
+            <div class="rounded-lg border border-border-flat bg-bg-panel p-3">
+                <div class="text-[0.65rem] font-black uppercase tracking-[0.14em] text-text-muted">Sales card collections</div>
+                <div class="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                    {#each paymentExtraReportRows(tillReportData.breakdown) as [label, amount]}
+                        <span>{label} <b class="block">{formatMoney(amount)}</b></span>
+                    {/each}
+                </div>
+                <p class="mt-2 mb-0 text-xs text-text-muted">Extras are separate from goods revenue. Cashback is a drawer payout, not change.</p>
+            </div>
+
             <div class="rounded-lg border border-warning/40 bg-warning/10 p-3">
                 <div class="text-[0.65rem] font-black uppercase tracking-[0.14em] text-warning">Shop Customer Accounts</div>
                 <div class="mt-2 grid grid-cols-2 md:grid-cols-3 gap-2 text-sm">
                     <span>Opening account <b class="block">{formatAccountPosition(tillReportData.breakdown.openingAccountOwed)}</b></span>
                     <span>New charges <b class="block">{formatMoney(tillReportData.breakdown.accountCharges)}</b></span>
                     <span>Cash collected <b class="block text-success">{formatMoney(tillReportData.breakdown.accountRepaymentsCash)}</b></span>
-                    <span>Card collected <b class="block text-accent-primary">{formatMoney(tillReportData.breakdown.accountRepaymentsCard)}</b></span>
+                    <span>Card applied to account <b class="block text-accent-primary">{formatMoney(tillReportData.breakdown.accountRepaymentsCard)}</b></span>
+                    {#each paymentExtraReportRows(tillReportData.breakdown, true) as [label, amount]}
+                        <span>{label} <b class="block">{formatMoney(amount)}</b></span>
+                    {/each}
                     <span>Other collected <b class="block">{formatMoney(tillReportData.breakdown.accountRepaymentsOther)}</b></span>
                     <span>Adjustments <b class="block">{formatMoney(tillReportData.breakdown.accountAdjustments)}</b></span>
                     <span>Closing account <b class="block text-warning">{formatAccountPosition(tillReportData.breakdown.closingAccountOwed)}</b></span>
@@ -1276,32 +2017,143 @@
                 <button class="btn btn-secondary" disabled={closeReportPrintBusy} on:click={printCloseReport}>
                     {closeReportPrintBusy ? 'Printing...' : 'Print'}
                 </button>
-                <button class="btn btn-primary" disabled={closeReportSaving} on:click={closePeriodReportModal}>Close</button>
+                <button class="btn btn-primary" disabled={closeReportSaving} on:click={closePeriodReportModal}>
+                    {closeReportSaving && wholeSystemCloseSession ? 'Releasing…' : 'Close'}
+                </button>
             </div>
         </div>
     </div>
 {/if}
 
+<ConfirmDialog
+    bind:show={showCancelTestPayment}
+    title="Cancel expired sandbox payment?"
+    message={`This is only for the expired Dojo test payment ${cancelTestPayment ? reportPaymentAmount(cancelTestPayment) : ''}. The app will ask Dojo to cancel the uncaptured sandbox intent and verify the result. It will not force-clear the payment record, refund a captured payment, or override a live card payment. Continue?`}
+    confirmText="Cancel test payment"
+    cancelText="Keep payment"
+    variant="danger"
+    on:confirm={confirmCancelTestPayment}
+    on:cancel={() => cancelTestPayment = null}
+/>
+
 <style>
-    .report-filter-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .75rem; }
-    .report-filter-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); align-items: end; gap: .75rem; }
-    .report-filter-grid .field { min-width: 0; }
-    .report-filter-grid input { width: 100%; }
-    .report-filter-actions { display: grid; grid-template-columns: repeat(3, max-content); align-items: stretch; gap: .65rem; }
-    .report-filter-actions .btn { min-height: 48px; padding-inline: 1rem; }
-    .report-filter-actions svg { width: 18px; height: 18px; flex: 0 0 auto; }
-    .report-load-state,
-    .report-filter-pending { padding: .65rem .8rem; border-left: 3px solid var(--accent-primary); background: var(--bg-panel); color: var(--text-muted); font-size: .82rem; font-weight: 750; }
+    .report-page { --report-control-height: 44px; --report-surface: color-mix(in srgb, var(--bg-base) 55%, var(--bg-card)); --report-divider: color-mix(in srgb, var(--border-flat) 55%, transparent); height: 100%; min-width: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; font-variant-numeric: tabular-nums; }
+    :global(.back-office-route) .report-page { --report-control-height: 36px; }
+    .report-page > * { flex-shrink: 0; min-width: 0; }
+    .report-panel { min-width: 0; padding: 14px; border: 1px solid var(--report-divider); border-radius: 8px; background: var(--report-surface); }
+    .report-panel h3 { margin: 0; font-weight: 600; font-size: 1rem; line-height: 1.35; }
+    .report-panel p { margin: 4px 0 0; font-size: .78rem; line-height: 1.5; color: var(--text-muted); }
+    .report-controls-stack { display: flex; flex-direction: column; gap: 12px; }
+    .report-controls-top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; }
+    .report-period { margin: 0; font-weight: 600; font-size: 1.25rem; line-height: 1.3; }
+    .report-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 6px; font-size: .68rem; }
+    .report-metadata > span { padding: 2px 7px; font-weight: 450; border-color: transparent; background: transparent; }
+    .report-page :global(.btn) { min-width: 0; min-height: var(--report-control-height); padding: 6px 10px; gap: 6px; font-size: .78rem; font-weight: 550; border-radius: 5px; box-shadow: none; }
+    .report-date-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid var(--border-flat); border-radius: 7px; background: var(--bg-panel); }
+    .report-date-presets .btn { white-space: nowrap; border-color: transparent; }
+    .report-date-presets .btn-secondary { background: transparent; }
+    .report-filter-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; }
+    .report-filter-grid { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 10px; }
+    .report-filter-grid .field { min-width: 0; gap: 4px; }
+    .report-filter-grid :global(.relative) { gap: 4px; }
+    .report-filter-grid label, .report-filter-grid :global(.relative > span) { min-height: 17px; font-size: .68rem; line-height: 17px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+    .report-filter-grid input, .report-filter-grid :global(.custom-select-trigger) { width: 100%; min-width: 0; height: var(--report-control-height); min-height: var(--report-control-height); padding: 6px 9px; font-size: .8rem; border-radius: 5px; box-shadow: none; }
+    .report-filter-actions { display: flex; align-items: stretch; gap: 6px; }
+    .report-filter-actions .btn { white-space: nowrap; }
+    .report-filter-actions svg { width: 15px; height: 15px; flex: 0 0 auto; }
+    .report-alert { padding: 9px 12px; font-size: .8rem; line-height: 1.4; }
+    .report-performance { min-width: 0; }
+    .report-performance-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 5px; }
+    .report-performance-heading h2 { margin: 0; font-size: .85rem; font-weight: 550; }
+    .report-comparison-toggle { display: inline-flex; align-items: center; gap: 7px; min-height: var(--report-control-height); color: var(--text-muted); font-size: .75rem; font-weight: 450; cursor: pointer; }
+    .report-comparison-toggle input { width: 15px; height: 15px; min-height: 15px; margin: 0; accent-color: var(--accent-primary); cursor: pointer; }
+    .report-comparison-toggle:has(input:checked) { color: var(--text-main); }
+    .report-comparison-toggle:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+    .report-comparison-info { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding: 0 0 10px; color: var(--text-muted); font-size: .72rem; line-height: 1.5; }
+    .report-comparison-info strong { font-weight: 550; color: var(--text-main); }
+    .report-comparison-error { color: var(--warning); }
+    .report-comparison-retry { padding: 4px 0; min-height: var(--report-control-height); border: 0; background: transparent; color: var(--accent-primary); text-decoration: underline; cursor: pointer; }
+    .report-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 5px; background: var(--report-surface); border: 1px solid var(--report-divider); border-radius: 8px; }
+    .report-metric { container-type: inline-size; min-width: 0; padding: 11px 13px; border: 1px solid transparent; border-radius: 5px; background: transparent; }
+    .report-metric.featured { --metric-max-font: 1.5rem; border-left: 2px solid color-mix(in srgb, var(--success) 65%, transparent); background: color-mix(in srgb, var(--success) 6%, var(--report-surface)); }
+    .report-metric-label { color: var(--text-muted); font-size: .73rem; font-weight: 450; letter-spacing: 0; }
+    .report-metric-value { margin-top: 5px; font-size: min(var(--metric-max-font, 1.2rem), calc(100cqw / var(--metric-characters) * 1.45)); font-weight: 550; line-height: 1.25; white-space: nowrap; }
+    .report-metric.featured .report-metric-value { color: var(--success); font-weight: 650; }
+    .report-metric.featured .report-metric-label { color: var(--text-main); font-weight: 550; }
+    .report-metric.negative .report-metric-value, .report-till-total strong.negative { color: var(--danger); }
+    .report-metric.featured.negative { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 5%, var(--report-surface)); }
+    .report-metric-comparison { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 9px; margin-top: 9px; font-size: .68rem; line-height: 1.5; }
+    .report-metric-comparison .improved { color: var(--success); }
+    .report-metric-comparison .declined { color: var(--danger); }
+    .report-previous-value { color: var(--text-muted); overflow-wrap: anywhere; }
+    .report-metric-detail { margin-top: 3px; font-size: .68rem; line-height: 1.35; color: var(--text-muted); }
+    .report-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .report-section-eyebrow { margin-bottom: 4px; color: var(--text-muted); font-size: .65rem; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; }
+    .report-till-total { flex-shrink: 0; display: flex; align-items: baseline; flex-wrap: wrap; justify-content: end; gap: 8px; }
+    .report-till-total span { color: var(--text-muted); font-size: .7rem; }
+    .report-till-total strong { font-weight: 600; font-size: 1.15rem; overflow-wrap: anywhere; }
+    .report-table-wrap { max-width: 100%; overflow-x: auto; margin-top: 10px; border: 1px solid var(--report-divider); border-radius: 6px; }
+    .report-table-wrap:focus-visible, .report-trend-chart:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+    .report-table-wrap .tbl { width: 100%; font-size: .78rem; }
+    .report-table-wrap :is(th, td) { height: auto; padding: 7px 10px; font-size: .78rem; font-weight: 400; border-color: var(--report-divider); line-height: 1.4; text-align: right; white-space: nowrap; }
+    .report-table-wrap thead th { font-size: .7rem; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text-muted); background: color-mix(in srgb, var(--bg-panel) 60%, transparent); }
+    .report-table-wrap :is(th, td):first-child { text-align: left; }
+    .report-table-wrap tbody th { text-transform: none; letter-spacing: normal; font-weight: 500; color: var(--text-main); background: transparent; }
+    .report-table-wrap tfoot { background: color-mix(in srgb, var(--bg-panel) 60%, transparent); }
+    .report-table-wrap tfoot :is(th, td) { font-weight: 550; }
+    .report-till-overview { min-width: 570px; }
+    .report-till-overview :is(th, td):first-child { white-space: normal; min-width: 130px; max-width: 260px; overflow-wrap: anywhere; }
+    .report-products :is(th, td):nth-child(2), .report-products :is(th, td):nth-child(3) { text-align: left; }
+    .report-till-details { margin-top: 8px; }
+    .report-till-details summary { min-height: var(--report-control-height); padding: 6px 0; align-content: center; font-size: .76rem; font-weight: 500; cursor: pointer; color: var(--accent-primary); }
+    .report-till-details summary span { margin-left: 8px; font-size: .7rem; font-weight: 400; color: var(--text-muted); }
+    .report-till-details summary:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; border-radius: 3px; }
+    .report-till-details .report-table-wrap { margin-top: 0; }
+    .report-analysis-grid, .report-detail-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: start; gap: 12px; }
+    .report-accounts { grid-column: 1 / -1; }
+    .report-empty { margin-top: 10px; padding: 18px 10px; text-align: center; color: var(--text-muted); font-size: .8rem; border: 1px dashed var(--border-flat); border-radius: 5px; }
+    .report-trend-chart { display: flex; align-items: end; gap: 8px; height: 158px; margin-top: 10px; overflow-x: auto; padding-bottom: 5px; }
+    .report-trend-day { min-width: max-content; flex: 1 0 64px; padding-inline: 4px; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: end; gap: 6px; }
+    .report-trend-day > div { flex-shrink: 0; }
+    .report-payment-bars { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .report-payment-bars > div { gap: 8px; }
+    .report-payment-bars span { font-size: .76rem; font-weight: 450; }
+    .report-payment-track > div { opacity: .75; }
+    .report-payment-track { height: 14px; }
+    .report-payment-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .report-account-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+    .report-payment-totals > div, .report-account-grid > div { min-width: 0; padding: 9px 10px; border: 0; border-left: 1px solid var(--report-divider); border-radius: 0; background: transparent; }
+    .report-payment-totals :global(.text-xl), .report-account-grid :global(.text-xl) { font-size: 1rem; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+    .report-payment-totals :global(.text-xs), .report-account-grid :global(.text-xs) { font-size: .7rem; font-weight: 450; }
+    .report-close > div:first-child { gap: 12px; }
+    .report-close > div:first-child > div:last-child { flex-shrink: 0; gap: 6px; }
+    .report-load-state, .report-filter-pending { padding: 7px 10px; border-left: 3px solid var(--accent-primary); background: var(--bg-panel); color: var(--text-muted); font-size: .76rem; }
     .report-filter-pending { border-left-color: var(--warning); color: var(--warning); }
-    @media (max-width: 1100px) {
+    @container management (max-width: 1000px) {
         .report-filter-bar { grid-template-columns: minmax(0, 1fr); }
-        .report-filter-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .report-filter-actions { justify-content: end; }
+        .report-account-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
-    @media (max-width: 850px) {
+    @container management (max-width: 720px) {
+        .report-page { padding: 10px; gap: 10px; }
         .report-filter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .report-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .report-analysis-grid, .report-detail-grid { grid-template-columns: minmax(0, 1fr); }
+        .report-account-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .report-accounts { grid-column: auto; }
     }
-    @media (max-width: 700px) {
-        .report-filter-actions { grid-template-columns: 1fr; }
+    @container management (max-width: 440px) {
+        .report-panel { padding: 12px; }
+        .report-period { font-size: 1.1rem; }
+        .report-date-presets { width: 100%; }
+        .report-date-presets .btn { padding-inline: 5px; font-size: .72rem; }
+        .report-filter-actions { display: grid; grid-template-columns: 1fr 1fr; }
+        .report-filter-actions .btn:first-child { grid-column: 1 / -1; }
+        .report-metric { padding: 10px; }
+        .report-metric { --metric-max-font: 1.1rem; }
+        .report-metric.featured { --metric-max-font: 1.3rem; }
+        .report-till-details summary span { display: block; margin: 3px 0 0; }
+        .report-section-heading { align-items: start; flex-direction: column; gap: 5px; }
     }
     @media print {
         :global(.management-header),

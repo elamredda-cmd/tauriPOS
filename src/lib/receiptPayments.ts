@@ -2,7 +2,7 @@ import type { Order, Payment } from '$lib/stores/db';
 
 export type ReceiptPayment = Pick<
     Payment,
-    'method' | 'amount' | 'cashAmount' | 'cardAmount' | 'loyaltyAmount' | 'accountAmount' | 'changeGiven'
+    'method' | 'amount' | 'cashAmount' | 'cardAmount' | 'loyaltyAmount' | 'accountAmount' | 'changeGiven' | 'tipsAmount' | 'serviceChargeAmount' | 'cashbackAmount'
 >;
 
 export interface ReceiptTenderBreakdown {
@@ -85,6 +85,9 @@ export function receiptTenderRows(
     }
     const refund = order.type === 'return';
     const breakdown = receiptTenderBreakdown(payments);
+    const tips = payments.reduce((sum, payment) => sum + Number(payment.tipsAmount || 0), 0);
+    const serviceCharge = payments.reduce((sum, payment) => sum + Number(payment.serviceChargeAmount || 0), 0);
+    const cashback = payments.reduce((sum, payment) => sum + Number(payment.cashbackAmount || 0), 0);
     const cashTendered = refund
         ? breakdown.cash
         : payments.reduce((total, payment) => {
@@ -98,5 +101,11 @@ export function receiptTenderRows(
         { label: refund ? 'LOYALTY CREDIT' : 'LOYALTY', amount: breakdown.loyalty },
         { label: refund ? 'ACCOUNT CREDIT' : 'PAY LATER', amount: breakdown.account },
         { label: refund ? 'OTHER REFUND' : 'OTHER', amount: breakdown.other },
+        { label: 'TIP', amount: tips },
+        { label: 'SERVICE CHARGE', amount: serviceCharge },
+        { label: 'CASHBACK PAID OUT', amount: cashback },
+        ...(tips || serviceCharge || cashback
+            ? [{ label: 'TOTAL CARD CHARGED', amount: breakdown.card + tips + serviceCharge + cashback }]
+            : []),
     ].filter((row) => row.amount !== 0);
 }

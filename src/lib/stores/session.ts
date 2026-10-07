@@ -1,6 +1,13 @@
 import { writable, get } from 'svelte/store';
 import { isTauri } from '@tauri-apps/api/core';
-import { employeesDB, type Employee } from './db';
+import {
+    ATTENDANCE_ONLY_PIN_HASH_PREFIX,
+    employeesDB,
+    normalizeEmployeeRole,
+    type Employee,
+    type EmployeeRole,
+} from './db';
+import { connectionState, type PosConnectionState } from './connection';
 import { toast } from './toast';
 import type { SupportSessionGrant } from '$lib/supportAccess';
 
@@ -11,9 +18,56 @@ export const REMEMBERED_EMPLOYEE_SESSION_KEY = 'pos_remembered_employee_session_
 const REMEMBERED_EMPLOYEE_SESSION_MS = 12 * 60 * 60 * 1000;
 const SUPPORT_EMPLOYEE_PREFIX = 'lbj-support-';
 let supportExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+let authenticatedEmployeeUpdatedAt = '';
+
+// A staff-clock sign-in authorizes one self-service action, never a till session.
+const attendanceGrants = new Map<string, { employeeId: string; updatedAt: string; expiresAt: number }>();
+export async function signInToAttendance(employeeId: string, pin: string) {
+    const state = get(connectionState);
+    if (state.mode === 'multi' && (!state.mysqlOnline || !state.mysqlReady)) {
+        throw new Error('Connect to the shared database before signing in to attendance.');
+    }
+    const employee = await verifyEmployeePin(employeeId, pin);
+    if (!employee || isSupportEmployee(employee)) return null;
+    const now = Date.now();
+    for (const [token, grant] of attendanceGrants) {
+        if (grant.expiresAt <= now) attendanceGrants.delete(token);
+    }
+    const token = crypto.randomUUID();
+    const expiresAt = now + 2 * 60_000;
+    attendanceGrants.set(token, { employeeId: employee.id, updatedAt: String(employee.updatedAt || ''), expiresAt });
+    return { token, employee, expiresAt };
+}
+
+export function revokeAttendanceSignIn(token: string): void {
+    attendanceGrants.delete(token);
+}
+
+/** Consume before awaiting so two clicks cannot reuse the same PIN verification. */
+export async function authorizeAttendanceAction(token: string, employeeId: string, actorId: string): Promise<void> {
+    const grant = attendanceGrants.get(token);
+    attendanceGrants.delete(token);
+    if (!grant || grant.expiresAt <= Date.now() || grant.employeeId !== employeeId || actorId !== employeeId) {
+        throw new Error('Please sign in to the staff clock again.');
+    }
+    const state = get(connectionState);
+    if (state.mode === 'multi' && (!state.mysqlOnline || !state.mysqlReady)) {
+        throw new Error('Attendance cannot be saved while the shared database is disconnected. Sign in again when connected.');
+    }
+    const employee = await resolveEmployeeForAuthentication(employeeId);
+    if (!employee?.isActive || isSupportEmployee(employee) || String(employee.updatedAt || '') !== grant.updatedAt) {
+        throw new Error('Your staff profile changed. Sign in again before changing attendance.');
+    }
+}
+
+/** Immutable MariaDB profile version proven when this employee authenticated. */
+export function currentEmployeeAuthorizationVersion(): string {
+    return authenticatedEmployeeUpdatedAt;
+}
 
 type RememberedEmployeeSession = {
     employeeId: string;
+    employeeUpdatedAt: string;
     expiresAt: number;
 };
 
@@ -28,12 +82,24 @@ function readRememberedEmployeeSession(): RememberedEmployeeSession | null {
         const raw = sessionStorage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
         if (!raw) return null;
         const saved = JSON.parse(raw) as Partial<RememberedEmployeeSession>;
-        if (!saved.employeeId || typeof saved.expiresAt !== 'number') return null;
+        if (
+            !saved.employeeId
+            || !saved.employeeUpdatedAt
+            || typeof saved.employeeUpdatedAt !== 'string'
+            || typeof saved.expiresAt !== 'number'
+        ) {
+            clearRememberedEmployeeSession();
+            return null;
+        }
         if (Date.now() > saved.expiresAt) {
             clearRememberedEmployeeSession();
             return null;
         }
-        return { employeeId: saved.employeeId, expiresAt: saved.expiresAt };
+        return {
+            employeeId: saved.employeeId,
+            employeeUpdatedAt: saved.employeeUpdatedAt,
+            expiresAt: saved.expiresAt,
+        };
     } catch {
         clearRememberedEmployeeSession();
         return null;
@@ -42,9 +108,15 @@ function readRememberedEmployeeSession(): RememberedEmployeeSession | null {
 
 function rememberEmployeeSession(employee: Employee): void {
     if (typeof sessionStorage === 'undefined') return;
+    const employeeUpdatedAt = String(employee.updatedAt || '');
+    if (!employeeUpdatedAt) {
+        clearRememberedEmployeeSession();
+        return;
+    }
     try {
         sessionStorage.setItem(REMEMBERED_EMPLOYEE_SESSION_KEY, JSON.stringify({
             employeeId: employee.id,
+            employeeUpdatedAt,
             expiresAt: Date.now() + REMEMBERED_EMPLOYEE_SESSION_MS,
         }));
     } catch {
@@ -86,6 +158,7 @@ export function startSupportSession(grant: SupportSessionGrant): Employee {
         supportExpiresAt: grant.expiresAt,
     };
     currentShiftId.set('');
+    authenticatedEmployeeUpdatedAt = String(employee.updatedAt || '');
     currentEmployee.set(employee);
     writeSessionAudit('employee_login', employee);
     supportExpiryTimer = setTimeout(() => {
@@ -109,15 +182,73 @@ export function clearRememberedEmployeeSession(): void {
     }
 }
 
-export function restoreRememberedEmployeeSession(): Employee | null {
+function cachedRuntimeEmployee(employeeId: string): Employee | null {
+    return normalizeEmployeeForRuntime(
+        get(employeesDB).find((employee) => employee.id === employeeId),
+    );
+}
+
+/**
+ * MariaDB is authoritative whenever this till says it is online and ready.
+ * A failed live check never falls back to a cached administrator. When the
+ * till is genuinely offline, the existing cached-login policy is preserved.
+ */
+async function resolveEmployeeForAuthentication(employeeId: string): Promise<Employee | null> {
+    const state = get(connectionState);
+    if (state.mode !== 'multi') {
+        return cachedRuntimeEmployee(employeeId);
+    }
+    const status = state.mysqlStatus
+        ?? (state.mysqlOnline ? 'online' : state.syncError ? 'offline' : 'pending');
+    if (status === 'pending') {
+        throw new Error('MariaDB is still checking staff access. Wait for the connection result, then try again.');
+    }
+    if (status === 'blocked') {
+        throw new Error('MariaDB staff access is blocked until the database setup issue is fixed.');
+    }
+    if (!state.mysqlOnline) {
+        if (status !== 'offline') {
+            throw new Error('MariaDB has not confirmed that offline staff access is safe yet.');
+        }
+        return cachedRuntimeEmployee(employeeId);
+    }
+    if (!state.mysqlReady) {
+        throw new Error('MariaDB is still preparing staff access. Wait for sync, then try again.');
+    }
+    const { getAuthoritativeEmployeeForSession } = await import('./database');
+    return getAuthoritativeEmployeeForSession(employeeId);
+}
+
+export function isEmployeeAuthorityCheckPending(
+    state: PosConnectionState = get(connectionState),
+): boolean {
+    if (state.mode !== 'multi') return false;
+    const status = state.mysqlStatus
+        ?? (state.mysqlOnline ? 'online' : state.syncError ? 'offline' : 'pending');
+    return status === 'pending' || (state.mysqlOnline && !state.mysqlReady);
+}
+
+export function currentEmployeeSessionVersionMatches(employee: Employee): boolean {
+    const sessionEmployee = get(currentEmployee);
+    if (!sessionEmployee || sessionEmployee.id !== employee.id) return false;
+    if (isSupportEmployee(sessionEmployee) || get(connectionState).mode !== 'multi') return true;
+    const expectedVersion = authenticatedEmployeeUpdatedAt || String(sessionEmployee.updatedAt || '');
+    return Boolean(expectedVersion && String(employee.updatedAt || '') === expectedVersion);
+}
+
+export async function restoreRememberedEmployeeSession(): Promise<Employee | null> {
     clearSupportExpiryTimer();
     const saved = readRememberedEmployeeSession();
     if (!saved) return null;
-    const employee = get(employeesDB).find((e) => e.id === saved.employeeId && e.isActive) || null;
-    if (!employee) {
+    const employee = await resolveEmployeeForAuthentication(saved.employeeId);
+    if (
+        !employee?.isActive
+        || String(employee.updatedAt || '') !== saved.employeeUpdatedAt
+    ) {
         clearRememberedEmployeeSession();
         return null;
     }
+    authenticatedEmployeeUpdatedAt = saved.employeeUpdatedAt;
     currentEmployee.set(employee);
     return employee;
 }
@@ -149,6 +280,136 @@ type PinAttemptState = {
 };
 
 const pinAttempts = new Map<string, PinAttemptState>();
+
+function isNormalPbkdf2PinHash(value: string): boolean {
+    const parts = value.split('$');
+    const iterations = Number(parts[1]);
+    const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
+    const decodedLength = (encoded: string): number => {
+        if (!encoded || encoded.length % 4 !== 0 || !base64.test(encoded)) return -1;
+        const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
+        return (encoded.length / 4) * 3 - padding;
+    };
+    return parts.length === 4
+        && parts[0] === PIN_HASH_PREFIX
+        && Number.isInteger(iterations)
+        && iterations >= 100_000
+        && iterations <= 1_000_000
+        && decodedLength(parts[2]) >= 16
+        && decodedLength(parts[2]) <= 64
+        && decodedLength(parts[3]) === 32;
+}
+
+function isLegacySha256PinHash(value: string): boolean {
+    return /^[a-f0-9]{64}$/i.test(value);
+}
+
+function hasValidStoredEmployeePin(employee: Pick<Employee, 'pin' | 'pinHash'>): boolean {
+    const storedHash = String(employee.pinHash || '');
+    if (storedHash) {
+        return isNormalPbkdf2PinHash(storedHash) || isLegacySha256PinHash(storedHash);
+    }
+    return /^\d{4,8}$/.test(String(employee.pin || ''));
+}
+
+export function isAttendanceOnlyPinHash(value: unknown): boolean {
+    return typeof value === 'string'
+        && value.startsWith(ATTENDANCE_ONLY_PIN_HASH_PREFIX)
+        && isNormalPbkdf2PinHash(value.slice(ATTENDANCE_ONLY_PIN_HASH_PREFIX.length));
+}
+
+/**
+ * Canonicalize a staff record before it crosses a database write boundary.
+ * Attendance identities receive a PIN envelope that legacy POS builds cannot
+ * validate. Promoting one back to a POS role removes that envelope.
+ */
+export function normalizeEmployeeForPersistence<
+    T extends { role: unknown; pinHash?: string; pin?: string },
+>(employee: T): T & { role: EmployeeRole; pinHash: string } {
+    const role = normalizeEmployeeRole(employee.role);
+    if (!role) throw new Error('Choose a valid staff role');
+
+    const storedHash = String(employee.pinHash || '');
+    const unwrappedHash = storedHash.startsWith(ATTENDANCE_ONLY_PIN_HASH_PREFIX)
+        ? storedHash.slice(ATTENDANCE_ONLY_PIN_HASH_PREFIX.length)
+        : storedHash;
+
+    if (role === 'attendance') {
+        if (!isNormalPbkdf2PinHash(unwrappedHash)) {
+            throw new Error('Attendance-only staff require a secure PIN to be set');
+        }
+        return {
+            ...employee,
+            role,
+            pin: '',
+            pinHash: `${ATTENDANCE_ONLY_PIN_HASH_PREFIX}${unwrappedHash}`,
+            roleNeedsRepair: undefined,
+            pinNeedsReset: undefined,
+        };
+    }
+
+    if (!hasValidStoredEmployeePin({
+        pin: String(employee.pin || ''),
+        pinHash: unwrappedHash,
+    })) {
+        throw new Error('Staff PIN needs to be reset before this profile can be saved');
+    }
+
+    return {
+        ...employee,
+        role,
+        pinHash: unwrappedHash,
+        roleNeedsRepair: undefined,
+        pinNeedsReset: undefined,
+    };
+}
+
+/**
+ * Validate a hydrated/runtime employee. Unknown roles and broken attendance
+ * envelopes are omitted so they cannot become an authenticated session.
+ */
+export function normalizeEmployeeForRuntime(employee: unknown): Employee | null {
+    if (!employee || typeof employee !== 'object') return null;
+    const candidate = employee as Employee;
+    if (candidate.roleNeedsRepair || candidate.pinNeedsReset) return null;
+    const role = normalizeEmployeeRole(candidate.role);
+    if (!role) return null;
+    const storedHash = String(candidate.pinHash || '');
+    if (role === 'attendance') {
+        if (!isAttendanceOnlyPinHash(storedHash)) return null;
+    } else {
+        if (storedHash.startsWith(ATTENDANCE_ONLY_PIN_HASH_PREFIX)) return null;
+        if (!hasValidStoredEmployeePin(candidate)) return null;
+    }
+    return candidate.role === role ? candidate : { ...candidate, role };
+}
+
+/**
+ * Keep an unsafe staff row visible to administrators for repair without ever
+ * making it eligible for login. The repair markers are stripped only by the
+ * validated persistence helper after a role/PIN is corrected.
+ */
+export function normalizeEmployeeForManagement(employee: unknown): Employee | null {
+    if (!employee || typeof employee !== 'object') return null;
+    const runtimeEmployee = normalizeEmployeeForRuntime(employee);
+    if (runtimeEmployee) return runtimeEmployee;
+    const candidate = employee as Employee;
+    const role = normalizeEmployeeRole(candidate.role);
+    return {
+        ...candidate,
+        role: (role || String(candidate.role || '')) as EmployeeRole,
+        roleNeedsRepair: !role,
+        // Any row that failed runtime validation receives a fresh PIN during
+        // repair. This prevents an unknown role with a legacy/plaintext or
+        // reset-required hash from becoming usable merely by changing role.
+        pinNeedsReset: true,
+    };
+}
+
+export function isPosShiftEligibleEmployee(employee: unknown): boolean {
+    const normalized = normalizeEmployeeForRuntime(employee);
+    return Boolean(normalized?.isActive && normalized.role !== 'attendance');
+}
 
 export class PinRateLimitError extends Error {
     retryAfterSeconds: number;
@@ -207,7 +468,12 @@ export async function hashPin(pin: string): Promise<string> {
 }
 
 async function matchesEmployeePin(employee: Employee, pin: string): Promise<{ valid: boolean; upgrade: boolean }> {
-    const stored = String(employee.pinHash || '');
+    const normalizedEmployee = normalizeEmployeeForRuntime(employee);
+    if (!normalizedEmployee) return { valid: false, upgrade: false };
+    const protectedHash = String(normalizedEmployee.pinHash || '');
+    const stored = normalizedEmployee.role === 'attendance'
+        ? protectedHash.slice(ATTENDANCE_ONLY_PIN_HASH_PREFIX.length)
+        : protectedHash;
     if (stored.startsWith(`${PIN_HASH_PREFIX}$`)) {
         const parts = stored.split('$');
         const iterations = Number(parts[1]);
@@ -222,7 +488,7 @@ async function matchesEmployeePin(employee: Employee, pin: string): Promise<{ va
         }
     }
     if (stored) {
-        return { valid: stored === await legacyPinHash(pin), upgrade: true };
+        return { valid: stored.toLowerCase() === await legacyPinHash(pin), upgrade: true };
     }
     return { valid: employee.pin === pin, upgrade: true };
 }
@@ -253,11 +519,19 @@ function recordFailedPinAttempt(key: string): number {
 export async function authenticatePin(pin: string): Promise<Employee | null> {
     const attemptKey = 'all-employees';
     assertPinAttemptAllowed(attemptKey);
-    for (const candidate of get(employeesDB).filter((employee) => employee.isActive)) {
+    const candidates = get(employeesDB)
+        .map(normalizeEmployeeForRuntime)
+        .filter((employee): employee is Employee => Boolean(employee?.isActive));
+    for (const candidate of candidates) {
         const match = await matchesEmployeePin(candidate, pin);
         if (match.valid) {
+            const authoritative = await resolveEmployeeForAuthentication(candidate.id);
+            const authoritativeMatch = authoritative
+                ? await matchesEmployeePin(authoritative, pin)
+                : { valid: false, upgrade: false };
+            if (!authoritative?.isActive || !authoritativeMatch.valid) continue;
             pinAttempts.delete(attemptKey);
-            return finishAuthentication(candidate, pin, match.upgrade);
+            return finishAuthentication(authoritative, pin, authoritativeMatch.upgrade);
         }
     }
     const retryAfter = recordFailedPinAttempt(attemptKey);
@@ -268,9 +542,9 @@ export async function authenticatePin(pin: string): Promise<Employee | null> {
 export async function authenticateEmployeePin(employeeId: string, pin: string): Promise<Employee | null> {
     const attemptKey = `employee:${employeeId}`;
     assertPinAttemptAllowed(attemptKey);
-    const employee = get(employeesDB).find((candidate) => candidate.id === employeeId && candidate.isActive) || null;
+    const employee = await resolveEmployeeForAuthentication(employeeId);
     const match = employee ? await matchesEmployeePin(employee, pin) : { valid: false, upgrade: false };
-    if (!employee || !match.valid) {
+    if (!employee?.isActive || !match.valid) {
         const retryAfter = recordFailedPinAttempt(attemptKey);
         if (retryAfter) throw new PinRateLimitError(retryAfter);
         return finishAuthentication(null, pin, false);
@@ -282,8 +556,8 @@ export async function authenticateEmployeePin(employeeId: string, pin: string): 
 export async function verifyEmployeePin(employeeId: string, pin: string): Promise<Employee | null> {
     const attemptKey = `approval:${employeeId}`;
     assertPinAttemptAllowed(attemptKey);
-    const employee = get(employeesDB).find((candidate) => candidate.id === employeeId && candidate.isActive) || null;
-    if (employee && (await matchesEmployeePin(employee, pin)).valid) {
+    const employee = await resolveEmployeeForAuthentication(employeeId);
+    if (employee?.isActive && (await matchesEmployeePin(employee, pin)).valid) {
         pinAttempts.delete(attemptKey);
         return employee;
     }
@@ -294,29 +568,88 @@ export async function verifyEmployeePin(employeeId: string, pin: string): Promis
 
 async function finishAuthentication(employee: Employee | null, pin: string, upgradeHash: boolean): Promise<Employee | null> {
     clearSupportExpiryTimer();
+    employee = normalizeEmployeeForRuntime(employee);
     if (employee && upgradeHash) {
-        employee = { ...employee, pinHash: await hashPin(pin), pin: '' };
-        employeesDB.update((list) => list.map((e) => e.id === employee?.id ? employee! : e));
+        const upgradedEmployee = normalizeEmployeeForPersistence({
+            ...employee,
+            pinHash: await hashPin(pin),
+            pin: '',
+            updatedAt: new Date().toISOString(),
+        });
         if (isTauri()) {
-            const { upsert } = await import('./database');
-            await upsert('employees', employee);
+            const state = get(connectionState);
+            // Never queue authorization data while a shared server is offline.
+            // The valid legacy PIN can still open this intentionally offline
+            // till, and it will be upgraded on a later connected login.
+            if (state.mode !== 'multi' || state.mysqlOnline) {
+                const database = await import('./database');
+                employee = state.mode === 'multi'
+                    ? await database.upgradeEmployeeLegacyPin(
+                        employee,
+                        pin,
+                        upgradedEmployee.pinHash,
+                    )
+                    : await database.saveEmployeeProfile(upgradedEmployee, {
+                        expectedUpdatedAt: String(employee.updatedAt || ''),
+                        previousIsActive: employee.isActive,
+                    });
+            }
+        } else {
+            employee = upgradedEmployee;
+            employeesDB.update((list) => list.map((candidate) =>
+                candidate.id === employee?.id ? employee! : candidate
+            ));
         }
     }
+    authenticatedEmployeeUpdatedAt = String(employee?.updatedAt || '');
     currentEmployee.set(employee);
     if (employee) rememberEmployeeSession(employee);
     writeSessionAudit('employee_login', employee);
     return employee;
 }
 
+/** Re-check an existing session after MariaDB reconnects. */
+export async function revalidateCurrentEmployeeSession(): Promise<Employee | null> {
+    const sessionEmployee = get(currentEmployee);
+    if (!sessionEmployee || isSupportEmployee(sessionEmployee)) return sessionEmployee;
+    try {
+        const authoritative = await resolveEmployeeForAuthentication(sessionEmployee.id);
+        // Signing out or switching user while the live query is in flight must
+        // never let its late result resurrect/overwrite the former session.
+        if (get(currentEmployee) !== sessionEmployee) return get(currentEmployee);
+        if (!authoritative?.isActive) {
+            logout();
+            return null;
+        }
+        const expectedVersion = authenticatedEmployeeUpdatedAt
+            || String(sessionEmployee.updatedAt || '');
+        if (!expectedVersion || String(authoritative.updatedAt || '') !== expectedVersion) {
+            logout();
+            return null;
+        }
+        if (authoritative.role === 'attendance') currentShiftId.set('');
+        currentEmployee.set(authoritative);
+        return authoritative;
+    } catch (error) {
+        // A till which claims MariaDB is ready must never retain stale admin or
+        // checkout rights after the authoritative verification itself fails.
+        if (get(currentEmployee) === sessionEmployee) logout();
+        throw error;
+    }
+}
+
 export function logout(): void {
+    attendanceGrants.clear();
     const employee = get(currentEmployee);
     writeSessionAudit('employee_logout', employee);
     clearSupportExpiryTimer();
     clearRememberedEmployeeSession();
+    authenticatedEmployeeUpdatedAt = '';
     currentEmployee.set(null);
     currentShiftId.set('');
 }
 
 export function canManage(employee: Employee | null): boolean {
-    return employee?.role === 'admin' || employee?.role === 'manager' || employee?.role === 'supervisor';
+    const role = normalizeEmployeeRole(employee?.role);
+    return role === 'admin' || role === 'manager' || role === 'supervisor';
 }

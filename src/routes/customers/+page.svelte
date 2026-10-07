@@ -3,6 +3,7 @@
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import Code39Barcode from '$lib/components/Code39Barcode.svelte';
     import SearchField from '$lib/components/SearchField.svelte';
     import {
@@ -19,10 +20,10 @@
         toPence,
     } from '$lib/stores/db';
     import {
+        adjustCustomerLoyalty,
         getCustomerAccount,
         getCustomerAccountEntries,
-        getCustomerLoyaltyHistory,
-        getCustomerById,
+        getCustomerLoyaltySnapshot,
         getCustomersPage,
         getCustomerUsage,
         getOrCreateTillId,
@@ -31,11 +32,13 @@
         removeCustomerSafely,
         saveCustomerAccountConfig,
         saveCustomerProfile,
+        POS_CUSTOMERS_CHANGED_EVENT,
         type CustomerLoyaltyHistoryRow,
     } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import { currentEmployee, currentShiftId } from '$lib/stores/session';
     import { hasPermission } from '$lib/permissions';
+    import { deviceOperatingMode } from '$lib/deviceMode';
     import { createLoyaltyCode, getLoyaltyConfig, loyaltyCredit } from '$lib/loyalty';
     import { getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
     import { getReceiptPrinterConfig, printEscposTextReport } from '$lib/printers';
@@ -72,6 +75,12 @@
         updateDojoAttempt,
         type DojoPaymentAttempt,
     } from '$lib/dojo';
+    import { monitorDojoSession } from '$lib/dojoSessionFlow';
+    import { retryDojoPayment } from '$lib/dojo';
+    import DojoRetryDialog from '$lib/components/DojoRetryDialog.svelte';
+    let dojoRetryDecision: ((retry: boolean) => void) | null = null;
+    import { getDojoPaymentBreakdown } from '$lib/dojoPaymentValidation';
+    import { accountPaymentAmountLines } from '$lib/paymentExtraPresentation';
     import {
         assertPaymentTerminalAttemptReady,
         isCustomerAccountPaymentPayload,
@@ -83,13 +92,26 @@
         loyaltyCodeValidationError,
         normalizeLoyaltyCode,
     } from '$lib/customerLoyaltyCode';
+    import {
+        customerLoyaltyAdjustmentPreview,
+        customerLoyaltyReasonError,
+        newestCustomerSnapshot,
+        manualLoyaltyReasonNote,
+        MAX_CUSTOMER_LOYALTY_REASON_LENGTH,
+        type CustomerLoyaltyAdjustmentMode,
+    } from '$lib/customerLoyaltyAdjustment';
 
     const PAGE_SIZE = 40;
     const ACCOUNT_HISTORY_PAGE_SIZE = 50;
+    type CustomerAccountListView = 'all' | 'outstanding';
     let showForm = false;
     let editing = false;
     let saving = false;
     let deletingCustomerId = '';
+    let showDeleteConfirm = false;
+    let customerToDelete: Customer | null = null;
+    let showDojoSignatureConfirm = false;
+    let dojoSignatureDecision: ((accepted: boolean) => void) | null = null;
     let cur: Partial<Customer> = {};
     let editingCustomer: Customer | null = null;
     let searchQuery = '';
@@ -98,17 +120,30 @@
     let pageCustomers: Customer[] = [];
     let totalCustomers = 0;
     let allCustomerCount = 0;
+    let outstandingCustomerCount = 0;
+    let outstandingBalancePence = 0;
+    let customerAccountListView: CustomerAccountListView = 'all';
     let customersLoading = false;
     let customersLoadError = '';
     let customersMounted = false;
     let customersLoadToken = 0;
+    let customerRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let customerListStoreState = new Map<string, unknown[]>();
     let showLoyalty = false;
     let loyaltyCustomerId = '';
     let loyaltyCustomer: Customer | null = null;
     let loyaltyCustomerSnapshot: Customer | null = null;
     let loyaltyHistory: CustomerLoyaltyHistoryRow[] = [];
     let loyaltyHistoryLoading = false;
+    let loyaltyHistoryError = '';
     let loyaltyHistoryRun = 0;
+    let loyaltyView: 'history' | 'adjust' = 'history';
+    let loyaltyAdjustmentMode: CustomerLoyaltyAdjustmentMode = 'add';
+    let loyaltyPointsDraft = '';
+    let loyaltyReasonDraft = '';
+    let loyaltyAdjustmentSaving = false;
+    let loyaltyAdjustmentAttempted = false;
+    let loyaltyAdjustmentIdempotencyKey = '';
     let showAccount = false;
     let accountCustomerId = '';
     let accountCustomer: Customer | null = null;
@@ -135,23 +170,59 @@
     let accountManagedAttemptProvider: TerminalProvider | '' = '';
     let accountManagedReportEpoch: string | undefined;
     let accountManagedServerDataEpoch: string | undefined;
+    let accountManagedCardExtras = { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 };
     let accountTerminalStatus = '';
     let accountPrintingEntryId = '';
     let accountCardConfigState: 'loading' | 'loaded' | 'error' = isTauri() ? 'loading' : 'loaded';
     let accountCardFlow: 'external' | 'sumup' | 'dojo' | 'unavailable' | '' = '';
 
     $: loyaltyConfig = getLoyaltyConfig($settingsDB);
-    $: loyaltyCustomer = $customersDB.find((customer) => customer.id === loyaltyCustomerId)
-        || pageCustomers.find((customer) => customer.id === loyaltyCustomerId)
-        || loyaltyCustomerSnapshot;
+    $: loyaltyCustomer = newestCustomerSnapshot(
+        loyaltyCustomerSnapshot,
+        newestCustomerSnapshot(
+            $customersDB.find((customer) => customer.id === loyaltyCustomerId),
+            pageCustomers.find((customer) => customer.id === loyaltyCustomerId),
+        ),
+    );
     $: accountCustomer = $customersDB.find((customer) => customer.id === accountCustomerId)
         || pageCustomers.find((customer) => customer.id === accountCustomerId)
         || accountCustomerSnapshot;
-    $: canTakeAccountPayment = hasPermission($currentEmployee, 'take_account_payment', $settingsDB);
+    $: canTakeAccountPayment = $deviceOperatingMode === 'checkout'
+        && hasPermission($currentEmployee, 'take_account_payment', $settingsDB);
     $: if (!showLoyalty && loyaltyHistoryLoading) {
         loyaltyHistoryRun += 1;
         loyaltyHistoryLoading = false;
     }
+    $: canAdjustCustomerLoyalty = hasPermission($currentEmployee, 'adjust_customer_loyalty', $settingsDB);
+    $: loyaltyCurrentPoints = Number(loyaltyCustomer?.loyaltyPoints ?? 0);
+    $: loyaltyAdjustment = customerLoyaltyAdjustmentPreview(
+        loyaltyCurrentPoints,
+        loyaltyAdjustmentMode,
+        loyaltyPointsDraft,
+    );
+    $: loyaltyAdjustmentReasonError = customerLoyaltyReasonError(loyaltyReasonDraft);
+    $: loyaltyAdjustmentInputLabel = loyaltyAdjustmentMode === 'add'
+        ? 'Points to add *'
+        : loyaltyAdjustmentMode === 'remove'
+            ? 'Points to remove *'
+            : 'New points balance *';
+    $: loyaltyAdjustmentSubmitLabel = loyaltyAdjustmentSaving
+        ? 'Saving adjustment...'
+        : loyaltyAdjustment.enteredPoints === null || loyaltyAdjustment.error
+            ? 'Save Adjustment'
+            : loyaltyAdjustmentMode === 'add'
+                ? `Add ${loyaltyAdjustment.enteredPoints.toLocaleString()} Points`
+                : loyaltyAdjustmentMode === 'remove'
+                    ? `Remove ${loyaltyAdjustment.enteredPoints.toLocaleString()} Points`
+                    : `Set Balance to ${loyaltyAdjustment.enteredPoints.toLocaleString()}`;
+    $: loyaltyAdjustmentReady = canAdjustCustomerLoyalty
+        && Boolean($currentEmployee)
+        && loyaltyAdjustment.enteredPoints !== null
+        && !loyaltyAdjustment.error
+        && !loyaltyAdjustmentReasonError
+        && !loyaltyHistoryLoading
+        && !loyaltyHistoryError
+        && !loyaltyAdjustmentSaving;
     $: canAdjustCustomerAccount = hasPermission($currentEmployee, 'adjust_customer_account', $settingsDB);
     $: accountBalance = Number(customerAccount?.balancePence || 0);
     $: accountLimit = Number(customerAccount?.creditLimitPence || 0);
@@ -172,11 +243,44 @@
     $: pageCount = Math.max(1, Math.ceil(totalCustomers / PAGE_SIZE));
     $: if (currentPage > pageCount) currentPage = pageCount;
     $: pageStart = (currentPage - 1) * PAGE_SIZE;
+    $: if (customersMounted) observeCustomerListChanges($customersDB);
+
+    function customerListFields(customer: Customer): unknown[] {
+        return [customer.name, customer.phone, customer.email, customer.postcode, customer.loyaltyCode,
+            customer.loyaltyPoints, customer.notes, customer.accountId || '', Boolean(customer.accountEnabled),
+            Number(customer.accountCreditLimitPence || 0), Number(customer.accountBalancePence || 0)];
+    }
+
+    function observeCustomerListChanges(customers: Customer[]) {
+        const next = new Map<string, unknown[]>();
+        let changed = customers.length !== customerListStoreState.size;
+        for (const customer of customers) {
+            const fields = customerListFields(customer), previous = customerListStoreState.get(customer.id);
+            next.set(customer.id, fields);
+            if (!previous || fields.some((value, index) => value !== previous[index])) changed = true;
+        }
+        customerListStoreState = next;
+        if (!changed) return;
+        scheduleCustomerListRefresh();
+    }
+
+    function scheduleCustomerListRefresh() {
+        if (!customersMounted) return;
+        // A burst of synced rows needs one bounded page query, not a full-table
+        // reload for each event. getCustomersPage never writes customersDB.
+        customersLoadToken++;
+        if (!customerRefreshTimer) customerRefreshTimer = setTimeout(() => {
+            customerRefreshTimer = null;
+            if (customersMounted) void loadCustomerPage();
+        }, 250);
+    }
 
     onMount(() => {
+        customerListStoreState = new Map($customersDB.map((customer) => [customer.id, customerListFields(customer)]));
         customersMounted = true;
+        window.addEventListener(POS_CUSTOMERS_CHANGED_EVENT, scheduleCustomerListRefresh);
         void loadCustomerPage();
-        if (isTauri()) {
+        if (isTauri() && $deviceOperatingMode === 'checkout') {
             accountCardConfigState = 'loading';
             void Promise.allSettled([loadDojoConfig(), loadSumupConfig()]).then((results) => {
                 if (!customersMounted) return;
@@ -190,23 +294,32 @@
     onDestroy(() => {
         customersMounted = false;
         customersLoadToken += 1;
+        loyaltyHistoryRun += 1;
+        if (customerRefreshTimer) clearTimeout(customerRefreshTimer);
+        if (typeof window !== 'undefined') window.removeEventListener(POS_CUSTOMERS_CHANGED_EVENT, scheduleCustomerListRefresh);
         accountLoadToken += 1;
         accountHistoryLoadRun += 1;
+        dismissDojoSignatureDecision();
     });
 
     async function loadCustomerPage() {
+        if (customerRefreshTimer) clearTimeout(customerRefreshTimer);
+        customerRefreshTimer = null;
         const token = ++customersLoadToken;
         customersLoading = true;
         customersLoadError = '';
         try {
             const result = await getCustomersPage({
                 query: appliedSearchQuery,
+                accountFilter: customerAccountListView,
                 limit: PAGE_SIZE,
                 offset: (currentPage - 1) * PAGE_SIZE,
             });
             if (!customersMounted || token !== customersLoadToken) return;
             totalCustomers = result.total;
-            if (!appliedSearchQuery) allCustomerCount = result.total;
+            allCustomerCount = result.summary.customerCount;
+            outstandingCustomerCount = result.summary.outstandingCount;
+            outstandingBalancePence = result.summary.outstandingBalancePence;
             const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
             if (currentPage > lastPage) {
                 currentPage = lastPage;
@@ -235,6 +348,13 @@
         void loadCustomerPage();
     }
 
+    function setCustomerAccountListView(view: CustomerAccountListView) {
+        if (customerAccountListView === view) return;
+        customerAccountListView = view;
+        currentPage = 1;
+        void loadCustomerPage();
+    }
+
     function handleCustomerSearchKeydown(event: KeyboardEvent) {
         if (event.key !== 'Enter') return;
         event.preventDefault();
@@ -249,6 +369,7 @@
     }
 
     function add() {
+        if (saving) return;
         const stamp = now();
         cur = {
             id: uuid(),
@@ -268,14 +389,19 @@
     }
 
     function edit(customer: Customer) {
-        cur = { ...customer };
+        if (saving) return;
+        const latest = newestCustomerSnapshot(customer, $customersDB.find((item) => item.id === customer.id))!;
+        cur = { ...latest };
         editing = true;
-        editingCustomer = customer;
+        editingCustomer = { ...latest };
         showForm = true;
     }
 
     async function save() {
-        const name = String(cur.name || '').trim();
+        if (saving) return;
+        const submitted = { ...cur };
+        const expectedProfile = editingCustomer ? { ...editingCustomer } : null;
+        const name = String(submitted.name || '').trim();
         if (!name) {
             toast('Customer name is required', 'error');
             return;
@@ -283,8 +409,8 @@
 
         saving = true;
         try {
-            const id = String(cur.id || uuid());
-            const loyaltyCode = normalizeLoyaltyCode(cur.loyaltyCode || createLoyaltyCode($customersDB));
+            const id = String(submitted.id || uuid());
+            const loyaltyCode = normalizeLoyaltyCode(submitted.loyaltyCode || createLoyaltyCode($customersDB));
             const validationError = loyaltyCodeValidationError(loyaltyCode);
             if (validationError) {
                 toast(validationError, 'error');
@@ -295,27 +421,22 @@
                 return;
             }
 
-            const existing = editingCustomer || $customersDB.find((customer) => customer.id === id);
+            const existing = expectedProfile;
             const stamp = now();
             const profile = {
                 id,
                 name,
-                phone: String(cur.phone || '').trim(),
-                email: String(cur.email || '').trim(),
-                postcode: String(cur.postcode || '').trim().toUpperCase(),
+                phone: String(submitted.phone || '').trim(),
+                email: String(submitted.email || '').trim(),
+                postcode: String(submitted.postcode || '').trim().toUpperCase(),
                 loyaltyCode,
-                notes: String(cur.notes || '').trim(),
-                createdAt: existing?.createdAt || cur.createdAt || stamp,
+                notes: String(submitted.notes || '').trim(),
+                createdAt: existing?.createdAt || submitted.createdAt || stamp,
                 updatedAt: stamp,
             };
             // Profile writes deliberately omit loyaltyPoints. Sales, refunds and
             // redemption transactions are the only owners of that balance.
-            await saveCustomerProfile(profile);
-            customersDB.update((list) => existing
-                ? list.map((customer) => customer.id === id
-                    ? { ...customer, ...profile, loyaltyPoints: customer.loyaltyPoints }
-                    : customer)
-                : [...list, { ...profile, loyaltyPoints: 0 }]);
+            await saveCustomerProfile(profile, expectedProfile);
             showForm = false;
             editingCustomer = null;
             await loadCustomerPage();
@@ -356,8 +477,20 @@
                 );
                 return;
             }
-            if (!confirm(`Delete ${customer.name}?`)) return;
-            deletingCustomerId = customer.id;
+            customerToDelete = customer;
+            showDeleteConfirm = true;
+        } catch (error) {
+            const message = String(error).replace(/^Error:\s*/, '');
+            toast(message.startsWith('Could not delete customer') ? message : `Could not delete customer: ${message}`, 'error');
+        }
+    }
+
+    async function confirmCustomerDelete() {
+        const customer = customerToDelete;
+        if (!customer || deletingCustomerId) return;
+        showDeleteConfirm = false;
+        deletingCustomerId = customer.id;
+        try {
             await removeCustomerSafely(customer.id);
             customersDB.update((list) => list.filter((item) => item.id !== customer.id));
             await loadCustomerPage();
@@ -367,15 +500,147 @@
             toast(message.startsWith('Could not delete customer') ? message : `Could not delete customer: ${message}`, 'error');
         } finally {
             deletingCustomerId = '';
+            customerToDelete = null;
         }
+    }
+
+    function cancelCustomerDelete() {
+        customerToDelete = null;
+    }
+
+    function dismissDojoSignatureDecision() {
+        dojoSignatureDecision = null;
+        showDojoSignatureConfirm = false;
+    }
+
+    function finishDojoSignatureDecision(accepted: boolean) {
+        const decide = dojoSignatureDecision;
+        dismissDojoSignatureDecision();
+        decide?.(accepted);
     }
 
     async function openLoyalty(customer: Customer) {
         loyaltyCustomerId = customer.id;
         loyaltyCustomerSnapshot = customer;
         loyaltyHistory = [];
+        loyaltyHistoryError = '';
+        loyaltyView = 'history';
+        resetLoyaltyAdjustment();
         showLoyalty = true;
         await refreshLoyaltyHistory();
+    }
+
+    function resetLoyaltyAdjustment() {
+        loyaltyAdjustmentMode = 'add';
+        loyaltyPointsDraft = '';
+        loyaltyReasonDraft = '';
+        loyaltyAdjustmentAttempted = false;
+        loyaltyAdjustmentIdempotencyKey = uuid();
+    }
+
+    function openLoyaltyAdjustment() {
+        if (loyaltyHistoryLoading || loyaltyHistoryError) {
+            toast('Refresh the customer’s live loyalty balance before adjusting points', 'error');
+            return;
+        }
+        if (!canAdjustCustomerLoyalty) {
+            toast('Your role cannot adjust customer loyalty points', 'error');
+            return;
+        }
+        if (!$currentEmployee) {
+            toast('Sign in before adjusting customer loyalty points', 'error');
+            return;
+        }
+        resetLoyaltyAdjustment();
+        if (loyaltyCurrentPoints < 0) loyaltyAdjustmentMode = 'set';
+        loyaltyView = 'adjust';
+    }
+
+    function cancelLoyaltyAdjustment() {
+        if (loyaltyAdjustmentSaving) return;
+        loyaltyView = 'history';
+        resetLoyaltyAdjustment();
+    }
+
+    function selectLoyaltyAdjustmentMode(mode: CustomerLoyaltyAdjustmentMode) {
+        if (loyaltyAdjustmentSaving || loyaltyAdjustmentMode === mode) return;
+        loyaltyAdjustmentMode = mode;
+        loyaltyAdjustmentAttempted = false;
+    }
+
+    function formatSignedPoints(value: number): string {
+        if (value > 0) return `+${value.toLocaleString()}`;
+        if (value < 0) return `-${Math.abs(value).toLocaleString()}`;
+        return '0';
+    }
+
+    async function saveLoyaltyAdjustment() {
+        loyaltyAdjustmentAttempted = true;
+        const customer = loyaltyCustomer;
+        const actor = $currentEmployee;
+        if (!customer || !actor || loyaltyAdjustmentSaving) return;
+        if (!hasPermission(actor, 'adjust_customer_loyalty', $settingsDB)) {
+            toast('Your role can no longer adjust customer loyalty points', 'error');
+            return;
+        }
+
+        if (loyaltyHistoryLoading || loyaltyHistoryError) {
+            toast('Refresh the customer’s live loyalty balance before adjusting points', 'error');
+            return;
+        }
+        const expectedPoints = Number(customer.loyaltyPoints ?? 0);
+        const preview = customerLoyaltyAdjustmentPreview(
+            expectedPoints,
+            loyaltyAdjustmentMode,
+            loyaltyPointsDraft,
+        );
+        const reason = loyaltyReasonDraft.trim();
+        const reasonError = customerLoyaltyReasonError(reason);
+        if (preview.error || preview.enteredPoints === null) {
+            toast(preview.error || 'Enter the points for this adjustment', 'error');
+            return;
+        }
+        if (reasonError) {
+            toast(reasonError, 'error');
+            return;
+        }
+
+        const idempotencyKey = loyaltyAdjustmentIdempotencyKey || uuid();
+        loyaltyAdjustmentIdempotencyKey = idempotencyKey;
+        loyaltyAdjustmentSaving = true;
+        try {
+            const result = await adjustCustomerLoyalty({
+                customerId: customer.id,
+                expectedPoints,
+                newPoints: preview.nextPoints,
+                reason,
+                employeeId: actor.id,
+                actorExpectedUpdatedAt: actor.updatedAt || '',
+                idempotencyKey,
+            });
+            // The database layer applies the result only when it is not older
+            // than the customer already in memory. Reuse that guarded row so
+            // a later shared-till update can never be overwritten here.
+            const visibleCustomer = newestCustomerSnapshot({
+                ...customer,
+                loyaltyPoints: result.loyaltyPoints,
+                updatedAt: result.customerUpdatedAt,
+            }, $customersDB.find((item) => item.id === customer.id))!;
+            loyaltyCustomerSnapshot = visibleCustomer;
+            pageCustomers = pageCustomers.map((item) => item.id === customer.id
+                ? { ...item, ...newestCustomerSnapshot(visibleCustomer, item)! }
+                : item);
+            loyaltyView = 'history';
+            resetLoyaltyAdjustment();
+            await refreshLoyaltyHistory();
+            toast(`Loyalty correction saved for ${customer.name}`, 'success');
+        } catch (error) {
+            const message = String(error).replace(/^Error:\s*/, '');
+            toast(`Could not adjust loyalty points: ${message}`, 'error');
+            if (/balance changed|refresh/i.test(message)) await refreshLoyaltyHistory();
+        } finally {
+            loyaltyAdjustmentSaving = false;
+        }
     }
 
     async function refreshLoyaltyHistory() {
@@ -383,21 +648,22 @@
         if (!customerId) return;
         const run = ++loyaltyHistoryRun;
         loyaltyHistoryLoading = true;
+        loyaltyHistoryError = '';
         try {
-            const [customer, history] = await Promise.all([
-                getCustomerById(customerId),
-                getCustomerLoyaltyHistory(customerId),
-            ]);
+            const { customer, history } = await getCustomerLoyaltySnapshot(customerId);
             if (run !== loyaltyHistoryRun || customerId !== loyaltyCustomerId || !showLoyalty) return;
-            if (customer) {
-                loyaltyCustomerSnapshot = customer as Customer;
-                pageCustomers = pageCustomers.map((item) => item.id === customer.id ? customer as Customer : item);
-                customersDB.update((list) => list.map((item) => item.id === customer.id ? customer as Customer : item));
-            }
+            if (!customer) throw new Error('This customer is no longer available.');
+            const visibleCustomer = newestCustomerSnapshot(customer, $customersDB.find((item) => item.id === customer.id))!;
+            loyaltyCustomerSnapshot = visibleCustomer;
+            // The authoritative snapshot is for this view only; do not write it
+            // into the shared cache or overwrite a newer synced customer row.
+            pageCustomers = pageCustomers.map((item) => item.id === customer.id
+                ? { ...item, ...newestCustomerSnapshot(visibleCustomer, item)! }
+                : item);
             loyaltyHistory = history;
         } catch (error) {
             if (run === loyaltyHistoryRun && customerId === loyaltyCustomerId && showLoyalty) {
-                toast(`Could not load loyalty history: ${error}`, 'error');
+                loyaltyHistoryError = `Could not load the live loyalty balance and history. ${String(error).replace(/^Error:\s*/, '')} Refresh before adjusting points.`;
             }
         } finally {
             if (run === loyaltyHistoryRun) loyaltyHistoryLoading = false;
@@ -408,7 +674,7 @@
         if (reason === 'earned') return 'Points earned';
         if (reason === 'redeemed') return 'Loyalty value used';
         if (reason === 'refund_adjustment') return 'Refund adjustment';
-        if (reason === 'manual_adjustment') return 'Manual adjustment';
+        if (reason === 'manual_adjustment' || reason.startsWith('manual_adjustment:')) return 'Manual adjustment';
         return 'Loyalty adjustment';
     }
 
@@ -547,6 +813,10 @@
             return;
         }
         if (mode === 'payment') {
+            if ($deviceOperatingMode === 'back_office') {
+                toast('Customer payments must be taken on a Checkout Till', 'error');
+                return;
+            }
             if (!canTakeAccountPayment) {
                 toast('Your role cannot take customer account payments', 'error');
                 return;
@@ -583,6 +853,7 @@
         accountManagedAttemptProvider = '';
         accountManagedReportEpoch = undefined;
         accountManagedServerDataEpoch = undefined;
+        accountManagedCardExtras = { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 };
         accountCardFlow = '';
         accountTerminalStatus = '';
         showAccountEntry = true;
@@ -613,6 +884,7 @@
         accountManagedAttemptProvider = '';
         accountManagedReportEpoch = undefined;
         accountManagedServerDataEpoch = undefined;
+        accountManagedCardExtras = { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 };
         accountTerminalStatus = '';
     }
 
@@ -813,63 +1085,59 @@
                 clientTransactionId: paymentIntentId,
                 terminalSessionId,
             });
-            const deadline = Date.now() + 180_000;
-            let nextLeaseRefresh = Date.now() + 25_000;
-            let signatureHandled = false;
-            while (Date.now() < deadline) {
-                const session = await getDojoTerminalSessionStatus(terminalSessionId);
-                if (session.status === 'SignatureVerificationRequired' && !signatureHandled) {
-                    signatureHandled = true;
-                    const accepted = confirm('Compare the customer signature, then press OK to accept it or Cancel to reject it.');
-                    await respondToDojoSignature(terminalSessionId, accepted);
-                }
-                if (['Captured', 'SignatureVerificationAccepted'].includes(session.status)) {
-                    const status = session.payment || await getDojoPaymentIntentStatus(paymentIntentId);
-                    if (status.id !== paymentIntentId
-                        || status.reference !== reference
-                        || status.amount !== amountPence
-                        || String(status.currency || '').toUpperCase() !== config.currency.toUpperCase()
-                        || status.status !== 'Captured') {
-                        throw new Error('Dojo captured a payment that does not match this account payment. Do not retry the card; check Dojo.');
-                    }
-                    const providerReference = `Dojo ${status.transactionId || paymentIntentId} [id:${paymentIntentId}]`;
-                    payload.reference = providerReference;
-                    approved = true;
-                    await updateDojoAttempt(reference, 'approved', {
-                        clientTransactionId: paymentIntentId,
-                        terminalSessionId,
-                        providerReference,
-                        saleBundle: payload,
-                    }).catch(() => undefined);
-                    return providerReference;
-                }
-                if (['Canceled', 'Declined', 'SignatureVerificationRejected'].includes(session.status)) {
-                    const finalStatus = session.status === 'Canceled' ? 'cancelled' : 'failed';
-                    await updateDojoAttempt(reference, finalStatus, {
-                        clientTransactionId: paymentIntentId,
-                        terminalSessionId,
-                        error: `Dojo status: ${session.status}`,
-                    });
-                    finalized = true;
-                    throw new Error(session.status === 'Canceled' ? 'The Dojo payment was cancelled' : 'The card payment was not approved');
-                }
-                if (session.status === 'Expired' || session.status === 'Authorized') {
-                    throw new Error(`Dojo returned ${session.status}. Check Dojo before retrying.`);
-                }
-                accountTerminalStatus = session.latestNotification === 'EnterPin'
-                    ? 'Waiting for the customer to enter their PIN'
-                    : 'Ask the customer to tap or insert their card';
-                if (Date.now() >= nextLeaseRefresh) {
-                    nextLeaseRefresh = Date.now() + 25_000;
-                    if (!(await refreshDojoLock(config, tillNumber, reference))) {
-                        await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-                        throw new Error('This till lost the Dojo reservation. Check Dojo before retrying.');
-                    }
-                }
-                await delay(1_200);
+            const result = await monitorDojoSession({
+                paymentIntentId,
+                terminalSessionId,
+                apiEnvironment: config.apiEnvironment,
+                retry: async () => {
+                    const retried = await retryDojoPayment(reference, terminalSessionId);
+                    terminalSessionId = retried.terminalSessionId;
+                    return terminalSessionId;
+                },
+                onDeclined: (decide) => { dojoRetryDecision = decide; },
+                onDeclineDismiss: () => { dojoRetryDecision = null; },
+                getSession: () => getDojoTerminalSessionStatus(terminalSessionId),
+                getPayment: () => getDojoPaymentIntentStatus(paymentIntentId),
+                submitSignature: (accepted) => respondToDojoSignature(terminalSessionId, accepted),
+                cancel: () => cancelDojoTerminalSession(terminalSessionId),
+                refreshLease: () => refreshDojoLock(config, tillNumber, reference),
+                isDisposed: () => !customersMounted,
+                onSignatureRequired: (decide) => {
+                    dojoSignatureDecision = decide;
+                    showDojoSignatureConfirm = true;
+                },
+                onSignatureDismiss: dismissDojoSignatureDecision,
+                onMessage: (message) => { accountTerminalStatus = message; },
+            });
+            if (result.outcome !== 'captured') {
+                await updateDojoAttempt(reference, result.outcome, {
+                    clientTransactionId: paymentIntentId,
+                    terminalSessionId,
+                    error: `Dojo status: ${result.status}`,
+                });
+                finalized = true;
+                throw new Error(result.outcome === 'cancelled' ? 'The Dojo payment was cancelled' : 'The card payment was not approved');
             }
-            await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-            throw new Error('Dojo did not return a final result. Check Dojo before retrying.');
+            const status = result.payment;
+            if (status.id !== paymentIntentId
+                || status.reference !== reference
+                || status.status !== 'Captured') {
+                throw new Error('Dojo captured a payment that does not match this account payment. Do not retry the card; check Dojo.');
+            }
+            const breakdown = getDojoPaymentBreakdown(status, amountPence, config.currency);
+            payload.tipsAmount = breakdown.tipsAmount;
+            payload.serviceChargeAmount = breakdown.serviceChargeAmount;
+            payload.cashbackAmount = breakdown.cashbackAmount;
+            const providerReference = `Dojo ${status.transactionId || paymentIntentId} [id:${paymentIntentId}]`;
+            payload.reference = providerReference;
+            approved = true;
+            await updateDojoAttempt(reference, 'approved', {
+                clientTransactionId: paymentIntentId,
+                terminalSessionId,
+                providerReference,
+                saleBundle: payload,
+            }).catch(() => undefined);
+            return providerReference;
         } catch (error) {
             if (!approved && !finalized) {
                 await updateDojoAttempt(reference, networkStarted ? 'uncertain' : 'cancelled', {
@@ -881,6 +1149,7 @@
             }
             throw error;
         } finally {
+            dismissDojoSignatureDecision();
             if (lockHeld) {
                 await releaseDojoLock(config, tillNumber, reference).catch((error) => {
                     console.warn('Could not release Dojo account-payment lock:', error);
@@ -905,6 +1174,10 @@
 
     async function saveAccountEntry() {
         if (!customerAccount || !$currentEmployee || accountSaving) return;
+        if (accountEntryMode === 'payment' && $deviceOperatingMode === 'back_office') {
+            toast('Customer payments must be taken on a Checkout Till', 'error');
+            return;
+        }
         if (accountEntryMode === 'payment' && !canTakeAccountPayment) {
             toast('Your role can no longer take customer account payments', 'error');
             return;
@@ -985,6 +1258,7 @@
                     allowCreditBalance: true,
                     reportEpoch: accountManagedReportEpoch,
                     serverDataEpoch: accountManagedServerDataEpoch,
+                    ...accountManagedCardExtras,
                 };
             }
             if (accountEntryMode === 'payment'
@@ -999,6 +1273,11 @@
                 );
                 accountManagedReportEpoch = managedAttemptPayload!.reportEpoch;
                 accountManagedServerDataEpoch = managedAttemptPayload!.serverDataEpoch;
+                accountManagedCardExtras = {
+                    tipsAmount: managedAttemptPayload!.tipsAmount || 0,
+                    serviceChargeAmount: managedAttemptPayload!.serviceChargeAmount || 0,
+                    cashbackAmount: managedAttemptPayload!.cashbackAmount || 0,
+                };
                 accountManagedCardApproved = true;
                 managedAttemptProvider = durableManagedProvider;
                 accountManagedAttemptProvider = managedAttemptProvider;
@@ -1030,6 +1309,9 @@
                     && accountManagedCardApproved,
                 reportEpoch: managedAttemptPayload?.reportEpoch,
                 serverDataEpoch: managedAttemptPayload?.serverDataEpoch,
+                tipsAmount: managedAttemptPayload?.tipsAmount || 0,
+                serviceChargeAmount: managedAttemptPayload?.serviceChargeAmount || 0,
+                cashbackAmount: managedAttemptPayload?.cashbackAmount || 0,
             });
             if (managedAttemptProvider && managedAttemptPayload) {
                 managedAttemptPayload.reference = accountReferenceDraft.trim();
@@ -1052,19 +1334,26 @@
             ];
             if (!entryAlreadyShown) accountEntryTotal += 1;
             updateCustomerAccountSummary(result.account);
+            void loadCustomerPage();
             showAccountEntry = false;
             const paymentResultMessage = result.account.balancePence > 0
                 ? `Payment recorded. ${formatMoney(result.account.balancePence)} remains owed.`
                 : result.account.balancePence < 0
                     ? `Payment recorded. The customer now has ${formatMoney(Math.abs(result.account.balancePence))} credit.`
                     : 'Payment recorded. The customer account is clear.';
+            const cashbackToGive = managedAttemptPayload?.cashbackAmount || 0;
             toast(accountEntryMode === 'payment'
-                ? paymentResultMessage
-                : 'Customer account adjustment recorded');
+                ? `${cashbackToGive > 0 ? `Give cashback ${formatMoney(cashbackToGive)}. This is cashback, not change. ` : ''}${paymentResultMessage}`
+                : 'Customer account adjustment recorded',
+                'success',
+                cashbackToGive > 0,
+                cashbackToGive > 0 ? () => { void printAccountPaymentAcknowledgement(result.entry); } : undefined,
+                { persistent: cashbackToGive > 0 },
+            );
             if (accountEntryMode === 'payment') {
                 void printAccountPaymentAcknowledgement(result.entry, true);
             }
-            if (accountEntryMode === 'payment' && accountPaymentMethod === 'cash' && isTauri()) {
+            if (accountEntryMode === 'payment' && (accountPaymentMethod === 'cash' || cashbackToGive > 0) && isTauri()) {
                 const printerConfig = getReceiptPrinterConfig($settingsDB);
                 if (printerConfig.openDrawerAfterPayment) {
                     void openCashDrawer(getCashDrawerConfig($settingsDB)).catch((drawerError) => {
@@ -1126,7 +1415,7 @@
             `Date: ${formatHistoryDate(entry.createdAt)}`,
             `Customer: ${customerName}`,
             `Method: ${entry.paymentMethod === 'card' ? 'Card' : entry.paymentMethod === 'cash' ? 'Cash' : 'Other'}`,
-            `Amount received: ${formatMoney(Math.abs(entry.amountPence))}`,
+            ...accountPaymentAmountLines(entry, formatMoney),
             `Balance after: ${formatAccountBalance(entry.balanceAfterPence)}`,
             entry.reference ? `Reference: ${entry.reference}` : '',
             entry.tillNumber ? `Till: ${entry.tillNumber}` : '',
@@ -1181,6 +1470,7 @@
         return Number.isNaN(date.getTime()) ? value : date.toLocaleString('en-GB');
     }
 </script>
+<DojoRetryDialog bind:decide={dojoRetryDecision} />
 
 <MgmtPage title="Customers">
     <button slot="actions" class="btn btn-primary" on:click={add}>
@@ -1191,9 +1481,40 @@
     </button>
 
     <div class="search-strip">
-        <div class="search-strip-intro">
-            <strong class="block text-sm font-black text-text-main">Find customers</strong>
-            <span class="mt-1 block text-xs text-text-muted">View loyalty value, Pay Later balances, and customer details.</span>
+        <div class="search-strip-intro customer-search-intro">
+            <div class="customer-search-copy">
+                <strong class="block text-sm font-black text-text-main">Find customers</strong>
+                <span class="mt-1 block text-xs text-text-muted">View loyalty value, Pay Later balances, and customer details.</span>
+            </div>
+            <div class="customer-account-views" role="group" aria-label="Customer account view">
+                <button
+                    type="button"
+                    class="customer-account-view all"
+                    class:active={customerAccountListView === 'all'}
+                    aria-pressed={customerAccountListView === 'all'}
+                    on:click={() => setCustomerAccountListView('all')}
+                >
+                    <span>
+                        <b>All customers</b>
+                        <small>Complete customer list</small>
+                    </span>
+                    <strong>{allCustomerCount}</strong>
+                </button>
+                <button
+                    type="button"
+                    class="customer-account-view outstanding"
+                    class:active={customerAccountListView === 'outstanding'}
+                    aria-pressed={customerAccountListView === 'outstanding'}
+                    title="Show customers who owe money"
+                    on:click={() => setCustomerAccountListView('outstanding')}
+                >
+                    <span>
+                        <b>Outstanding credit</b>
+                        <small>{outstandingCustomerCount} {outstandingCustomerCount === 1 ? 'customer' : 'customers'} owing</small>
+                    </span>
+                    <strong>{formatMoney(outstandingBalancePence)}</strong>
+                </button>
+            </div>
         </div>
         <div class="search-controls">
             <div class="search-primary">
@@ -1210,14 +1531,20 @@
                 />
             </div>
             <button class="btn btn-primary search-toolbar-action" disabled={customersLoading} on:click={runCustomerSearch}>Find</button>
-            <span class="search-meta">{totalCustomers} / {allCustomerCount}</span>
+            <span class="search-meta">
+                {#if customerAccountListView === 'outstanding'}
+                    {totalCustomers} / {outstandingCustomerCount} owing
+                {:else}
+                    {totalCustomers} / {allCustomerCount}
+                {/if}
+            </span>
         </div>
     </div>
 
     <div class="customer-table-wrap">
         <table class="tbl customer-table">
             <thead>
-                <tr><th>Name</th><th>Postcode</th><th>Loyalty Code</th><th>Points</th><th>Loyalty Value</th><th>Amount Owed</th><th>Actions</th></tr>
+                <tr><th>Name</th><th>Postcode</th><th>Loyalty Code</th><th>Points</th><th><span class="customer-value-label-full">Loyalty Value</span><span class="customer-value-label-short">Value</span></th><th>Amount Owed</th><th>Actions</th></tr>
             </thead>
             <tbody>
                 {#each pageCustomers as customer (customer.id)}
@@ -1252,8 +1579,8 @@
                                 </button>
                                 <button
                                     class="btn-icon act-btn points"
-                                    title={`View ${customer.name}'s loyalty history`}
-                                    aria-label={`View ${customer.name}'s loyalty history`}
+                                    title={`Open ${customer.name}'s loyalty points and history`}
+                                    aria-label={`Open ${customer.name}'s loyalty points and history`}
                                     on:click={() => openLoyalty(customer)}
                                 >
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -1292,6 +1619,10 @@
                     <tr class="empty-row"><td colspan="7">Could not load customers: {customersLoadError}</td></tr>
                 {:else if allCustomerCount === 0}
                     <tr class="empty-row"><td colspan="7">No customers yet.</td></tr>
+                {:else if totalCustomers === 0 && customerAccountListView === 'outstanding' && !appliedSearchQuery}
+                    <tr class="empty-row"><td colspan="7">No customers currently have an outstanding balance.</td></tr>
+                {:else if totalCustomers === 0 && customerAccountListView === 'outstanding'}
+                    <tr class="empty-row"><td colspan="7">No outstanding customer accounts match your search.</td></tr>
                 {:else if totalCustomers === 0}
                     <tr class="empty-row"><td colspan="7">No customers match your search.</td></tr>
                 {/if}
@@ -1328,7 +1659,7 @@
 </MgmtPage>
 
 <Modal bind:show={showForm} title={editing ? 'Edit Customer' : 'Add Customer'} width="560px" dismissDisabled={saving}>
-    <div class="form-grid">
+    <fieldset class="form-grid customer-profile-fields" disabled={saving}>
         <div class="field span-2"><label for="customer-name">Name *</label><input id="customer-name" bind:value={cur.name} placeholder="Full name" /></div>
         <div class="field"><label for="customer-phone">Phone</label><input id="customer-phone" type="tel" bind:value={cur.phone} placeholder="07..." /></div>
         <div class="field"><label for="customer-email">Email</label><input id="customer-email" type="email" bind:value={cur.email} /></div>
@@ -1338,49 +1669,198 @@
         <div class="field"><span class="field-label">Loyalty Value</span><div class="flat-input readonly-value money">{formatMoney(loyaltyCredit(cur.loyaltyPoints || 0, loyaltyConfig))}</div></div>
         <div class="field span-2"><span class="field-label">Loyalty Barcode</span><Code39Barcode value={cur.loyaltyCode || ''} /></div>
         <div class="field span-2"><label for="customer-notes">Notes</label><textarea id="customer-notes" bind:value={cur.notes}></textarea></div>
-    </div>
+    </fieldset>
     <svelte:fragment slot="footer">
         <button class="btn btn-secondary" disabled={saving} on:click={() => showForm = false}>Cancel</button>
         <button class="btn btn-primary" disabled={saving} on:click={save}>{saving ? 'Saving...' : 'Save Customer'}</button>
     </svelte:fragment>
 </Modal>
 
-<Modal bind:show={showLoyalty} title={loyaltyCustomer ? `Loyalty - ${loyaltyCustomer.name}` : 'Loyalty History'} width="620px">
+<Modal
+    bind:show={showLoyalty}
+    title={loyaltyCustomer
+        ? loyaltyView === 'adjust' ? `Adjust Points - ${loyaltyCustomer.name}` : `Loyalty - ${loyaltyCustomer.name}`
+        : 'Loyalty History'}
+    width="620px"
+    dismissDisabled={loyaltyAdjustmentSaving}
+>
+    {#if loyaltyHistoryError}<p class="loyalty-live-error" role="alert">{loyaltyHistoryError}</p>{/if}
     {#if loyaltyCustomer}
-        <div class="loyalty-summary">
-            <div><span>Current points</span><strong>{Number(loyaltyCustomer.loyaltyPoints || 0).toLocaleString()}</strong></div>
-            <div><span>Loyalty value</span><strong>{formatMoney(loyaltyCredit(loyaltyCustomer.loyaltyPoints, loyaltyConfig))}</strong></div>
-            <div><span>Loyalty code</span><strong class="mono">{loyaltyCustomer.loyaltyCode || '-'}</strong></div>
-        </div>
-        <div class="loyalty-history-heading">
-            <h3>Recent points activity</h3>
-            <span>Newest first</span>
-        </div>
-        {#if loyaltyHistoryLoading}
-            <p class="loyalty-empty">Loading loyalty history...</p>
-        {:else if loyaltyHistory.length === 0}
-            <p class="loyalty-empty">
-                {loyaltyCustomer.loyaltyPoints > 0
-                    ? 'This balance was imported or created before detailed points history was available.'
-                    : 'No points activity yet.'}
-            </p>
+        {#if loyaltyCurrentPoints < 0}<p class="loyalty-negative-note">This customer has a negative points balance, which can happen after a refund. It is shown as recorded. Use Add or Set balance to correct it to zero or more if needed.</p>{/if}
+        {#if loyaltyView === 'history'}
+            <div class="loyalty-summary">
+                <div><span>Current points</span><strong>{Number(loyaltyCustomer.loyaltyPoints || 0).toLocaleString()}</strong></div>
+                <div><span>Loyalty value</span><strong>{formatMoney(loyaltyCredit(loyaltyCustomer.loyaltyPoints, loyaltyConfig))}</strong></div>
+                <div><span>Loyalty code</span><strong class="mono">{loyaltyCustomer.loyaltyCode || '-'}</strong></div>
+            </div>
+            <div class="loyalty-history-heading">
+                <h3>Recent points activity</h3>
+                <span>Newest first</span>
+            </div>
+            {#if loyaltyHistoryLoading}
+                <p class="loyalty-empty">Loading loyalty history...</p>
+            {:else if loyaltyHistory.length === 0 && !loyaltyHistoryError}
+                <p class="loyalty-empty">
+                    {loyaltyCustomer.loyaltyPoints !== 0
+                        ? 'This balance was imported or created before detailed points history was available.'
+                        : 'No points activity yet.'}
+                </p>
+            {:else}
+                <div class="loyalty-history-list">
+                    {#each loyaltyHistory as entry (entry.id)}
+                        <article>
+                            <div>
+                                <strong>{loyaltyReason(entry.reason)}</strong>
+                                {#if manualLoyaltyReasonNote(entry.reason)}
+                                    <small class="loyalty-history-note">{manualLoyaltyReasonNote(entry.reason)}</small>
+                                {/if}
+                                <span>{formatHistoryDate(entry.createdAt)}{entry.orderNumber ? ` - Receipt ${entry.orderNumber}` : ''}</span>
+                            </div>
+                            <b class:negative={entry.pointsChange < 0}>{entry.pointsChange > 0 ? '+' : ''}{entry.pointsChange.toLocaleString()}</b>
+                        </article>
+                    {/each}
+                </div>
+            {/if}
         {:else}
-            <div class="loyalty-history-list">
-                {#each loyaltyHistory as entry (entry.id)}
-                    <article>
-                        <div>
-                            <strong>{loyaltyReason(entry.reason)}</strong>
-                            <span>{formatHistoryDate(entry.createdAt)}{entry.orderNumber ? ` - Receipt ${entry.orderNumber}` : ''}</span>
-                        </div>
-                        <b class:negative={entry.pointsChange < 0}>{entry.pointsChange > 0 ? '+' : ''}{entry.pointsChange.toLocaleString()}</b>
-                    </article>
-                {/each}
+            <div class="loyalty-adjustment-form">
+                <section class="loyalty-adjustment-current" aria-label="Current loyalty balance">
+                    <div>
+                        <span>Customer</span>
+                        <strong>{loyaltyCustomer.name}</strong>
+                        <small class="mono">{loyaltyCustomer.loyaltyCode || 'No loyalty code'}</small>
+                    </div>
+                    <div>
+                        <span>Current balance</span>
+                        <strong>{loyaltyCurrentPoints.toLocaleString()} points</strong>
+                        <small>{formatMoney(loyaltyCredit(loyaltyCurrentPoints, loyaltyConfig))} loyalty value</small>
+                    </div>
+                </section>
+
+                <fieldset class="loyalty-adjustment-fieldset">
+                    <legend>Adjustment type</legend>
+                    <div class="loyalty-adjustment-modes">
+                        <button
+                            type="button"
+                            class:active={loyaltyAdjustmentMode === 'add'}
+                            aria-pressed={loyaltyAdjustmentMode === 'add'}
+                            disabled={loyaltyAdjustmentSaving}
+                            on:click={() => selectLoyaltyAdjustmentMode('add')}
+                        >
+                            <strong>Add</strong>
+                            <small>Missing or goodwill points</small>
+                        </button>
+                        <button
+                            type="button"
+                            class:active={loyaltyAdjustmentMode === 'remove'}
+                            aria-pressed={loyaltyAdjustmentMode === 'remove'}
+                            disabled={loyaltyAdjustmentSaving || loyaltyCurrentPoints < 0}
+                            on:click={() => selectLoyaltyAdjustmentMode('remove')}
+                        >
+                            <strong>Remove</strong>
+                            <small>Correct points added by mistake</small>
+                        </button>
+                        <button
+                            type="button"
+                            class:active={loyaltyAdjustmentMode === 'set'}
+                            aria-pressed={loyaltyAdjustmentMode === 'set'}
+                            disabled={loyaltyAdjustmentSaving}
+                            on:click={() => selectLoyaltyAdjustmentMode('set')}
+                        >
+                            <strong>Set balance</strong>
+                            <small>Restore an exact balance</small>
+                        </button>
+                    </div>
+                </fieldset>
+
+                <div class="field loyalty-points-field">
+                    <label for="loyalty-adjustment-points">{loyaltyAdjustmentInputLabel}</label>
+                    <input
+                        id="loyalty-adjustment-points"
+                        type="text"
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        autocomplete="off"
+                        placeholder={loyaltyAdjustmentMode === 'set' ? 'Enter the correct total' : 'Enter whole points'}
+                        bind:value={loyaltyPointsDraft}
+                        disabled={loyaltyAdjustmentSaving}
+                        aria-describedby="loyalty-adjustment-points-help"
+                    />
+                    <small
+                        id="loyalty-adjustment-points-help"
+                        class:error={Boolean(loyaltyAdjustment.error) || (loyaltyAdjustmentAttempted && loyaltyAdjustment.enteredPoints === null)}
+                    >
+                        {loyaltyAdjustment.error
+                            || (loyaltyAdjustmentAttempted && loyaltyAdjustment.enteredPoints === null
+                                ? 'Enter the points for this adjustment'
+                                : 'Use whole points only.')}
+                    </small>
+                </div>
+
+                <div class="field loyalty-reason-field">
+                    <label for="loyalty-adjustment-reason">Reason *</label>
+                    <input
+                        id="loyalty-adjustment-reason"
+                        type="text"
+                        maxlength={MAX_CUSTOMER_LOYALTY_REASON_LENGTH}
+                        placeholder="For example: Restored after till reset"
+                        bind:value={loyaltyReasonDraft}
+                        disabled={loyaltyAdjustmentSaving}
+                        aria-describedby="loyalty-adjustment-reason-help"
+                    />
+                    <div class="loyalty-field-help" id="loyalty-adjustment-reason-help">
+                        <small class:error={Boolean(loyaltyReasonDraft) && Boolean(loyaltyAdjustmentReasonError)}>
+                            {loyaltyReasonDraft && loyaltyAdjustmentReasonError
+                                ? loyaltyAdjustmentReasonError
+                                : 'Required. This explanation will stay in the loyalty history.'}
+                        </small>
+                        <small>{loyaltyReasonDraft.length}/{MAX_CUSTOMER_LOYALTY_REASON_LENGTH}</small>
+                    </div>
+                </div>
+
+                <section
+                    class="loyalty-adjustment-preview"
+                    class:increase={loyaltyAdjustment.pointsChange > 0}
+                    class:decrease={loyaltyAdjustment.pointsChange < 0}
+                    aria-label="Loyalty adjustment preview"
+                    aria-live="polite"
+                >
+                    <div>
+                        <span>Current</span>
+                        <strong>{loyaltyCurrentPoints.toLocaleString()}</strong>
+                        <small>{formatMoney(loyaltyCredit(loyaltyCurrentPoints, loyaltyConfig))}</small>
+                    </div>
+                    <div class="loyalty-adjustment-change">
+                        <span>Change</span>
+                        <strong>{loyaltyAdjustment.enteredPoints === null ? '—' : formatSignedPoints(loyaltyAdjustment.pointsChange)}</strong>
+                        <small>points</small>
+                    </div>
+                    <div>
+                        <span>New balance</span>
+                        <strong>{loyaltyAdjustment.nextPoints.toLocaleString()}</strong>
+                        <small>{formatMoney(loyaltyCredit(loyaltyAdjustment.nextPoints, loyaltyConfig))}</small>
+                    </div>
+                </section>
+
+                <div class="loyalty-append-only-note">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7l-8-4Z"></path><path d="m9 12 2 2 4-4"></path></svg>
+                    <span>This will add a permanent correction to the loyalty history. Previous sales and points activity will not be edited.</span>
+                </div>
             </div>
         {/if}
     {/if}
     <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={loyaltyHistoryLoading} on:click={refreshLoyaltyHistory}>{loyaltyHistoryLoading ? 'Refreshing...' : 'Refresh'}</button>
-        <button class="btn btn-primary" on:click={() => showLoyalty = false}>Close</button>
+        <div class="loyalty-modal-actions">
+            {#if loyaltyView === 'history'}
+                {#if canAdjustCustomerLoyalty}
+                    <button class="btn btn-primary" disabled={loyaltyHistoryLoading || !!loyaltyHistoryError} on:click={openLoyaltyAdjustment}>Adjust Points</button>
+                {/if}
+                <button class="btn btn-secondary" disabled={loyaltyHistoryLoading} on:click={refreshLoyaltyHistory}>{loyaltyHistoryLoading ? 'Refreshing...' : 'Refresh'}</button>
+                <button class="btn btn-secondary" on:click={() => showLoyalty = false}>Close</button>
+            {:else}
+                <button class="btn btn-secondary" disabled={loyaltyAdjustmentSaving} on:click={cancelLoyaltyAdjustment}>Back</button>
+                <button class="btn btn-primary" disabled={!loyaltyAdjustmentReady} on:click={saveLoyaltyAdjustment}>{loyaltyAdjustmentSubmitLabel}</button>
+            {/if}
+        </div>
     </svelte:fragment>
 </Modal>
 
@@ -1422,15 +1902,17 @@
         </div>
 
         <div class="account-actions">
-            <button
-                class="btn btn-primary account-action"
-                disabled={!canTakeAccountPayment || !$currentShiftId || accountBalance <= 0 || accountSaving}
-                title={!$currentShiftId ? 'Open a till session to take payment' : ''}
-                on:click={() => openAccountEntry('payment')}
-            >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7h18v10H3z"></path><path d="M3 10h18M7 14h3"></path></svg>
-                Take Payment
-            </button>
+            {#if $deviceOperatingMode !== 'back_office'}
+                <button
+                    class="btn btn-primary account-action"
+                    disabled={!canTakeAccountPayment || !$currentShiftId || accountBalance <= 0 || accountSaving}
+                    title={!$currentShiftId ? 'Open a till session to take payment' : ''}
+                    on:click={() => openAccountEntry('payment')}
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7h18v10H3z"></path><path d="M3 10h18M7 14h3"></path></svg>
+                    Take Payment
+                </button>
+            {/if}
             {#if canAdjustCustomerAccount}
                 {#if accountEntryTotal === 0 && accountBalance === 0}
                     <button class="btn btn-secondary account-action" disabled={accountSaving} on:click={() => openAccountEntry('opening')}>Opening Balance</button>
@@ -1688,12 +2170,50 @@
     </svelte:fragment>
 </Modal>
 
+<ConfirmDialog
+    bind:show={showDeleteConfirm}
+    title="Delete Customer"
+    message={`Delete ${customerToDelete?.name || 'this customer'}? This cannot be undone.`}
+    confirmText="Delete Customer"
+    variant="danger"
+    on:confirm={confirmCustomerDelete}
+    on:cancel={cancelCustomerDelete}
+/>
+
+<ConfirmDialog
+    bind:show={showDojoSignatureConfirm}
+    title="Verify Customer Signature"
+    message="Compare the customer's signature with the card or merchant receipt, then accept or reject it. Dojo is still checking the payment while this dialog is open."
+    confirmText="Accept Signature"
+    cancelText="Reject Signature"
+    dismissDisabled={true}
+    on:confirm={() => finishDojoSignatureDecision(true)}
+    on:cancel={() => finishDojoSignatureDecision(false)}
+/>
+
 <style>
+    .customer-profile-fields { border:0; padding:0; margin:0; min-width:0; }
+    .loyalty-live-error { padding:10px 12px; border:1px solid var(--danger); border-radius:7px; color:var(--danger); font-size:.82rem; line-height:1.45; overflow-wrap:anywhere; }
+    .loyalty-negative-note { padding:10px 12px; border:1px solid var(--border-flat); border-radius:7px; color:var(--warning); font-size:.8rem; line-height:1.45; }
+    .customer-search-intro { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    .customer-search-copy { min-width: 0; }
+    .customer-account-views { flex: 0 0 auto; display: grid; grid-template-columns: minmax(160px, .8fr) minmax(244px, 1.2fr); gap: .45rem; }
+    .customer-account-view { min-height: 48px; padding: .4rem .65rem; display: flex; align-items: center; justify-content: space-between; gap: .65rem; color: var(--text-muted); border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); text-align: left; }
+    .customer-account-view:hover { border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .customer-account-view > span { min-width: 0; display: flex; flex-direction: column; gap: .08rem; line-height: 1.15; }
+    .customer-account-view b { color: inherit; font-size: .75rem; font-weight: 850; white-space: nowrap; }
+    .customer-account-view small { overflow: hidden; color: var(--text-muted); font-size: .62rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .customer-account-view > strong { flex: 0 0 auto; color: var(--text-main); font-size: .9rem; font-variant-numeric: tabular-nums; }
+    .customer-account-view.active { color: var(--accent-primary); border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 9%, var(--bg-card)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 40%, transparent); }
+    .customer-account-view.outstanding { color: var(--danger); }
+    .customer-account-view.outstanding > strong { color: var(--danger); }
+    .customer-account-view.outstanding.active { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--bg-card)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 36%, transparent); }
     .customer-table-wrap { min-width: 0; overflow-x: auto; }
     .customer-table { min-width: 1020px; }
+    .customer-value-label-short { display: none; }
     .customer-table tbody tr { height: 58px; }
     .customer-actions { flex-wrap: nowrap; }
-    .customer-actions .btn-icon, .customer-pagination .btn-icon { width: 42px; height: 42px; min-width: 42px; }
+    .customer-actions .btn-icon, .customer-pagination .btn-icon { width: 44px; height: 44px; min-width: 44px; }
     .customer-actions svg, .customer-pagination svg { width: 19px; height: 19px; }
     .customer-actions .points { color: var(--warning); }
     .customer-actions .account { color: var(--success); }
@@ -1719,9 +2239,51 @@
     .loyalty-history-list article { padding: .75rem .25rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-flat); }
     .loyalty-history-list article div { min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
     .loyalty-history-list article span { color: var(--text-muted); font-size: .76rem; }
+    .loyalty-history-list .loyalty-history-note { color: var(--text-main); font-size: .78rem; line-height: 1.35; overflow-wrap: anywhere; }
     .loyalty-history-list article b { color: var(--success); font-size: 1rem; }
     .loyalty-history-list article b.negative { color: var(--danger); }
     .loyalty-empty { padding: 1.5rem .5rem; color: var(--text-muted); text-align: center; }
+    .loyalty-modal-actions { width: 100%; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .65rem; }
+    .loyalty-adjustment-form { display: grid; gap: .9rem; }
+    .loyalty-adjustment-current { overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(190px, .9fr); border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-panel); }
+    .loyalty-adjustment-current > div { min-width: 0; padding: .8rem .9rem; display: flex; flex-direction: column; justify-content: center; gap: .16rem; }
+    .loyalty-adjustment-current > div + div { align-items: flex-end; border-left: 1px solid var(--border-flat); text-align: right; }
+    .loyalty-adjustment-current span, .loyalty-adjustment-preview span { color: var(--text-muted); font-size: .68rem; font-weight: 850; letter-spacing: .025em; text-transform: uppercase; }
+    .loyalty-adjustment-current strong { overflow: hidden; color: var(--text-main); font-size: .98rem; text-overflow: ellipsis; white-space: nowrap; }
+    .loyalty-adjustment-current small { overflow: hidden; color: var(--text-muted); font-size: .72rem; text-overflow: ellipsis; white-space: nowrap; }
+    .loyalty-adjustment-fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .loyalty-adjustment-fieldset legend { margin-bottom: .45rem; color: var(--text-muted); font-size: .75rem; font-weight: 800; text-transform: uppercase; }
+    .loyalty-adjustment-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; }
+    .loyalty-adjustment-modes button { min-width: 0; min-height: 62px; padding: .55rem .65rem; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: .12rem; color: var(--text-main); border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-panel); text-align: left; cursor: pointer; }
+    .loyalty-adjustment-modes button:hover:not(:disabled) { border-color: var(--accent-primary); background: var(--bg-card-hover); }
+    .loyalty-adjustment-modes button.active { color: var(--accent-primary); border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-card)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-primary) 45%, transparent); }
+    .loyalty-adjustment-modes button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent-primary) 45%, transparent); outline-offset: 2px; }
+    .loyalty-adjustment-modes button:disabled { opacity: .65; cursor: default; }
+    .loyalty-adjustment-modes strong { font-size: .82rem; }
+    .loyalty-adjustment-modes small { color: var(--text-muted); font-size: .65rem; line-height: 1.25; }
+    .loyalty-points-field, .loyalty-reason-field { margin: 0; }
+    .loyalty-points-field input { min-height: 50px; font-size: 1.15rem; font-weight: 850; font-variant-numeric: tabular-nums; }
+    .loyalty-points-field > small { color: var(--text-muted); font-size: .68rem; }
+    .loyalty-points-field > small.error, .loyalty-field-help small.error { color: var(--danger); }
+    .loyalty-field-help { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; color: var(--text-muted); }
+    .loyalty-field-help small { font-size: .68rem; line-height: 1.35; }
+    .loyalty-field-help small:first-child { min-width: 0; }
+    .loyalty-field-help small:last-child { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+    .loyalty-adjustment-preview { overflow: hidden; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-panel); }
+    .loyalty-adjustment-preview > div { min-width: 0; padding: .7rem .75rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .15rem; text-align: center; }
+    .loyalty-adjustment-preview > div + div { border-left: 1px solid var(--border-flat); }
+    .loyalty-adjustment-preview strong { color: var(--text-main); font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+    .loyalty-adjustment-preview small { color: var(--text-muted); font-size: .7rem; }
+    .loyalty-adjustment-preview.increase .loyalty-adjustment-change strong { color: var(--success); }
+    .loyalty-adjustment-preview.decrease .loyalty-adjustment-change strong { color: var(--danger); }
+    .loyalty-append-only-note { padding: .65rem .75rem; display: flex; align-items: flex-start; gap: .55rem; color: var(--text-muted); font-size: .72rem; line-height: 1.4; border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border-flat)); border-radius: .45rem; background: color-mix(in srgb, var(--warning) 7%, var(--bg-card)); }
+    .loyalty-append-only-note svg { width: 19px; height: 19px; flex: 0 0 19px; color: var(--warning); }
+    :global(.back-office-route) .loyalty-adjustment-form { gap: .65rem; }
+    :global(.back-office-route) .loyalty-adjustment-current > div { padding: .58rem .7rem; }
+    :global(.back-office-route) .loyalty-adjustment-modes button { min-height: 48px; padding: .4rem .55rem; }
+    :global(.back-office-route) .loyalty-points-field input { min-height: 40px; }
+    :global(.back-office-route) .loyalty-adjustment-preview > div { padding: .52rem .6rem; }
+    :global(.back-office-route) .loyalty-append-only-note { padding: .5rem .65rem; }
     .account-loading { min-height: 220px; display: grid; place-items: center; color: var(--text-muted); font-weight: 800; }
     .account-hero { overflow: hidden; display: grid; grid-template-columns: minmax(210px, .72fr) minmax(0, 1.28fr); border: 1px solid var(--border-flat); border-radius: .7rem; background: var(--bg-panel); }
     .account-hero > div:first-child { padding: 1.05rem 1.15rem; display: flex; flex-direction: column; justify-content: center; border-right: 1px solid var(--border-flat); }
@@ -1818,9 +2380,17 @@
         .customer-table td:nth-child(3) { display: none; }
         .customer-table th,
         .customer-table td { padding-left: .5rem; padding-right: .5rem; }
-        .customer-actions .btn-icon { width: 38px; height: 38px; min-width: 38px; }
+        .customer-actions { gap: .3rem; }
+        .customer-actions .btn-icon { width: 44px; height: 44px; min-width: 44px; }
         .account-settings-grid { grid-template-columns: minmax(0, 1fr) minmax(160px, .65fr); }
         .account-save-settings { grid-column: 1 / -1; }
+    }
+    @media (max-width: 760px) {
+        .customer-search-intro { align-items: stretch; flex-direction: column; }
+        .customer-account-views { width: 100%; grid-template-columns: minmax(104px, .7fr) minmax(0, 1.3fr); }
+    }
+    @media (max-width: 480px) {
+        .customer-account-views { grid-template-columns: 1fr; }
     }
     @media (max-width: 600px) {
         .loyalty-summary { grid-template-columns: 1fr; }
@@ -1835,5 +2405,14 @@
         .account-entry-list article { align-items: flex-start; }
         .account-entry-side { flex-direction: column; align-items: flex-end; }
         .account-history-limit { flex-direction: column; }
+    }
+    @media (max-width: 480px) {
+        .loyalty-adjustment-current { grid-template-columns: 1fr; }
+        .loyalty-adjustment-current > div + div { align-items: flex-start; border-top: 1px solid var(--border-flat); border-left: 0; text-align: left; }
+        .loyalty-adjustment-modes { grid-template-columns: 1fr; }
+        .loyalty-adjustment-modes button { min-height: 48px; }
+        .loyalty-adjustment-preview > div { padding-inline: .4rem; }
+        .loyalty-adjustment-preview strong { font-size: .9rem; }
+        .loyalty-modal-actions .btn { flex: 1 1 auto; }
     }
 </style>

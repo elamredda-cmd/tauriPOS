@@ -6,6 +6,7 @@ import {
 } from '$lib/stores/database';
 import { connectionState } from '$lib/stores/connection';
 import {
+    mysqlEnrichDojoTerminalAccounting,
     mysqlGetOperationalPaymentTerminalAttempts,
     mysqlGetPaymentTerminalAttempt,
     mysqlPreparePaymentTerminalAttempt,
@@ -16,7 +17,12 @@ import {
 } from '$lib/stores/mysql';
 import { getDb as getSqliteDb } from '$lib/stores/sqlite';
 import {
+    assertTerminalAccountingEnrichment,
+    isTerminalAttemptTransitionAllowed,
+    TERMINAL_PAYMENT_EXTRA_FIELDS,
+    terminalAttemptStateStrength,
     terminalAttemptUpdatePredecessors,
+    type TerminalPaymentExtras,
     type TerminalAttemptState,
 } from '$lib/terminalAttemptState';
 
@@ -41,6 +47,9 @@ export interface CustomerAccountPaymentAttemptPayload {
     allowCreditBalance: true;
     reportEpoch?: string;
     serverDataEpoch?: string;
+    tipsAmount?: number;
+    serviceChargeAmount?: number;
+    cashbackAmount?: number;
 }
 
 export type TerminalAttemptPayload = SaleBundle | CustomerAccountPaymentAttemptPayload;
@@ -60,6 +69,8 @@ export interface TerminalPaymentAttempt {
     status: TerminalAttemptStatus;
     saleBundle: TerminalAttemptPayload;
     providerReference: string;
+    /** Set only by the native, PIN-verified expiry review. Never part of an ordinary update. */
+    operatorResolution?: string;
     error: string;
     tillId: string;
     createdAt: string;
@@ -172,6 +183,7 @@ function normalizeAttempt(row: any): TerminalPaymentAttempt {
         status: String(row.status || '') as TerminalAttemptStatus,
         saleBundle: payload,
         providerReference: String(row.providerReference || ''),
+        operatorResolution: String(row.operatorResolution || ''),
         error: String(row.error || ''),
         tillId: String(row.tillId || ''),
         createdAt: String(row.createdAt || ''),
@@ -280,7 +292,25 @@ export async function preparePaymentTerminalAttempt<T extends TerminalPaymentAtt
                 requireLiveServerDataEpoch: true,
             }),
         };
-        const prepared = await mysqlPreparePaymentTerminalAttempt(serializeAttempt(durableAttempt));
+        let prepared: MysqlPaymentTerminalAttempt;
+        try {
+            prepared = await mysqlPreparePaymentTerminalAttempt(serializeAttempt(durableAttempt));
+        } catch (error) {
+            if (/uq_payment_terminal_active/i.test(String(error))) {
+                // The unique active key is an intentional financial safety
+                // barrier. Explain the existing work instead of showing SQL
+                // internals or suggesting another charge.
+                const active = await mysqlGetOperationalPaymentTerminalAttempts(attempt.provider)
+                    .then((rows) => rows.find((row) => row.terminalKey === attempt.terminalKey))
+                    .catch(() => undefined);
+                const providerName = attempt.provider === 'dojo' ? 'Dojo' : 'SumUp';
+                const progress = active && ['approved', 'commit_failed', 'completion_pending'].includes(active.status)
+                    ? 'An earlier payment was approved and its sale is still being saved.'
+                    : 'An earlier payment is still being processed or its result is being checked.';
+                throw new Error(`${providerName} terminal busy. ${progress} Wait for recovery to finish and check the original payment before trying again. No new payment was sent.`);
+            }
+            throw error;
+        }
         // The shared server's timestamps are the only safe basis for takeover
         // across tills whose Windows clocks may disagree.
         localAttempt = normalizeAttempt(prepared);
@@ -362,14 +392,21 @@ export async function updatePaymentTerminalAttempt(
                     ...values,
                     error: `Ledger committed, but the shared journal rejected completion from ${remote.attempt.status}`,
                 });
+                if (pending.attempt.status === 'completed') {
+                    throw new Error('The sale is saved locally, but shared terminal completion has not been acknowledged');
+                }
                 return pending.attempt;
             }
             return (await updateLocalAttempt(provider, id, 'completed', values)).attempt;
         } catch (error) {
-            return (await updateLocalAttempt(provider, id, 'completion_pending', {
+            const pending = await updateLocalAttempt(provider, id, 'completion_pending', {
                 ...values,
                 error: `Ledger committed; shared completion is pending: ${String(error)}`,
-            })).attempt;
+            });
+            // A final local row cannot be downgraded. Returning that row here
+            // would falsely tell recovery that MariaDB released its active key.
+            if (pending.attempt.status === 'completed') throw error;
+            return pending.attempt;
         }
     }
 
@@ -382,6 +419,179 @@ export async function updatePaymentTerminalAttempt(
         remoteValues,
     );
     return cacheRemoteAttempt(remote.attempt);
+}
+
+function assertSameTerminalAttemptProof(
+    local: TerminalPaymentAttempt,
+    remote: MysqlPaymentTerminalAttempt,
+): void {
+    if (remote.id !== local.id
+        || remote.provider !== local.provider
+        || remote.terminalKey !== local.terminalKey
+        || remote.operationKind !== local.operationKind
+        || remote.amount !== local.amount
+        || Number(remote.expectedProviderAmount || remote.amount) !== local.expectedProviderAmount
+        || remote.currency.toUpperCase() !== local.currency.toUpperCase()) {
+        throw new Error('The shared terminal recovery journal does not match the approved payment; administrator review is required');
+    }
+    for (const key of ['clientTransactionId', 'terminalSessionId', 'providerReference'] as const) {
+        if (remote[key] && local[key] && remote[key] !== local[key]) {
+            throw new Error('The shared terminal recovery journal has different provider evidence; administrator review is required');
+        }
+    }
+    if (remote.status === 'failed' || remote.status === 'cancelled') {
+        throw new Error('The shared terminal journal has a final failure conflicting with local approval; administrator review is required');
+    }
+    if (['approved', 'commit_failed', 'completion_pending', 'completed'].includes(remote.status)) {
+        const remotePayload = JSON.parse(remote.saleBundle) as TerminalAttemptPayload;
+        const remotePayment = isCustomerAccountPaymentPayload(remotePayload) ? remotePayload : remotePayload.payment;
+        const localPayment = isCustomerAccountPaymentPayload(local.saleBundle) ? local.saleBundle : local.saleBundle.payment;
+        for (const field of TERMINAL_PAYMENT_EXTRA_FIELDS) {
+            // Missing legacy fields carry no recorded amount. Once shared
+            // approval explicitly records an amount (including zero), stronger
+            // local state must not replace it with conflicting financial proof.
+            if (!Object.prototype.hasOwnProperty.call(remotePayment, field)) continue;
+            const recorded = remotePayment[field];
+            const proposed = Object.prototype.hasOwnProperty.call(localPayment, field) ? localPayment[field] : 0;
+            if (!Number.isSafeInteger(recorded) || Number(recorded) < 0 || proposed !== recorded) {
+                throw new Error('The shared approved terminal payment has conflicting extra amounts; administrator review is required');
+            }
+        }
+    }
+}
+
+/**
+ * Repair a lost shared approval acknowledgement without weakening normal
+ * state transitions. Only a recovery worker holding the terminal lease may
+ * replay durable local approval through the missing intermediate state.
+ */
+export async function acknowledgeApprovedPaymentTerminalAttempt(
+    attempt: TerminalPaymentAttempt,
+    assertLeaseHeld: () => Promise<void>,
+): Promise<TerminalPaymentAttempt> {
+    if (!['approved', 'commit_failed', 'completion_pending', 'completed'].includes(attempt.status)) {
+        throw new Error('Only durable approved terminal work can acknowledge shared approval');
+    }
+    if (!isMultiMode()) return attempt;
+    await assertLeaseHeld();
+    let remote = await mysqlGetPaymentTerminalAttempt(attempt.id, attempt.provider);
+    if (!remote) throw new Error(`Shared ${attempt.provider} recovery attempt ${attempt.id} is missing`);
+    assertSameTerminalAttemptProof(attempt, remote);
+    const requestedStrength = terminalAttemptStateStrength(attempt.status);
+    const sharedPayload = structuredClone(attempt.saleBundle);
+    if (['approved', 'commit_failed', 'completion_pending', 'completed'].includes(remote.status)) {
+        const remotePayload = JSON.parse(remote.saleBundle) as TerminalAttemptPayload;
+        const remotePayment = isCustomerAccountPaymentPayload(remotePayload) ? remotePayload : remotePayload.payment;
+        const sharedPayment = isCustomerAccountPaymentPayload(sharedPayload) ? sharedPayload : sharedPayload.payment;
+        for (const field of TERMINAL_PAYMENT_EXTRA_FIELDS) {
+            // A missing local legacy field may match a recorded zero, but keep
+            // that explicit shared zero instead of erasing its proof metadata.
+            if (!Object.prototype.hasOwnProperty.call(sharedPayment, field)
+                && Object.prototype.hasOwnProperty.call(remotePayment, field)) {
+                sharedPayment[field] = remotePayment[field];
+            }
+        }
+    }
+    const values: MysqlPaymentTerminalAttemptUpdate = {
+        clientTransactionId: attempt.clientTransactionId,
+        terminalSessionId: attempt.terminalSessionId,
+        providerReference: attempt.providerReference,
+        saleBundle: JSON.stringify(sharedPayload),
+        error: attempt.error,
+    };
+    if (terminalAttemptStateStrength(remote.status) < requestedStrength) {
+        if (!attempt.clientTransactionId || !attempt.providerReference) {
+            throw new Error('Local approved terminal work has no complete provider evidence; administrator review is required');
+        }
+        const stages: TerminalAttemptStatus[] = isTerminalAttemptTransitionAllowed(remote.status, attempt.status)
+            ? [attempt.status]
+            : ['approved', attempt.status];
+        for (const status of stages) {
+            if (terminalAttemptStateStrength(remote.status) >= requestedStrength) break;
+            if (!isTerminalAttemptTransitionAllowed(remote.status, status)) {
+                throw new Error(`Shared terminal approval cannot advance from ${remote.status}; administrator review is required`);
+            }
+            await assertLeaseHeld();
+            const acknowledged = await mysqlUpdatePaymentTerminalAttempt(attempt.id, attempt.provider, status, values);
+            remote = acknowledged.attempt;
+            assertSameTerminalAttemptProof(attempt, remote);
+            if (terminalAttemptStateStrength(remote.status) < terminalAttemptStateStrength(status)) {
+                throw new Error(`The shared terminal journal did not acknowledge ${status}; recovery remains pending`);
+            }
+        }
+    }
+    // Inspect the actual shared result before the monotonic local merge: a
+    // stronger local completed row is not proof of a successful server ACK.
+    if (terminalAttemptStateStrength(remote.status) < requestedStrength) {
+        throw new Error('Shared terminal completion has not been acknowledged; recovery remains pending');
+    }
+    return cacheRemoteAttempt(remote);
+}
+
+export function withTerminalPaymentExtras(
+    payload: TerminalAttemptPayload,
+    extras: TerminalPaymentExtras,
+): TerminalAttemptPayload {
+    return isCustomerAccountPaymentPayload(payload)
+        ? { ...payload, ...extras }
+        : { ...payload, payment: { ...payload.payment, ...extras } };
+}
+
+/** Persist newly verified legacy extras before any ledger write, using exact-payload CAS. */
+export async function persistVerifiedDojoPaymentAccounting(
+    attempt: TerminalPaymentAttempt,
+    extras: TerminalPaymentExtras,
+    assertLeaseHeld: () => Promise<void>,
+): Promise<TerminalPaymentAttempt> {
+    if (attempt.provider !== 'dojo' || attempt.operationKind === 'refund'
+        || !['approved', 'commit_failed', 'completion_pending'].includes(attempt.status)) {
+        throw new Error('Only pending approved Dojo sales can reconcile terminal accounting');
+    }
+    const enriched = withTerminalPaymentExtras(attempt.saleBundle, extras);
+    const enrichedJson = JSON.stringify(enriched);
+    assertTerminalAccountingEnrichment(JSON.stringify(attempt.saleBundle), enrichedJson);
+    if (enrichedJson === JSON.stringify(attempt.saleBundle)) return attempt;
+    const db = await getSqliteDb();
+    const localRows = await db.select<any[]>(
+        `SELECT * FROM payment_terminal_attempts WHERE id = ? AND provider = 'dojo' LIMIT 1`, [attempt.id],
+    );
+    const local = localRows[0];
+    if (!local || !['approved', 'commit_failed', 'completion_pending'].includes(local.status)) {
+        throw new Error('Local terminal accounting changed during reconciliation; recovery remains pending');
+    }
+    assertTerminalAccountingEnrichment(String(local.saleBundle), enrichedJson);
+    if (isMultiMode()) {
+        await assertLeaseHeld();
+        const remote = await mysqlGetPaymentTerminalAttempt(attempt.id, 'dojo');
+        if (!remote) throw new Error('The shared Dojo recovery journal is missing');
+        assertSameTerminalAttemptProof({ ...attempt, saleBundle: enriched }, remote);
+        if (remote.status === 'completed') {
+            // Completed ledgers must not be retroactively rewritten. Missing
+            // zero fields are harmless, but unrecorded collections need review.
+            const payload = JSON.parse(remote.saleBundle) as TerminalAttemptPayload;
+            const payment = isCustomerAccountPaymentPayload(payload) ? payload : payload.payment;
+            if (Object.entries(extras).some(([field, amount]) => Number((payment as any)[field] || 0) !== amount)) {
+                throw new Error('The completed shared payment has different extra amounts; administrator review is required');
+            }
+            return cacheRemoteAttempt(remote);
+        }
+        const remoteEnriched = JSON.stringify(withTerminalPaymentExtras(JSON.parse(remote.saleBundle), extras));
+        await assertLeaseHeld();
+        await mysqlEnrichDojoTerminalAccounting(remote, remoteEnriched);
+    }
+    await assertLeaseHeld();
+    await db.execute(
+        `UPDATE payment_terminal_attempts SET saleBundle = ?
+         WHERE id = ? AND provider = 'dojo' AND status = ? AND saleBundle = ?`,
+        [enrichedJson, attempt.id, local.status, local.saleBundle],
+    );
+    const rows = await db.select<any[]>(
+        `SELECT * FROM payment_terminal_attempts WHERE id = ? AND provider = 'dojo' LIMIT 1`, [attempt.id],
+    );
+    if (!rows[0] || rows[0].saleBundle !== enrichedJson || rows[0].status !== local.status) {
+        throw new Error('Local terminal accounting was not acknowledged; recovery remains pending');
+    }
+    return normalizeAttempt(rows[0]);
 }
 
 function sqliteTerminalAttemptStrength(column: string): string {
@@ -407,8 +617,8 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
         `INSERT INTO payment_terminal_attempts
             (id, provider, terminalKey, clientTransactionId, terminalSessionId,
              operationKind, amount, expectedProviderAmount, currency, status,
-             saleBundle, providerReference, error, tillId, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             saleBundle, providerReference, error, tillId, createdAt, updatedAt, operatorResolution)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             clientTransactionId = CASE
                 WHEN ${preferRemote} AND excluded.clientTransactionId <> '' THEN excluded.clientTransactionId
@@ -426,6 +636,8 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
                 ELSE excluded.providerReference END,
             error = CASE WHEN ${remoteStrength} >= ${currentStrength}
                          THEN excluded.error ELSE payment_terminal_attempts.error END,
+            operatorResolution = CASE WHEN excluded.operatorResolution <> '' THEN excluded.operatorResolution
+                                      ELSE payment_terminal_attempts.operatorResolution END,
             tillId = CASE WHEN payment_terminal_attempts.tillId = '' THEN excluded.tillId
                           ELSE payment_terminal_attempts.tillId END,
             -- Remote timestamps are generated by MariaDB and deliberately win
@@ -449,6 +661,7 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
             remote.tillId,
             remote.createdAt,
             remote.updatedAt,
+            remote.operatorResolution || '',
         ],
     );
     const rows = await db.select<any[]>(

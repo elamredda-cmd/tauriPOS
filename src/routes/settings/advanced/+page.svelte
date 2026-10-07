@@ -6,6 +6,7 @@
     import { revealItemInDir } from '@tauri-apps/plugin-opener';
     import { get } from 'svelte/store';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { currentEmployee } from '$lib/stores/session';
     import { storeDB, now, type Store } from '$lib/stores/db';
@@ -73,6 +74,8 @@
     let automaticSetupBackupDirectory = '';
     let latestAutomaticBackupPath: string | null = null;
     let automaticBackupStatus = '';
+    let showDismissWarningConfirm = false;
+    let conflictPendingDismiss: SyncConflict | null = null;
     const RESTORE_NOTICE_KEY = 'pos_restore_notice';
 
     function cleanError(error: unknown): string {
@@ -341,14 +344,15 @@
     async function dismissConflict(conflict: SyncConflict) {
         const retainedLocalSale = isRetainedLocalSaleConflict(conflict);
         if (retainedLocalSale) {
-            const reference = syncConflictSaleReference(conflict);
-            const confirmed = window.confirm(
-                `Dismiss the warning for ${reference}?\n\n` +
-                'This does not upload the sale and does not remove it from this till. ' +
-                'The local sale remains available for administrator review.',
-            );
-            if (!confirmed) return;
+            conflictPendingDismiss = conflict;
+            showDismissWarningConfirm = true;
+            return;
         }
+        await performConflictDismiss(conflict);
+    }
+
+    async function performConflictDismiss(conflict: SyncConflict) {
+        const retainedLocalSale = isRetainedLocalSaleConflict(conflict);
         await dismissSyncConflict(conflict.id, {
             acknowledgeRetainedLocalSale: retainedLocalSale,
         });
@@ -356,6 +360,13 @@
         conflictStatus = retainedLocalSale
             ? 'Warning dismissed. The sale remains stored locally and was not uploaded.'
             : 'Conflict dismissed on this till.';
+    }
+
+    async function confirmRetainedSaleDismiss() {
+        const conflict = conflictPendingDismiss;
+        showDismissWarningConfirm = false;
+        conflictPendingDismiss = null;
+        if (conflict) await performConflictDismiss(conflict);
     }
 
     async function saveTaxMode() {
@@ -425,14 +436,14 @@
     async function forcePush() {
         if (!pushConfirmed) {
             pushConfirmed = true;
-            pushStatus = 'Click again to push all local data to MariaDB.';
+            pushStatus = 'Click again to push local shop data to MariaDB. Existing server customers, loyalty points, loyalty history, account balances and account statements are preserved.';
             return;
         }
         busy = true;
         try {
             pushStatus = 'Pushing local data...';
             await forcePushToServer();
-            pushStatus = 'Local data pushed to MariaDB.';
+            pushStatus = 'Local shop data pushed to MariaDB. Server customers, loyalty points and history, and customer account balances and history were preserved.';
         } catch (error) {
             pushStatus = `Push failed: ${error}`;
         } finally {
@@ -455,7 +466,7 @@
                 'confirm',
                 0,
                 'Ready to restore latest backup',
-                `Click restore again to use the full backup from ${fullBackupDateTime(latest)}. File: ${latest}`
+                `Click restore again to use the full backup from ${fullBackupDateTime(latest)}. Customer loyalty points and money owed will return to the balances recorded in that backup; later points, charges and repayments are not retained. File: ${latest}`
             );
             restoreStatus = `Click again to restore the backup from ${fullBackupDateTime(latest)}.`;
             return;
@@ -486,7 +497,7 @@
                 'confirm',
                 0,
                 'Ready to restore selected file',
-                `Click Restore From File again to replace this till's local data with ${path}`
+                `Click Restore From File again to replace this till's local data with ${path}. Customer loyalty points and account debt will return to the selected database's backup date, including its charges and repayments. Changes made after that backup will not be retained.`
             );
             return;
         }
@@ -541,7 +552,7 @@
 
     async function purgeTransactions() {
         if (!purgeResponsibilityAccepted) {
-            purgeStatus = 'Confirm that you understand this permanently deletes sales history. Customer account balances and statements are kept.';
+            purgeStatus = 'Confirm that you understand this permanently deletes sales history. Customer loyalty points, loyalty history, account balances and statements are kept.';
             return;
         }
         if (!purgeFinalConfirmation) {
@@ -565,8 +576,8 @@
 
         busy = false;
         purgeProgressState = 'success';
-        purgeStatus = 'Sales history deleted. Customer account balances and statements were preserved. Returning to the main POS...';
-        toast('Sales history deleted; customer accounts were preserved', 'success');
+        purgeStatus = 'Sales history deleted. Customer loyalty points, loyalty history, account balances and statements were preserved. Returning to the main POS...';
+        toast('Sales history deleted; customer points, loyalty history and accounts were preserved', 'success');
         await new Promise(resolve => setTimeout(resolve, 900));
         try {
             await goto('/', { replaceState: true, invalidateAll: true });
@@ -621,6 +632,9 @@
                     <h3 class="settings-section-title">Backup and Restore</h3>
                     <p class="text-text-muted">
                         Manual full backups include the complete local database, including sales and orders.
+                    </p>
+                    <p class="text-text-muted">
+                        Restoring replaces current data with the backup. Customer loyalty points and money owed return to the balances at the backup date; later points adjustments, Pay Later charges and repayments are not kept.
                     </p>
                 </div>
                 <div class="backup-state" class:has-backup={Boolean(latestBackupPath)}>
@@ -734,7 +748,7 @@
                         {restoreFileConfirmed ? 'Confirm Restore From File' : 'Restore From File'}
                     </button>
                 </div>
-                <small>The selected database is checked before the current till database is closed or replaced.</small>
+                <small>The selected database is checked before the current till database is closed or replaced. Restoring also replaces customer points and account debt with the values from that backup date.</small>
             </details>
             {#if restoreProgressState !== 'idle'}
                 <div
@@ -789,7 +803,7 @@
                     </article>
                     <article class="danger-card">
                         <strong>Push Local Data</strong>
-                        <p>Upload this till’s complete local shop data to MariaDB.</p>
+                        <p>Upload this till’s local shop data to MariaDB. Server customer profiles, loyalty points and history, and customer account balances and statements are preserved rather than replaced by this till’s cache.</p>
                         <button class="btn btn-danger" disabled={busy} on:click={forcePush}>Push Local Data to Server</button>
                         {#if pushStatus}<small>{pushStatus}</small>{/if}
                     </article>
@@ -850,7 +864,7 @@
                 This permanently removes sales and transaction history from this database and every connected till. Are you sure you want to continue?
             </p>
             <p class="purge-warning">
-                Customer account balances, Pay Later charges, repayments, and account statements are preserved so deleting receipts can never erase money owed.
+                Customer loyalty points and their loyalty history are kept. Customer account balances, Pay Later charges, repayments and account statements are also kept. Deleting receipts does not reset points or erase money owed.
             </p>
             {#if $connectionState.mode === 'multi' && !$connectionState.mysqlOnline}
                 <p class="purge-warning">MariaDB must be online so every till receives the deletion instruction.</p>
@@ -872,7 +886,7 @@
                     purgeFinalConfirmation = false;
                 }}
             >
-                <span class="font-bold">I understand sales history is permanently deleted from all tills, while customer account records are kept.</span>
+                <span class="font-bold">I understand sales history is permanently deleted from all tills, while customer loyalty points, loyalty history and customer account records are kept.</span>
                 <b class="shrink-0 text-xs uppercase tracking-[0.12em]">{purgeResponsibilityAccepted ? 'Accepted' : 'Required'}</b>
             </button>
             <button
@@ -886,6 +900,16 @@
         </section>
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showDismissWarningConfirm}
+    title="Dismiss Retained Sale Warning"
+    message={`Dismiss the warning for ${conflictPendingDismiss ? syncConflictSaleReference(conflictPendingDismiss) : 'this sale'}? This does not upload or remove the sale. It remains on this till for administrator review.`}
+    confirmText="Dismiss Warning"
+    variant="danger"
+    on:confirm={confirmRetainedSaleDismiss}
+    on:cancel={() => conflictPendingDismiss = null}
+/>
 
 {#if purgeProgressState !== 'idle'}
     <div class="purge-progress-overlay" role="status" aria-live="assertive" aria-busy={purgeProgressState === 'deleting'}>
@@ -919,6 +943,8 @@
     .status-card i.online { background: var(--success); box-shadow: 0 0 10px var(--success); }
     .status-card div { display: flex; flex-direction: column; }
     .status-card span, article p, article small { color: var(--text-muted); }
+    .button-row :global(.btn) { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .danger-card :global(.btn) { max-width: 100%; white-space: normal; }
     .button-row { display: flex; flex-wrap: wrap; gap: .65rem; }
     .backup-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
     .backup-heading .settings-section-title { margin-bottom: .35rem; }

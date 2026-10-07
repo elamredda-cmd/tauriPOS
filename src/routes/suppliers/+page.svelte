@@ -13,7 +13,8 @@
     function add() { cur = { id:uuid(), name:'', contactName:'', phone:'', email:'', address:'', notes:'', createdAt:now() }; editing=false; show=true; }
     function edit(s: Supplier) { cur={...s}; editing=true; show=true; }
     async function save() {
-        if (!cur.name) { alert('Name is required'); return; }
+        if (!cur.name?.trim()) { toast('Company name is required', 'error'); return; }
+        cur.name = cur.name.trim();
         const record = cur as Supplier;
         try { await upsert('suppliers', record); }
         catch (e) { console.error(e); toast('Failed to save supplier', 'error'); return; }
@@ -39,24 +40,29 @@
 
 <MgmtPage title="Suppliers">
     <button slot="actions" class="btn btn-primary" on:click={add}><Plus size={19} strokeWidth={2.5} />Add Supplier</button>
-    <table class="tbl">
-        <thead><tr><th>Company</th><th>Contact</th><th>Phone</th><th>Email</th><th>Actions</th></tr></thead>
-        <tbody>
-            {#each $suppliersDB as s}
-            <tr>
-                <td class="font-semibold">{s.name}</td>
-                <td>{s.contactName || '-'}</td>
-                <td class="mono">{s.phone || '-'}</td>
-                <td>{s.email || '-'}</td>
-                <td><div class="act-row">
-                    <button class="btn-icon act-btn" title={`Edit ${s.name}`} aria-label={`Edit ${s.name}`} on:click={() => edit(s)}><Pencil size={16} /></button>
-                    <button class="btn-icon act-btn danger" title={`Delete ${s.name}`} aria-label={`Delete ${s.name}`} on:click={() => requestDelete(s)}><Trash2 size={16} /></button>
-                </div></td>
-            </tr>
-            {/each}
-            {#if $suppliersDB.length===0}<tr class="empty-row"><td colspan="5">No suppliers yet.</td></tr>{/if}
-        </tbody>
-    </table>
+    <div class="supplier-table-wrap">
+        <table class="tbl supplier-table">
+            <thead><tr><th>Company</th><th>Contact</th><th class="supplier-phone-column">Phone</th><th class="supplier-email-column">Email</th><th class="supplier-actions-column">Actions</th></tr></thead>
+            <tbody>
+                {#each $suppliersDB as s}
+                <tr>
+                    <td class="supplier-text-cell font-semibold">
+                        <span title={s.name}>{s.name}</span>
+                        <small class="supplier-email-compact" title={s.email || 'No email address'}>{s.email || 'No email address'}</small>
+                    </td>
+                    <td class="supplier-text-cell"><span title={s.contactName || 'No contact person'}>{s.contactName || '-'}</span></td>
+                    <td class="supplier-phone-column mono" title={s.phone || 'No phone number'}>{s.phone || '-'}</td>
+                    <td class="supplier-email-column supplier-text-cell"><span title={s.email || 'No email address'}>{s.email || '-'}</span></td>
+                    <td class="supplier-actions-column"><div class="supplier-action-row">
+                        <button class="btn-icon act-btn" title={`Edit ${s.name}`} aria-label={`Edit ${s.name}`} on:click={() => edit(s)}><Pencil size={16} /></button>
+                        <button class="btn-icon act-btn danger" title={`Delete ${s.name}`} aria-label={`Delete ${s.name}`} on:click={() => requestDelete(s)}><Trash2 size={16} /></button>
+                    </div></td>
+                </tr>
+                {/each}
+                {#if $suppliersDB.length===0}<tr class="empty-row"><td colspan="5">No suppliers yet.</td></tr>{/if}
+            </tbody>
+        </table>
+    </div>
 </MgmtPage>
 
 <Modal bind:show title={editing?'Edit Supplier':'Add Supplier'} width="560px">
@@ -83,3 +89,105 @@
     on:confirm={del}
     on:cancel={() => supplierToDelete = null}
 />
+
+<style>
+    .supplier-table-wrap {
+        min-width: 0;
+        width: 100%;
+        height: 100%;
+        overflow: auto;
+        overscroll-behavior: contain;
+    }
+
+    .supplier-table {
+        width: 100%;
+        min-width: 680px;
+        table-layout: fixed;
+    }
+
+    .supplier-table th:nth-child(1) { width: 25%; }
+    .supplier-table th:nth-child(2) { width: 20%; }
+    .supplier-phone-column { width: 130px; }
+    .supplier-actions-column { width: 116px; }
+
+    .supplier-text-cell > span,
+    td.supplier-phone-column {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .supplier-email-compact {
+        display: none;
+    }
+
+    th.supplier-actions-column,
+    td.supplier-actions-column {
+        position: sticky;
+        right: 0;
+        padding-inline: .5rem !important;
+        background: var(--bg-card);
+        box-shadow: -1px 0 0 var(--border-flat);
+    }
+
+    th.supplier-actions-column {
+        z-index: 8;
+    }
+
+    td.supplier-actions-column {
+        z-index: 3;
+    }
+
+    .supplier-table tbody tr:hover td.supplier-actions-column {
+        background: var(--bg-card-hover);
+    }
+
+    .supplier-action-row {
+        display: grid;
+        grid-template-columns: repeat(2, 44px);
+        justify-content: end;
+        gap: .35rem;
+    }
+
+    @media (max-width: 900px) {
+        .supplier-table {
+            min-width: 660px;
+        }
+
+        .supplier-table th:nth-child(1) { width: 24%; }
+        .supplier-table th:nth-child(2) { width: 19%; }
+        .supplier-phone-column { width: 118px; }
+    }
+
+    @media (max-width: 900px) {
+        :global(.back-office-route) .supplier-table {
+            min-width: 0;
+        }
+
+        :global(.back-office-route) .supplier-table th:nth-child(1) { width: auto; }
+        :global(.back-office-route) .supplier-table th:nth-child(2) { width: 30%; }
+        :global(.back-office-route) .supplier-phone-column { width: 116px; }
+        :global(.back-office-route) .supplier-email-column { display: none; }
+        :global(.back-office-route) .supplier-actions-column {
+            width: 92px;
+            padding-inline: .35rem !important;
+        }
+
+        :global(.back-office-route) .supplier-email-compact {
+            display: block;
+            margin-top: .15rem;
+            overflow: hidden;
+            color: var(--text-muted);
+            font-size: .68rem;
+            font-weight: 600;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        :global(.back-office-route) .supplier-action-row {
+            grid-template-columns: repeat(2, 36px);
+            gap: .25rem;
+        }
+    }
+</style>

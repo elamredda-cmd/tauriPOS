@@ -16,6 +16,7 @@ import type { Writable } from 'svelte/store';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type PosMode = 'single' | 'multi';
+export type MysqlConnectionStatus = 'pending' | 'online' | 'offline' | 'blocked';
 
 export interface MysqlConfig {
     host: string;
@@ -29,6 +30,10 @@ export interface PosConnectionState {
     mode: PosMode | null; // null = not selected yet
     mysqlConfig: MysqlConfig | null;
     mysqlOnline: boolean;
+    /** True only after schema setup, identity checks and startup recovery finish. */
+    mysqlReady: boolean;
+    /** Distinguishes first-start checking from a confirmed offline/blocked outcome. */
+    mysqlStatus?: MysqlConnectionStatus;
     syncError: string | null;
 }
 
@@ -38,6 +43,8 @@ export const connectionState = writable<PosConnectionState>({
     mode: null,
     mysqlConfig: null,
     mysqlOnline: false,
+    mysqlReady: false,
+    mysqlStatus: 'pending',
     syncError: null
 });
 
@@ -102,7 +109,14 @@ export async function loadSavedMode(): Promise<PosMode | null> {
                 } catch { /* ignore corrupt JSON */ }
             }
 
-            connectionState.set({ mode, mysqlConfig, mysqlOnline: false, syncError: null });
+            connectionState.set({
+                mode,
+                mysqlConfig,
+                mysqlOnline: false,
+                mysqlReady: false,
+                mysqlStatus: mode === 'multi' ? 'pending' : 'online',
+                syncError: null,
+            });
             return mode;
         }
     } catch (e) {
@@ -141,6 +155,8 @@ export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<voi
         mode,
         mysqlConfig: config ?? get(connectionState).mysqlConfig,
         mysqlOnline: false,
+        mysqlReady: false,
+        mysqlStatus: mode === 'multi' ? 'pending' : 'online',
         syncError: null,
     });
 }
@@ -220,14 +236,17 @@ export async function pingMysql(): Promise<boolean> {
     if (!isMultiMode()) return false;
     try {
         const db = await getMysqlDb();
-        if (!db) return false;
+        if (!db) {
+            connectionState.update(s => ({ ...s, mysqlOnline: false, mysqlStatus: 'offline' }));
+            return false;
+        }
         await withTimeout(db.select('SELECT 1'), HEARTBEAT_TIMEOUT_MS);
-        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        connectionState.update(s => ({ ...s, mysqlOnline: true, mysqlStatus: 'online' }));
         return true;
     } catch (e) {
         console.warn('connection: heartbeat ping failed:', e);
         resetMysqlConnection();
-        connectionState.update(s => ({ ...s, mysqlOnline: false }));
+        connectionState.update(s => ({ ...s, mysqlOnline: false, mysqlStatus: 'offline' }));
         return false;
     }
 }
@@ -249,7 +268,7 @@ async function openMysqlConnection(uri: string, generation: number): Promise<Dat
 
         mysqlDbInstance = opened;
         mysqlDbUri = uri;
-        connectionState.update(s => ({ ...s, mysqlOnline: true }));
+        connectionState.update(s => ({ ...s, mysqlOnline: true, mysqlStatus: 'online' }));
         return opened;
     } catch (e) {
         console.warn('connection: could not open MySQL connection:', e);
@@ -257,7 +276,7 @@ async function openMysqlConnection(uri: string, generation: number): Promise<Dat
         if (generation === mysqlConnectionGeneration) {
             mysqlDbInstance = null;
             mysqlDbUri = '';
-            connectionState.update(s => ({ ...s, mysqlOnline: false }));
+            connectionState.update(s => ({ ...s, mysqlOnline: false, mysqlStatus: 'offline' }));
         }
         return null;
     } finally {

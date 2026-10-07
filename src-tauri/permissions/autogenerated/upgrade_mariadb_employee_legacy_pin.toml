@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upgrade-mariadb-employee-legacy-pin"
+description = "Enables the upgrade_mariadb_employee_legacy_pin command without any pre-configured scope."
+commands.allow = ["upgrade_mariadb_employee_legacy_pin"]
+
+[[permission]]
+identifier = "deny-upgrade-mariadb-employee-legacy-pin"
+description = "Denies the upgrade_mariadb_employee_legacy_pin command without any pre-configured scope."
+commands.deny = ["upgrade_mariadb_employee_legacy_pin"]

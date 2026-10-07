@@ -4,6 +4,16 @@ export interface RefundAllocation {
     taxAmount: number;
 }
 
+export function refundCardInstructions(payments: Array<{ method?: string; reference?: string; cardAmount?: number }>): string {
+    const cardPayments = payments.filter((payment) => Number(payment.cardAmount || 0) > 0);
+    if (cardPayments.length === 0) return '';
+    const integrated = cardPayments.some((payment) => /dojo|sumup/i.test(payment.method || '')
+        || /^(Dojo|SumUp) /i.test(payment.reference || ''));
+    return integrated
+        ? 'The POS sends the integrated card refund automatically. Do not refund it separately on the terminal or portal.'
+        : 'Complete the card refund on the external terminal before confirming; this POS only records that refund.';
+}
+
 function allocateProportionally(total: number, weights: number[]): number[] {
     if (total <= 0 || weights.length === 0) return weights.map(() => 0);
     const positiveWeights = weights.map((weight) => Math.max(0, weight));

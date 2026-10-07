@@ -241,6 +241,7 @@
         eyebrow="Settings"
         description={`${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}${dirty ? ' · Unsaved changes' : ''}`}
         backFallback="/settings"
+        extraClass="barcode-page-header"
         padded
     >
         <button type="button" class="btn btn-secondary" disabled={saving} on:click={() => addRule(PRICE_RULE_PRESET)}>
@@ -535,12 +536,50 @@
     .sample-panel span, .sample-panel small { color: var(--text-muted); font-size: .7rem; }
     .sample-panel strong { overflow-wrap: anywhere; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 1.18rem; }
 
+    :where(.rule-tabs button, .panel-actions button, .switch-control, .test-button, .sync-warning button, summary, input):focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
+        outline-offset: 2px;
+    }
+    :global(.back-office-route) .barcode-main { padding: 0 .7rem .7rem; }
+    :global(.back-office-route) .rule-bar { min-height: 44px; }
+    :global(.back-office-route) .rule-tabs button { height: 40px; min-width: 132px; }
+    :global(.back-office-route) .panel-header { min-height: 52px; padding: .55rem .65rem; }
+    :global(.back-office-route) .editor-scroll,
+    :global(.back-office-route) .tester-body { padding: .55rem; gap: .5rem; }
+
     @media (max-width: 860px) {
         .barcode-page { height: auto; min-height: 100dvh; overflow-y: auto; }
         .barcode-main { min-height: 980px; }
         .barcode-workspace { grid-template-columns: 1fr; }
         .editor-panel { min-height: 620px; }
         .tester-panel { min-height: 320px; }
+    }
+    @media (max-width: 1120px) {
+        :global(.back-office-route) .barcode-page { height: auto; min-height: 100dvh; overflow-y: auto; }
+        :global(.back-office-route) .barcode-main { min-height: 930px; }
+        :global(.back-office-route) .barcode-workspace { grid-template-columns: 1fr; }
+        :global(.back-office-route) .editor-panel { min-height: 580px; }
+        :global(.back-office-route) .tester-panel { min-height: 300px; }
+    }
+    @media (min-width: 661px) and (max-width: 900px) {
+        :global(.back-office-route .barcode-page-header) {
+            height: auto !important;
+            min-height: 92px !important;
+            grid-template-columns: minmax(0, 1fr) !important;
+            grid-template-rows: 44px 40px !important;
+            gap: .35rem !important;
+            padding-block: .25rem !important;
+        }
+        :global(.back-office-route .barcode-page-header .management-actions) {
+            width: 100%;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: .4rem;
+        }
+        :global(.back-office-route .barcode-page-header .management-actions .btn) {
+            width: 100%;
+            justify-content: center;
+        }
     }
     @media (max-width: 660px) {
         .primary-fields, .advanced-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }

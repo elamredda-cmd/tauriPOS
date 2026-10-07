@@ -140,51 +140,63 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory.join(CONFIG_FILE_NAME))
 }
 
-fn load_config(app: &AppHandle) -> Result<SumupStoredConfig, String> {
-    let path = config_path(app)?;
+fn read_config_file(path: &PathBuf) -> Result<Option<SumupStoredConfig>, String> {
     if !path.exists() {
-        let mut config = SumupStoredConfig::default();
-        config.api_key = secret_store::load(SUMUP_API_KEY)?;
-        config.affiliate_key = secret_store::load(SUMUP_AFFILIATE_KEY)?;
-        return Ok(config);
+        return Ok(None);
     }
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read the SumUp settings: {error}"))?;
-    let mut config: SumupStoredConfig = serde_json::from_str(&contents)
-        .map_err(|error| format!("The saved SumUp settings are invalid: {error}"))?;
-    let legacy_api_key = std::mem::take(&mut config.api_key);
-    let legacy_affiliate_key = std::mem::take(&mut config.affiliate_key);
-    if !legacy_api_key.is_empty() {
-        secret_store::save(SUMUP_API_KEY, &legacy_api_key)?;
-    }
-    if !legacy_affiliate_key.is_empty() {
-        secret_store::save(SUMUP_AFFILIATE_KEY, &legacy_affiliate_key)?;
-    }
-    config.api_key = secret_store::load(SUMUP_API_KEY)?;
-    config.affiliate_key = secret_store::load(SUMUP_AFFILIATE_KEY)?;
-    if !legacy_api_key.is_empty() || !legacy_affiliate_key.is_empty() {
-        save_config_file(app, &config)?;
-    }
-    Ok(config)
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| format!("The saved SumUp settings are invalid: {error}"))
 }
 
-fn save_config_file(app: &AppHandle, config: &SumupStoredConfig) -> Result<(), String> {
+fn load_config(app: &AppHandle) -> Result<SumupStoredConfig, String> {
     let path = config_path(app)?;
-    let temporary = path.with_extension("json.tmp");
+    secret_store::mutate_related_config(app, &[SUMUP_API_KEY, SUMUP_AFFILIATE_KEY], |secrets| {
+        let mut config = read_config_file(&path)?.unwrap_or_default();
+        let legacy_api_key = std::mem::take(&mut config.api_key);
+        let legacy_affiliate_key = std::mem::take(&mut config.affiliate_key);
+        config.api_key = secrets.first().cloned().unwrap_or_default();
+        config.affiliate_key = secrets.get(1).cloned().unwrap_or_default();
+        let mut updates = Vec::new();
+        if config.api_key.is_empty() && !legacy_api_key.is_empty() {
+            config.api_key = legacy_api_key.clone();
+            updates.push((SUMUP_API_KEY.to_string(), legacy_api_key.clone()));
+        }
+        if config.affiliate_key.is_empty() && !legacy_affiliate_key.is_empty() {
+            config.affiliate_key = legacy_affiliate_key.clone();
+            updates.push((
+                SUMUP_AFFILIATE_KEY.to_string(),
+                legacy_affiliate_key.clone(),
+            ));
+        }
+        let related_config_write = if !legacy_api_key.is_empty() || !legacy_affiliate_key.is_empty()
+        {
+            Some(config_write(app, &config)?)
+        } else {
+            None
+        };
+        Ok(secret_store::RelatedConfigMutation {
+            value: config,
+            secret_updates: updates,
+            related_config_write,
+        })
+    })
+}
+
+fn config_write(
+    app: &AppHandle,
+    config: &SumupStoredConfig,
+) -> Result<secret_store::RelatedConfigWrite, String> {
+    let path = config_path(app)?;
     let contents = serde_json::to_vec_pretty(config)
         .map_err(|error| format!("Could not prepare the SumUp settings: {error}"))?;
-    fs::write(&temporary, contents)
-        .map_err(|error| format!("Could not save the SumUp settings: {error}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Could not protect the SumUp settings: {error}"))?;
-    }
-
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("Could not finish saving the SumUp settings: {error}"))
+    Ok(secret_store::RelatedConfigWrite {
+        path,
+        contents,
+        description: "SumUp settings".into(),
+    })
 }
 
 fn clean_identifier(value: &str, field_name: &str, maximum: usize) -> Result<String, String> {
@@ -397,48 +409,84 @@ pub fn sumup_save_config(
     app: AppHandle,
     config: SumupConfigInput,
 ) -> Result<SumupPublicConfig, String> {
-    let current = load_config(&app)?;
     let api_key = config.api_key.unwrap_or_default().trim().to_string();
     let affiliate_key = config.affiliate_key.unwrap_or_default().trim().to_string();
-    let next = SumupStoredConfig {
-        enabled: config.enabled,
-        merchant_code: clean_identifier(&config.merchant_code, "Merchant code", 64)?,
-        reader_id: clean_identifier(&config.reader_id, "Reader ID", 128)?,
-        reader_name: clean_identifier(&config.reader_name, "Reader name", 500)?,
-        currency: normalize_currency(&config.currency)?,
-        affiliate_app_id: clean_identifier(&config.affiliate_app_id, "Affiliate App ID", 255)?,
-        api_key: if api_key.is_empty() {
-            current.api_key
-        } else {
-            api_key
+    let merchant_code = clean_identifier(&config.merchant_code, "Merchant code", 64)?;
+    let reader_id = clean_identifier(&config.reader_id, "Reader ID", 128)?;
+    let reader_name = clean_identifier(&config.reader_name, "Reader name", 500)?;
+    let currency = normalize_currency(&config.currency)?;
+    let affiliate_app_id = clean_identifier(&config.affiliate_app_id, "Affiliate App ID", 255)?;
+    let path = config_path(&app)?;
+    let next = secret_store::mutate_related_config(
+        &app,
+        &[SUMUP_API_KEY, SUMUP_AFFILIATE_KEY],
+        |secrets| {
+            let legacy = read_config_file(&path)?.unwrap_or_default();
+            let current_api_key = secrets
+                .first()
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or(legacy.api_key);
+            let current_affiliate_key = secrets
+                .get(1)
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .unwrap_or(legacy.affiliate_key);
+            let next = SumupStoredConfig {
+                enabled: config.enabled,
+                merchant_code,
+                reader_id,
+                reader_name,
+                currency,
+                affiliate_app_id,
+                api_key: if api_key.is_empty() {
+                    current_api_key
+                } else {
+                    api_key
+                },
+                affiliate_key: if affiliate_key.is_empty() {
+                    current_affiliate_key
+                } else {
+                    affiliate_key
+                },
+            };
+            if next.enabled && !config_is_ready(&next) {
+                return Err(
+                    "Complete the merchant, reader, API key, and affiliate fields before enabling SumUp"
+                        .into(),
+                );
+            }
+            Ok(secret_store::RelatedConfigMutation {
+                secret_updates: vec![
+                    (SUMUP_API_KEY.to_string(), next.api_key.clone()),
+                    (SUMUP_AFFILIATE_KEY.to_string(), next.affiliate_key.clone()),
+                ],
+                related_config_write: Some(config_write(&app, &next)?),
+                value: next,
+            })
         },
-        affiliate_key: if affiliate_key.is_empty() {
-            current.affiliate_key
-        } else {
-            affiliate_key
-        },
-    };
-    if next.enabled && !config_is_ready(&next) {
-        return Err(
-            "Complete the merchant, reader, API key, and affiliate fields before enabling SumUp"
-                .into(),
-        );
-    }
-    secret_store::save(SUMUP_API_KEY, &next.api_key)?;
-    secret_store::save(SUMUP_AFFILIATE_KEY, &next.affiliate_key)?;
-    save_config_file(&app, &next)?;
+    )?;
     Ok(SumupPublicConfig::from(&next))
 }
 
 #[tauri::command]
 pub fn sumup_clear_secrets(app: AppHandle) -> Result<SumupPublicConfig, String> {
-    let mut config = load_config(&app)?;
-    config.enabled = false;
-    secret_store::delete(SUMUP_API_KEY)?;
-    secret_store::delete(SUMUP_AFFILIATE_KEY)?;
-    config.api_key.clear();
-    config.affiliate_key.clear();
-    save_config_file(&app, &config)?;
+    let path = config_path(&app)?;
+    let config =
+        secret_store::mutate_related_config(&app, &[SUMUP_API_KEY, SUMUP_AFFILIATE_KEY], |_| {
+            let mut config = read_config_file(&path)?.unwrap_or_default();
+            config.enabled = false;
+            config.api_key.clear();
+            config.affiliate_key.clear();
+            Ok(secret_store::RelatedConfigMutation {
+                related_config_write: Some(config_write(&app, &config)?),
+                value: config,
+                secret_updates: vec![
+                    (SUMUP_API_KEY.to_string(), String::new()),
+                    (SUMUP_AFFILIATE_KEY.to_string(), String::new()),
+                ],
+            })
+        })?;
     Ok(SumupPublicConfig::from(&config))
 }
 

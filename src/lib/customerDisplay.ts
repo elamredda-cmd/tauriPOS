@@ -1,6 +1,8 @@
-import { emitTo } from '@tauri-apps/api/event';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import { availableMonitors, PhysicalPosition } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { isTauri } from '@tauri-apps/api/core';
+import { assertCheckoutDeviceMode } from '$lib/deviceMode';
 
 const CUSTOMER_DISPLAY_MONITOR_KEY = 'customer_display_monitor';
 const CUSTOMER_DISPLAY_AUTO_OPEN_KEY = 'customer_display_auto_open';
@@ -44,6 +46,7 @@ export interface DisplayMonitor {
 }
 
 export async function getDisplayMonitors(): Promise<DisplayMonitor[]> {
+    if (!isTauri()) return [];
     const monitors = await availableMonitors();
     return monitors.map((monitor, index) => ({
         index,
@@ -72,6 +75,7 @@ export function saveCustomerDisplayAutoOpen(enabled: boolean) {
 }
 
 export async function openCustomerDisplayOnSecondScreen(): Promise<boolean> {
+    assertCheckoutDeviceMode('Opening the customer display');
     if (!getCustomerDisplayAutoOpen()) return false;
     const monitors = await availableMonitors();
     if (monitors.length < 2) return false;
@@ -113,11 +117,17 @@ export function startCustomerDisplayAutoOpenWatcher(): () => void {
 }
 
 export async function openCustomerDisplay(monitorIndex = getSavedCustomerDisplayMonitor()): Promise<void> {
+    assertCheckoutDeviceMode('Opening the customer display');
+    if (!isTauri()) throw new Error('Open the desktop app to use a second screen. You can preview the display here.');
+    await startCustomerDisplayBridge();
     saveCustomerDisplayMonitor(monitorIndex);
     const monitors = await availableMonitors();
-    const monitor = monitors[monitorIndex] || monitors[0];
+    if (!monitors.length) throw new Error('No screens are available. Connect a customer screen and refresh the screen list.');
+    const monitor = monitors[monitorIndex];
+    if (!monitor) throw new Error('The selected screen is no longer connected. Refresh the screen list and choose a screen.');
     const existing = await WebviewWindow.getByLabel('customer-display');
     if (existing) {
+        await existing.setFullscreen(false);
         if (monitor) await existing.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
         await existing.setFullscreen(true);
         await existing.show();
@@ -128,25 +138,39 @@ export async function openCustomerDisplay(monitorIndex = getSavedCustomerDisplay
         url: '/customer-display',
         title: 'L&Bj POS Customer Display',
         decorations: false,
-        fullscreen: true,
+        fullscreen: false,
         focus: false,
-        x: monitor?.position.x,
-        y: monitor?.position.y,
-        width: monitor?.size.width || 1024,
-        height: monitor?.size.height || 768,
+        width: 1024,
+        height: 768,
     });
     await new Promise<void>((resolve, reject) => {
-        display.once('tauri://created', () => resolve());
-        display.once('tauri://error', (event) => reject(event.payload));
+        const timeout = setTimeout(() => reject(new Error('The customer screen did not open. Please retry.')), 10000);
+        display.once('tauri://created', () => { clearTimeout(timeout); resolve(); });
+        display.once('tauri://error', (event) => { clearTimeout(timeout); reject(event.payload); });
     });
+    await display.setPosition(new PhysicalPosition(monitor.position.x, monitor.position.y));
+    await display.setFullscreen(true);
 }
 
 export async function closeCustomerDisplay(): Promise<void> {
+    if (!isTauri()) return;
     const display = await WebviewWindow.getByLabel('customer-display');
     if (display) await display.close();
 }
 
+let latestState: CustomerDisplayState | null = null;
+let bridgeReady: Promise<void> | null = null;
+export function startCustomerDisplayBridge(): Promise<void> {
+    if (!isTauri()) return Promise.resolve();
+    if (!bridgeReady) bridgeReady = listen('customer-display-ready', () => {
+        if (latestState) void emitTo('customer-display', 'customer-display-state', latestState);
+    }).then(() => {}).catch((error) => { bridgeReady = null; console.warn('Customer display connection:', error); });
+    return bridgeReady;
+}
 export async function broadcastCustomerDisplay(state: CustomerDisplayState): Promise<void> {
+    latestState = state;
+    if (!isTauri()) return;
+    await startCustomerDisplayBridge();
     try {
         await emitTo('customer-display', 'customer-display-state', state);
     } catch {

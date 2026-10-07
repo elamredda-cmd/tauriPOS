@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { allocateRefundPayment } from './refunds';
+import { allocateRefundPayment, refundCardInstructions } from './refunds';
+
+describe('refundCardInstructions', () => {
+    it.each(['dojo', 'split+dojo', 'sumup', 'split+sumup'])('never asks for a second external refund for %s', (method) => {
+        expect(refundCardInstructions([{ method, cardAmount: 100 }])).toContain('automatically');
+        expect(refundCardInstructions([{ method, cardAmount: 100 }])).toContain('Do not refund it separately');
+    });
+    it('recognizes legacy provider references', () => {
+        expect(refundCardInstructions([{ method: 'card', cardAmount: 100, reference: 'Dojo TX [id:pi_test]' }])).toContain('automatically');
+    });
+    it('distinguishes standalone cards and non-card refunds', () => {
+        expect(refundCardInstructions([{ method: 'card', cardAmount: 100 }])).toContain('external terminal before confirming');
+        expect(refundCardInstructions([{ method: 'cash', cardAmount: 0 }])).toBe('');
+    });
+});
 
 describe('allocateRefundPayment', () => {
     it('keeps an on-account refund out of loyalty', () => {

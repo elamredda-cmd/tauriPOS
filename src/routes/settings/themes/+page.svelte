@@ -1,8 +1,6 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import { activeTheme, setTheme, type Theme } from '$lib/stores/theme';
-    import { upsert } from '$lib/stores/database';
-    import { now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
 
     const themes: { id: Theme; name: string; color1: string; color2: string; desc: string; light?: boolean }[] = [
@@ -11,14 +9,26 @@
         { id: 'snow', name: 'Snow', color1: '#f8fafc', color2: '#3b82f6', desc: 'Bright, clean light theme.', light: true },
         { id: 'linen', name: 'Linen & Walnut', color1: '#f7f5f1', color2: '#76543c', desc: 'Soft warm surfaces with clear walnut accents.', light: true },
         { id: 'sage', name: 'Sage Slate', color1: '#e7ece7', color2: '#315f6f', desc: 'Muted sage surfaces with calm slate accents.', light: true },
+        { id: 'daylight', name: 'Daylight', color1: '#f5f6f4', color2: '#245b83', desc: 'Soft off-white, slate text and calm blue for daytime use.', light: true },
         { id: 'coffee', name: 'Coffee', color1: '#1c1917', color2: '#d97706', desc: 'Warm browns and tan accents.' },
         { id: 'sunset', name: 'Sunset', color1: '#1a0b1e', color2: '#f43f5e', desc: 'Deep purple and vibrant rose.' }
     ];
 
+    let savingTheme: Theme | null = null;
+    let saveError = '';
+
     async function selectTheme(id: Theme) {
-        await setTheme(id);
-        await upsert('settings', { key: 'active_theme', value: id, updatedAt: now() }, 'key');
-        toast(`Applied ${id.charAt(0).toUpperCase() + id.slice(1)} theme`);
+        if (savingTheme || id === $activeTheme) return;
+        savingTheme = id;
+        saveError = '';
+        try {
+            await setTheme(id);
+            toast(`Applied ${themes.find(theme => theme.id === id)?.name || id} theme`);
+        } catch (error) {
+            saveError = `Could not save the theme. ${String(error).replace(/^Error:\s*/, '')}`;
+        } finally {
+            savingTheme = null;
+        }
     }
 </script>
 
@@ -32,11 +42,14 @@
             </p>
         </section>
 
-        <section class="settings-card-grid" aria-label="Theme choices">
+        {#if saveError}<p class="theme-save-error" role="alert">{saveError}</p>{/if}
+        {#if savingTheme}<p class="theme-save-status" role="status">Saving theme…</p>{/if}
+        <section class="settings-card-grid" aria-label="Theme choices" aria-busy={!!savingTheme}>
             {#each themes as theme}
                 <button
                     class="theme-card settings-action-card {$activeTheme === theme.id ? 'active' : ''}"
                     aria-pressed={$activeTheme === theme.id}
+                    disabled={!!savingTheme}
                     on:click={() => selectTheme(theme.id)}
                 >
                     <div class:light-preview={theme.light} class="theme-preview" style="background: {theme.color1}">
@@ -66,6 +79,9 @@
 </MgmtPage>
 
 <style>
+    .theme-save-error { padding: .85rem 1rem; border: 1px solid var(--danger); border-radius: .65rem; color: var(--danger); background: var(--bg-card); overflow-wrap: anywhere; }
+    .theme-save-status { color: var(--text-muted); }
+    .theme-card:disabled { cursor: wait; }
     .theme-card {
         position: relative;
         display: flex;

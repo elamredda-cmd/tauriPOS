@@ -31,7 +31,7 @@ async function protectedReporterPassword(legacyPassword: string): Promise<string
         }
         return protectedPassword;
     } catch (error) {
-        console.warn('owner cloud: system credential store is unavailable', error);
+        console.warn('owner cloud: device-local credential store is unavailable', error);
         return legacyPassword;
     }
 }

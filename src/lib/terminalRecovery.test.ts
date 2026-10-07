@@ -3,12 +3,15 @@ import {
     classifyDojoPaymentStatus,
     classifySumupPaymentStatus,
     providerMissingReconciliation,
+    settleRecoveredProviderOutcome,
     settleProviderFinalReconciliation,
+    verifyDojoPayment,
 } from './terminalRecovery';
 import {
     inferTerminalOperationKind,
     isOperationalTerminalAttemptStatus,
     type CustomerAccountPaymentAttemptPayload,
+    type TerminalPaymentAttempt,
 } from './terminalAttempts';
 import {
     isTerminalAttemptTransitionAllowed,
@@ -17,6 +20,39 @@ import {
 } from './terminalAttemptState';
 
 describe('managed terminal recovery safety', () => {
+    it('requires exact Dojo payment identity before every negative final result', () => {
+        const attempt = { id: 'sale-1', clientTransactionId: 'pi-1', amount: 1250, currency: 'GBP' } as TerminalPaymentAttempt;
+        for (const [status, terminal] of [['Canceled', 'Expired'], ['Reversed', 'Captured'], ['Created', 'Declined'], ['Created', 'SignatureVerificationRejected']]) {
+            const payment = { id: 'pi-1', reference: 'sale-1', status, amount: 1250, currency: 'GBP' };
+            expect(verifyDojoPayment(attempt, { ...payment, id: 'wrong' }, 'ts-1', terminal).outcome).toBe('uncertain');
+            expect(verifyDojoPayment(attempt, { ...payment, reference: 'wrong' }, 'ts-1', terminal).outcome).toBe('uncertain');
+        }
+        expect(verifyDojoPayment(attempt, { id: 'pi-1', reference: 'sale-1', status: 'Created' }, 'ts-1', 'Expired'))
+            .toMatchObject({ outcome: 'uncertain', error: expect.stringContaining('terminal Expired, payment intent Created') });
+    });
+
+    it('returns captured Dojo extras separately from the prepared base payment', () => {
+        const attempt = { id: 'sale-1', clientTransactionId: 'pi-1', amount: 1250, currency: 'GBP' } as TerminalPaymentAttempt;
+        const result = verifyDojoPayment(attempt, {
+            id: 'pi-1', reference: 'sale-1', status: 'Captured', amount: 1250, currency: 'GBP',
+            totalAmount: { value: 1900, currencyCode: 'GBP' },
+            tipsAmount: { value: 120, currencyCode: 'GBP' },
+            serviceChargeAmount: { value: 30, currencyCode: 'GBP' },
+            cashbackAmount: { value: 500, currencyCode: 'GBP' },
+        });
+        expect(result).toMatchObject({ outcome: 'approved', extras: { tipsAmount: 120, serviceChargeAmount: 30, cashbackAmount: 500 } });
+        expect(attempt.amount).toBe(1250);
+    });
+
+    it('does not approve recovery with a conflicting intent or extra total', () => {
+        const attempt = { id: 'sale-1', clientTransactionId: 'pi-1', amount: 1250, currency: 'GBP' } as TerminalPaymentAttempt;
+        const payment = { id: 'pi-1', reference: 'sale-1', status: 'Captured', amount: 1250, currency: 'GBP' };
+        expect(verifyDojoPayment(attempt, { ...payment, id: 'pi-other' }).outcome).toBe('uncertain');
+        expect(verifyDojoPayment(attempt, {
+            ...payment, totalAmount: { value: 1250, currencyCode: 'GBP' }, tipsAmount: { value: 120, currencyCode: 'GBP' },
+        }).outcome).toBe('uncertain');
+    });
+
     it('keeps every unresolved journal state operational', () => {
         for (const status of [
             'prepared',
@@ -80,6 +116,32 @@ describe('managed terminal recovery safety', () => {
             firstAt + 25 * 60 * 60 * 1000 + 60_000,
         );
         expect(third.outcome).toBe('cancelled');
+    });
+
+    it('completes missing-provider recovery without restarting its settled evidence', () => {
+        const firstAt = Date.parse('2026-07-28T08:00:00.000Z');
+        const attempt = { createdAt: '2026-07-27T08:00:00.000Z', error: '' };
+        const results = [firstAt, firstAt + 25 * 60 * 60 * 1000, firstAt + 25 * 60 * 60 * 1000 + 60_000]
+            .map((now) => {
+                const result = settleRecoveredProviderOutcome(
+                    attempt, 'dojo', providerMissingReconciliation(attempt, 'dojo', now), now,
+                );
+                if ('error' in result) attempt.error = result.error;
+                return result;
+            });
+
+        expect(results.map((result) => result.outcome)).toEqual(['uncertain', 'uncertain', 'cancelled']);
+        expect(attempt.error).toMatch(/^PROVIDER_NOT_FOUND:dojo:/);
+        expect(results[2]).toMatchObject({ finalityAlreadyConfirmed: true });
+    });
+
+    it('still settles ordinary provider finals and immediately preserves capture evidence', () => {
+        const now = Date.parse('2026-07-29T12:00:00.000Z');
+        expect(settleRecoveredProviderOutcome({ error: '' }, 'dojo', {
+            outcome: 'failed', error: 'Dojo final status: Declined',
+        }, now).outcome).toBe('uncertain');
+        const captured = { outcome: 'approved' as const, clientTransactionId: 'pi-original', providerReference: 'Dojo captured' };
+        expect(settleRecoveredProviderOutcome({ error: '' }, 'dojo', captured, now)).toBe(captured);
     });
 
     it('keeps an explicit failure operational until a separated confirmation', () => {

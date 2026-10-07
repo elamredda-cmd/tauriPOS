@@ -23,6 +23,7 @@
         Usb,
     } from '@lucide/svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { now, settingsDB } from '$lib/stores/db';
     import { upsert } from '$lib/stores/database';
@@ -37,6 +38,7 @@
         type ReceiptPrinterModel,
     } from '$lib/printers';
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from '$lib/cashDrawer';
+    import { deviceOperatingMode } from '$lib/deviceMode';
     import {
         executePrinterModule,
         installPrinterModule,
@@ -84,12 +86,18 @@
     let printerModules: PrinterModuleInfo[] = [];
     let modulesLoading = false;
     let moduleBusyId = '';
+    let moduleToRemove: PrinterModuleInfo | null = null;
+    let showRemoveModuleConfirm = false;
     let activeSection: PrinterSection = 'receipt';
     let drawerTargetEditorOpen = false;
     let drawerTargetEditorMode: DrawerTargetEditorMode = 'printer';
 
     type PrinterSection = 'receipt' | 'label' | 'drawer' | 'modules';
     type DrawerTargetEditorMode = 'printer' | 'network' | 'device' | 'module';
+
+    $: if ($deviceOperatingMode === 'back_office' && activeSection === 'drawer') {
+        activeSection = 'receipt';
+    }
 
     type SystemPrinterInfo = {
         name: string;
@@ -168,12 +176,23 @@
         return receipt.moduleId === moduleId || label.moduleId === moduleId || drawer.moduleId === moduleId;
     }
 
-    async function removeModule(module: PrinterModuleInfo) {
+    function requestRemoveModule(module: PrinterModuleInfo) {
         if (moduleInUse(module.id)) {
             toast('Switch the receipt and label printers away from this module first', 'error');
             return;
         }
-        if (!window.confirm(`Uninstall ${module.name}?`)) return;
+        moduleToRemove = module;
+        showRemoveModuleConfirm = true;
+    }
+
+    async function confirmRemoveModule() {
+        const module = moduleToRemove;
+        if (!module || moduleBusyId) return;
+        if (moduleInUse(module.id)) {
+            moduleToRemove = null;
+            toast('Switch the receipt and label printers away from this module first', 'error');
+            return;
+        }
         moduleBusyId = module.id;
         try {
             await uninstallPrinterModule(module.id);
@@ -183,6 +202,7 @@
             toast(`Could not uninstall printer module: ${error}`, 'error');
         } finally {
             moduleBusyId = '';
+            moduleToRemove = null;
         }
     }
 
@@ -486,12 +506,14 @@
             <div class="printer-status-strip">
                 <span class:online={receipt.enabled}><i></i>Receipt</span>
                 <span class:online={label.enabled}><i></i>Labels</span>
-                <span class:online={drawerManualEnabled}><i></i>Drawer</span>
+                {#if $deviceOperatingMode !== 'back_office'}
+                    <span class:online={drawerManualEnabled}><i></i>Drawer</span>
+                {/if}
             </div>
         </section>
 
         <div class="printer-tabs" role="tablist" aria-label="Printer settings sections">
-            {#each sections as section}
+            {#each sections.filter((section) => $deviceOperatingMode !== 'back_office' || section.value !== 'drawer') as section}
                 <button
                     id={`${section.value}-tab`}
                     type="button"
@@ -604,7 +626,9 @@
                         <button class:active={receipt.autoPrintAfterPayment} role="switch" aria-checked={receipt.autoPrintAfterPayment} on:click={() => updateSetting('receipt_printer_auto_print_after_payment', receipt.autoPrintAfterPayment ? 'false' : 'true')}><span>Auto print</span><i><b></b></i></button>
                         <button class:active={receipt.cutPaper} role="switch" aria-checked={receipt.cutPaper} on:click={() => updateSetting('receipt_printer_cut_paper', receipt.cutPaper ? 'false' : 'true')}><span>Cut paper</span><i><b></b></i></button>
                         <div class="field compact-number"><label for="receipt-cut-feed-lines">Feed before cut</label><input id="receipt-cut-feed-lines" type="number" min="0" max="20" value={receipt.cutFeedLines} on:change={(event) => updateSetting('receipt_printer_cut_feed_lines', event.currentTarget.value || '8')} /></div>
-                        <button class:active={receipt.openDrawerAfterPayment} role="switch" aria-checked={receipt.openDrawerAfterPayment} on:click={() => updateSetting('receipt_printer_open_drawer_after_payment', receipt.openDrawerAfterPayment ? 'false' : 'true')}><span>Open drawer</span><i><b></b></i></button>
+                        {#if $deviceOperatingMode !== 'back_office'}
+                            <button class:active={receipt.openDrawerAfterPayment} role="switch" aria-checked={receipt.openDrawerAfterPayment} on:click={() => updateSetting('receipt_printer_open_drawer_after_payment', receipt.openDrawerAfterPayment ? 'false' : 'true')}><span>Open drawer</span><i><b></b></i></button>
+                        {/if}
                     </div>
                 </div>
             </div>
@@ -668,7 +692,7 @@
                     </div>
                 </div>
             </div>
-        {:else if activeSection === 'drawer'}
+        {:else if activeSection === 'drawer' && $deviceOperatingMode !== 'back_office'}
             <div id="drawer-panel" class="printer-panel" role="tabpanel" aria-labelledby="drawer-tab">
                 <header class="printer-panel-header">
                     <div>
@@ -751,7 +775,7 @@
                             <div class="module-actions">
                                 <button title="Check module" aria-label={`Check ${module.name}`} disabled={!module.enabled || moduleBusyId === module.id} on:click={() => testModule(module)}><Stethoscope size={18} /></button>
                                 <button title={module.enabled ? 'Disable module' : 'Enable module'} aria-label={`${module.enabled ? 'Disable' : 'Enable'} ${module.name}`} disabled={!module.trusted || moduleBusyId === module.id} on:click={() => toggleModule(module)}><Power size={18} class={module.enabled ? 'text-success' : 'text-text-muted'} /></button>
-                                <button class="danger" title={moduleInUse(module.id) ? 'Switch printers away from this module first' : 'Uninstall module'} aria-label={`Uninstall ${module.name}`} disabled={moduleInUse(module.id) || moduleBusyId === module.id} on:click={() => removeModule(module)}><Trash2 size={18} /></button>
+                                <button class="danger" title={moduleInUse(module.id) ? 'Switch printers away from this module first' : 'Uninstall module'} aria-label={`Uninstall ${module.name}`} disabled={moduleInUse(module.id) || moduleBusyId === module.id} on:click={() => requestRemoveModule(module)}><Trash2 size={18} /></button>
                             </div>
                         </article>
                     {/each}
@@ -763,6 +787,17 @@
         {/if}
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showRemoveModuleConfirm}
+    title="Uninstall Printer Module?"
+    message={`Uninstall ${moduleToRemove?.name || 'this printer module'} from this till?`}
+    confirmText="Uninstall Module"
+    variant="danger"
+    dismissDisabled={Boolean(moduleBusyId)}
+    on:confirm={confirmRemoveModule}
+    on:cancel={() => (moduleToRemove = null)}
+/>
 
 <style>
     .printer-page-shell {
@@ -1452,6 +1487,10 @@
         outline-offset: 2px;
     }
 
+    :global(.back-office-route) .printer-tabs {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
     @media (min-width: 1280px) {
         .connection-grid {
             grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1467,6 +1506,10 @@
     @media (max-width: 900px) {
         .printer-page-shell {
             padding: 0.75rem;
+        }
+
+        :global(.back-office-route) .connection-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .printer-panel-header {

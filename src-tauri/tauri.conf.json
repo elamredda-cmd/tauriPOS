@@ -13,15 +13,22 @@
     "windows": [
       {
         "title": "L&Bj POS",
-        "width": 800,
-        "height": 600,
+        "width": 1024,
+        "height": 768,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "maximized": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https:; img-src 'self' asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
-      "devCsp": "default-src 'self' http://localhost:*; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:* https:; img-src 'self' asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self' 'unsafe-eval'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https:; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; media-src 'self' asset: http://asset.localhost https://asset.localhost blob:",
+      "devCsp": "default-src 'self' http://localhost:*; connect-src 'self' ipc: http://ipc.localhost http://localhost:* ws://localhost:* https:; img-src 'self' asset: http://asset.localhost https://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; script-src 'self' 'unsafe-eval'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; media-src 'self' asset: http://asset.localhost https://asset.localhost blob:",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/customer-display-media/*"
+        ]
+      }
     }
   },
   "bundle": {

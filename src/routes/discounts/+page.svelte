@@ -1,954 +1,191 @@
 <script lang="ts">
-    import { onDestroy, onMount, tick } from 'svelte';
+    import { onDestroy, onMount } from 'svelte';
+    import { get } from 'svelte/store';
+    import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import Modal from '$lib/components/Modal.svelte';
-    import {
-        discountsDB, promoGroupsDB, promoGroupItemsDB, productsDB,
-        type Discount, type Product, type PromoGroup, type PromoGroupItem,
-        uuid, now, formatMoney
-    } from '$lib/stores/db';
-    import { toast } from '$lib/stores/toast';
-    import {
-        upsert,
-        deletePromotionBundle,
-        getProductsByIds,
-        getProductsPage,
-        savePromotionBundle,
-    } from '$lib/stores/database';
-    import TouchToggle from '$lib/components/TouchToggle.svelte';
-    import SearchField from '$lib/components/SearchField.svelte';
-    import TouchKeyboardButton from '$lib/components/TouchKeyboardButton.svelte';
-    import TouchDateTimePicker from '$lib/components/TouchDateTimePicker.svelte';
-    import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { isTauri } from '@tauri-apps/api/core';
-    import { get } from 'svelte/store';
+    import PromotionEditor from '$lib/components/PromotionEditor.svelte';
+    import { discountsDB, promoGroupsDB, promoGroupItemsDB, productsDB, uuid, now, formatMoney, type Discount, type Product, type PromoGroup, type PromoGroupItem } from '$lib/stores/db';
+    import { savePromotionBundle, deletePromotionBundle, getPromotionEditSnapshot, getProductsByIds, type PromotionSnapshot } from '$lib/stores/database';
+    import { promotionDraft, promotionOverlapNames, validatePromotionDraft, type PromotionDraft, type PromotionEditorKind, type PromotionValues } from '$lib/promotionEditor';
 
-    type Tab = 'bundle' | 'bogo' | 'temporary' | 'percent';
+    type Tab = PromotionEditorKind;
     let tab: Tab = 'bundle';
     let promotionClock = Date.now();
     let promotionClockTimer: ReturnType<typeof setInterval> | null = null;
-
-    onMount(() => {
-        promotionClockTimer = setInterval(() => {
-            promotionClock = Date.now();
-        }, 30_000);
-    });
-
-    onDestroy(() => {
-        if (promotionClockTimer) clearInterval(promotionClockTimer);
-    });
-
-    // ───── Bundle (group + discount as one entity in the UI) ─────
-    let showBundle = false;
-    let editingBundle = false;
-    let curName = '';
-    let curQty = 2;
-    let curPrice = 0;
-    let curStartAt = '';
-    let curEndAt = '';
-    let curActive = true;
-    let curDiscountId = '';
-    let curGroupId = '';
-    let curProductIds: Set<string> = new Set();
-    let productSearch = '';
-
-    // Numpad for Bundle Price
-    let showPricePad = false;
-    let priceString = '0';
-    let pricePadOverlay: HTMLDivElement | null = null;
-
-    // Numpad for Quantity
-    let showQtyPad = false;
-    let qtyString = '2';
-    let qtyPadOverlay: HTMLDivElement | null = null;
-
-    async function openPricePad() {
-        showPricePad = true;
-        await tick();
-        pricePadOverlay?.focus();
-    }
-
-    async function openQtyPad() {
-        showQtyPad = true;
-        await tick();
-        qtyPadOverlay?.focus();
-    }
-
-    function closePricePadFromBackdrop(event: MouseEvent) {
-        if (event.target === event.currentTarget) showPricePad = false;
-    }
-
-    function closeQtyPadFromBackdrop(event: MouseEvent) {
-        if (event.target === event.currentTarget) showQtyPad = false;
-    }
-
-    function closePricePadOnEscape(event: KeyboardEvent) {
-        if (event.key !== 'Escape') return;
-        event.stopPropagation();
-        showPricePad = false;
-    }
-
-    function closeQtyPadOnEscape(event: KeyboardEvent) {
-        if (event.key !== 'Escape') return;
-        event.stopPropagation();
-        showQtyPad = false;
-    }
-
-    function discountKind(discount: Discount): string {
-        if (discount.kind) return discount.kind;
-        return discount.type === 'percentage' ? 'manual_percent' : 'manual_fixed';
-    }
-
-    function numeric(value: unknown, fallback = 0): number {
-        const parsed = Number(value);
-        return Number.isFinite(parsed) ? parsed : fallback;
-    }
-
-    function uniqueById<T extends { id: string }>(list: T[]): T[] {
-        const seen = new Set<string>();
-        return list.filter((row) => {
-            if (seen.has(row.id)) return false;
-            seen.add(row.id);
-            return true;
-        });
-    }
-
-    function upsertUniqueById<T extends { id: string }>(list: T[], item: T): T[] {
-        let replaced = false;
-        const seen = new Set<string>();
-        const next: T[] = [];
-        for (const row of list) {
-            if (row.id === item.id) {
-                if (!replaced) {
-                    next.push(item);
-                    replaced = true;
-                    seen.add(item.id);
-                }
-                continue;
-            }
-            if (seen.has(row.id)) continue;
-            seen.add(row.id);
-            next.push(row);
-        }
-        if (!replaced) next.push(item);
-        return next;
-    }
-
-    function promotionSnapshot() {
-        return {
-            discounts: $discountsDB,
-            groups: $promoGroupsDB,
-            items: $promoGroupItemsDB
-        };
-    }
-
-    function restorePromotionSnapshot(snapshot: ReturnType<typeof promotionSnapshot>) {
-        discountsDB.set(snapshot.discounts);
-        promoGroupsDB.set(snapshot.groups);
-        promoGroupItemsDB.set(snapshot.items);
-    }
-
-    function applyPromotionToStores(group: PromoGroup | null, discount: Discount, items: PromoGroupItem[] = []) {
-        discountsDB.update((list) => upsertUniqueById(list, discount));
-        if (!group) return;
-        promoGroupsDB.update((list) => upsertUniqueById(list, group));
-        promoGroupItemsDB.update((list) => {
-            const replacementIds = new Set(items.map((item) => item.id));
-            return uniqueById([
-                ...list.filter((item) => item.groupId !== group.id && !replacementIds.has(item.id)),
-                ...items
-            ]);
-        });
-    }
-
-    let savingPromotion = false;
-    let deletingPromotion = false;
-
-    function safeDiscounts(discounts: Discount[], kind: string): Discount[] {
-        return uniqueById(discounts.filter((discount) => discount && discountKind(discount) === kind));
-    }
-
-    $: bundles = safeDiscounts($discountsDB, 'bundle_fixed_price');
-    $: bogos = safeDiscounts($discountsDB, 'bogo_fixed_price');
-    $: temporaryItems = safeDiscounts($discountsDB, 'temporary_item');
-    $: percentages = safeDiscounts($discountsDB, 'manual_percent');
-    $: promoGroupById = new Map($promoGroupsDB.map((group) => [group.id, group]));
-    $: promoItemCountsByGroup = $promoGroupItemsDB.reduce((counts, item) => {
-        counts.set(item.groupId, (counts.get(item.groupId) || 0) + 1);
-        return counts;
-    }, new Map<string, number>());
-    $: firstPromoProductIdByGroup = $promoGroupItemsDB.reduce((products, item) => {
-        if (!products.has(item.groupId)) products.set(item.groupId, item.productId);
-        return products;
-    }, new Map<string, string>());
-
-    type ProductPicker = 'bundle' | 'bogo' | 'temporary';
-    type PromotionProductEntry = { groupId: string; name: string };
-    const PRODUCT_PICKER_LIMIT = 60;
     let productCacheById = new Map<string, Product>();
-    let pickerRows: Record<ProductPicker, Product[]> = { bundle: [], bogo: [], temporary: [] };
-    let pickerLoading: Record<ProductPicker, boolean> = { bundle: false, bogo: false, temporary: false };
-    let pickerTotal: Record<ProductPicker, number> = { bundle: 0, bogo: 0, temporary: 0 };
-    let pickerError: Record<ProductPicker, string> = { bundle: '', bogo: '', temporary: '' };
-    const pickerTokens: Record<ProductPicker, number> = { bundle: 0, bogo: 0, temporary: 0 };
-    let referencedProductIds: string[] = [];
-    let referencedProductIdsKey = '';
-    let loadedReferencedProductIdsKey = '';
-    let referencedProductsLoadToken = 0;
-
-    function cacheProducts(products: Product[]) {
-        if (products.length === 0) return;
-        const next = new Map(productCacheById);
-        for (const product of products) next.set(product.id, product);
-        productCacheById = next;
-    }
-
-    async function ensureProductsCached(productIds: string[]) {
-        const missing = Array.from(new Set(productIds)).filter(id => id && !productCacheById.has(id));
-        if (missing.length === 0) return;
-        if (!isTauri()) {
-            const missingIds = new Set(missing);
-            cacheProducts(get(productsDB).filter(product => missingIds.has(product.id)));
-            return;
-        }
-        await refreshProductsCached(missing);
-    }
-
-    async function refreshProductsCached(productIds: string[]) {
-        const uniqueIds = Array.from(new Set(productIds)).filter(Boolean);
-        if (uniqueIds.length === 0) return;
-        if (!isTauri()) {
-            const wantedIds = new Set(uniqueIds);
-            cacheProducts(get(productsDB).filter(product => wantedIds.has(product.id)));
-            return;
-        }
-        cacheProducts(await getProductsByIds(uniqueIds, false, true) as Product[]);
-    }
-
-    async function loadReferencedProducts(key: string, productIds: string[]) {
-        loadedReferencedProductIdsKey = key;
-        const token = ++referencedProductsLoadToken;
-        try {
-            await ensureProductsCached(productIds);
-        } catch (error) {
-            if (token !== referencedProductsLoadToken) return;
-            loadedReferencedProductIdsKey = '';
-            console.warn('Could not load promotion product names:', error);
-        }
-    }
-
-    async function loadProductPicker(kind: ProductPicker, query: string) {
-        const token = ++pickerTokens[kind];
-        pickerLoading = { ...pickerLoading, [kind]: true };
-        pickerError = { ...pickerError, [kind]: '' };
-        try {
-            if (!isTauri()) {
-                const normalizedQuery = query.trim().toLowerCase();
-                const matches = get(productsDB).filter(product =>
-                    product.isActive && (!normalizedQuery || [
-                        product.name,
-                        product.sku,
-                        product.barcode,
-                        product.scalePlu,
-                    ].some(value => String(value || '').toLowerCase().includes(normalizedQuery)))
-                );
-                if (token !== pickerTokens[kind]) return;
-                const rows = matches.slice(0, PRODUCT_PICKER_LIMIT);
-                cacheProducts(rows);
-                pickerRows = { ...pickerRows, [kind]: rows };
-                pickerTotal = { ...pickerTotal, [kind]: matches.length };
-                return;
-            }
-            const result = await getProductsPage({
-                query: query.trim(),
-                status: 'active',
-                limit: PRODUCT_PICKER_LIMIT,
-                offset: 0,
-                compact: true,
-            });
-            if (token !== pickerTokens[kind]) return;
-            const rows = result.rows as Product[];
-            cacheProducts(rows);
-            pickerRows = { ...pickerRows, [kind]: rows };
-            pickerTotal = { ...pickerTotal, [kind]: result.total };
-        } catch (error) {
-            if (token !== pickerTokens[kind]) return;
-            pickerRows = { ...pickerRows, [kind]: [] };
-            pickerTotal = { ...pickerTotal, [kind]: 0 };
-            pickerError = {
-                ...pickerError,
-                [kind]: String(error).replace(/^Error:\s*/, ''),
-            };
-        } finally {
-            if (token === pickerTokens[kind]) {
-                pickerLoading = { ...pickerLoading, [kind]: false };
-            }
-        }
-    }
-
-    function runPickerSearch(kind: ProductPicker) {
-        const query = kind === 'bundle'
-            ? productSearch
-            : kind === 'bogo'
-                ? bogoProductSearch
-                : temporaryProductSearch;
-        void loadProductPicker(kind, query);
-    }
-
-    function clearPickerSearch(kind: ProductPicker) {
-        if (kind === 'bundle') productSearch = '';
-        else if (kind === 'bogo') bogoProductSearch = '';
-        else temporaryProductSearch = '';
-        void loadProductPicker(kind, '');
-    }
-
-    function handlePickerSearchKeydown(event: KeyboardEvent, kind: ProductPicker) {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        runPickerSearch(kind);
-    }
-
-    $: referencedProductIds = Array.from(new Set(
-        $promoGroupItemsDB.map(item => item.productId).filter(Boolean)
-    ));
-    $: referencedProductIdsKey = [...referencedProductIds].sort().join('|');
-    $: if (referencedProductIdsKey !== loadedReferencedProductIdsKey) {
-        void loadReferencedProducts(referencedProductIdsKey, referencedProductIds);
-    }
-    $: productNameById = new Map(
-        Array.from(productCacheById, ([id, product]) => [id, product.name])
-    );
-    $: promotionEntriesByProductId = (() => {
-        const discountByGroup = new Map<string, string>();
-        for (const discount of uniqueById($discountsDB)) {
-            if (discount.groupId && ['bundle_fixed_price', 'bogo_fixed_price', 'temporary_item'].includes(discountKind(discount))) {
-                discountByGroup.set(discount.groupId, discount.name);
-            }
-        }
-        const entries = new Map<string, PromotionProductEntry[]>();
-        for (const item of $promoGroupItemsDB) {
-            const name = discountByGroup.get(item.groupId);
-            if (!name) continue;
-            const current = entries.get(item.productId) || [];
-            current.push({ groupId: item.groupId, name });
-            entries.set(item.productId, current);
-        }
-        return entries;
-    })();
-
-    function promotionWarningsForProducts(
-        productIds: string[],
-        currentGroupId: string,
-        productNames: Map<string, string>,
-        entriesByProductId: Map<string, PromotionProductEntry[]>
-    ): string[] {
-        const warnings = new Set<string>();
-        for (const productId of productIds) {
-            const productName = productNames.get(productId) || 'Selected item';
-            const promoNames = Array.from(new Set(
-                (entriesByProductId.get(productId) || [])
-                    .filter(entry => entry.groupId !== currentGroupId)
-                    .map(entry => entry.name)
-            ));
-            if (promoNames.length > 0) {
-                warnings.add(`${productName} is also in: ${promoNames.join(', ')}`);
-            }
-        }
-        return Array.from(warnings);
-    }
-
-    $: bundleOverlapWarnings = promotionWarningsForProducts(
-        Array.from(curProductIds),
-        curGroupId,
-        productNameById,
-        promotionEntriesByProductId
-    );
-    $: bogoOverlapWarnings = promotionWarningsForProducts(
-        Array.from(bogoProductIds),
-        bogoGroupId,
-        productNameById,
-        promotionEntriesByProductId
-    );
-    $: temporaryOverlapWarnings = temporaryProductId
-        ? promotionWarningsForProducts(
-            [temporaryProductId],
-            temporaryGroupId,
-            productNameById,
-            promotionEntriesByProductId
-        )
-        : [];
-
-    function validatePromotionWindow(startAt: string, endAt: string): boolean {
-        if (startAt && Number.isNaN(new Date(startAt).getTime())) {
-            toast('Start time is not valid', 'error');
-            return false;
-        }
-        if (endAt && Number.isNaN(new Date(endAt).getTime())) {
-            toast('End time is not valid', 'error');
-            return false;
-        }
-        if (startAt && endAt && new Date(endAt).getTime() <= new Date(startAt).getTime()) {
-            toast('End time must be after the start time', 'error');
-            return false;
-        }
-        return true;
-    }
-
-    // ───── Temporary single-item offers ─────
-    let showTemporary = false;
-    let editingTemporary = false;
-    let temporaryId = '';
-    let temporaryGroupId = '';
-    let temporaryName = '';
-    let temporaryProductId = '';
-    let temporaryType: 'percentage' | 'fixed' = 'percentage';
-    let temporaryValue = 10;
-    let temporaryStartAt = '';
-    let temporaryEndAt = '';
-    let temporaryActive = true;
-    let temporaryProductSearch = '';
-
-    function addTemporary() {
-        temporaryId = uuid();
-        temporaryGroupId = uuid();
-        temporaryName = '';
-        temporaryProductId = '';
-        temporaryType = 'percentage';
-        temporaryValue = 10;
-        temporaryStartAt = '';
-        temporaryEndAt = '';
-        temporaryActive = true;
-        temporaryProductSearch = '';
-        editingTemporary = false;
-        showTemporary = true;
-        void loadProductPicker('temporary', '');
-    }
-
-    function editTemporary(d: Discount) {
-        const group = $promoGroupsDB.find(g => g.id === d.groupId);
-        temporaryId = d.id;
-        temporaryGroupId = d.groupId;
-        temporaryName = d.name;
-        temporaryProductId = $promoGroupItemsDB.find(item => item.groupId === d.groupId)?.productId || '';
-        temporaryType = d.type;
-        temporaryValue = d.type === 'fixed' ? d.value / 100 : d.value;
-        temporaryStartAt = group?.startAt || d.startAt || '';
-        temporaryEndAt = group?.endAt || d.endAt || '';
-        temporaryActive = d.isActive && (group?.isActive ?? true);
-        temporaryProductSearch = '';
-        editingTemporary = true;
-        showTemporary = true;
-        void refreshProductsCached([temporaryProductId]);
-        void loadProductPicker('temporary', '');
-    }
-
-    async function saveTemporary() {
-        if (!temporaryName.trim()) { toast('Name is required', 'error'); return; }
-        if (!temporaryProductId) { toast('Select an item', 'error'); return; }
-        if (!isPromotionEligible(temporaryProductId)) { toast('Choose an active item that is shown on the POS', 'error'); return; }
-        const inputValue = Number(temporaryValue);
-        if (!Number.isFinite(inputValue) || inputValue <= 0) { toast('Discount value must be greater than zero', 'error'); return; }
-        if (temporaryType === 'percentage' && inputValue > 100) { toast('Percentage cannot exceed 100', 'error'); return; }
-        if (!validatePromotionWindow(temporaryStartAt, temporaryEndAt)) return;
-        const conflicting = temporaryItems.find(discount =>
-            discount.id !== temporaryId &&
-            $promoGroupItemsDB.some(item => item.groupId === discount.groupId && item.productId === temporaryProductId)
-        );
-        if (conflicting) {
-            toast(`This item already has the temporary discount "${conflicting.name}"`, 'error');
-            return;
-        }
-        const product = productCacheById.get(temporaryProductId);
-        const storedValue = temporaryType === 'fixed' ? Math.round(inputValue * 100) : inputValue;
-        if (temporaryType === 'fixed' && product && storedValue >= product.price) {
-            toast('Temporary sale price must be lower than the normal item price', 'error');
-            return;
-        }
-
-        const timestamp = now();
-        const existingGroup = $promoGroupsDB.find(g => g.id === temporaryGroupId);
-        const existingDiscount = $discountsDB.find(d => d.id === temporaryId);
-        const group: PromoGroup = {
-            id: temporaryGroupId, name: temporaryName.trim(), startAt: temporaryStartAt,
-            endAt: temporaryEndAt, isActive: temporaryActive,
-            createdAt: existingGroup?.createdAt || timestamp, updatedAt: timestamp
-        };
-        const discount: Discount = {
-            id: temporaryId, name: temporaryName.trim(), type: temporaryType, value: storedValue,
-            isActive: temporaryActive, createdAt: existingDiscount?.createdAt || timestamp,
-            updatedAt: timestamp, kind: 'temporary_item', autoApply: true,
-            groupId: temporaryGroupId, minQuantity: 1, secondPrice: 0, bundleQuantity: 0,
-            bundlePrice: 0, maxApplications: null, startAt: temporaryStartAt,
-            endAt: temporaryEndAt, priority: 0
-        };
-        if (savingPromotion) return;
-        savingPromotion = true;
-        const wasEditing = editingTemporary;
-        const snapshot = promotionSnapshot();
-        try {
-            const items = buildGroupItems(temporaryGroupId, new Set([temporaryProductId]));
-            applyPromotionToStores(group, discount, items);
-            showTemporary = false;
-            await savePromotionBundle(group, discount, items);
-            toast(wasEditing ? 'Temporary discount updated' : 'Temporary discount added');
-        } catch (error) {
-            restorePromotionSnapshot(snapshot);
-            showTemporary = true;
-            toast(`Could not save temporary discount: ${error}`, 'error');
-        } finally {
-            savingPromotion = false;
-        }
-    }
-
-    function delTemporary(d: Discount) {
-        bundleToDelete = d;
-        showDeleteConfirm = true;
-    }
-
-    function temporaryDeal(d: Discount): string {
-        return d.type === 'percentage' ? `${numeric(d.value)}% off` : `${formatMoney(numeric(d.value))} sale price`;
-    }
-
-    function selectTemporaryProduct(productId: string) {
-        temporaryProductId = productId;
-    }
-
-    function isPromotionEligible(productId: string): boolean {
-        return Boolean(productCacheById.get(productId)?.isActive);
-    }
-
-    $: selectedTemporaryProduct = productCacheById.get(temporaryProductId);
-
-    function promotionStatus(d: Discount, group: PromoGroup | null | undefined, current: number): string {
-        if (!d.isActive || group?.isActive === false) return 'Inactive';
-        const startAt = group?.startAt || d.startAt;
-        const endAt = group?.endAt || d.endAt;
-        if (startAt && current < new Date(startAt).getTime()) return 'Scheduled';
-        if (endAt && current > new Date(endAt).getTime()) return 'Expired';
-        return 'Active';
-    }
-
-    function promotionStatusClass(d: Discount, group: PromoGroup | null | undefined, current: number): string {
-        const status = promotionStatus(d, group, current);
-        if (status === 'Active') return 'text-success';
-        if (status === 'Scheduled') return 'text-warning';
-        return 'text-danger';
-    }
-
-    // ───── BOGO ─────
-    let showBogo = false;
-    let editingBogo = false;
-    let bogoId = '';
-    let bogoGroupId = '';
-    let bogoName = '';
-    let bogoBuyQty = 1;
-    let bogoSecondPricePounds = 0;
-    let bogoMaxApplications: number | null = null;
-    let bogoStartAt = '';
-    let bogoEndAt = '';
-    let bogoActive = true;
-    let bogoProductIds: Set<string> = new Set();
-    let bogoProductSearch = '';
-
-    function addBogo() {
-        bogoId = uuid();
-        bogoGroupId = uuid();
-        bogoName = '';
-        bogoBuyQty = 1;
-        bogoSecondPricePounds = 0;
-        bogoMaxApplications = null;
-        bogoStartAt = '';
-        bogoEndAt = '';
-        bogoActive = true;
-        bogoProductIds = new Set();
-        bogoProductSearch = '';
-        editingBogo = false;
-        showBogo = true;
-        void loadProductPicker('bogo', '');
-    }
-
-    function editBogo(d: Discount) {
-        const g = $promoGroupsDB.find(g => g.id === d.groupId);
-        bogoId = d.id;
-        bogoGroupId = d.groupId;
-        bogoName = d.name;
-        bogoBuyQty = d.minQuantity || 1;
-        bogoSecondPricePounds = numeric(d.secondPrice) / 100;
-        bogoMaxApplications = d.maxApplications ?? null;
-        bogoStartAt = g?.startAt || d.startAt || '';
-        bogoEndAt = g?.endAt || d.endAt || '';
-        bogoActive = d.isActive && (g?.isActive ?? true);
-        bogoProductIds = new Set($promoGroupItemsDB.filter(i => i.groupId === d.groupId).map(i => i.productId));
-        bogoProductSearch = '';
-        editingBogo = true;
-        showBogo = true;
-        void refreshProductsCached(Array.from(bogoProductIds));
-        void loadProductPicker('bogo', '');
-    }
-
-    async function saveBogo() {
-        if (!bogoName.trim()) { toast('Name is required', 'error'); return; }
-        const buyQty = Number(bogoBuyQty);
-        const secondPricePounds = Number(bogoSecondPricePounds);
-        const maxApplications = bogoMaxApplications === null ? null : Number(bogoMaxApplications);
-        if (!Number.isInteger(buyQty) || buyQty < 1) { toast('Buy quantity must be a whole number of at least 1', 'error'); return; }
-        if (!Number.isFinite(secondPricePounds) || secondPricePounds < 0) { toast('Discounted price cannot be negative', 'error'); return; }
-        if (maxApplications !== null && (!Number.isInteger(maxApplications) || maxApplications < 1)) { toast('Maximum uses must be a whole number of at least 1', 'error'); return; }
-        if (!validatePromotionWindow(bogoStartAt, bogoEndAt)) return;
-        if (bogoProductIds.size === 0) { toast('Pick at least one product', 'error'); return; }
-        if (Array.from(bogoProductIds).some(id => !isPromotionEligible(id))) {
-            toast('Remove deactivated or hidden items before saving this promotion', 'error');
-            return;
-        }
-        const secondPrice = Math.round(secondPricePounds * 100);
-        const invalidPriceProducts = Array.from(bogoProductIds)
-            .map(id => productCacheById.get(id))
-            .filter((product): product is Product => Boolean(product?.price && secondPrice >= product.price));
-        if (invalidPriceProducts.length > 0) {
-            const firstName = invalidPriceProducts[0].name;
-            const remaining = invalidPriceProducts.length - 1;
-            toast(`Next-item price must be below the normal price for ${firstName}${remaining ? ` and ${remaining} more` : ''}`, 'error');
-            return;
-        }
-
-        const timestamp = now();
-        const existingGroup = $promoGroupsDB.find(g => g.id === bogoGroupId);
-        const existingDiscount = $discountsDB.find(d => d.id === bogoId);
-        const group: PromoGroup = {
-            id: bogoGroupId, name: bogoName.trim(), startAt: bogoStartAt, endAt: bogoEndAt,
-            isActive: bogoActive, createdAt: existingGroup?.createdAt || timestamp, updatedAt: timestamp
-        };
-        const discount: Discount = {
-            id: bogoId, name: bogoName.trim(), type: 'fixed', value: 0,
-            isActive: bogoActive, createdAt: existingDiscount?.createdAt || timestamp,
-            updatedAt: timestamp, kind: 'bogo_fixed_price',
-            autoApply: true, groupId: bogoGroupId, minQuantity: buyQty,
-            secondPrice, bundleQuantity: 0, bundlePrice: 0,
-            maxApplications,
-            startAt: bogoStartAt, endAt: bogoEndAt, priority: 0
-        };
-
-        if (savingPromotion) return;
-        savingPromotion = true;
-        const wasEditing = editingBogo;
-        const snapshot = promotionSnapshot();
-        try {
-            const items = buildGroupItems(bogoGroupId, bogoProductIds);
-            applyPromotionToStores(group, discount, items);
-            showBogo = false;
-            await savePromotionBundle(group, discount, items);
-            toast(wasEditing ? 'BOGO promotion updated' : 'BOGO promotion added');
-        } catch (error) {
-            restorePromotionSnapshot(snapshot);
-            showBogo = true;
-            toast(`Could not save BOGO promotion: ${error}`, 'error');
-        } finally {
-            savingPromotion = false;
-        }
-    }
-
-    // ───── Manual percentage discounts ─────
-    let showPercent = false;
-    let editingPercent = false;
-    let percentId = '';
-    let percentName = '';
-    let percentValue = 10;
-    let percentActive = true;
-
-    function addPercent() {
-        percentId = uuid();
-        percentName = '';
-        percentValue = 10;
-        percentActive = true;
-        editingPercent = false;
-        showPercent = true;
-    }
-
-    function editPercent(d: Discount) {
-        percentId = d.id;
-        percentName = d.name;
-        percentValue = numeric(d.value, 10);
-        percentActive = d.isActive;
-        editingPercent = true;
-        showPercent = true;
-    }
-
-    async function savePercent() {
-        if (!percentName.trim()) { toast('Name is required', 'error'); return; }
-        const value = Number(percentValue);
-        if (!Number.isFinite(value) || value <= 0 || value > 100) { toast('Percentage must be between 1 and 100', 'error'); return; }
-        const timestamp = now();
-        const existingDiscount = $discountsDB.find(d => d.id === percentId);
-        const discount: Discount = {
-            id: percentId, name: percentName.trim(), type: 'percentage', value,
-            isActive: percentActive, createdAt: existingDiscount?.createdAt || timestamp,
-            updatedAt: timestamp, kind: 'manual_percent', autoApply: false,
-            groupId: '', minQuantity: 1, secondPrice: 0, bundleQuantity: 0, bundlePrice: 0,
-            maxApplications: null, startAt: '', endAt: '', priority: 0
-        };
-        if (savingPromotion) return;
-        savingPromotion = true;
-        const wasEditing = editingPercent;
-        const snapshot = promotionSnapshot();
-        try {
-            applyPromotionToStores(null, discount);
-            showPercent = false;
-            await upsert('discounts', discount);
-            toast(wasEditing ? 'Percentage discount updated' : 'Percentage discount added');
-        } catch (error) {
-            restorePromotionSnapshot(snapshot);
-            showPercent = true;
-            toast(`Could not save percentage discount: ${error}`, 'error');
-        } finally {
-            savingPromotion = false;
-        }
-    }
-
-    function buildGroupItems(groupId: string, productIds: Set<string>): PromoGroupItem[] {
-        const oldItems = $promoGroupItemsDB.filter(i => i.groupId === groupId);
-        const existingByProduct = new Map<string, PromoGroupItem>();
-        for (const item of oldItems) {
-            if (!existingByProduct.has(item.productId)) existingByProduct.set(item.productId, item);
-        }
-        const timestamp = now();
-        const keptItems = Array.from(existingByProduct.values()).filter(item => productIds.has(item.productId));
-        const newItems: PromoGroupItem[] = Array.from(productIds)
-            .filter(productId => !existingByProduct.has(productId))
-            .map(productId => ({ id: uuid(), groupId, productId, updatedAt: timestamp }));
-        return [...keptItems, ...newItems];
-    }
-
-    function addBundle() {
-        curDiscountId = uuid();
-        curGroupId = uuid();
-        curName = '';
-        curQty = 2;
-        curPrice = 0;
-        curStartAt = '';
-        curEndAt = '';
-        curActive = true;
-        curProductIds = new Set();
-        productSearch = '';
-        priceString = '0';
-        qtyString = '2';
-        editingBundle = false;
-        showBundle = true;
-        void loadProductPicker('bundle', '');
-    }
-
-    function editBundle(d: Discount) {
-        curDiscountId = d.id;
-        curGroupId = d.groupId;
-        curName = d.name;
-        curQty = numeric(d.bundleQuantity, 2) || 2;
-        curPrice = numeric(d.bundlePrice);
-        const g = $promoGroupsDB.find(g => g.id === d.groupId);
-        curStartAt = g?.startAt || d.startAt || '';
-        curEndAt = g?.endAt || d.endAt || '';
-        curActive = d.isActive && (g?.isActive ?? true);
-        curProductIds = new Set($promoGroupItemsDB.filter(i => i.groupId === d.groupId).map(i => i.productId));
-        productSearch = '';
-        priceString = (numeric(d.bundlePrice) / 100).toFixed(2).replace(/\.00$/, '');
-        qtyString = String(numeric(d.bundleQuantity, 2));
-        editingBundle = true;
-        showBundle = true;
-        void refreshProductsCached(Array.from(curProductIds));
-        void loadProductPicker('bundle', '');
-    }
-
-    async function saveBundle() {
-        if (!curName.trim()) { toast('Name is required', 'error'); return; }
-        const bundleQty = Number(curQty);
-        const bundlePrice = Number(curPrice);
-        if (!Number.isInteger(bundleQty) || bundleQty < 2) { toast('Quantity must be a whole number of at least 2', 'error'); return; }
-        if (!Number.isInteger(bundlePrice) || bundlePrice <= 0) { toast('Bundle price must be greater than 0', 'error'); return; }
-        if (!validatePromotionWindow(curStartAt, curEndAt)) return;
-        if (curProductIds.size === 0) { toast('Pick at least one product', 'error'); return; }
-        if (Array.from(curProductIds).some(id => !isPromotionEligible(id))) {
-            toast('Remove deactivated or hidden items before saving this promotion', 'error');
-            return;
-        }
-
-        const timestamp = now();
-        const existingGroup = $promoGroupsDB.find(g => g.id === curGroupId);
-        const existingDiscount = $discountsDB.find(d => d.id === curDiscountId);
-        const group: PromoGroup = {
-            id: curGroupId, name: curName, startAt: curStartAt, endAt: curEndAt,
-            isActive: curActive, createdAt: existingGroup?.createdAt || timestamp, updatedAt: timestamp
-        };
-        const discount: Discount = {
-            id: curDiscountId, name: curName, type: 'fixed', value: 0,
-            isActive: curActive, createdAt: existingDiscount?.createdAt || timestamp,
-            updatedAt: timestamp, kind: 'bundle_fixed_price',
-            autoApply: true, groupId: curGroupId,
-            minQuantity: 0, secondPrice: 0,
-            bundleQuantity: bundleQty, bundlePrice,
-            maxApplications: null, startAt: curStartAt, endAt: curEndAt, priority: 0
-        };
-
-        if (savingPromotion) return;
-        savingPromotion = true;
-        const wasEditing = editingBundle;
-        const snapshot = promotionSnapshot();
-        try {
-            const items = buildGroupItems(curGroupId, curProductIds);
-            applyPromotionToStores(group, discount, items);
-            showBundle = false;
-            await savePromotionBundle(group, discount, items);
-            toast(wasEditing ? 'Bundle updated' : 'Bundle added');
-        } catch (error) {
-            restorePromotionSnapshot(snapshot);
-            showBundle = true;
-            toast(`Could not save bundle: ${error}`, 'error');
-        } finally {
-            savingPromotion = false;
-        }
-    }
-
+    let loadedProductKey = '', productLoadToken = 0;
+    let showEditor = false, editing = false;
+    let draft = promotionDraft('bundle', uuid(), uuid());
+    let editSnapshot: PromotionSnapshot | undefined;
+    let draftItemsByProduct = new Map<string, PromoGroupItem>();
     let showDeleteConfirm = false;
     let bundleToDelete: Discount | null = null;
-    function delBundle(d: Discount) {
-        bundleToDelete = d;
-        showDeleteConfirm = true;
-    }
-    function delBogo(d: Discount) {
-        bundleToDelete = d;
-        showDeleteConfirm = true;
-    }
-    function delPercent(d: Discount) {
-        bundleToDelete = d;
-        showDeleteConfirm = true;
-    }
-    async function confirmDelete() {
-        if (deletingPromotion) return;
-        const d = bundleToDelete;
-        if (!d) { showDeleteConfirm = false; return; }
-        deletingPromotion = true;
-        const snapshot = promotionSnapshot();
-        try {
-            const groupId = d.groupId || '';
-            const relatedDiscountIds = Array.from(new Set([
-                d.id,
-                ...$discountsDB
-                    .filter(x => x.id === d.id || (groupId && x.groupId === groupId))
-                    .map(x => x.id)
-            ]));
-            showDeleteConfirm = false;
-            bundleToDelete = null;
-            discountsDB.update(l => l.filter(x =>
-                !relatedDiscountIds.includes(x.id) && !(groupId && x.groupId === groupId)
-            ));
-            promoGroupsDB.update(l => groupId ? l.filter(g => g.id !== groupId) : l);
-            promoGroupItemsDB.update(l => groupId ? l.filter(i => i.groupId !== groupId) : l);
-            await deletePromotionBundle(d.id, groupId);
-            toast('Promotion deleted', 'info');
-        } catch (e) {
-            restorePromotionSnapshot(snapshot);
-            console.error('Delete bundle failed:', e);
-            toast(`Delete failed: ${(e as Error)?.message || e}`, 'error');
-        } finally {
-            deletingPromotion = false;
-            showDeleteConfirm = false;
-            bundleToDelete = null;
-        }
-    }
+    let deleteSnapshot: PromotionSnapshot | undefined;
+    let mutation: 'save' | 'delete' | null = null;
+    let saveError = '', deleteError = '', feedback = '';
+    const kindNames: Record<Tab, Discount['kind']> = { bundle: 'bundle_fixed_price', bogo: 'bogo_fixed_price', temporary: 'temporary_item', percent: 'manual_percent' };
+    $: busy = mutation !== null;
+    $: allDiscounts = [...new Map($discountsDB.filter(Boolean).map((discount) => [discount.id, discount])).values()];
+    $: bundles = allDiscounts.filter((discount) => discountKind(discount) === kindNames.bundle);
+    $: bogos = allDiscounts.filter((discount) => discountKind(discount) === kindNames.bogo);
+    $: temporaryItems = allDiscounts.filter((discount) => discountKind(discount) === kindNames.temporary);
+    $: percentages = allDiscounts.filter((discount) => discountKind(discount) === kindNames.percent);
+    $: promoGroupById = new Map($promoGroupsDB.map((group) => [group.id, group]));
+    $: promoItemCountsByGroup = $promoGroupItemsDB.reduce((counts, item) => counts.set(item.groupId, (counts.get(item.groupId) || 0) + 1), new Map<string, number>());
+    $: firstPromoProductIdByGroup = $promoGroupItemsDB.reduce((map, item) => { if (!map.has(item.groupId)) map.set(item.groupId, item.productId); return map; }, new Map<string, string>());
+    $: productNameById = new Map([...productCacheById].map(([id, product]) => [id, product.name]));
+    $: referencedProducts = [...new Set($promoGroupItemsDB.map((item) => item.productId).filter(Boolean))];
+    $: referencedProductKey = [...referencedProducts].sort().join('|');
+    $: if (referencedProductKey !== loadedProductKey) { loadedProductKey = referencedProductKey; void loadProductNames(referencedProducts); }
 
-    function toggleProduct(pid: string) {
-        if (curProductIds.has(pid)) curProductIds.delete(pid);
-        else curProductIds.add(pid);
-        curProductIds = new Set(curProductIds);
+    function numeric(value: unknown, fallback = 0) { const number = Number(value); return Number.isFinite(number) ? number : fallback; }
+    function discountKind(discount: Discount) { return discount.kind || (discount.type === 'percentage' ? 'manual_percent' : 'manual_fixed'); }
+    function cacheProducts(products: Product[]) { productCacheById = new Map([...productCacheById, ...products.map((product) => [product.id, product] as const)]); }
+    async function fetchProducts(ids: string[]): Promise<Product[]> {
+        if (!ids.length) return [];
+        const wanted = new Set(ids);
+        return isTauri() ? await getProductsByIds(ids, false, true) as Product[] : get(productsDB).filter((product) => wanted.has(product.id));
     }
-
-    $: selectedBundleProducts = Array.from(curProductIds)
-        .map(id => productCacheById.get(id))
-        .filter((product): product is Product => Boolean(product));
-
-    function formatPromotionDate(value: string): string {
-        const date = new Date(value);
-        if (!Number.isFinite(date.getTime())) return value;
-        return date.toLocaleString('en-GB', {
-            day: '2-digit',
-            month: 'short',
-            year: '2-digit',
-            hour: 'numeric',
-            minute: '2-digit',
-            hour12: true,
+    async function loadProductNames(ids: string[]) {
+        const token = ++productLoadToken;
+        try { const products = await fetchProducts(ids); if (token === productLoadToken) cacheProducts(products); }
+        catch (error) { console.warn('Could not load promotion product names:', error); }
+    }
+    function openEditor(kind: Tab, discount?: Discount) {
+        if (busy) return;
+        const id = discount?.id || uuid(), groupId = kind === 'percent' ? '' : discount?.groupId || uuid();
+        editing = Boolean(discount);
+        draft = promotionDraft(kind, id, groupId, discount, promoGroupById.get(groupId), $promoGroupItemsDB);
+        editSnapshot = getPromotionEditSnapshot(id, groupId);
+        draftItemsByProduct = new Map((editSnapshot.items || []).map((item) => [item.productId, item as PromoGroupItem]));
+        saveError = ''; feedback = ''; showEditor = true;
+        void loadProductNames(draft.productIds);
+    }
+    const addBundle = () => openEditor('bundle');
+    const addBogo = () => openEditor('bogo');
+    const addTemporary = () => openEditor('temporary');
+    const addPercent = () => openEditor('percent');
+    const editBundle = (discount: Discount) => openEditor('bundle', discount);
+    const editBogo = (discount: Discount) => openEditor('bogo', discount);
+    const editTemporary = (discount: Discount) => openEditor('temporary', discount);
+    const editPercent = (discount: Discount) => openEditor('percent', discount);
+    function buildItems(groupId: string, productIds: string[]): PromoGroupItem[] {
+        return [...new Set(productIds)].map((productId) => {
+            let item = draftItemsByProduct.get(productId);
+            if (!item) {
+                item = { id: uuid(), groupId, productId, updatedAt: now() };
+                draftItemsByProduct.set(productId, item);
+            }
+            return item;
         });
     }
-
-    function bundleWindow(d: Discount, group: PromoGroup | null | undefined): string {
-        const s = group?.startAt || d.startAt;
-        const e = group?.endAt || d.endAt;
-        if (!s && !e) return 'Always';
-        if (s && e) return `${formatPromotionDate(s)} to ${formatPromotionDate(e)}`;
-        if (s) return `From ${formatPromotionDate(s)}`;
-        return `Until ${formatPromotionDate(e)}`;
+    async function saveEditor(event: { draft: PromotionDraft; values: PromotionValues }) {
+        if (busy) return;
+        const submitted = event.draft;
+        const checked = validatePromotionDraft(submitted);
+        if (!checked.valid) { saveError = 'Check the promotion fields before saving.'; return; }
+        mutation = 'save'; saveError = '';
+        try {
+            const freshProducts = await fetchProducts(submitted.productIds);
+            cacheProducts(freshProducts);
+            const products = new Map(freshProducts.map((product) => [product.id, product]));
+            if (submitted.kind !== 'percent' && submitted.productIds.some((id) => !products.get(id)?.isActive)) throw new Error('Some selected products are unavailable or inactive. Remove them before saving.');
+            const values = checked.values;
+            if (submitted.kind === 'bogo' && freshProducts.some((product) => values.price >= product.price)) throw new Error('Next-item price must be below the normal price of every selected product.');
+            if (submitted.kind === 'temporary' && submitted.temporaryType === 'fixed' && values.value >= freshProducts[0].price) throw new Error('The sale price must be below the normal item price.');
+            const conflicts = submitted.kind === 'temporary' ? promotionOverlapNames(submitted, $discountsDB, $promoGroupsDB, $promoGroupItemsDB, Date.now(), true) : [];
+            if (conflicts.length) throw new Error('This product already has an active offer in the same time window: ' + conflicts.join(', ') + '.');
+            const timestamp = now(), oldDiscount = editSnapshot?.discounts.find((discount) => discount.id === submitted.id), oldGroup = editSnapshot?.group;
+            const group: PromoGroup | null = submitted.kind === 'percent' ? null : {
+                id: submitted.groupId, name: submitted.name, isActive: submitted.active,
+                startAt: submitted.startAt, endAt: submitted.endAt,
+                createdAt: oldGroup?.createdAt || timestamp, updatedAt: timestamp,
+            };
+            const discount: Discount = {
+                id: submitted.id, name: submitted.name, isActive: submitted.active,
+                type: submitted.kind === 'percent' ? 'percentage' : submitted.kind === 'temporary' ? submitted.temporaryType : 'fixed',
+                value: submitted.kind === 'percent' || submitted.kind === 'temporary' ? values.value : 0,
+                kind: kindNames[submitted.kind], autoApply: submitted.kind !== 'percent',
+                groupId: group?.id || '', minQuantity: submitted.kind === 'bogo' ? values.quantity : submitted.kind === 'bundle' ? 0 : 1,
+                secondPrice: submitted.kind === 'bogo' ? values.price : 0,
+                bundleQuantity: submitted.kind === 'bundle' ? values.quantity : 0,
+                bundlePrice: submitted.kind === 'bundle' ? values.price : 0,
+                maxApplications: submitted.kind === 'bogo' ? values.maxApplications : null,
+                startAt: submitted.kind === 'percent' ? '' : submitted.startAt, endAt: submitted.kind === 'percent' ? '' : submitted.endAt,
+                priority: oldDiscount?.priority || 0, createdAt: oldDiscount?.createdAt || timestamp, updatedAt: timestamp,
+            };
+            await savePromotionBundle(group, discount, group ? buildItems(group.id, submitted.productIds) : [], editSnapshot);
+            showEditor = false;
+            feedback = (editing ? 'Updated ' : 'Added ') + submitted.name + '.';
+        } catch (error) { saveError = 'Could not save this promotion. ' + String(error).replace(/^Error:\s*/, '') + ' Your draft is still open.'; }
+        finally { mutation = null; }
     }
-
-    function toggleBogoProduct(pid: string) {
-        if (bogoProductIds.has(pid)) bogoProductIds.delete(pid);
-        else bogoProductIds.add(pid);
-        bogoProductIds = new Set(bogoProductIds);
+    function openDelete(discount: Discount) {
+        if (busy) return;
+        bundleToDelete = discount; deleteSnapshot = getPromotionEditSnapshot(discount.id, discount.groupId || '');
+        deleteError = ''; feedback = ''; showDeleteConfirm = true;
     }
-
-    $: selectedBogoProducts = Array.from(bogoProductIds)
-        .map(id => productCacheById.get(id))
-        .filter((product): product is Product => Boolean(product));
-
-    function handlePricePadKey(key: string) {
-        if (key === 'C') {
-            priceString = '0';
-        } else if (key === 'DEL') {
-            priceString = priceString.length > 1 ? priceString.slice(0, -1) : '0';
-        } else if (key === 'ENTER') {
-            showPricePad = false;
-        } else if (key === '.') {
-            if (!priceString.includes('.')) priceString += '.';
-        } else {
-            const decimalPlaces = priceString.includes('.') ? priceString.split('.')[1].length : 0;
-            if (decimalPlaces < 2) {
-                if (priceString === '0') priceString = key;
-                else priceString += key;
-            }
-        }
-        const pounds = Number(priceString);
-        curPrice = Number.isFinite(pounds) ? Math.round(pounds * 100) : 0;
+    const delBundle = openDelete, delBogo = openDelete, delTemporary = openDelete, delPercent = openDelete;
+    async function confirmDelete() {
+        if (busy || !bundleToDelete) return;
+        const target = bundleToDelete;
+        mutation = 'delete'; deleteError = '';
+        try {
+            await deletePromotionBundle(target.id, target.groupId || '', deleteSnapshot);
+            showDeleteConfirm = false; bundleToDelete = null; feedback = 'Deleted ' + target.name + '.';
+        } catch (error) { deleteError = 'Could not delete this promotion. ' + String(error).replace(/^Error:\s*/, ''); }
+        finally { mutation = null; }
     }
-
-    function handleQtyPadKey(key: string) {
-        if (key === 'C') {
-            qtyString = '0';
-        } else if (key === 'DEL') {
-            qtyString = qtyString.length > 1 ? qtyString.slice(0, -1) : '0';
-        } else if (key === 'ENTER') {
-            showQtyPad = false;
-        } else {
-            if (qtyString === '0') qtyString = key;
-            else qtyString += key;
-        }
-        curQty = parseInt(qtyString) || 2;
+    function temporaryDeal(discount: Discount) { return discount.type === 'percentage' ? discount.value + '% off' : formatMoney(discount.value) + ' sale price'; }
+    function promotionStatus(discount: Discount, group: PromoGroup | undefined, clock: number) {
+        if (!discount.isActive || group?.isActive === false) return 'Inactive';
+        const starts = [discount.startAt, group?.startAt].filter(Boolean).map((value) => new Date(value!).getTime());
+        const ends = [discount.endAt, group?.endAt].filter(Boolean).map((value) => new Date(value!).getTime());
+        if ([...starts, ...ends].some(Number.isNaN)) return 'Invalid dates';
+        const start = Math.max(-Infinity, ...starts), end = Math.min(Infinity, ...ends);
+        if (start > end) return 'Invalid dates';
+        if (clock > end) return 'Expired';
+        if (clock < start) return 'Scheduled';
+        return 'Active';
     }
+    function promotionStatusClass(discount: Discount, group: PromoGroup | undefined, clock: number) {
+        const status = promotionStatus(discount, group, clock);
+        return status === 'Active' ? 'text-success' : status === 'Scheduled' ? 'text-warning' : 'text-danger';
+    }
+    function displayDate(value: string) {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? 'Invalid date' : date.toLocaleString('en-GB', { day: '2-digit', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+    function bundleWindow(discount: Discount, group: PromoGroup | undefined) {
+        const start = group?.startAt || discount.startAt, end = group?.endAt || discount.endAt;
+        if (!start && !end) return 'Always';
+        return [start ? 'From ' + displayDate(start) : '', end ? 'Until ' + displayDate(end) : ''].filter(Boolean).join(' · ');
+    }
+    onMount(() => { promotionClockTimer = setInterval(() => promotionClock = Date.now(), 30_000); });
+    onDestroy(() => { if (promotionClockTimer) clearInterval(promotionClockTimer); productLoadToken++; });
 </script>
 
 <MgmtPage title="Discounts & Promotions">
     <div slot="actions">
         {#if tab==='bundle'}
-            <button class="btn btn-primary add-promotion-button" on:click={addBundle}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Bundle</button>
+            <button disabled={busy} class="btn btn-primary add-promotion-button" on:click={addBundle}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Bundle</button>
         {:else if tab==='bogo'}
-            <button class="btn btn-primary add-promotion-button" on:click={addBogo}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add BOGO</button>
+            <button disabled={busy} class="btn btn-primary add-promotion-button" on:click={addBogo}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add BOGO</button>
         {:else if tab==='temporary'}
-            <button class="btn btn-primary add-promotion-button" on:click={addTemporary}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Temporary</button>
+            <button disabled={busy} class="btn btn-primary add-promotion-button" on:click={addTemporary}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Temporary</button>
         {:else}
-            <button class="btn btn-primary add-promotion-button" on:click={addPercent}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Percentage</button>
+            <button disabled={busy} class="btn btn-primary add-promotion-button" on:click={addPercent}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add Percentage</button>
         {/if}
     </div>
 
     <div class="discount-page">
+        {#if feedback}<div class="promotion-feedback" role="status">{feedback}</div>{/if}
         <nav class="promotion-tabs" aria-label="Promotion types">
-            <button class:active={tab === 'bundle'} aria-pressed={tab === 'bundle'} on:click={() => tab='bundle'}><span>Bundle Deals</span><small>{bundles.length}</small></button>
-            <button class:active={tab === 'bogo'} aria-pressed={tab === 'bogo'} on:click={() => tab='bogo'}><span>BOGO</span><small>{bogos.length}</small></button>
-            <button class:active={tab === 'temporary'} aria-pressed={tab === 'temporary'} on:click={() => tab='temporary'}><span>Temporary Item</span><small>{temporaryItems.length}</small></button>
-            <button class:active={tab === 'percent'} aria-pressed={tab === 'percent'} on:click={() => tab='percent'}><span>Percentage</span><small>{percentages.length}</small></button>
+            <button disabled={busy} class:active={tab === 'bundle'} aria-pressed={tab === 'bundle'} on:click={() => tab='bundle'}><span>Bundle Deals</span><small>{bundles.length}</small></button>
+            <button disabled={busy} class:active={tab === 'bogo'} aria-pressed={tab === 'bogo'} on:click={() => tab='bogo'}><span>BOGO</span><small>{bogos.length}</small></button>
+            <button disabled={busy} class:active={tab === 'temporary'} aria-pressed={tab === 'temporary'} on:click={() => tab='temporary'}><span>Temporary Item</span><small>{temporaryItems.length}</small></button>
+            <button disabled={busy} class:active={tab === 'percent'} aria-pressed={tab === 'percent'} on:click={() => tab='percent'}><span>Percentage</span><small>{percentages.length}</small></button>
         </nav>
 
         <div class="promotion-table-wrap">
@@ -965,8 +202,8 @@
                                 <td class="window-cell">{bundleWindow(d, group)}</td>
                                 <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
                                 <td class="action-cell"><div class="act-row">
-                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
-                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBundle(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
                                 </div></td>
                             </tr>
                         {/each}
@@ -987,8 +224,8 @@
                                 <td>{d.maxApplications == null ? 'Unlimited' : `${numeric(d.maxApplications)} per sale`}</td>
                                 <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
                                 <td class="action-cell"><div class="act-row">
-                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
-                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delBogo(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
                                 </div></td>
                             </tr>
                         {/each}
@@ -1009,8 +246,8 @@
                                 <td class="window-cell">{bundleWindow(d, group)}</td>
                                 <td><span class="tag {promotionStatusClass(d, group, promotionClock)}">{promotionStatus(d, group, promotionClock)}</span></td>
                                 <td class="action-cell"><div class="act-row">
-                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
-                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delTemporary(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
                                 </div></td>
                             </tr>
                         {/each}
@@ -1028,8 +265,8 @@
                                 <td>Manual at checkout</td>
                                 <td><span class="tag {d.isActive ? 'text-success' : 'text-danger'}">{d.isActive?'Active':'Inactive'}</span></td>
                                 <td class="action-cell"><div class="act-row">
-                                    <button class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
-                                    <button class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn" title={`Edit ${d.name}`} aria-label={`Edit ${d.name}`} on:click={() => editPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg></button>
+                                    <button disabled={busy} class="btn-icon act-btn danger" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`} on:click={() => delPercent(d)}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"></path></svg></button>
                                 </div></td>
                             </tr>
                         {/each}
@@ -1041,406 +278,19 @@
     </div>
 </MgmtPage>
 
-<Modal bind:show={showBundle} title={editingBundle ? 'Edit Bundle' : 'Add Bundle'} width="760px" height="min(86vh, 780px)">
-    <div class="form-grid">
-        <div class="field span-2">
-            <label for="bundle-name">Bundle Name *</label>
-            <div class="relative">
-                <input class="min-w-0 !pr-12" id="bundle-name" data-touch-keyboard="button" bind:value={curName} placeholder="e.g. Any 3 Croissants for £4" />
-                <TouchKeyboardButton targetId="bundle-name" label="Open bundle name keyboard" embedded />
-            </div>
-        </div>
-        <div class="field">
-            <label for="bundle-quantity-button">Quantity *</label>
-            <button id="bundle-quantity-button" type="button" class="number-trigger" on:click={openQtyPad}>
-                <span class="text-text-main font-semibold">{curQty} items</span>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
-            </button>
-        </div>
-        <div class="field">
-            <label for="bundle-price-button">Bundle Price (£) *</label>
-            <button id="bundle-price-button" type="button" class="number-trigger" on:click={openPricePad}>
-                <span class="font-semibold text-success">{formatMoney(curPrice)}</span>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
-            </button>
-        </div>
-        <div class="field"><TouchDateTimePicker label="Start Time (optional)" bind:value={curStartAt} /></div>
-        <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={curEndAt} /></div>
-        <div class="span-2"><TouchToggle bind:checked={curActive} label="Active Status" /></div>
-
-        <div class="field span-2">
-            <div class="flex items-center justify-between gap-3 mb-2">
-                <span class="text-sm font-medium text-text-muted">Selected Items ({selectedBundleProducts.length})</span>
-                <button class="btn btn-danger !py-1 !px-3 !text-xs !min-h-8" disabled={selectedBundleProducts.length === 0} on:click={() => curProductIds = new Set()}>Clear all</button>
-            </div>
-            <div class="flex flex-wrap content-start gap-2 h-[92px] overflow-y-auto p-2 border border-border-flat rounded-sm bg-bg-panel">
-                {#if selectedBundleProducts.length === 0}
-                    <span class="text-sm text-text-muted p-2">No items selected yet.</span>
-                {:else}
-                    {#each selectedBundleProducts as product (product.id)}
-                        <button class="flat-card !py-1.5 !px-2.5 text-sm flex items-center gap-2 hover:!border-danger" on:click={() => toggleProduct(product.id)}>
-                            <span>{product.name}</span><strong class="text-danger">✕</strong>
-                        </button>
-                    {/each}
-                {/if}
-            </div>
-            {#if bundleOverlapWarnings.length > 0}
-                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
-                    <strong class="block text-text-main">Promotion overlap</strong>
-                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
-                    {#each bundleOverlapWarnings as warning}
-                        <div class="mt-1">{warning}</div>
-                    {/each}
-                </div>
-            {/if}
-        </div>
-
-        <div class="field span-2">
-            <label for="bundle-product-search">Find Products</label>
-            <div class="search-controls search-controls-fill">
-                <div class="search-primary">
-                    <SearchField
-                        id="bundle-product-search"
-                        bind:value={productSearch}
-                        placeholder="Search name, SKU, barcode, or PLU..."
-                        ariaLabel="Search bundle products"
-                        keyboardLabel="Open bundle product search keyboard"
-                        clearLabel="Clear bundle product search"
-                        onKeydown={(event) => handlePickerSearchKeydown(event, 'bundle')}
-                        onClear={() => clearPickerSearch('bundle')}
-                    />
-                </div>
-                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.bundle} on:click={() => runPickerSearch('bundle')}>
-                    {pickerLoading.bundle ? 'Finding...' : 'Find'}
-                </button>
-            </div>
-        </div>
-        <div class="span-2 max-h-[220px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each pickerRows.bundle as p (p.id)}
-                <label
-                    class="grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-2.5 py-1.5 border-b border-border-flat last:border-b-0 cursor-pointer text-[0.85rem] hover:bg-bg-card {curProductIds.has(p.id) ? 'bg-accent-primary/10' : ''}"
-                >
-                    <div class="flex w-6 h-6 items-center justify-center rounded-md border-2 transition-colors shrink-0 {curProductIds.has(p.id) ? 'bg-accent-primary border-accent-primary text-white' : 'bg-bg-panel border-border-flat'}">
-                        {#if curProductIds.has(p.id)}
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" width="14"><polyline points="20 6 9 17 4 12"></polyline></svg>
-                        {/if}
-                    </div>
-                    <input type="checkbox" class="hidden" checked={curProductIds.has(p.id)} on:change={() => toggleProduct(p.id)} />
-                    <span class="text-text-main font-medium">{p.name}</span>
-                    <span class="text-text-muted text-[0.8rem] font-mono">{p.sku || p.barcode || ''}</span>
-                    <span class="text-text-main font-semibold min-w-[60px] text-right">{formatMoney(p.price)}</span>
-                </label>
-            {/each}
-            {#if pickerError.bundle}
-                <div class="p-4 text-center text-danger text-[0.9rem]">{pickerError.bundle}</div>
-            {:else if pickerLoading.bundle && pickerRows.bundle.length === 0}
-                <div class="p-4 text-center text-text-muted text-[0.9rem]">Finding products...</div>
-            {:else if pickerRows.bundle.length === 0}
-                <div class="p-4 text-center text-text-muted text-[0.9rem]">No matches.</div>
-            {/if}
-            {#if pickerTotal.bundle > pickerRows.bundle.length}
-                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.bundle.length} of {pickerTotal.bundle}{pickerTotal.bundle >= 1000 ? '+' : ''} results.</div>
-            {/if}
-        </div>
-    </div>
-    <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showBundle=false}>Cancel</button>
-        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBundle}>{savingPromotion ? 'Saving...' : 'Save'}</button>
-    </svelte:fragment>
+{#if showEditor}<PromotionEditor bind:show={showEditor} {editing} {draft} {busy} error={saveError} productsById={productCacheById} on:save={(event) => saveEditor(event.detail)} on:loaded={(event) => cacheProducts(event.detail)} />{/if}
+<Modal bind:show={showDeleteConfirm} title="Delete Promotion?" width="440px" dismissDisabled={busy}>
+    {#if deleteError}<p class="delete-promotion-error" role="alert">{deleteError}</p>{/if}
+    <p class="delete-promotion-copy">Delete <strong>“{bundleToDelete?.name}”</strong>? This removes the promotion and its product list.</p>
+    <svelte:fragment slot="footer"><button class="btn btn-secondary" disabled={busy} on:click={() => showDeleteConfirm = false}>Cancel</button><button class="btn btn-danger" disabled={busy} on:click={confirmDelete}>{mutation === 'delete' ? 'Deleting…' : 'Delete'}</button></svelte:fragment>
 </Modal>
-
-<Modal bind:show={showBogo} title={editingBogo ? 'Edit BOGO Promotion' : 'Add BOGO Promotion'} width="760px" height="min(86vh, 780px)">
-    <div class="form-grid">
-        <div class="field span-2">
-            <label for="bogo-name">Promotion Name *</label>
-            <div class="relative">
-                <input class="min-w-0 !pr-12" id="bogo-name" data-touch-keyboard="button" bind:value={bogoName} placeholder="e.g. Buy 1, get the next for £1" />
-                <TouchKeyboardButton targetId="bogo-name" label="Open promotion name keyboard" embedded />
-            </div>
-        </div>
-        <div class="field"><label for="bogo-buy-quantity">Full-price items to buy *</label><input id="bogo-buy-quantity" type="number" min="1" step="1" bind:value={bogoBuyQty} /></div>
-        <div class="field"><label for="bogo-next-price">Price of the next item (£) *</label><input id="bogo-next-price" type="number" min="0" step="0.01" bind:value={bogoSecondPricePounds} /></div>
-        <div class="field">
-            <label for="bogo-max-uses">Maximum uses per sale</label>
-            <input id="bogo-max-uses" type="number" min="1" step="1" bind:value={bogoMaxApplications} placeholder="Leave empty for unlimited" />
-        </div>
-        <div class="field flex items-end"><TouchToggle bind:checked={bogoActive} label="Active Status" /></div>
-        <div class="field"><TouchDateTimePicker label="Start Time (optional)" bind:value={bogoStartAt} /></div>
-        <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={bogoEndAt} /></div>
-        <div class="field span-2">
-            <div class="flex items-center justify-between gap-3 mb-2">
-                <span class="text-sm font-medium text-text-muted">Selected Items ({selectedBogoProducts.length})</span>
-                <button class="btn btn-danger !py-1 !px-3 !text-xs !min-h-8" disabled={selectedBogoProducts.length === 0} on:click={() => bogoProductIds = new Set()}>Clear all</button>
-            </div>
-            <div class="flex flex-wrap content-start gap-2 h-[92px] overflow-y-auto p-2 border border-border-flat rounded-sm bg-bg-panel">
-                {#if selectedBogoProducts.length === 0}
-                    <span class="text-sm text-text-muted p-2">No items selected yet.</span>
-                {:else}
-                    {#each selectedBogoProducts as product (product.id)}
-                        <button class="flat-card !py-1.5 !px-2.5 text-sm flex items-center gap-2 hover:!border-danger" on:click={() => toggleBogoProduct(product.id)}>
-                            <span>{product.name}</span><strong class="text-danger">✕</strong>
-                        </button>
-                    {/each}
-                {/if}
-            </div>
-            {#if bogoOverlapWarnings.length > 0}
-                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
-                    <strong class="block text-text-main">Promotion overlap</strong>
-                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
-                    {#each bogoOverlapWarnings as warning}
-                        <div class="mt-1">{warning}</div>
-                    {/each}
-                </div>
-            {/if}
-        </div>
-        <div class="field span-2">
-            <label for="bogo-product-search">Find Products</label>
-            <div class="search-controls search-controls-fill">
-                <div class="search-primary">
-                    <SearchField
-                        id="bogo-product-search"
-                        bind:value={bogoProductSearch}
-                        placeholder="Search name, SKU, barcode, or PLU..."
-                        ariaLabel="Search promotion products"
-                        keyboardLabel="Open promotion product search keyboard"
-                        clearLabel="Clear promotion product search"
-                        onKeydown={(event) => handlePickerSearchKeydown(event, 'bogo')}
-                        onClear={() => clearPickerSearch('bogo')}
-                    />
-                </div>
-                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.bogo} on:click={() => runPickerSearch('bogo')}>
-                    {pickerLoading.bogo ? 'Finding...' : 'Find'}
-                </button>
-            </div>
-        </div>
-        <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each pickerRows.bogo as p (p.id)}
-                <label class="grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-2.5 py-1.5 border-b border-border-flat last:border-b-0 cursor-pointer text-[0.85rem] hover:bg-bg-card {bogoProductIds.has(p.id) ? 'bg-accent-primary/10' : ''}">
-                    <div class="flex w-6 h-6 items-center justify-center rounded-md border-2 transition-colors shrink-0 {bogoProductIds.has(p.id) ? 'bg-accent-primary border-accent-primary text-white' : 'bg-bg-panel border-border-flat'}">
-                        {#if bogoProductIds.has(p.id)}✓{/if}
-                    </div>
-                    <input type="checkbox" class="hidden" checked={bogoProductIds.has(p.id)} on:change={() => toggleBogoProduct(p.id)} />
-                    <span class="text-text-main font-medium">{p.name}</span>
-                    <span class="text-text-muted text-[0.8rem] font-mono">{p.sku || p.barcode || ''}</span>
-                    <span class="text-text-main font-semibold min-w-[60px] text-right">{formatMoney(p.price)}</span>
-                </label>
-            {/each}
-            {#if pickerError.bogo}
-                <div class="p-4 text-center text-danger">{pickerError.bogo}</div>
-            {:else if pickerLoading.bogo && pickerRows.bogo.length === 0}
-                <div class="p-4 text-center text-text-muted">Finding products...</div>
-            {:else if pickerRows.bogo.length === 0}
-                <div class="p-4 text-center text-text-muted">No matches.</div>
-            {/if}
-            {#if pickerTotal.bogo > pickerRows.bogo.length}
-                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.bogo.length} of {pickerTotal.bogo}{pickerTotal.bogo >= 1000 ? '+' : ''} results.</div>
-            {/if}
-        </div>
-    </div>
-    <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showBogo=false}>Cancel</button>
-        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveBogo}>{savingPromotion ? 'Saving...' : 'Save'}</button>
-    </svelte:fragment>
-</Modal>
-
-<Modal bind:show={showPercent} title={editingPercent ? 'Edit Percentage Discount' : 'Add Percentage Discount'} width="520px">
-    <div class="form-grid">
-        <div class="field span-2">
-            <label for="percent-name">Discount Name *</label>
-            <div class="relative">
-                <input class="min-w-0 !pr-12" id="percent-name" data-touch-keyboard="button" bind:value={percentName} placeholder="e.g. Staff Discount" />
-                <TouchKeyboardButton targetId="percent-name" label="Open discount name keyboard" embedded />
-            </div>
-        </div>
-        <div class="field"><label for="percentage-value">Percentage Off *</label><input id="percentage-value" type="number" min="1" max="100" step="1" bind:value={percentValue} /></div>
-        <div class="field flex items-end"><TouchToggle bind:checked={percentActive} label="Active Status" /></div>
-        <div class="span-2 p-3 flat-card text-sm text-text-muted">This discount is selected manually by the cashier from the POS discount button.</div>
-    </div>
-    <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showPercent=false}>Cancel</button>
-        <button class="btn btn-primary" disabled={savingPromotion} on:click={savePercent}>{savingPromotion ? 'Saving...' : 'Save'}</button>
-    </svelte:fragment>
-</Modal>
-
-<Modal bind:show={showTemporary} title={editingTemporary ? 'Edit Temporary Item Discount' : 'Add Temporary Item Discount'} width="760px" height="min(86vh, 780px)">
-    <div class="form-grid">
-        <div class="field span-2">
-            <label for="temporary-name">Discount Name *</label>
-            <div class="relative">
-                <input class="min-w-0 !pr-12" id="temporary-name" data-touch-keyboard="button" bind:value={temporaryName} placeholder="e.g. Tomatoes weekend offer" />
-                <TouchKeyboardButton targetId="temporary-name" label="Open discount name keyboard" embedded />
-            </div>
-        </div>
-        <div class="field">
-            <CustomSelect
-                label="Discount Type *"
-                bind:value={temporaryType}
-                options={[
-                    { label: 'Percentage off', value: 'percentage' },
-                    { label: 'Temporary sale price', value: 'fixed' }
-                ]}
-            />
-        </div>
-        <div class="field">
-            <label for="temporary-discount-value">{temporaryType === 'percentage' ? 'Percentage Off *' : 'Temporary Sale Price (£) *'}</label>
-            <input
-                id="temporary-discount-value"
-                type="number"
-                min={temporaryType === 'percentage' ? 1 : 0.01}
-                max={temporaryType === 'percentage' ? 100 : undefined}
-                step={temporaryType === 'percentage' ? 1 : 0.01}
-                bind:value={temporaryValue}
-            />
-        </div>
-        <div class="field"><TouchDateTimePicker label="Start Time (optional)" bind:value={temporaryStartAt} /></div>
-        <div class="field"><TouchDateTimePicker label="End Time (optional)" bind:value={temporaryEndAt} /></div>
-        <div class="span-2"><TouchToggle bind:checked={temporaryActive} label="Active Status" /></div>
-        <div class="field span-2">
-            <span class="text-sm font-medium text-text-muted">Selected Item</span>
-            <div class="flat-card p-3 h-[68px] flex items-center gap-3 {selectedTemporaryProduct ? '!border-accent-primary' : ''}">
-                {#if selectedTemporaryProduct}
-                    <div class="w-4 h-10 rounded-sm" style="background:{selectedTemporaryProduct.color || '#3b82f6'}"></div>
-                    <div class="flex-1 min-w-0">
-                        <strong class="block truncate">{selectedTemporaryProduct.name}</strong>
-                        <span class="text-xs text-text-muted font-mono">{selectedTemporaryProduct.sku || selectedTemporaryProduct.barcode || selectedTemporaryProduct.scalePlu || ''}</span>
-                    </div>
-                    <span class="font-bold">{formatMoney(selectedTemporaryProduct.price)}</span>
-                    <button class="btn btn-danger !py-1.5 !px-3" on:click={() => temporaryProductId = ''}>Remove</button>
-                {:else}
-                    <span class="text-sm text-text-muted">No item selected yet.</span>
-                {/if}
-            </div>
-            {#if temporaryOverlapWarnings.length > 0}
-                <div class="mt-2 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
-                    <strong class="block text-text-main">Promotion overlap</strong>
-                    <span>Best deal wins at checkout. The same item quantity will not be used twice.</span>
-                    {#each temporaryOverlapWarnings as warning}
-                        <div class="mt-1">{warning}</div>
-                    {/each}
-                </div>
-            {/if}
-        </div>
-        <div class="field span-2">
-            <label for="temporary-product-search">Find Item *</label>
-            <div class="search-controls search-controls-fill">
-                <div class="search-primary">
-                    <SearchField
-                        id="temporary-product-search"
-                        bind:value={temporaryProductSearch}
-                        placeholder="Search by item name, SKU, barcode or PLU..."
-                        ariaLabel="Search temporary discount products"
-                        keyboardLabel="Open item search keyboard"
-                        clearLabel="Clear item search"
-                        onKeydown={(event) => handlePickerSearchKeydown(event, 'temporary')}
-                        onClear={() => clearPickerSearch('temporary')}
-                    />
-                </div>
-                <button class="btn btn-primary search-toolbar-action min-w-[104px]" disabled={pickerLoading.temporary} on:click={() => runPickerSearch('temporary')}>
-                    {pickerLoading.temporary ? 'Finding...' : 'Find'}
-                </button>
-            </div>
-        </div>
-        <div class="span-2 max-h-[240px] overflow-y-auto border border-border-flat rounded-sm bg-bg-panel">
-            {#each pickerRows.temporary as product (product.id)}
-                <button
-                    class="w-full grid grid-cols-[auto_1fr_auto_auto] gap-3 items-center px-3 py-2 border-0 border-b border-border-flat last:border-b-0 text-left cursor-pointer hover:bg-bg-card {temporaryProductId === product.id ? 'bg-accent-primary/10' : 'bg-transparent'}"
-                    on:click={() => selectTemporaryProduct(product.id)}
-                >
-                    <div class="flex w-6 h-6 items-center justify-center rounded-md border-2 {temporaryProductId === product.id ? 'bg-accent-primary border-accent-primary text-white' : 'border-border-flat'}">
-                        {#if temporaryProductId === product.id}✓{/if}
-                    </div>
-                    <span class="text-text-main font-medium">{product.name}</span>
-                    <span class="text-text-muted text-xs font-mono">{product.sku || product.barcode || product.scalePlu || ''}</span>
-                    <span class="text-text-main font-semibold">{formatMoney(product.price)}</span>
-                </button>
-            {/each}
-            {#if pickerError.temporary}
-                <div class="p-4 text-center text-danger">{pickerError.temporary}</div>
-            {:else if pickerLoading.temporary && pickerRows.temporary.length === 0}
-                <div class="p-4 text-center text-text-muted">Finding products...</div>
-            {:else if pickerRows.temporary.length === 0}
-                <div class="p-4 text-center text-text-muted">No matches.</div>
-            {/if}
-            {#if pickerTotal.temporary > pickerRows.temporary.length}
-                <div class="p-3 text-center text-text-muted text-xs">Showing first {pickerRows.temporary.length} of {pickerTotal.temporary}{pickerTotal.temporary >= 1000 ? '+' : ''} results.</div>
-            {/if}
-        </div>
-        <div class="span-2 p-3 flat-card text-sm text-text-muted">
-            The normal item price is kept unchanged. This discount applies automatically during the selected time window.
-        </div>
-    </div>
-    <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={savingPromotion} on:click={() => showTemporary=false}>Cancel</button>
-        <button class="btn btn-primary" disabled={savingPromotion} on:click={saveTemporary}>{savingPromotion ? 'Saving...' : 'Save'}</button>
-    </svelte:fragment>
-</Modal>
-
-<Modal bind:show={showDeleteConfirm} title="Delete Promotion?" width="420px">
-    <p class="m-0 text-text-main">
-        Delete <strong>“{bundleToDelete?.name}”</strong>? This removes the promotion and its product list.
-    </p>
-    <svelte:fragment slot="footer">
-        <button class="btn btn-secondary" disabled={deletingPromotion} on:click={() => { showDeleteConfirm = false; bundleToDelete = null; }}>Cancel</button>
-        <button class="btn btn-danger" disabled={deletingPromotion} on:click={confirmDelete}>{deletingPromotion ? 'Deleting...' : 'Delete'}</button>
-    </svelte:fragment>
-</Modal>
-
-
-{#if showPricePad}
-    <div bind:this={pricePadOverlay} class="modal-overlay !z-[1100] outline-none" role="presentation" tabindex="-1" on:click={closePricePadFromBackdrop} on:keydown={closePricePadOnEscape}>
-        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" role="dialog" aria-modal="true" aria-label="Enter bundle price">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="m-0 text-base text-text-muted">Enter Bundle Price</h3>
-                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close price keypad" aria-label="Close price keypad" on:click={() => showPricePad = false}>✕</button>
-            </div>
-            <div class="p-5 text-3xl font-bold text-center text-success mb-4 flat-card">
-                {formatMoney(curPrice)}
-            </div>
-            <div class="grid grid-cols-3 gap-2.5">
-                {#each ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'DEL', 'C', 'ENTER'] as key}
-                    <button
-                        class="flat-card p-5 text-lg font-semibold text-center cursor-pointer transition-colors hover:!bg-bg-card-hover hover:border-accent-primary
-                            {key === 'ENTER' ? '!bg-accent-primary !text-white !border-0 col-span-2 hover:!bg-accent-primary-hover' : ''}
-                            {key === 'C' ? '!text-danger' : ''}
-                            {key === 'DEL' ? '!text-accent-primary' : ''}"
-                        on:click={() => handlePricePadKey(key)}
-                    >
-                        {key === 'DEL' ? '⌫' : key}
-                    </button>
-                {/each}
-            </div>
-        </div>
-    </div>
-{/if}
-
-{#if showQtyPad}
-    <div bind:this={qtyPadOverlay} class="modal-overlay !z-[1100] outline-none" role="presentation" tabindex="-1" on:click={closeQtyPadFromBackdrop} on:keydown={closeQtyPadOnEscape}>
-        <div class="w-80 p-5 rounded-md flat-panel shadow-2xl" role="dialog" aria-modal="true" aria-label="Enter quantity">
-            <div class="flex justify-between items-center mb-4">
-                <h3 class="m-0 text-base text-text-muted">Enter Quantity</h3>
-                <button class="bg-transparent border-0 text-text-muted text-xl cursor-pointer" title="Close quantity keypad" aria-label="Close quantity keypad" on:click={() => showQtyPad = false}>✕</button>
-            </div>
-            <div class="p-5 text-3xl font-bold text-center text-text-main mb-4 flat-card">
-                {qtyString}
-            </div>
-            <div class="grid grid-cols-3 gap-2.5">
-                {#each ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'DEL', 'C', 'ENTER'] as key}
-                    <button
-                        class="flat-card p-5 text-lg font-semibold text-center cursor-pointer transition-colors hover:!bg-bg-card-hover hover:border-accent-primary
-                            {key === 'ENTER' ? '!bg-accent-primary !text-white !border-0 col-span-3 hover:!bg-accent-primary-hover' : ''}
-                            {key === 'C' ? '!text-danger' : ''}
-                            {key === 'DEL' ? '!text-accent-primary' : ''}"
-                        on:click={() => handleQtyPadKey(key)}
-                    >
-                        {key === 'DEL' ? '⌫' : key}
-                    </button>
-                {/each}
-            </div>
-        </div>
-    </div>
-{/if}
 
 <style>
+    .promotion-feedback { flex:none; padding:10px 16px; color:var(--success); font-size:.82rem; border-bottom:1px solid var(--border-flat); overflow-wrap:anywhere; }
+    .delete-promotion-error { color:var(--danger); font-size:.82rem; overflow-wrap:anywhere; }
+    .delete-promotion-copy { overflow-wrap:anywhere; }
+    .discount-page button:disabled { opacity:.45; cursor:not-allowed; }
+
     .add-promotion-button { min-width: 168px; display: inline-flex; align-items: center; justify-content: center; gap: .5rem; }
     .add-promotion-button svg { width: 19px; height: 19px; flex: 0 0 19px; }
     .discount-page { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -1463,8 +313,24 @@
     .act-row { display: grid; grid-template-columns: repeat(2, 42px); justify-content: end; gap: .45rem; }
     .act-row .act-btn { width: 42px !important; height: 42px !important; min-width: 42px !important; min-height: 42px !important; border-radius: .4rem; }
     .act-row svg { width: 18px; height: 18px; }
-    .number-trigger { width: 100%; min-height: 46px; padding: .65rem .75rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; color: var(--text-main); text-align: left; border: 1px solid var(--border-flat); border-radius: .25rem; background: var(--bg-panel); cursor: pointer; }
-    .number-trigger:hover { border-color: var(--accent-primary); }
+    :global(.back-office-route) .promotion-tabs { padding: .45rem .55rem; gap: .35rem; }
+    :global(.back-office-route) .promotion-tabs button { min-height: 40px; padding: .4rem .55rem; }
+    :global(.back-office-route) .promotion-table { min-width: 560px; table-layout: fixed; }
+    :global(.back-office-route) .promotion-table-wide { min-width: 620px; }
+    :global(.back-office-route) .window-cell { min-width: 0; max-width: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    :global(.back-office-route) .discount-page .promotion-table :where(.actions-heading, .action-cell) { width: 92px !important; }
+    :global(.back-office-route) .discount-page .promotion-table .act-row { grid-template-columns: repeat(2, 32px) !important; gap: .25rem !important; }
+    :global(.back-office-route) .discount-page .promotion-table .act-row .act-btn { width: 32px !important; height: 32px !important; min-width: 32px !important; min-height: 32px !important; }
+    @media (min-width: 701px) and (max-width: 900px) {
+        .promotion-tabs { padding: .55rem .7rem; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem; }
+        .promotion-tabs button { min-height: 44px; padding: .45rem .65rem; }
+        .promotion-tabs span { overflow: visible; text-overflow: clip; }
+        .promotion-table { width: 100%; min-width: 700px; table-layout: fixed; }
+        .promotion-table-wide { min-width: 700px; }
+        .promotion-table :global(th), .promotion-table :global(td) { padding-inline: .5rem; overflow: hidden; text-overflow: ellipsis; }
+        .window-cell { min-width: 0; max-width: none; white-space: nowrap; }
+        .actions-heading, .action-cell { width: 118px; }
+    }
     @media (max-width: 700px) {
         .add-promotion-button { min-width: 142px; }
         .promotion-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }

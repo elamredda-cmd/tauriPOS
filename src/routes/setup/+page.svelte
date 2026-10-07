@@ -13,11 +13,13 @@
         migrateLocalDataToServer,
         replaceMariaDbDataFromThisTill,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
+        saveEmployeeProfile,
+        startBackgroundSync,
         verifyDatabaseIdentityBeforeSchemaMutation,
         wipeAndPullFromServer
     } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
-    import { hashPin } from '$lib/stores/session';
+    import { hashPin, normalizeEmployeeForRuntime } from '$lib/stores/session';
     import { employeesDB, settingsDB, now, uuid } from '$lib/stores/db';
     import { get } from 'svelte/store';
 
@@ -39,6 +41,7 @@
     let adminName = '';
     let adminPin = '';
     let needsAdmin = false;
+    let adminRecoveryRequired = false;
     let needsShopDetails = true;
     let stockTrackingEnabled = true;
     let restorePendingMariaDbReplace = false;
@@ -190,7 +193,10 @@
     }
 
     function hasActiveAdmin() {
-        return get(employeesDB).some((employee) => employee.isActive && employee.role === 'admin');
+        return get(employeesDB).some((employee) => {
+            const normalized = normalizeEmployeeForRuntime(employee);
+            return normalized?.isActive && normalized.role === 'admin';
+        });
     }
 
     async function createShopAdmin() {
@@ -222,7 +228,7 @@
                 updatedAt: stamp,
             }, 'key');
         }
-        await upsert('employees', {
+        await saveEmployeeProfile({
             id: uuid(),
             storeId: 'store-main',
             name: adminName.trim(),
@@ -233,6 +239,9 @@
             isActive: true,
             createdAt: stamp,
             updatedAt: stamp,
+        }, {
+            expectedUpdatedAt: null,
+            previousIsActive: false,
         });
         await upsert('tax_rates', {
             id: 'tax-standard-vat',
@@ -265,7 +274,14 @@
         try {
             const cfg = buildConfig();
             setSetupProgress('running', 10, 'Checking shop identity', 'Verifying this database before making any server changes...');
-            connectionState.set({ mode: 'multi', mysqlConfig: cfg, mysqlOnline: false, syncError: null });
+            connectionState.set({
+                mode: 'multi',
+                mysqlConfig: cfg,
+                mysqlOnline: false,
+                mysqlReady: false,
+                mysqlStatus: 'pending',
+                syncError: null,
+            });
             await verifyDatabaseIdentityBeforeSchemaMutation();
             setSetupProgress('running', 20, 'Preparing MariaDB', 'Creating or upgrading tables after identity verification...');
             await initMysqlDb(cfg);
@@ -273,7 +289,13 @@
             if (!server) throw new Error('MariaDB connected during the test but could not be opened.');
             const restoreNeedsMariaDbReplace = await hasRestorePendingMariaDbReplace();
             if (!restoreNeedsMariaDbReplace) await ensureDatabaseIdentityForSync();
-            connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: true,
+                mysqlReady: false,
+                mysqlStatus: 'online',
+                syncError: null,
+            }));
             setSetupProgress('running', 35, 'Checking shop data', 'Counting products, categories, orders, and customers...');
             const remoteCounts = await countRemoteShopData(server);
             const localCounts = await countLocalShopData();
@@ -333,17 +355,41 @@
 
             setSetupProgress('running', 90, 'Saving connection', 'Finishing this till setup...');
             await saveMode('multi', cfg);
-            connectionState.update((state) => ({ ...state, mysqlOnline: true, syncError: null }));
             const finalServer = await getMysqlDb();
             if (!finalServer) throw new Error('MariaDB disconnected while finishing setup.');
-            const admins: any[] = await finalServer.select(
-                `SELECT id FROM employees WHERE role = 'admin' AND isActive = 1 LIMIT 1`
+            await startBackgroundSync();
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: true,
+                mysqlReady: true,
+                mysqlStatus: 'online',
+                syncError: null,
+            }));
+            const adminCandidates: any[] = await finalServer.select(
+                `SELECT CAST(id AS CHAR CHARACTER SET utf8mb4) AS id,
+                        COALESCE(storeId, '') AS storeId,
+                        COALESCE(name, '') AS name,
+                        COALESCE(pin, '') AS pin,
+                        COALESCE(pinHash, '') AS pinHash,
+                        COALESCE(role, '') AS role,
+                        COALESCE(email, '') AS email,
+                        COALESCE(isActive, 0) AS isActive,
+                        COALESCE(createdAt, '') AS createdAt,
+                        COALESCE(updatedAt, '') AS updatedAt
+                 FROM employees`
             );
+            const hasAuthenticatableAdmin = adminCandidates.some((candidate) => {
+                const normalized = normalizeEmployeeForRuntime({
+                    ...candidate,
+                    isActive: Boolean(Number(candidate.isActive)),
+                });
+                return normalized?.role === 'admin' && normalized.isActive;
+            });
             const shopSettings: any[] = await finalServer.select(
                 "SELECT `key` FROM settings WHERE `key` = 'store_info' LIMIT 1"
             );
 
-            if (admins.length > 0) {
+            if (hasAuthenticatableAdmin) {
                 setSetupProgress('success', 100, 'Setup complete', 'This till is connected and ready.');
                 clearRestoreNotice();
                 goto('/');
@@ -351,9 +397,17 @@
             }
 
             needsShopDetails = shopSettings.length === 0;
-            needsAdmin = true;
+            adminRecoveryRequired = adminCandidates.length > 0;
+            needsAdmin = !adminRecoveryRequired;
             testResult = 'pass';
-            setSetupProgress('success', 100, 'Database connected', 'No active administrator exists, so create the first administrator.');
+            setSetupProgress(
+                adminRecoveryRequired ? 'error' : 'success',
+                100,
+                adminRecoveryRequired ? 'Administrator recovery required' : 'Database connected',
+                adminRecoveryRequired
+                    ? 'Existing staff records were found, but none contains a usable active administrator. The records were preserved for recovery.'
+                    : 'No staff records exist, so create the first administrator.',
+            );
             connecting = false;
         } catch (err) {
             const message = cleanError(err);
@@ -371,7 +425,14 @@
             }
             testResult = 'fail';
             setSetupProgress('error', 100, 'Connection failed', message);
-            connectionState.set({ mode: null, mysqlConfig: null, mysqlOnline: false, syncError: message });
+            connectionState.set({
+                mode: null,
+                mysqlConfig: null,
+                mysqlOnline: false,
+                mysqlReady: false,
+                mysqlStatus: 'blocked',
+                syncError: message,
+            });
             connecting = false;
         }
     }
@@ -387,7 +448,8 @@
                 goto('/');
                 return;
             }
-            needsAdmin = true;
+            adminRecoveryRequired = get(employeesDB).length > 0;
+            needsAdmin = !adminRecoveryRequired;
             connecting = false;
         } catch (err) {
             testResult = 'fail';
@@ -452,7 +514,7 @@
             </div>
         {/if}
 
-        {#if !needsAdmin}
+        {#if !needsAdmin && !adminRecoveryRequired}
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 w-full">
 
             <!-- Single POS -->
@@ -501,7 +563,7 @@
         {/if}
 
         <!-- ── Single POS: Continue ──────────────────────────── -->
-        {#if selectedMode === 'single' && !needsAdmin}
+        {#if selectedMode === 'single' && !needsAdmin && !adminRecoveryRequired}
             <div class="w-full flex flex-col items-center gap-3 animate-fade-in">
                 <button
                     class="btn btn-primary px-12 py-3.5 text-base font-semibold rounded-lg"
@@ -514,7 +576,7 @@
         {/if}
 
         <!-- ── Multi POS: Connection form ────────────────────── -->
-        {#if selectedMode === 'multi' && !needsAdmin}
+        {#if selectedMode === 'multi' && !needsAdmin && !adminRecoveryRequired}
             <div class="w-full bg-bg-panel border border-border-flat rounded-lg p-6 flex flex-col gap-5 animate-fade-in">
 
                 <h2 class="text-base font-semibold text-text-main">
@@ -659,6 +721,23 @@
                     <button class="btn btn-primary" disabled={connecting} on:click={handleCreateAdmin}>
                         {connecting ? 'Creating…' : 'Create Administrator'}
                     </button>
+                </div>
+            </div>
+        {/if}
+
+        {#if adminRecoveryRequired}
+            <div
+                class="w-full rounded-lg border border-danger/50 bg-bg-panel p-6 flex flex-col gap-4 animate-fade-in"
+                role="alert"
+            >
+                <div>
+                    <h2 class="text-base font-semibold text-text-main">Administrator recovery required</h2>
+                    <p class="text-sm text-text-muted mt-1">
+                        Staff records already exist, but no active administrator has a usable role and PIN. For safety, setup will not create an unauthenticated administrator over an existing staff database.
+                    </p>
+                </div>
+                <div class="rounded-md border border-border-flat bg-bg-card p-4 text-sm text-text-muted">
+                    Restore a known-good database backup or contact L&amp;Bj Support to repair the administrator record. Existing staff, attendance, and sales data have not been deleted.
                 </div>
             </div>
         {/if}

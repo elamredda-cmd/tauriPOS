@@ -1,16 +1,72 @@
 import { describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 
 import {
+    EMPLOYEE_PROFILE_CONFLICT_CODE,
+    ensureAttendanceOnlyRoleGuards,
     ensureCustomerAccountLedgerGuards,
     ensureCustomerAntiResurrectionTriggers,
     hardenCustomerAccountTables,
+    MYSQL_ATTENDANCE_ROW_PROJECTION,
+    MYSQL_ATTENDANCE_SUMMARY_PROJECTION,
     mysqlApplicationReadProjection,
+    mysqlInsertOpenEmployeeAttendanceOnDatabase,
+    mysqlSaveEmployeeProfileCasOnDatabase,
+    mysqlSaveClosedEmployeeAttendanceOnDatabase,
     normalizeMysqlIdentifierCollations,
     seedMysqlCloseBarrierFromLatestReportMarker,
 } from './mysql';
 
 function compactSql(sql: string): string {
     return sql.replace(/\s+/g, ' ').trim();
+}
+
+function mysqlCliTestDatabase() {
+    const host = process.env.POS_TEST_MYSQL_HOST || '';
+    const port = process.env.POS_TEST_MYSQL_PORT || '3306';
+    const user = process.env.POS_TEST_MYSQL_USER || '';
+    const database = process.env.POS_TEST_MYSQL_DATABASE || '';
+    const password = process.env.POS_TEST_MYSQL_PASSWORD || '';
+    const quote = (value: unknown): string => {
+        if (value === null || value === undefined) return 'NULL';
+        if (typeof value === 'number') return String(value);
+        return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+    };
+    const bind = (sql: string, params: unknown[] = []): string => {
+        let index = 0;
+        const bound = sql.replace(/\?/g, () => quote(params[index++]));
+        if (index !== params.length) throw new Error('MariaDB live-test parameter mismatch');
+        return bound;
+    };
+    const run = (sql: string, headings: boolean): string => execFileSync(
+        process.env.POS_TEST_MYSQL_CLI || 'mariadb',
+        [
+            '--connect-timeout=5', '--batch', '--raw',
+            ...(headings ? [] : ['--skip-column-names']),
+            '--delimiter=//',
+            '-h', host, '-P', port, '-u', user, database, '--execute', `${sql}//`,
+        ],
+        {
+            encoding: 'utf8',
+            env: { ...process.env, MYSQL_PWD: password },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        },
+    );
+    return {
+        execute: async (sql: string, params: unknown[] = []) => {
+            run(bind(sql, params), false);
+            return { rowsAffected: 0 };
+        },
+        select: async (sql: string, params: unknown[] = []) => {
+            const output = run(bind(sql, params), true).trim();
+            if (!output) return [];
+            const [headingLine, ...lines] = output.split('\n');
+            const headings = headingLine.split('\t');
+            return lines.filter(Boolean).map((line) => Object.fromEntries(
+                line.split('\t').map((value, index) => [headings[index], value]),
+            ));
+        },
+    };
 }
 
 const COORDINATION_COLUMNS = [
@@ -70,6 +126,357 @@ describe('MariaDB report epoch migration', () => {
         await seedMysqlCloseBarrierFromLatestReportMarker(database as never);
 
         expect(execute).not.toHaveBeenCalled();
+    });
+});
+
+describe('MariaDB attendance-only role guards', () => {
+    it('wraps legacy hashes and blocks legacy checkout or shift writes', async () => {
+        const executedSql: string[] = [];
+        const database = {
+            select: vi.fn(async () => []),
+            execute: vi.fn(async (sql: string) => {
+                executedSql.push(compactSql(sql));
+                return { rowsAffected: 0 };
+            }),
+        };
+
+        await ensureAttendanceOnlyRoleGuards(database as never);
+
+        const legacyWrap = executedSql.find((sql) =>
+            sql.startsWith('UPDATE employees SET role = TRIM') && sql.includes('attendance-only-v1$'));
+        const legacyUnwrap = legacyWrap;
+        expect(legacyWrap).toContain("pin = CASE WHEN TRIM(COALESCE(role, '')) = 'attendance' THEN ''");
+        expect(legacyUnwrap).toContain('attendance-only-v1$');
+
+        const employeeInsert = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_employee_insert'));
+        const employeeUpdate = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_employee_update'));
+        const employeeDelete = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_employee_delete'));
+        const shiftInsert = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_shift_insert'));
+        const orderInsert = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_order_insert'));
+        const terminalInsert = executedSql.find((sql) =>
+            sql.includes('pos_guard_terminal_employee_insert'));
+        const attendanceInsertAudit = executedSql.find((sql) =>
+            sql.includes('pos_audit_employee_attendance_insert'));
+        const attendanceUpdateAudit = executedSql.find((sql) =>
+            sql.includes('pos_audit_employee_attendance_update'));
+        const attendanceActiveInsert = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_active_insert'));
+        const attendanceUpdateGuard = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_update'));
+        const attendanceDeleteGuard = executedSql.find((sql) =>
+            sql.includes('pos_guard_attendance_delete'));
+
+        expect(employeeInsert).toContain('ATTENDANCE_ROLE_PIN_REQUIRED');
+        expect(employeeUpdate).toContain('ATTENDANCE_ROLE_PIN_INVALID');
+        expect(employeeUpdate).toContain('ATTENDANCE_STILL_OPEN');
+        expect(employeeUpdate).toContain("status = 'open'");
+        expect(employeeUpdate).toContain('TERMINAL_ATTEMPT_ACTIVE');
+        expect(employeeUpdate).toContain("JSON_EXTRACT(saleBundle, '$.order.employeeId')");
+        expect(employeeUpdate).toContain("JSON_EXTRACT(saleBundle, '$.employeeId')");
+        expect(employeeUpdate).toContain('(BINARY NEW.id <=> BINARY OLD.id)');
+        expect(employeeUpdate).toContain('(BINARY NEW.name <=> BINARY OLD.name)');
+        expect(employeeUpdate).toContain('BINARY NEW.pinHash = BINARY (CASE');
+        // The normal timestamp trigger may stamp NEW.updatedAt before this
+        // guard. The exception is still one-shot because OLD must be genuinely
+        // noncanonical and every user-controlled field is binary-exact.
+        expect(employeeUpdate).not.toContain('NEW.updatedAt <=> OLD.updatedAt');
+        expect(employeeDelete).toContain('pos_restore_gate');
+        expect(employeeDelete).toContain("ownerTillId <> ''");
+        expect(employeeDelete).toContain('@lbj_pos_restore_bypass');
+        expect(employeeDelete).toContain('EMPLOYEE_DELETE_DISABLED');
+        expect(shiftInsert).toContain('FOR UPDATE');
+        expect(shiftInsert).toContain('@lbj_pos_restore_bypass');
+        expect(shiftInsert).toContain('pos_restore_gate');
+        expect(shiftInsert).toContain("'admin', 'manager', 'supervisor', 'cashier'");
+        expect(shiftInsert).toContain('EMPLOYEE_ACCESS_DENIED');
+        expect(orderInsert).toContain('FOR UPDATE');
+        expect(orderInsert).toContain('@lbj_pos_restore_bypass');
+        expect(orderInsert).toContain('pos_restore_gate');
+        expect(orderInsert).toContain("'admin', 'manager', 'supervisor', 'cashier'");
+        expect(orderInsert).toContain('EMPLOYEE_ACCESS_DENIED');
+        expect(terminalInsert).toContain('FOR UPDATE');
+        expect(terminalInsert).toContain("JSON_EXTRACT(NEW.saleBundle, '$.order.employeeId')");
+        expect(terminalInsert).toContain("JSON_EXTRACT(NEW.saleBundle, '$.employeeId')");
+        expect(terminalInsert).toContain('EMPLOYEE_ACCESS_DENIED');
+        expect((terminalInsert?.match(/SELECT COALESCE\(isActive, 0\), COALESCE\(role, ''\)/g) || []))
+            .toHaveLength(1);
+        expect(attendanceActiveInsert).toContain('FOR UPDATE');
+        expect(attendanceActiveInsert).toContain('ATTENDANCE_ACTOR_INVALID');
+        expect(attendanceActiveInsert).toContain('ATTENDANCE_SELF_ONLY');
+        expect(attendanceActiveInsert).toContain('manage_attendance');
+        expect(attendanceActiveInsert).toContain("ELSEIF attendanceActorRole = 'attendance'");
+        expect(attendanceActiveInsert).toContain("JSON_EXTRACT(attendanceRolePermissions, '$.roles') IS NOT NULL");
+        expect(attendanceActiveInsert).toContain('pos_attendance_audit_import_sessions');
+        expect(attendanceUpdateGuard).toContain('ATTENDANCE_IMMUTABLE_FIELDS');
+        expect(attendanceUpdateGuard).toContain('ATTENDANCE_CLOCK_OUT_INVALID');
+        expect(attendanceUpdateGuard).toContain('ATTENDANCE_MANAGER_REQUIRED');
+        expect(attendanceUpdateGuard).toContain('FOR UPDATE');
+        expect(attendanceDeleteGuard).toContain('ATTENDANCE_DELETE_DISABLED');
+        expect(attendanceDeleteGuard).toContain('@lbj_pos_restore_bypass');
+        expect(attendanceInsertAudit).toContain('attendance_clocked_in');
+        expect(attendanceInsertAudit).toContain('attendance_manual_record_added');
+        expect(attendanceUpdateAudit).toContain('attendance_clocked_out');
+        expect(attendanceUpdateAudit).toContain('attendance_corrected');
+        expect(attendanceUpdateAudit).toContain("JSON_OBJECT( 'id', OLD.id");
+
+        const employeeGuardIndex = executedSql.findIndex((sql) =>
+            sql.includes('pos_guard_attendance_employee_update'));
+        const repairIndex = executedSql.findIndex((sql) =>
+            sql.startsWith('UPDATE employees SET role = TRIM'));
+        expect(employeeGuardIndex).toBeGreaterThanOrEqual(0);
+        expect(repairIndex).toBeGreaterThan(employeeGuardIndex);
+    });
+
+    const liveTest = process.env.POS_TEST_MYSQL_HOST
+        && process.env.POS_TEST_MYSQL_USER
+        && process.env.POS_TEST_MYSQL_DATABASE
+        ? it
+        : it.skip;
+
+    liveTest('installs the current attendance guards on a configured MariaDB', async () => {
+        const database = mysqlCliTestDatabase();
+
+        await ensureAttendanceOnlyRoleGuards(database as never);
+
+        const rows = await database.select(
+            `SELECT TRIGGER_NAME AS triggerName,
+                    LOCATE('ATTENDANCE_SELF_ONLY', ACTION_STATEMENT) > 0 AS hasSelfGuard,
+                    LOCATE('ATTENDANCE_MANAGER_REQUIRED', ACTION_STATEMENT) > 0 AS hasManagerGuard,
+                    LOCATE('ATTENDANCE_DELETE_DISABLED', ACTION_STATEMENT) > 0 AS hasDeleteGuard
+               FROM INFORMATION_SCHEMA.TRIGGERS
+              WHERE TRIGGER_SCHEMA = DATABASE()
+                AND TRIGGER_NAME IN (
+                  'pos_guard_attendance_active_insert',
+                  'pos_guard_attendance_update',
+                  'pos_guard_attendance_delete'
+                )`,
+        ) as Array<{
+            triggerName: string;
+            hasSelfGuard: string;
+            hasManagerGuard: string;
+            hasDeleteGuard: string;
+        }>;
+        expect(rows).toHaveLength(3);
+        const guards = new Map(rows.map((row) => [row.triggerName, row]));
+        expect(guards.get('pos_guard_attendance_active_insert')?.hasSelfGuard).toBe('1');
+        expect(guards.get('pos_guard_attendance_update')?.hasManagerGuard).toBe('1');
+        expect(guards.get('pos_guard_attendance_delete')?.hasDeleteGuard).toBe('1');
+    });
+});
+
+describe('MariaDB attendance clock-in', () => {
+    const savedAttendance = {
+        id: 'attendance-clock-in-1',
+        employeeId: 'employee-1',
+        employeeName: 'Cashier One',
+        clockInAt: '2026-08-27T08:00:00.000Z',
+        clockOutAt: '',
+        clockInTillId: 'till-1',
+        clockOutTillId: '',
+        tillName: 'Till 1',
+        status: 'open',
+        notes: '',
+        createdByEmployeeId: 'employee-1',
+        updatedByEmployeeId: 'employee-1',
+        createdAt: '2026-08-27T08:00:00.000Z',
+        updatedAt: '2026-08-27T08:00:00.000Z',
+    } as const;
+
+    it('does not reuse employees as the INSERT source while its trigger locks that table', async () => {
+        const execute = vi.fn(async () => ({ rowsAffected: 1 }));
+        const select = vi.fn(async () => [savedAttendance]);
+
+        const result = await mysqlInsertOpenEmployeeAttendanceOnDatabase(
+            { execute, select } as never,
+            savedAttendance.id,
+            savedAttendance.employeeId,
+            savedAttendance.clockInTillId,
+            savedAttendance.updatedByEmployeeId,
+        );
+
+        const [sql, params] = execute.mock.calls[0] as unknown as [string, unknown[]];
+        const compact = compactSql(sql);
+        expect(compact).toMatch(/^INSERT INTO employee_attendance/);
+        expect(compact).toContain('VALUES (?, ?');
+        expect(compact).not.toContain('FROM employees');
+        expect(params).toEqual([
+            savedAttendance.id,
+            savedAttendance.employeeId,
+            savedAttendance.clockInTillId,
+            '',
+            savedAttendance.updatedByEmployeeId,
+            savedAttendance.updatedByEmployeeId,
+        ]);
+        expect(result).toEqual(savedAttendance);
+    });
+
+    it('keeps the inactive-account error friendly when the trigger rejects the actor', async () => {
+        const execute = vi.fn(async () => {
+            throw new Error('ATTENDANCE_ACTOR_INVALID: sign in again before changing attendance');
+        });
+        const select = vi.fn(async () => []);
+
+        await expect(mysqlInsertOpenEmployeeAttendanceOnDatabase(
+            { execute, select } as never,
+            savedAttendance.id,
+            savedAttendance.employeeId,
+            savedAttendance.clockInTillId,
+            savedAttendance.updatedByEmployeeId,
+        )).rejects.toThrow('ATTENDANCE_EMPLOYEE_INACTIVE');
+        expect(select).not.toHaveBeenCalled();
+    });
+});
+
+describe('MariaDB attendance correction compare-and-swap', () => {
+    const expectedUpdatedAt = '2026-08-22T16:05:03.123Z';
+    const correction = {
+        id: 'attendance-1',
+        employeeId: 'employee-1',
+        clockInAt: '2026-08-22T08:00:00.000Z',
+        clockOutAt: '2026-08-22T16:00:00.000Z',
+        clockInTillId: 'till-1',
+        clockOutTillId: 'till-1',
+        status: 'closed',
+        notes: 'Manager correction',
+        createdByEmployeeId: 'employee-1',
+        updatedByEmployeeId: 'manager-1',
+        createdAt: '2026-08-22T08:00:00.000Z',
+        updatedAt: expectedUpdatedAt,
+    } as const;
+
+    it('updates a closed row only when its authoritative updatedAt still matches', async () => {
+        const saved = { ...correction, updatedAt: '2026-08-22T16:10:00.000Z' };
+        const execute = vi.fn(async (_sql: string, _params: unknown[] = []) => ({ rowsAffected: 1 }));
+        const select = vi.fn(async () => [saved]);
+
+        const result = await mysqlSaveClosedEmployeeAttendanceOnDatabase(
+            { execute, select } as never,
+            correction as never,
+            expectedUpdatedAt,
+        );
+
+        expect(result).toEqual(saved);
+        expect(execute).toHaveBeenCalledTimes(1);
+        const [sql, params] = execute.mock.calls[0] as unknown as [string, unknown[]];
+        expect(compactSql(sql)).toContain("WHERE id = ? AND status = 'closed' AND updatedAt = ?");
+        expect(params.at(-1)).toBe(expectedUpdatedAt);
+        expect(select).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails clearly and does not insert when another till won the correction race', async () => {
+        const execute = vi.fn(async (_sql: string, _params: unknown[] = []) => ({ rowsAffected: 0 }));
+        const select = vi.fn(async () => []);
+
+        await expect(mysqlSaveClosedEmployeeAttendanceOnDatabase(
+            { execute, select } as never,
+            correction as never,
+            expectedUpdatedAt,
+        )).rejects.toThrow('ATTENDANCE_CORRECTION_CONFLICT');
+
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(compactSql(String(execute.mock.calls[0]?.[0] || ''))).toMatch(/^UPDATE employee_attendance/);
+        expect(select).not.toHaveBeenCalled();
+    });
+});
+
+describe('MariaDB employee profile compare-and-swap', () => {
+    const originalUpdatedAt = '2026-08-22T16:05:03.123000Z';
+    const profile = {
+        id: 'employee-cas-1',
+        storeId: 'store-main',
+        name: 'Cashier One',
+        pin: '',
+        pinHash: 'pbkdf2-sha256$210000$salt$hash',
+        role: 'cashier',
+        email: '',
+        isActive: true,
+        createdAt: '2026-08-20T08:00:00.000Z',
+        updatedAt: originalUpdatedAt,
+    } as const;
+
+    it('updates only the exact authoritative version and returns the server-stamped row', async () => {
+        const saved = { ...profile, name: 'Cashier Renamed', updatedAt: '2026-08-22T16:10:00.456000Z' };
+        const execute = vi.fn(async (_sql: string, _params: unknown[] = []) => ({ rowsAffected: 1 }));
+        const select = vi.fn(async () => [{ ...saved, isActive: 1 }]);
+
+        const result = await mysqlSaveEmployeeProfileCasOnDatabase(
+            { execute, select } as never,
+            saved as never,
+            originalUpdatedAt,
+        );
+
+        expect(result).toEqual(saved);
+        const [sql, params] = execute.mock.calls[0] as unknown as [string, unknown[]];
+        const compact = compactSql(sql);
+        expect(compact).toContain("BINARY COALESCE(e.updatedAt, '') = BINARY ?");
+        expect(compact).toContain("attendance.status = 'open'");
+        expect(compact).toContain("e.updatedAt = DATE_FORMAT(UTC_TIMESTAMP(3)");
+        expect(params.at(-2)).toBe(originalUpdatedAt);
+        expect(select).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a stale edit instead of overwriting another till', async () => {
+        const execute = vi.fn(async () => ({ rowsAffected: 0 }));
+        const select = vi.fn(async () => []);
+
+        await expect(mysqlSaveEmployeeProfileCasOnDatabase(
+            { execute, select } as never,
+            profile as never,
+            originalUpdatedAt,
+        )).rejects.toThrow(EMPLOYEE_PROFILE_CONFLICT_CODE);
+
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(select).not.toHaveBeenCalled();
+    });
+
+    it('uses insert-only semantics for a new employee', async () => {
+        const serverSaved = { ...profile, id: 'employee-new', updatedAt: '2026-08-22T16:15:00.000000Z' };
+        const execute = vi.fn(async (_sql: string, _params: unknown[] = []) => ({ rowsAffected: 1 }));
+        const select = vi.fn(async () => [{ ...serverSaved, isActive: 1 }]);
+
+        const result = await mysqlSaveEmployeeProfileCasOnDatabase(
+            { execute, select } as never,
+            serverSaved as never,
+            null,
+        );
+
+        const sql = compactSql(String(execute.mock.calls[0]?.[0] || ''));
+        expect(sql).toMatch(/^INSERT INTO employees/);
+        expect(sql).not.toContain('ON DUPLICATE KEY UPDATE');
+        expect(sql).toContain("DATE_FORMAT(UTC_TIMESTAMP(3)");
+        expect(result.updatedAt).toBe(serverSaved.updatedAt);
+    });
+
+    it('reports a duplicate new employee as a profile conflict', async () => {
+        const duplicate = Object.assign(new Error('Duplicate entry'), { code: 1062 });
+        const execute = vi.fn(async () => { throw duplicate; });
+        const select = vi.fn(async () => []);
+
+        await expect(mysqlSaveEmployeeProfileCasOnDatabase(
+            { execute, select } as never,
+            profile as never,
+            null,
+        )).rejects.toThrow(EMPLOYEE_PROFILE_CONFLICT_CODE);
+
+        expect(select).not.toHaveBeenCalled();
+    });
+
+    it('distinguishes an open attendance session from an ordinary stale deactivation', async () => {
+        const execute = vi.fn(async () => ({ rowsAffected: 0 }));
+        const select = vi.fn(async (sql: string) => compactSql(sql).includes('FROM employee_attendance a')
+            ? [{ id: 'attendance-open' }]
+            : []);
+
+        await expect(mysqlSaveEmployeeProfileCasOnDatabase(
+            { execute, select } as never,
+            { ...profile, isActive: false } as never,
+            originalUpdatedAt,
+        )).rejects.toThrow('ATTENDANCE_OPEN_SESSION');
     });
 });
 
@@ -135,6 +542,11 @@ describe('MariaDB customer account migration', () => {
 
     it('aligns each relation to its own installed parent without rewriting parent or polymorphic IDs', async () => {
         const relations = [
+            ['employee_attendance', 'employeeId', 'employees', 'id'],
+            ['employee_attendance', 'clockInTillId', 'registers', 'id'],
+            ['employee_attendance', 'clockOutTillId', 'registers', 'id'],
+            ['employee_attendance', 'createdByEmployeeId', 'employees', 'id'],
+            ['employee_attendance', 'updatedByEmployeeId', 'employees', 'id'],
             ['customer_accounts', 'customerId', 'customers', 'id'],
             ['customer_account_entries', 'accountId', 'customer_accounts', 'id'],
             ['customer_account_entries', 'customerId', 'customers', 'id'],
@@ -150,6 +562,8 @@ describe('MariaDB customer account migration', () => {
             ['customer_account_entries', 'reversesEntryId', 'customer_account_entries', 'id'],
         ];
         const binaryCoordination = [
+            ['employee_attendance', 'id'],
+            ['employee_attendance', 'openEmployeeId'],
             ['pos_restore_gate', 'ownerTillId'],
             ['pos_account_write_authority', 'authorityToken'],
             ['till_presence', 'tillId'],
@@ -180,7 +594,9 @@ describe('MariaDB customer account migration', () => {
             const nullable = (tableName === 'orders' || tableName === 'loyalty_logs')
                 && columnName === 'customerId';
             const emptyDefault = tableName === 'customer_account_entries'
-                && ['orderId', 'receiptKey', 'employeeId', 'tillNumber', 'shiftId', 'reversesEntryId'].includes(columnName);
+                && ['orderId', 'receiptKey', 'employeeId', 'tillNumber', 'shiftId', 'reversesEntryId'].includes(columnName)
+                || tableName === 'employee_attendance'
+                && ['clockInTillId', 'clockOutTillId', 'createdByEmployeeId', 'updatedByEmployeeId'].includes(columnName);
             const width = columnName === 'receiptKey'
                 ? 100
                 : (tableName === 'pos_customer_write_locks'
@@ -299,6 +715,13 @@ describe('MariaDB customer account migration', () => {
             ['employees', 'id', 'utf8mb4_general_ci'],
             ['registers', 'id', 'utf8mb4_general_ci'],
             ['shifts', 'id', 'utf8mb4_general_ci'],
+            ['employee_attendance', 'id', 'utf8mb4_general_ci'],
+            ['employee_attendance', 'employeeId', 'utf8mb4_unicode_ci'],
+            ['employee_attendance', 'clockInTillId', 'utf8mb4_unicode_ci'],
+            ['employee_attendance', 'clockOutTillId', 'utf8mb4_unicode_ci'],
+            ['employee_attendance', 'createdByEmployeeId', 'utf8mb4_unicode_ci'],
+            ['employee_attendance', 'updatedByEmployeeId', 'utf8mb4_unicode_ci'],
+            ['employee_attendance', 'openEmployeeId', 'utf8mb4_general_ci'],
             ...[
                 ['pos_restore_gate', 'ownerTillId'],
                 ['pos_account_write_authority', 'authorityToken'],
@@ -320,7 +743,9 @@ describe('MariaDB customer account migration', () => {
             const nullable = (tableName === 'orders' || tableName === 'loyalty_logs')
                 && columnName === 'customerId';
             const emptyDefault = tableName === 'customer_account_entries'
-                && ['orderId', 'receiptKey', 'employeeId', 'tillNumber', 'shiftId', 'reversesEntryId'].includes(columnName);
+                && ['orderId', 'receiptKey', 'employeeId', 'tillNumber', 'shiftId', 'reversesEntryId'].includes(columnName)
+                || tableName === 'employee_attendance'
+                && ['clockInTillId', 'clockOutTillId', 'createdByEmployeeId', 'updatedByEmployeeId'].includes(columnName);
             const width = columnName === 'receiptKey'
                 ? 100
                 : tableName === 'pos_customer_write_locks'
@@ -581,6 +1006,8 @@ describe('MariaDB application read projections', () => {
         ['payment_terminal_attempts', 'createdAt'],
         ['payment_terminal_attempts', 'updatedAt'],
         ['payment_terminal_attempts', 'activeTerminalKey'],
+        ['employee_attendance', 'id'],
+        ['employee_attendance', 'openEmployeeId'],
     ])('casts %s.%s to utf8mb4 text for the Tauri SQL bridge', (table, column) => {
         expect(mysqlApplicationReadProjection(table, [column])).toBe(
             `CAST(\`${column}\` AS CHAR CHARACTER SET utf8mb4) AS \`${column}\``,
@@ -595,5 +1022,17 @@ describe('MariaDB application read projections', () => {
             'CAST(`id` AS CHAR CHARACTER SET utf8mb4) AS `id`, `amount`',
         );
         expect(mysqlApplicationReadProjection('orders', ['id', 'total'])).toBe('`id`, `total`');
+    });
+
+    it('decodes attendance binary IDs without selecting the generated open-session key', () => {
+        const projection = compactSql(MYSQL_ATTENDANCE_ROW_PROJECTION);
+        expect(projection).toContain('CAST(a.id AS CHAR CHARACTER SET utf8mb4) AS id');
+        expect(projection).not.toContain('openEmployeeId');
+    });
+
+    it('casts attendance sums to integer types supported by the Tauri SQL bridge', () => {
+        const projection = compactSql(MYSQL_ATTENDANCE_SUMMARY_PROJECTION);
+        expect(projection).toContain('AS SIGNED) AS workedSeconds');
+        expect(projection).toContain('AS SIGNED) AS openCount');
     });
 });

@@ -390,7 +390,7 @@
 </div>
 
 <style>
-    .label-designer-page { box-sizing: border-box; height: 100dvh; min-height: 580px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
+    .label-designer-page { box-sizing: border-box; height: var(--workspace-height, 100dvh); min-height: 0; overflow: auto; container: print-editor / inline-size; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); }
     .section-heading span, .preview-heading span { display: block; color: var(--accent-primary); font-size: .68rem; line-height: 1; font-weight: 900; text-transform: uppercase; }
     button:disabled { cursor: not-allowed; opacity: .42; }
     button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
@@ -488,20 +488,14 @@
     .preview-footer { min-height: 40px; padding: 0 .75rem; display: flex; align-items: center; justify-content: space-between; gap: .7rem; border-top: 1px solid var(--border-flat); color: var(--text-muted); font-size: .72rem; font-weight: 800; }
     .label-print-sheet { display: none; }
 
-    @media (max-width: 900px) and (min-width: 720px) {
-        .label-workspace { grid-template-columns: minmax(390px, 1.18fr) minmax(290px, .82fr); gap: .6rem; }
-        .template-grid, .visibility-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .preview-stage { padding: .55rem; }
+    @container print-editor (max-width: 900px) {
+        .label-workspace { flex: 0 0 auto; grid-template-columns: minmax(0,1fr); }
+        .editor-panel { height: 580px; min-height: 0; }
+        .preview-panel { height: 480px; min-height: 0; }
+        .preview-stage { padding: .6rem; }
     }
-    @media (max-width: 719px) {
-        .label-designer-page { min-height: 100dvh; height: auto; overflow: auto; }
-        .label-workspace { grid-template-columns: 1fr; }
-        .editor-panel { height: 600px; min-height: 520px; }
-        .preview-panel { min-height: 380px; }
-        .visibility-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
-    @media (max-width: 660px) {
-        .template-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @container print-editor (max-width: 500px) {
+        .template-grid, .visibility-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
     }
     @media print {
         .label-designer-page, :global(.fullscreen-toggle), :global(.toast-pop), :global(.touch-input-backdrop) { display: none !important; }

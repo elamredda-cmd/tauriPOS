@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { toast } from '$lib/stores/toast';
@@ -33,6 +34,8 @@
     let loading = true;
     let saving = false;
     let terminalBusy = false;
+    let removingSecret = false;
+    let showRemoveSecretConfirm = false;
 
     $: terminalOptions = [
         ...(!terminals.some((terminal) => terminal.id === config.terminalId) && config.terminalId
@@ -159,8 +162,9 @@
         }
     }
 
-    async function removeSecret() {
-        if (!confirm('Remove the saved Dojo API key from this till?')) return;
+    async function confirmRemoveSecret() {
+        if (removingSecret) return;
+        removingSecret = true;
         try {
             config = await clearDojoSecret();
             apiKey = '';
@@ -168,6 +172,8 @@
             toast('Dojo API key removed and integration disabled', 'success');
         } catch (error) {
             toast(`Could not remove the Dojo API key: ${error}`, 'error');
+        } finally {
+            removingSecret = false;
         }
     }
 </script>
@@ -282,8 +288,20 @@
             </div>
 
             <div class="mt-4 flex justify-start">
-                <button class="btn btn-danger" disabled={!config.apiKeyConfigured && !apiKey.trim()} on:click={removeSecret}>Remove Saved API Key</button>
+                <button class="btn btn-danger" disabled={removingSecret || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretConfirm = true}>
+                    {removingSecret ? 'Removing...' : 'Remove Saved API Key'}
+                </button>
             </div>
         </section>
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showRemoveSecretConfirm}
+    title="Remove Dojo API Key?"
+    message="Remove the saved Dojo API key from this till? Dojo will be disabled until a key is saved again."
+    confirmText="Remove API Key"
+    variant="danger"
+    dismissDisabled={removingSecret}
+    on:confirm={confirmRemoveSecret}
+/>

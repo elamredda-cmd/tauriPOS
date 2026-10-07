@@ -10,7 +10,7 @@
         refreshManualLicenseStatus,
         type ManualLicenseStatus,
     } from '$lib/licensing';
-    import { currentEmployee, currentShiftId } from '$lib/stores/session';
+    import { currentEmployee } from '$lib/stores/session';
     import { toast } from '$lib/stores/toast';
 
     export let enabled = false;
@@ -32,7 +32,6 @@
     $: signedIn = Boolean(
         $currentEmployee?.id
         && $currentEmployee?.isActive
-        && $currentShiftId
     );
     $: canOpenActivationPage = $currentEmployee?.role === 'admin';
     $: blocked = Boolean(status && !status.accessAllowed);

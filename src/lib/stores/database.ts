@@ -1,3 +1,4 @@
+import { beginSyncActivity, recordSyncResult, syncActivity } from './syncActivity';
 /**
  * database.ts — Unified Database Abstraction Layer
  *
@@ -14,16 +15,50 @@
  */
 
 import * as sqlite from './sqlite';
+import { sumPaymentExtras } from '../paymentExtras';
 import * as mysql from './mysql';
 import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection } from './connection';
+import {
+    REPORT_CONTRIBUTING_CONFLICT_TABLES,
+    REPORT_CONTRIBUTING_QUEUE_TABLES,
+    latestEffectiveReportMarker,
+    newestReportMarker,
+    assertCurrentReportPeriod,
+} from '../reportMarkers';
 import type { MysqlConfig } from './connection';
 import { get } from 'svelte/store';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { currentEmployee } from './session';
+import {
+    authorizeAttendanceAction,
+    currentEmployee,
+    currentEmployeeAuthorizationVersion,
+    isSupportEmployee,
+    isPosShiftEligibleEmployee,
+    normalizeEmployeeForPersistence,
+    normalizeEmployeeForManagement,
+    normalizeEmployeeForRuntime,
+} from './session';
+import { hasPermission } from '$lib/permissions';
 import { notifyOwnerCloudDataChanged } from '$lib/ownerCloudEvents';
 import { findStrongLegacySharedDataProof, type LegacySharedDataProof } from './databaseIdentity';
 import { AsyncMutex } from '$lib/utils/asyncMutex';
+import { readReconciliationCheckpoint, reconcileVersionPage } from './reconciliation';
+import { withMysqlSession } from './mysqlSession';
+import { cacheCustomerSnapshot, isCustomerSnapshotOlder } from './customerSnapshotCache';
+import { createStockReceiptPreview, validateStockReceiptBundle } from './stockReceiptPreview';
+import { PROMOTION_QUEUE_HEAD_PREDICATE, promotionDeletionTargets, promotionSaveMutations, promotionSnapshotAfterSave, promotionSnapshotsMatch, refreshAfterPromotionCommit, validatePromotionForPersistence, type PromotionSnapshot } from './promotionPersistence';
+export type { PromotionSnapshot } from './promotionPersistence';
+import { HELD_RECOVERY_SETTING, withHeldRecoveryWrite } from '$lib/heldOrderRecovery';
+import { heldUploadBlockReason, heldUploadOrderId, isNullReceiptHoldConflict } from '$lib/heldOrderSync';
 import { summarizeAccountActivity } from '$lib/accountReporting';
+import { assertCheckoutDeviceMode } from '$lib/deviceMode';
+import { loyaltyCodeValidationError, normalizeLoyaltyCode } from '$lib/customerLoyaltyCode';
+import { assertCustomerProfileBase, customerProfileFields, customerProfilesMatch, CUSTOMER_PROFILE_CONFLICT, CUSTOMER_PROFILE_FIELDS } from '$lib/customerProfile';
+import {
+    customerLoyaltyAdjustmentPreview,
+    customerLoyaltyReasonError,
+    manualLoyaltyReason,
+} from '$lib/customerLoyaltyAdjustment';
 import {
     buildPreviewOrderDetails,
     buildPreviewRecentReceipts,
@@ -34,10 +69,35 @@ import type {
     CustomerAccountEntry,
     CustomerAccountEntryType,
     CustomerAccountPaymentMethod,
+    AuditLog,
+    Customer,
+    Employee,
+    EmployeeAttendance,
+    LoyaltyLog,
 } from './db';
+import {
+    ATTENDANCE_CHANGED_EVENT,
+    ATTENDANCE_CORRECTION_CONFLICT_CODE,
+    ATTENDANCE_CORRECTION_CONFLICT_MESSAGE,
+    attendanceCorrectionVersionMatches,
+    attendanceDurationSeconds,
+    attendanceOpenSessionMatches,
+    openAttendanceDeactivationMessage,
+    syncedTablesIncludeAttendance,
+    validateClosedAttendance,
+} from '$lib/attendance';
+import {
+    attendanceQueueQuarantineSql,
+    bulkPushTableAction,
+    bulkPushSettingAllowed,
+    completeRecoveredControlledImport,
+    LEGACY_STAFF_QUEUE_CONFLICT_REASON,
+    type AttendanceBulkPushPolicy,
+} from '$lib/attendanceSyncPolicy';
 
 const PROMOTION_SYNC_TABLES = ['discounts', 'promo_groups', 'promo_group_items'];
 const PROMOTION_SYNC_TABLE_SET = new Set(PROMOTION_SYNC_TABLES);
+const promotionMutationMutex = new AsyncMutex();
 const serverEpochResetMutex = new AsyncMutex();
 // Serializes local financial commits with a close-barrier readiness ack. A
 // prepared ack can never overtake an already-started local sale, and a sale
@@ -51,11 +111,12 @@ const WHOLE_SYSTEM_CLOSE_LOCAL_GUARDED_TABLES = new Set([
     'payment_terminal_attempts', 'tombstones',
 ]);
 export const POS_HELD_ORDERS_CHANGED_EVENT = 'pos-held-orders-changed';
+export const POS_CUSTOMERS_CHANGED_EVENT = 'pos-customers-changed';
 const RECEIPT_SEQUENCE_REMOTE_TIMEOUT_MS = 1200;
 const RECEIPT_BLOCK = 1_000_000;
 const RECEIPT_HIGH_WATER_KEY = 'receipt_number_high_water';
 const LIGHT_STORE_ROUTES = new Set([
-    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
+    '/', '/admin', '/orders', '/items', '/discounts', '/categories', '/customers', '/employees', '/employees/permissions', '/attendance', '/reports', '/shifts', '/audit', '/label-print', '/customer-display',
     '/design', '/design/scale', '/tiles', '/stock-receiving', '/suppliers', '/tax-rates', '/sync', '/about', '/setup',
     '/settings', '/settings/advanced', '/settings/barcodes', '/settings/customer-display',
     '/settings/feedback', '/settings/fonts', '/settings/integrations', '/settings/labels',
@@ -112,7 +173,6 @@ const DISCOUNTS_LIGHT_ROUTE_TABLES = [
     'promo_group_items',
 ] as const;
 const CUSTOMER_DISPLAY_LIGHT_ROUTE_TABLES = [
-    'employees',
     'settings',
 ] as const;
 const CATEGORY_LIGHT_ROUTE_TABLES = [
@@ -127,6 +187,11 @@ const CUSTOMER_LIGHT_ROUTE_TABLES = [
 const EMPLOYEE_LIGHT_ROUTE_TABLES = [
     'employees',
     'settings',
+] as const;
+const ATTENDANCE_LIGHT_ROUTE_TABLES = [
+    'employees',
+    'settings',
+    'registers',
 ] as const;
 const REPORTS_LIGHT_ROUTE_TABLES = [
     'employees',
@@ -193,6 +258,7 @@ export function getLightRouteHydrationTables(pathname = typeof window !== 'undef
     if (pathname === '/categories') return [...CATEGORY_LIGHT_ROUTE_TABLES];
     if (pathname === '/customers') return [...CUSTOMER_LIGHT_ROUTE_TABLES];
     if (pathname === '/employees' || pathname === '/employees/permissions') return [...EMPLOYEE_LIGHT_ROUTE_TABLES];
+    if (pathname === '/attendance') return [...ATTENDANCE_LIGHT_ROUTE_TABLES];
     if (pathname === '/reports') return [...REPORTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/shifts') return [...SHIFTS_LIGHT_ROUTE_TABLES];
     if (pathname === '/audit') return [...AUDIT_LIGHT_ROUTE_TABLES];
@@ -304,7 +370,7 @@ export {
 
 export type {
     SeedPayload, SalesOverview, PaymentBreakdown, TopProduct,
-    TillReportOption, TillSalesSummary, DailySalesPoint,
+    TillReportOption, TillSalesSummary, TillPeriodReport, DailySalesPoint,
     BusinessSummary, EmployeeSalesSummary,
     OrderPageOptions, OrderPageResult,
     PosHeldOrdersResult, PosRecentReceiptsResult,
@@ -339,6 +405,11 @@ export async function initOfflineQueue(): Promise<void> {
             created_at TEXT NOT NULL
         )
     `);
+    // Older builds could queue generic staff/attendance upserts. Replaying
+    // those rows can roll back a remote role/PIN revocation or a newer
+    // attendance correction. The triggers atomically move both pre-existing
+    // and any future legacy rows to administrator-visible conflicts.
+    for (const sql of attendanceQueueQuarantineSql()) await d.execute(sql);
 }
 
 export interface SyncConflict {
@@ -372,10 +443,11 @@ export function isRetainedLocalSaleConflict(
 }
 
 export function canRetrySyncConflict(
-    conflict: Pick<SyncConflict, 'reason' | 'table_name'>,
+    conflict: Pick<SyncConflict, 'reason' | 'table_name' | 'operation'>,
 ): boolean {
     return !isRetainedLocalSaleConflict(conflict)
-        && conflict.table_name !== '_online_financial_intent';
+        && conflict.table_name !== '_online_financial_intent'
+        && conflict.operation !== 'stale_cache';
 }
 
 export function syncConflictSaleReference(
@@ -439,6 +511,19 @@ export async function retrySyncConflict(id: string): Promise<void> {
         throw new Error(
             'A financial transaction quarantined after a MariaDB restore cannot be retried. ' +
             'Review the conflict and the customer or sale balance, then dismiss it.',
+        );
+    }
+    if (conflict.operation === 'stale_cache') {
+        throw new Error(
+            'This is a preserved copy of stale local security or attendance data. Review it, then dismiss it; it must not be uploaded over MariaDB.',
+        );
+    }
+    if (
+        (conflict.table_name === 'employees' || conflict.table_name === 'employee_attendance')
+        && conflict.reason.includes(LEGACY_STAFF_QUEUE_CONFLICT_REASON)
+    ) {
+        throw new Error(
+            'This pre-upgrade staff or attendance change cannot be replayed over MariaDB. Review the current shared record, then dismiss this conflict.',
         );
     }
     const data = JSON.parse(conflict.data);
@@ -565,7 +650,7 @@ async function queueOffline(
 
 async function commitMysqlOutboxOperation(
     tableName: string,
-    operation: 'upsert' | 'remove' | 'adjustStock' | 'promotionBundle' | 'promotionDelete' | 'limitGoodsMenuItems',
+    operation: 'upsert' | 'remove' | 'adjustStock' | 'promotionBundle' | 'promotionDelete' | 'limitGoodsMenuItems' | 'heldOrderBundle' | 'customerProfile',
     data: any,
     idKey: string,
     serverDataEpoch: string,
@@ -701,9 +786,8 @@ async function persistAuditLog(row: any): Promise<void> {
         return;
     }
     const serverDataEpoch = await captureServerDataEpochForMutation();
-    await sqlite.upsert('audit_logs', row, 'id');
+    await persistLocalChanges([{ table: 'audit_logs', data: row }], serverDataEpoch);
     if (!isMultiMode()) return;
-    await queueOffline('audit_logs', 'upsert', row, 'id', serverDataEpoch);
     void flushOfflineQueue().catch((error) => {
         console.warn('database: audit outbox flush failed:', error);
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: String(error) }));
@@ -801,7 +885,61 @@ async function recordQueueFailure(d: any, row: any, error: unknown): Promise<num
     return attempt;
 }
 
+function redactQueuedEmployeeData(data: any): string {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return '{}';
+    return JSON.stringify({
+        id: String(data.id || ''),
+        storeId: String(data.storeId || ''),
+        name: String(data.name || ''),
+        role: String(data.role || ''),
+        email: String(data.email || ''),
+        isActive: Boolean(data.isActive),
+        createdAt: String(data.createdAt || ''),
+        updatedAt: String(data.updatedAt || ''),
+        serverDataEpoch: String(data.serverDataEpoch || ''),
+        credentials: '[redacted]',
+    });
+}
+
+/**
+ * Builds before server-first staff writes could leave employee upserts in the
+ * generic outbox. Never replay those authorization snapshots: preserve a
+ * redacted, non-retryable conflict and restore this till from MariaDB instead.
+ */
+async function quarantineQueuedEmployeeOperation(
+    row: any,
+    data: any,
+    mysqlDb: any,
+    localDb: any,
+): Promise<void> {
+    const employeeId = String(data?.id || '').trim();
+    if (employeeId) {
+        const authoritative = await mysql.mysqlGetEmployeeProfileByIdOnDatabase(
+            mysqlDb,
+            employeeId,
+        );
+        await reconcileAuthoritativeEmployeeCache(employeeId, authoritative);
+    }
+    await localDb.execute(
+        `INSERT OR REPLACE INTO _sync_conflicts
+            (id, table_name, operation, data, reason, created_at)
+         VALUES (?, 'employees', 'stale_cache', ?, ?, ?)`,
+        [
+            row.id,
+            redactQueuedEmployeeData(data),
+            employeeId
+                ? 'Legacy offline staff change was not replayed. MariaDB remains authoritative and this till reloaded the current staff profile.'
+                : 'Malformed legacy offline staff change was quarantined and was not replayed.',
+            new Date().toISOString(),
+        ],
+    );
+}
+
 async function executeQueuedOperation(row: any, data: any, mysqlDb: any, d: any): Promise<void> {
+    if (row.table_name === 'employees') {
+        await quarantineQueuedEmployeeOperation(row, data, mysqlDb, d);
+        return;
+    }
     // Settings can become device-local in newer releases while an older build
     // has already queued them. Treat those stale outbox rows as completed so
     // they are removed without ever reaching MariaDB.
@@ -809,7 +947,14 @@ async function executeQueuedOperation(row: any, data: any, mysqlDb: any, d: any)
         return;
     }
     const serverDataEpoch = String(data?.serverDataEpoch || '').trim();
-    if (row.operation === 'upsert') {
+    if (row.operation === 'heldOrderBundle') {
+        await commitMysqlOutboxOperation('orders', 'heldOrderBundle', data, 'id', serverDataEpoch);
+        // Retire only the exact diagnostic rows carried by this successful
+        // recovery upload. Other sync conflicts are left untouched.
+        for (const conflictId of data.recoveredConflictIds || []) {
+            await d.execute(`DELETE FROM _sync_conflicts WHERE id = ? AND table_name IN ('orders','order_lines')`, [conflictId]);
+        }
+    } else if (row.operation === 'upsert') {
         if (PROMOTION_SYNC_TABLE_SET.has(row.table_name)) {
             await flushQueuedPromotionUpsert(row, data, mysqlDb, d, serverDataEpoch);
         } else {
@@ -879,7 +1024,36 @@ async function executeQueuedOperation(row: any, data: any, mysqlDb: any, d: any)
     }
 }
 
-async function drainOfflineQueue(): Promise<number> {
+async function requeueNullReceiptHolds(d: any, remote: any): Promise<void> {
+    const conflicts: any[] = await d.select(`SELECT * FROM _sync_conflicts WHERE table_name IN ('orders','order_lines') AND operation = 'upsert'
+        AND (reason LIKE '%Invalid held order: invalid type: null, expected a string%' OR reason LIKE '%held-order line has no locked unpaid hold parent%')`);
+    const parents = conflicts.filter(isNullReceiptHoldConflict);
+    if (!parents.length) return;
+    const epoch = await captureServerDataEpochForMutation();
+    const outstanding: any[] = await d.select(`SELECT id, table_name, operation, data, '' AS reason FROM _offline_queue WHERE table_name IN ('orders','order_lines')
+        UNION ALL SELECT id, table_name, operation, data, reason FROM _sync_conflicts WHERE operation = 'heldOrderBundle'`);
+    const nullReceiptIndexFailures = outstanding.filter(row => row.operation === 'heldOrderBundle'
+        && String(row.reason).includes("Duplicate entry '' for key 'idx_orders_receipt_key'"));
+    for (const parent of parents) {
+        const original = JSON.parse(parent.data);
+        // Never revive a pre-restore hold or a hold with an unresolved newer upload.
+        if (original.serverDataEpoch !== epoch || outstanding.some(row => heldUploadOrderId(row) === original.id && !nullReceiptIndexFailures.includes(row))) continue;
+        const deleted: any[] = await remote.select(`SELECT id FROM tombstones WHERE table_name = 'orders' AND row_id = ? LIMIT 1`, [original.id]);
+        if (deleted.length) continue;
+        const orders: any[] = await d.select(`SELECT * FROM orders WHERE id = ? AND status = 'hold'
+            AND COALESCE(receiptKey, '') = '' AND COALESCE(completedAt, '') = '' AND COALESCE(amountTendered, 0) = 0`, [original.id]);
+        if (!orders.length) continue;
+        const lines: any[] = await d.select('SELECT * FROM order_lines WHERE orderId = ?', [original.id]);
+        if (!lines.length || lines.length > 1998) continue;
+        const recoveredConflictIds = [...conflicts, ...nullReceiptIndexFailures].filter(row => heldUploadOrderId(row) === original.id
+            && (isNullReceiptHoldConflict(row) || String(row.reason).includes('held-order line has no locked unpaid hold parent') || nullReceiptIndexFailures.includes(row))).map(row => row.id);
+        await sqlite.commitBatch([{ table: 'orders', kind: 'queue', queueId: crypto.randomUUID(), serverDataEpoch: epoch,
+            data: { id: original.id, order: orders[0], lines, recoveredConflictIds } }]);
+        outstanding.push({ table_name: 'orders', operation: 'heldOrderBundle', data: { order: orders[0] } });
+    }
+}
+
+async function drainOfflineQueue(onWork: () => void): Promise<number> {
     const mysqlDb = await getMysqlDb();
     if (!mysqlDb) throw new Error('MariaDB connection is unavailable');
     await ensureDatabaseIdentityForSync();
@@ -898,13 +1072,16 @@ async function drainOfflineQueue(): Promise<number> {
         );
     }
 
+    await requeueNullReceiptHolds(d, mysqlDb);
     let flushed = await discardQueuedDeletedPromotionRows(mysqlDb, d);
+    if (flushed > 0) onWork();
     for (let pass = 0; pass < 100; pass++) {
         offlineQueueFlushRequested = false;
         const now = new Date().toISOString();
         const rows: any[] = await d.select(
             `SELECT * FROM _offline_queue
-             WHERE COALESCE(next_attempt_at, '') = '' OR next_attempt_at <= ?
+             WHERE (COALESCE(next_attempt_at, '') = '' OR next_attempt_at <= ?)
+               AND ${PROMOTION_QUEUE_HEAD_PREDICATE}
              ORDER BY
                 CASE WHEN operation IN ('saleBundle', 'stockReceiptBundle') THEN 0
                      WHEN table_name = 'orders' THEN 2
@@ -921,9 +1098,24 @@ async function drainOfflineQueue(): Promise<number> {
             break;
         }
 
+        onWork();
         for (const row of rows) {
+            // The next package for this offer becomes eligible only after this
+            // head is retired; continue another pass even below the batch limit.
+            if (row.operation === 'promotionBundle' || row.operation === 'promotionDelete') offlineQueueFlushRequested = true;
             let data: any = null;
             try {
+                if (row.table_name === 'employees') {
+                    try {
+                        data = JSON.parse(row.data);
+                    } catch {
+                        data = null;
+                    }
+                    await quarantineQueuedEmployeeOperation(row, data, mysqlDb, d);
+                    await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+                    flushed++;
+                    continue;
+                }
                 data = JSON.parse(row.data);
                 await executeQueuedOperation(row, data, mysqlDb, d);
                 await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
@@ -932,9 +1124,14 @@ async function drainOfflineQueue(): Promise<number> {
                 if (isDatabaseIdentityMismatch(error)) throw error;
                 if (data && isPromotionForeignKeyFailure(error, row)) {
                     const refs = await promotionRefsForQueuedRow(row, data);
-                    await applyRemotePromotionDeleteLocally(d, refs);
-                    await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
-                    flushed++;
+                    if (await remoteHasPromotionDelete(mysqlDb, refs)) {
+                        await applyRemotePromotionDeleteLocally(d, refs);
+                        await d.execute(`DELETE FROM _offline_queue WHERE id = ?`, [row.id]);
+                        flushed++;
+                    } else {
+                        await moveQueuedRowToConflict(d, row,
+                            `Promotion references an unavailable product or group. Review the offer; it has not been deleted. ${String(error)}`);
+                    }
                     continue;
                 }
                 if (data && (
@@ -987,19 +1184,39 @@ async function drainOfflineQueue(): Promise<number> {
 export function flushOfflineQueue(): Promise<number> {
     offlineQueueFlushRequested = true;
     if (offlineQueueFlushPromise) return offlineQueueFlushPromise;
+    // Consume this request before the first connection await. A failed
+    // connection must not leave it set and recursively restart the drain.
+    offlineQueueFlushRequested = false;
 
-    const run = drainOfflineQueue();
+    let finishActivity: ReturnType<typeof beginSyncActivity> | null = null;
+    const run = drainOfflineQueue(() => { finishActivity ??= beginSyncActivity('upload'); });
+    void run.then(async () => {
+        if (!finishActivity) {
+            if (isMultiMode()) recordSyncResult('upload', null, true);
+            return;
+        }
+        try {
+            await getOfflineQueueStats();
+            finishActivity(null, true);
+        } catch { finishActivity('Could not check pending changes', false); }
+    }, error => {
+        if (finishActivity) finishActivity(String(error), false);
+        else if (isMultiMode()) recordSyncResult('upload', String(error), false);
+        void getOfflineQueueStats().catch(() => {});
+    });
     offlineQueueFlushPromise = run;
-    const finish = () => {
+    const finish = (succeeded: boolean) => {
         if (offlineQueueFlushPromise !== run) return;
         offlineQueueFlushPromise = null;
-        if (offlineQueueFlushRequested) {
+        if (!succeeded) offlineQueueFlushRequested = false;
+        if (succeeded && offlineQueueFlushRequested) {
             void flushOfflineQueue().catch((error) => {
                 console.warn('database: follow-up outbox drain failed:', error);
             });
         }
     };
-    void run.then(finish, finish);
+    // Failed drains retry through the background schedule or the next write.
+    void run.then(() => finish(true), () => finish(false));
     return run;
 }
 
@@ -1047,7 +1264,7 @@ export async function getOfflineQueueStats(): Promise<OfflineQueueStats> {
          ORDER BY next_attempt_at DESC, created_at DESC
          LIMIT 1`,
     );
-    return {
+    const stats = {
         pending: Number(pendingRows[0]?.count || 0),
         retrying: Number(pendingRows[0]?.retrying || 0),
         conflicts: Number(conflictRows[0]?.count || 0),
@@ -1055,6 +1272,9 @@ export async function getOfflineQueueStats(): Promise<OfflineQueueStats> {
         nextRetryAt: String(pendingRows[0]?.nextRetryAt || ''),
         lastError: String(errorRows[0]?.last_error || ''),
     };
+    syncActivity.update(s => s.pending === stats.pending && s.conflicts === stats.conflicts
+        ? s : { ...s, pending: stats.pending, conflicts: stats.conflicts });
+    return stats;
 }
 
 async function pendingPromotionQueueCount(): Promise<number> {
@@ -1122,10 +1342,7 @@ async function promotionRefsForQueuedRow(row: any, data: any): Promise<Promotion
 
 async function remoteHasPromotionDelete(mysqlDb: any, refs: PromotionDeleteRefs | null): Promise<boolean> {
     if (!refs) return false;
-    const pairs: Array<[string, string]> = [];
-    if (refs.groupId) pairs.push(['promo_groups', refs.groupId]);
-    for (const id of refs.discountIds) pairs.push(['discounts', id]);
-    for (const id of refs.itemIds) pairs.push(['promo_group_items', id]);
+    const pairs = promotionDeletionTargets(refs);
     if (pairs.length === 0) return false;
 
     const where = pairs.map(() => `(table_name = ? AND row_id = ?)`).join(' OR ');
@@ -1346,6 +1563,22 @@ async function queueLocalProductSnapshot(
     return queueOffline('products', 'upsert', product, 'id', expectedServerDataEpoch);
 }
 
+/** Save the edit and its upload intent together; neither can survive alone. */
+async function persistLocalChanges(mutations: sqlite.LocalMutation[], serverDataEpoch: string): Promise<void> {
+    const queued = mutations.map(mutation => ({
+        ...mutation,
+        ...(isMultiMode() && (mutation.table !== 'settings' || isSyncableSetting(mutation.data.key))
+            ? { queueId: crypto.randomUUID(), serverDataEpoch } : {}),
+    }));
+    await sqlite.commitBatch(queued);
+    if (queued.some(mutation => mutation.queueId)) offlineQueueFlushRequested = true;
+}
+
+function drainLocalChanges(): void {
+    if (!isMultiMode()) return;
+    void flushOfflineQueue().catch(error => console.warn('Local edits are saved; upload will retry:', error));
+}
+
 // ─── Helper: try MySQL, fall back to SQLite ─────────────────────────────────
 
 async function tryMysql(): Promise<boolean> {
@@ -1359,11 +1592,12 @@ async function tryMysql(): Promise<boolean> {
 // every till the same till_id, leak DB credentials, and clobber sync state.
 const LOCAL_ONLY_SETTING_KEYS = new Set([
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_name_manual', 'till_seq',
+    'device_operating_mode', 'held_order_recovery_v1',
     RECEIPT_HIGH_WATER_KEY,
     'automatic_setup_backup_enabled', 'automatic_setup_backup_time',
     'automatic_setup_backup_directory', 'backup_directory',
     'last_sync_time', 'last_fast_sync_time', 'bootstrap_uploaded',
-    'transaction_purge_applied_at', 'sync_change_cursor', RESTORE_PENDING_MARIADB_REPLACE_KEY,
+    'transaction_purge_applied_at', 'sync_change_cursor', 'sync_reconcile_v1', RESTORE_PENDING_MARIADB_REPLACE_KEY,
     REPORT_EPOCH_CACHE_KEY,
     'training_mode_enabled',
     'owner_cloud_reporter_password',
@@ -1397,20 +1631,22 @@ const LOCAL_ONLY_SETTING_KEYS = new Set([
     'feedback_haptics_enabled', 'feedback_sale_sound_enabled', 'barcode_error_sound',
     // Server-side control rows — never copy between tills.
     'till_seq_counter', 'bootstrap_done', MARIADB_RESTORE_MAINTENANCE_KEY,
+    'staff_attendance_import_owner',
     SERVER_DATA_EPOCH_SEEN_KEY,
 ]);
 
 function isSyncableSetting(key: string): boolean {
-    if (LOCAL_ONLY_SETTING_KEYS.has(key)) return false;
-    if (key.startsWith('sync_ts_')) return false;
-    if (key.startsWith('migration_')) return false;
+    const normalized = String(key || '').trim().toLowerCase();
+    if (LOCAL_ONLY_SETTING_KEYS.has(normalized)) return false;
+    if (normalized.startsWith('sync_ts_')) return false;
+    if (normalized.startsWith('migration_')) return false;
     return true;
 }
 
 function isPushableSetting(key: string): boolean {
     // The epoch is authored by MariaDB replacement/bootstrap only. Other tills
     // may read it, but ordinary settings pushes must never move it backwards.
-    if (key === SERVER_DATA_EPOCH_KEY) return false;
+    if (String(key || '').trim().toLowerCase() === SERVER_DATA_EPOCH_KEY) return false;
     return isSyncableSetting(key);
 }
 
@@ -1739,8 +1975,12 @@ async function assertMariaDbNotInRestoreMaintenance(
     remote: any,
     allowPendingRestoreOwner = false,
 ): Promise<void> {
-    const owner = await readRemoteRestoreMaintenanceOwner(remote);
+    let owner = await readRemoteRestoreMaintenanceOwner(remote);
     if (!owner) return;
+    if (await recoverCompletedControlledImportIfOwned(remote)) {
+        owner = await readRemoteRestoreMaintenanceOwner(remote);
+        if (!owner) return;
+    }
     if (allowPendingRestoreOwner
         && await hasRestorePendingMariaDbReplace()
         && owner === await readLocalTillIdWithoutCreating()) return;
@@ -1843,6 +2083,8 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
 
     let localIdentity = await getLocalAppIdentity();
     let remoteIdentity = await getRemoteAppIdentity();
+    // The common case needs identity checks, not four catalogue/history counts.
+    if (localIdentity && remoteIdentity && localIdentity.shopId === remoteIdentity.shopId) return localIdentity;
     const localName = localIdentity?.shopName || await getLocalStoreName();
     const remoteName = remoteIdentity?.shopName || await getRemoteStoreName();
     const localHasBusinessData = hasBusinessData(await countLocalBusinessData());
@@ -2071,6 +2313,11 @@ async function applyTransactionPurgeMarker(): Promise<boolean> {
 
 // ─── Tombstones (delete propagation) ────────────────────────────────────────
 
+function tombstoneMutation(table: string, id: string): sqlite.LocalMutation {
+    return { table: 'tombstones', data: { id: `${table}:${id}`, table_name: table,
+        row_id: id, deletedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } };
+}
+
 /** Record a deletion so other tills remove the same row on their next sync. */
 async function recordTombstone(
     table: string,
@@ -2097,10 +2344,36 @@ async function recordTombstone(
  * Pull tombstones created since our last tombstone watermark and apply the
  * deletions to the local SQLite cache. Returns the number of rows removed.
  */
-async function applyTombstones(newSyncTime: string, strict = false): Promise<number> {
-    const since = overlapWatermark(await getTableWatermark('tombstones'));
+async function applyTombstoneRows(rows: any[]): Promise<number> {
     const d = await sqlite.getDb();
     const allowedTables = new Set([...ALL_SYNC_TABLES, 'tombstones']);
+    const mutations: sqlite.LocalMutation[] = [];
+    const recreated = new Set<string>();
+    for (const table of PROMOTION_SYNC_TABLES) {
+        const ids = rows.filter(row => row.table_name === table).map(row => String(row.row_id));
+        for (const row of await mysql.mysqlGetSyncRowsByIds(table, ids)) recreated.add(`${table}:${row.id}`);
+    }
+    for (const t of rows) {
+        if (!allowedTables.has(t.table_name) || !t.row_id) {
+            await d.execute(
+                `INSERT OR REPLACE INTO _sync_conflicts (id, table_name, operation, data, reason, created_at)
+                 VALUES (?, ?, 'remove', ?, ?, ?)`,
+                [`tombstone:${t.id}`, String(t.table_name || 'unknown'), JSON.stringify(t),
+                    'Invalid deletion record received from MariaDB', new Date().toISOString()],
+            );
+            continue;
+        }
+        // An older deletion must not undo a subsequently recreated promotion.
+        if (recreated.has(`${t.table_name}:${t.row_id}`)) continue;
+        mutations.push({ table: t.table_name, kind: 'remove', data: { id: t.row_id } },
+            { table: 'tombstones', data: t });
+    }
+    await sqlite.commitBatch(mutations);
+    return mutations.length / 2;
+}
+
+async function applyTombstones(newSyncTime: string, strict = false): Promise<number> {
+    const since = overlapWatermark(await getTableWatermark('tombstones'));
     let applied = 0;
     let failed = false;
     let cursor: mysql.MysqlSyncPageCursor | null = null;
@@ -2115,26 +2388,7 @@ async function applyTombstones(newSyncTime: string, strict = false): Promise<num
                 cursor,
                 SYNC_PULL_PAGE_SIZE,
             );
-            for (const t of result.rows) {
-                if (!allowedTables.has(t.table_name) || !t.row_id) {
-                    await d.execute(
-                        `INSERT OR REPLACE INTO _sync_conflicts (id, table_name, operation, data, reason, created_at)
-                         VALUES (?, ?, 'remove', ?, ?, ?)`,
-                        [`tombstone:${t.id}`, String(t.table_name || 'unknown'), JSON.stringify(t),
-                            'Invalid deletion record received from MariaDB', new Date().toISOString()]
-                    );
-                    continue;
-                }
-                try {
-                    await sqlite.remove(t.table_name, t.row_id);
-                    await sqlite.upsert('tombstones', t, 'id');
-                    applied++;
-                } catch (error) {
-                    failed = true;
-                    console.warn(`database: could not apply tombstone ${t.id}:`, error);
-                    if (strict) throw error;
-                }
-            }
+            applied += await applyTombstoneRows(result.rows);
             if (!result.nextCursor) break;
             if (cursor
                 && cursor.updatedAt === result.nextCursor.updatedAt
@@ -2157,26 +2411,117 @@ async function applyTombstones(newSyncTime: string, strict = false): Promise<num
 // ─── Bulk push helpers (initial upload / repair) ────────────────────────────
 const PUSH_TABLES = [
     'app_identity',
+    // Staff/register parents and the paired attendance/audit snapshot are
+    // intentionally first. If an initial upload crashes after products make
+    // MariaDB look populated, attendance history has already committed in one
+    // atomic native transaction and cannot be stranded half-uploaded.
+    'settings', 'registers', 'employees', 'employee_attendance', 'audit_logs',
     'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'registers',
+    'customers',
     'customer_accounts', 'customer_account_entries',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
-    'loyalty_logs', 'audit_logs', 'shifts', 'cash_movements',
+    'loyalty_logs', 'shifts', 'cash_movements',
     'till_report_markers', 'manager_approvals',
     'stock_receipts', 'stock_receipt_lines'
 ];
 
+type ControlledStaffImportResult = {
+    employeeCount: number;
+    attendanceCount: number;
+    auditCount: number;
+    serverDataEpoch: string;
+};
+
+async function runControlledMariaDbImport(): Promise<ControlledStaffImportResult> {
+    if (!isTauri()) {
+        throw new Error('Attendance history migration requires the installed Tauri app');
+    }
+    const config = get(connectionState).mysqlConfig;
+    if (!config) throw new Error('MariaDB configuration is unavailable');
+    const tillId = await sqlite.getOrCreateTillId();
+    const result = await invoke<ControlledStaffImportResult>(
+        'import_mariadb_attendance_audit_snapshot',
+        { mysqlUri: buildMysqlUri(config), tillId },
+    );
+    console.log(
+        `database: atomically uploaded the full local snapshot, including `
+        + `${result.employeeCount} staff, ${result.attendanceCount} attendance rows, `
+        + `and ${result.auditCount} original audit rows`,
+    );
+    return result;
+}
+
+let controlledImportRecoveryInFlight: Promise<boolean> | null = null;
+
+async function recoverCompletedControlledImportIfOwned(remote: any): Promise<boolean> {
+    if (controlledImportRecoveryInFlight) return controlledImportRecoveryInFlight;
+    const recovery = (async () => {
+        const rows: any[] = await remote.select(
+            `SELECT \`key\`, value FROM settings
+             WHERE \`key\` IN (?, 'staff_attendance_import_owner', 'bootstrap_done')`,
+            [MARIADB_RESTORE_MAINTENANCE_KEY],
+        );
+        const valueFor = (key: string) => String(
+            rows.find((row) => row.key === key)?.value || '',
+        ).trim();
+        const maintenanceOwner = valueFor(MARIADB_RESTORE_MAINTENANCE_KEY);
+        const controlledOwner = valueFor('staff_attendance_import_owner');
+        // The same native command handles both crash points: bootstrap_done
+        // means commit succeeded and only gate release remains; without it the
+        // empty-destination transaction is safely retried from its frozen local
+        // source. Other tills never enter this branch.
+        if (!maintenanceOwner || !controlledOwner) return false;
+
+        const localTillId = await readLocalTillIdWithoutCreating();
+        if (!localTillId
+            || maintenanceOwner !== localTillId
+            || controlledOwner !== localTillId) return false;
+
+        const result = await runControlledMariaDbImport();
+        await rememberLocalServerDataEpoch(await sqlite.getDb(), result.serverDataEpoch);
+        return true;
+    })();
+    controlledImportRecoveryInFlight = recovery;
+    try {
+        return await recovery;
+    } finally {
+        if (controlledImportRecoveryInFlight === recovery) {
+            controlledImportRecoveryInFlight = null;
+        }
+    }
+}
+
 /** Push every local table to MariaDB (skips device-local settings keys). */
 async function forcePushTables(
     localDb: any,
-    options: { skipTables?: Set<string> } = {},
-): Promise<void> {
+    attendancePolicy: AttendanceBulkPushPolicy,
+): Promise<string> {
+    // Controlled bootstrap/migration is one native SQLite snapshot + one
+    // MariaDB transaction behind the durable restore gate. No partial server
+    // is ever visible and no JavaScript upsert can escape the transaction.
+    if (attendancePolicy === 'controlled-import') {
+        const result = await runControlledMariaDbImport();
+        if (!result.serverDataEpoch) {
+            throw new Error('Controlled MariaDB import did not publish a server data epoch');
+        }
+        await rememberLocalServerDataEpoch(localDb, result.serverDataEpoch);
+        return result.serverDataEpoch;
+    }
     for (const table of PUSH_TABLES) {
-        if (options.skipTables?.has(table)) continue;
+        const action = bulkPushTableAction(table, attendancePolicy);
+        if (action === 'skip') continue;
+        if (action === 'paired-staff-attendance-audit') {
+            continue;
+        }
         let rows: any[] = await localDb.select(`SELECT * FROM ${table}`);
-        if (table === 'settings') rows = rows.filter((r: any) => isPushableSetting(r.key));
+        if (table === 'settings') {
+            rows = rows.filter((r: any) =>
+                isPushableSetting(r.key)
+                && bulkPushSettingAllowed(r.key, attendancePolicy)
+            );
+        }
         if (rows.length === 0) continue;
 
         console.log(`database: uploading ${rows.length} rows to MariaDB ${table}…`);
@@ -2197,6 +2542,7 @@ async function forcePushTables(
             for (const row of rows) await mysql.mysqlUpsert(table, row, idKey);
         }
     }
+    return '';
 }
 
 async function repairMissingProductsAfterUpload(localProducts: any[]): Promise<void> {
@@ -2306,6 +2652,25 @@ function formatCompletenessIssue(
 
 async function assertMariaDbSafeForPull(remote: any): Promise<void> {
     if (!remote) throw new Error('MariaDB is unavailable');
+    await recoverCompletedControlledImportIfOwned(remote);
+    const maintenanceRows: any[] = await remote.select(
+        `SELECT \`key\`, value FROM settings
+         WHERE \`key\` IN (?, 'staff_attendance_import_owner', 'bootstrap_done')`,
+        [MARIADB_RESTORE_MAINTENANCE_KEY],
+    );
+    const valueFor = (key: string) => String(
+        maintenanceRows.find((row) => row.key === key)?.value || '',
+    ).trim();
+    const maintenanceOwner = valueFor(MARIADB_RESTORE_MAINTENANCE_KEY);
+    const controlledOwner = valueFor('staff_attendance_import_owner');
+    if (maintenanceOwner && controlledOwner && valueFor('bootstrap_done')) {
+        throw new Error('Another till must finish releasing the completed MariaDB import.');
+    }
+    if (maintenanceOwner || controlledOwner) {
+        throw new Error(
+            'MariaDB is in controlled-import maintenance. Finish the local-to-MariaDB migration on the till that started it before syncing or selling.',
+        );
+    }
     const localDb = await sqlite.getDb();
     const localCounts = await localCompletenessCounts(localDb);
     const remoteCounts = await remoteCompletenessCounts(remote);
@@ -2529,12 +2894,10 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
 
         console.log('database: server is empty — performing one-time initial upload…');
         await validateLocalDataForRestore(localDb);
-        await forcePushTables(localDb);
-        await verifyProductUploadCount(localDb);
-        await verifyPushedTableCounts(localDb, { exact: true, label: 'Initial MariaDB upload verification' });
-        await publishServerDataEpoch(localDb);
-
-        await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
+        await forcePushTables(localDb, 'controlled-import');
+        // The native importer verifies every copied table inside the same
+        // MariaDB transaction. Recounting after it opens maintenance would race
+        // legitimate writes from another till and could report a false failure.
         await sqlite.upsert('settings', { key: 'bootstrap_uploaded', value: '1', updatedAt: new Date().toISOString() }, 'key');
         console.log('database: initial upload complete!');
     } catch (e) {
@@ -2545,11 +2908,20 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
 // ─── CRUD Operations ────────────────────────────────────────────────────────
 
 async function upsertAfterClosePreflight(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    if (table === 'customers') {
+        throw new Error('Use saveCustomerProfile to change customer details, or the loyalty commands to change points');
+    }
     if (table === 'customer_account_entries') {
         throw new Error('Customer-account entries are append-only; use postCustomerAccountEntry');
     }
     if (table === 'customer_accounts') {
         throw new Error('Use saveCustomerAccountConfig to change a customer account');
+    }
+    if (table === 'employees') {
+        if (isMultiMode()) {
+            throw new Error('Use saveEmployeeProfile for shared staff changes');
+        }
+        obj = normalizeEmployeeForPersistence(obj);
     }
     const serverDataEpoch = await captureServerDataEpochForMutation();
     // Keep local/offline writes eligible for delta sync. MariaDB replaces this
@@ -2559,7 +2931,7 @@ async function upsertAfterClosePreflight(table: string, obj: any, idKey: string 
     }
     const auditBefore = await getAuditBefore(table, obj, idKey);
     // Always write to local SQLite (either primary or cache)
-    await sqlite.upsert(table, obj, idKey);
+    await persistLocalChanges([{ table, data: obj, idKey }], serverDataEpoch);
     if (shouldAuditTableMutation(table, obj)) {
         const auditAfter = await getLocalRow(table, idKey, obj?.[idKey]);
         await recordTableAudit(table, auditBefore ? 'updated' : 'created', idKey, auditBefore, auditAfter || obj);
@@ -2571,21 +2943,11 @@ async function upsertAfterClosePreflight(table: string, obj: any, idKey: string 
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
         await hydrateSvelteStores([table]);
-        await writeOrQueueImmediately(
-            `promotion upsert for ${table}`,
-            () => table === 'promo_group_items'
-                ? mysql.mysqlSafeOfflineUpsert(table, obj, idKey)
-                : mysql.mysqlUpsert(table, obj, idKey),
-            () => queueOffline(table, 'upsert', obj, idKey, serverDataEpoch),
-        );
+        drainLocalChanges();
         return;
     }
 
-    await pushWriteInBackground(
-        `upsert for ${table}`,
-        () => mysql.mysqlUpsert(table, obj, idKey),
-        () => queueOffline(table, 'upsert', obj, idKey, serverDataEpoch),
-    );
+    drainLocalChanges();
 }
 
 export async function upsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
@@ -2598,11 +2960,74 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
     });
 }
 
+/** A held trolley, its lines and its upload intents must survive together. */
+export async function saveHeldOrderBundle(order: any, lines: any[], clearRecovery = false): Promise<void> {
+    if (order?.status !== 'hold' || !order.id || !lines.length
+        || lines.some(line => line.orderId !== order.id)) {
+        throw new Error('A held trolley needs an unpaid order and matching item lines.');
+    }
+    await wholeSystemCloseLocalMutex.runExclusive(async () => {
+        if (isMultiMode()) await assertMariaDbCommerceWritesAllowed();
+        const epoch = await captureServerDataEpochForMutation();
+        await withHeldRecoveryWrite(() => sqlite.commitBatch([
+            { table: 'orders', data: order },
+            ...lines.map(data => ({ table: 'order_lines', data })),
+            ...(clearRecovery ? [{ table: 'settings', kind: 'remove' as const, idKey: 'key', data: { key: HELD_RECOVERY_SETTING } }] : []),
+            ...(isMultiMode() ? [{ table: 'orders', kind: 'queue' as const, queueId: crypto.randomUUID(), serverDataEpoch: epoch,
+                data: { id: order.id, order, lines } }] : []),
+        ]));
+    });
+    drainLocalChanges();
+}
+
 /** Save customer profiles server-first so a duplicate loyalty code cannot win on two tills. */
-export async function saveCustomerProfile(customer: any): Promise<void> {
-    if (!customer?.id) throw new Error('Customer ID is required');
+export async function saveCustomerProfile(customer: any, expectedProfile: Customer | null = null): Promise<void> {
+    const id = String(customer?.id || '').trim();
+    if (!id) throw new Error('Customer ID is required');
+    if (expectedProfile && expectedProfile.id !== id) throw new Error(CUSTOMER_PROFILE_CONFLICT);
+    // Freeze the editor's base before any await; never replace it with a later read.
+    const before = expectedProfile ? { ...expectedProfile } : null;
+    const storeBefore = get(customersDB).find(candidate => candidate.id === id);
+    const fields = customerProfileFields({ ...before, ...customer });
+    const validationError = loyaltyCodeValidationError(fields.loyaltyCode);
+    if (fields.loyaltyCode && validationError) throw new Error(validationError);
+    const stamp = new Date().toISOString();
+    const profile = {
+        id, ...fields,
+        createdAt: before?.createdAt || String(customer.createdAt || stamp),
+        updatedAt: String(customer.updatedAt || stamp),
+    };
+    if (!isTauri()) {
+        customersDB.update((customers) => {
+            const existing = customers.find((candidate) => candidate.id === id);
+            assertCustomerProfileBase(existing || null, before, profile);
+            const loyaltyCode = fields.loyaltyCode;
+            if (loyaltyCode) {
+                const validationError = loyaltyCodeValidationError(loyaltyCode);
+                if (validationError) throw new Error(validationError);
+                if (customers.some((candidate) => candidate.id !== id
+                    && normalizeLoyaltyCode(candidate.loyaltyCode) === loyaltyCode)) {
+                    throw new Error('Loyalty code is already used by another customer');
+                }
+            }
+            // Profile edits never change loyalty balances or account configuration.
+            // Keep browser previews entirely in memory, including when shared mode is selected.
+            const saved: Customer = {
+                ...existing,
+                ...profile,
+                loyaltyCode,
+                loyaltyPoints: existing?.loyaltyPoints ?? 0,
+                createdAt: existing?.createdAt || String(customer.createdAt || stamp),
+            };
+            return existing
+                ? customers.map((candidate) => candidate.id === id ? saved : candidate)
+                : [...customers, saved];
+        });
+        return;
+    }
     const serverDataEpoch = await captureServerDataEpochForMutation();
-    const auditBefore = await getAuditBefore('customers', customer, 'id');
+    const auditBefore = before;
+    let confirmedCustomer: Customer | null = null;
 
     if (isMultiMode()) {
         const state = get(connectionState);
@@ -2611,23 +3036,71 @@ export async function saveCustomerProfile(customer: any): Promise<void> {
         }
         await commitMysqlOutboxOperation(
             'customers',
-            'upsert',
-            customer,
+            'customerProfile',
+            { id, customer: profile, before },
             'id',
             serverDataEpoch,
         );
+        // The authoritative commit succeeded. A refresh/cache failure must not
+        // tell the operator to save again or overwrite a newer synced balance.
+        try {
+            const snapshot = await getCustomerLoyaltySnapshot(id, 1);
+            if (snapshot.customer) confirmedCustomer = await cacheCustomerSnapshot(await sqlite.getDb(), snapshot.customer);
+        } catch (error) {
+            console.warn('database: customer saved; local display refresh will retry on sync:', error);
+        }
+    } else {
+        const d = await sqlite.getDb();
+        const existing = await getCustomerById(id);
+        assertCustomerProfileBase(existing, before, profile);
+        if (!customerProfilesMatch(existing, profile)) {
+            if (!before) {
+                // INSERT only: a concurrent creation must not overwrite a row.
+                await d.execute(`INSERT INTO customers (id, name, phone, email, postcode, loyaltyCode, notes, loyaltyPoints, createdAt, updatedAt)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+                [id, ...CUSTOMER_PROFILE_FIELDS.map(key => profile[key] || (key === 'loyaltyCode' ? null : '')), profile.createdAt, profile.updatedAt]);
+            } else {
+                // Compare the actual row read above in the same statement that
+                // changes it. Never touch loyaltyPoints in a profile UPDATE.
+                const result = await d.execute(`UPDATE customers SET ${CUSTOMER_PROFILE_FIELDS.map(key => `${key} = ?`).join(', ')}, updatedAt = ?
+                    WHERE id = ? AND ${CUSTOMER_PROFILE_FIELDS.map(key => `COALESCE(${key}, '') = ?`).join(' AND ')}`,
+                [...CUSTOMER_PROFILE_FIELDS.map(key => profile[key] || (key === 'loyaltyCode' ? null : '')), profile.updatedAt, id,
+                    ...CUSTOMER_PROFILE_FIELDS.map(key => existing?.[key] ?? '')]);
+                if (!result.rowsAffected) throw new Error(CUSTOMER_PROFILE_CONFLICT);
+            }
+        }
+        try {
+            confirmedCustomer = await getCustomerById(id);
+        } catch (error) {
+            console.warn('database: customer saved; local display read failed:', error);
+        }
     }
-
-    await sqlite.upsert('customers', customer, 'id');
-    if (shouldAuditTableMutation('customers', customer)) {
-        const auditAfter = await getLocalRow('customers', 'id', customer.id);
-        await recordTableAudit(
-            'customers',
-            auditBefore ? 'updated' : 'created',
-            'id',
-            auditBefore,
-            auditAfter || customer,
-        );
+    if (confirmedCustomer) {
+        const confirmed = confirmedCustomer;
+        customersDB.update(customers => {
+            const current = customers.find(candidate => candidate.id === id);
+            if ((!current && storeBefore) || isCustomerSnapshotOlder(confirmed, current)) return customers;
+            // If the same-version row changed while saving, keep that newer
+            // in-memory observation rather than guessing the order of two reads.
+            if (current && current !== storeBefore
+                && !isCustomerSnapshotOlder(current, confirmed)) return customers;
+            return current ? customers.map(candidate => candidate.id === id ? { ...candidate, ...confirmed } : candidate)
+                : [...customers, confirmed];
+        });
+    }
+    if (shouldAuditTableMutation('customers', profile)) {
+        try {
+            const auditAfter = confirmedCustomer || await getLocalRow('customers', 'id', id);
+            await recordTableAudit(
+                'customers',
+                auditBefore ? 'updated' : 'created',
+                'id',
+                auditBefore,
+                auditAfter || profile,
+            );
+        } catch (error) {
+            console.warn('database: customer saved; audit cache write failed:', error);
+        }
     }
 }
 
@@ -2635,33 +3108,26 @@ async function removeAfterClosePreflight(table: string, id: string, idKey: strin
     if (table === 'customer_account_entries' || table === 'customer_accounts') {
         throw new Error('Customer-account records cannot be deleted; post a reversing entry instead');
     }
+    if (table === 'employees') {
+        throw new Error('Use deleteEmployeeProfile so staff history and multi-till deletion policy are enforced');
+    }
+    if (table === 'employee_attendance') {
+        throw new Error('Attendance records cannot be deleted; correct the recorded times instead');
+    }
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const auditBefore = AUDITED_TABLES.has(table) ? await getLocalRow(table, idKey, id) : null;
-    await sqlite.remove(table, id, idKey);
+    await persistLocalChanges([
+        { table, kind: 'remove', data: { [idKey]: id }, idKey },
+        ...(idKey === 'id' && table !== 'tombstones' ? [tombstoneMutation(table, id)] : []),
+    ], serverDataEpoch);
     if (auditBefore && shouldAuditTableMutation(table, auditBefore)) {
         await recordTableAudit(table, 'deleted', idKey, auditBefore, null);
     }
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
         await hydrateSvelteStores([table]);
-        await writeOrQueueImmediately(
-            `promotion remove for ${table}`,
-            () => mysql.mysqlRemove(table, id, idKey),
-            () => queueOffline(table, 'remove', { id }, idKey, serverDataEpoch),
-        );
-    } else {
-        await pushWriteInBackground(
-            `remove for ${table}`,
-            () => mysql.mysqlRemove(table, id, idKey),
-            () => queueOffline(table, 'remove', { id }, idKey, serverDataEpoch),
-        );
     }
-
-    // Record a tombstone so other tills delete the same row on their next sync.
-    // Only for id-keyed tables (tombstone apply removes by the `id` column).
-    if (idKey === 'id' && table !== 'tombstones') {
-        await recordTombstone(table, id, serverDataEpoch);
-    }
+    drainLocalChanges();
 }
 
 export async function remove(table: string, id: string, idKey: string = 'id'): Promise<void> {
@@ -2678,6 +3144,13 @@ const EMPLOYEE_HISTORY_SQL = `
     SELECT CASE WHEN
         EXISTS (SELECT 1 FROM orders WHERE employeeId = ? LIMIT 1)
         OR EXISTS (SELECT 1 FROM shifts WHERE employeeId = ? OR closedByEmployeeId = ? LIMIT 1)
+        OR EXISTS (
+            SELECT 1 FROM employee_attendance
+            WHERE employeeId = ? OR createdByEmployeeId = ? OR updatedByEmployeeId = ? LIMIT 1
+        )
+        OR EXISTS (SELECT 1 FROM customer_account_entries WHERE employeeId = ? LIMIT 1)
+        OR EXISTS (SELECT 1 FROM cash_movements WHERE employeeId = ? LIMIT 1)
+        OR EXISTS (SELECT 1 FROM inventory_logs WHERE employeeId = ? LIMIT 1)
         OR EXISTS (SELECT 1 FROM audit_logs WHERE employeeId = ? LIMIT 1)
         OR EXISTS (
             SELECT 1 FROM manager_approvals
@@ -2690,10 +3163,21 @@ const EMPLOYEE_HISTORY_SQL = `
 
 /** Protect reports and audit trails before permanently removing a staff record. */
 export async function employeeHasLinkedHistory(employeeId: string): Promise<boolean> {
-    const params = Array(8).fill(employeeId);
+    const params = Array(14).fill(employeeId);
     const localDb = await sqlite.getDb();
     const localRows: any[] = await localDb.select(EMPLOYEE_HISTORY_SQL, params);
     if (Number(localRows[0]?.hasHistory || 0) === 1) return true;
+    const localTerminalRows: any[] = await localDb.select(
+        `SELECT 1 AS hasHistory FROM payment_terminal_attempts
+         WHERE json_valid(saleBundle)
+           AND (
+             json_extract(saleBundle, '$.order.employeeId') = ?
+             OR json_extract(saleBundle, '$.employeeId') = ?
+           )
+         LIMIT 1`,
+        [employeeId, employeeId],
+    );
+    if (localTerminalRows.length > 0) return true;
     if (!isMultiMode()) return false;
 
     const remoteDb = await withTimeout(
@@ -2707,7 +3191,47 @@ export async function employeeHasLinkedHistory(employeeId: string): Promise<bool
         2_000,
         'Timed out while checking staff history on MariaDB',
     );
-    return Number(remoteRows[0]?.hasHistory || 0) === 1;
+    if (Number(remoteRows[0]?.hasHistory || 0) === 1) return true;
+    const remoteTerminalRows: any[] = await withTimeout(
+        remoteDb.select(
+            `SELECT 1 AS hasHistory FROM payment_terminal_attempts
+             WHERE JSON_VALID(saleBundle)
+               AND (
+                 BINARY JSON_UNQUOTE(JSON_EXTRACT(saleBundle, '$.order.employeeId')) = BINARY ?
+                 OR BINARY JSON_UNQUOTE(JSON_EXTRACT(saleBundle, '$.employeeId')) = BINARY ?
+               )
+             LIMIT 1`,
+            [employeeId, employeeId],
+        ),
+        2_000,
+        'Timed out while checking staff terminal history on MariaDB',
+    );
+    return remoteTerminalRows.length > 0;
+}
+
+/**
+ * Delete a never-used staff profile without creating an authorization race.
+ * MariaDB is authoritative in multi-till mode and commits first; its delete
+ * trigger creates the normal tombstone for every other till.
+ */
+export async function deleteEmployeeProfile(employeeId: string): Promise<void> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) throw new Error('Staff ID is required');
+    if (isMultiMode()) {
+        // An offline till can still hold unsynced work attributed to this
+        // employee. No single MariaDB query can prove that every till is empty,
+        // so permanent deletion is intentionally unavailable; deactivation is
+        // the safe, auditable lifecycle in a shared shop.
+        throw new Error('Staff cannot be permanently deleted in a multi-till shop. Deactivate the account instead.');
+    }
+    const auditBefore = await getLocalRow('employees', 'id', normalizedId);
+
+    if (await employeeHasLinkedHistory(normalizedId)) {
+        throw new Error('This staff member has recorded activity. Deactivate them so reports and the audit trail stay correct.');
+    }
+    await sqlite.remove('employees', normalizedId, 'id');
+    if (auditBefore) await recordTableAudit('employees', 'deleted', 'id', auditBefore, null);
+    employeesDB.update((list) => list.filter((employee) => employee.id !== normalizedId));
 }
 
 async function getLocalProductsForPromotionItems(items: any[]): Promise<any[]> {
@@ -2743,7 +3267,16 @@ async function saveLocalPromotionBundle(group: any, discount: any, items: any[])
     }
 }
 
-async function getPromotionAuditSnapshot(discountId = '', groupId = ''): Promise<any> {
+export function getPromotionEditSnapshot(discountId = '', groupId = ''): PromotionSnapshot {
+    return structuredClone({
+            group: get(promoGroupsDB).find(row => row.id === groupId) || null,
+            discounts: get(discountsDB).filter(row => row.id === discountId || (groupId && row.groupId === groupId)),
+            items: groupId ? get(promoGroupItemsDB).filter(row => row.groupId === groupId) : [],
+    });
+}
+
+async function getPromotionAuditSnapshot(discountId = '', groupId = ''): Promise<PromotionSnapshot> {
+    if (!isTauri()) return getPromotionEditSnapshot(discountId, groupId);
     const d = await sqlite.getDb();
     const groupRows: any[] = groupId
         ? await d.select(`SELECT * FROM promo_groups WHERE id = ? LIMIT 1`, [groupId])
@@ -2763,27 +3296,72 @@ async function getPromotionAuditSnapshot(discountId = '', groupId = ''): Promise
     };
 }
 
-export async function savePromotionBundle(group: any, discount: any, items: any[]): Promise<void> {
-    const serverDataEpoch = await captureServerDataEpochForMutation();
-    const before = await getPromotionAuditSnapshot(discount?.id || '', group?.id || '');
-    await saveLocalPromotionBundle(group, discount, items);
-    const after = await getPromotionAuditSnapshot(discount?.id || '', group?.id || '');
-    await recordAuditEvent(
-        before.group || before.discounts.length ? 'promotion_updated' : 'promotion_created',
-        'promotion',
-        group?.id || discount?.id || '',
-        before,
-        after,
-    );
-    await hydrateSvelteStores(PROMOTION_SYNC_TABLES);
+export async function savePromotionBundle(group: any, discount: any, items: any[], expectedSnapshot?: PromotionSnapshot): Promise<void> {
+    return promotionMutationMutex.runExclusive(() => savePromotionBundleLocked(group, discount, items, expectedSnapshot));
+}
 
-    const products = await getLocalProductsForPromotionItems(items);
-    const payload = { group, discount, items, products };
-    await writeOrQueueImmediately(
-        `promotion bundle ${discount?.id || group?.id || ''}`,
-        () => mysql.mysqlSavePromotionBundle(group, discount, items, products),
-        () => queueOffline('promotion_bundle', 'promotionBundle', payload, 'id', serverDataEpoch),
+function promotionAuditRow(action: string, entityId: string, before: PromotionSnapshot, after: PromotionSnapshot | null) {
+    const stamp = new Date().toISOString();
+    return {
+        id: crypto.randomUUID(), employeeId: currentAuditEmployeeId(), action,
+        entityType: 'promotion', entityId, oldData: auditJson(before), newData: auditJson(after),
+        createdAt: stamp, updatedAt: stamp,
+    };
+}
+
+async function refreshSavedPromotions(): Promise<void> {
+    await refreshAfterPromotionCommit(
+        () => hydrateSvelteStores(PROMOTION_SYNC_TABLES),
+        error => console.warn('Promotion change is saved; refreshing its display failed:', error),
     );
+    drainLocalChanges();
+}
+
+function applySavedPromotionStores(group: any, discount: any, items: any[], audit: any): void {
+    discountsDB.update(rows => [...rows.filter(row => row.id !== discount.id), discount]);
+    if (group) {
+        promoGroupsDB.update(rows => [...rows.filter(row => row.id !== group.id), group]);
+        promoGroupItemsDB.update(rows => [...rows.filter(row => row.groupId !== group.id), ...items]);
+    }
+    auditLogDB.update(rows => [audit, ...rows]);
+}
+
+function applyDeletedPromotionStores(discountId: string, groupId: string, audit: any): void {
+    discountsDB.update(rows => rows.filter(row => row.id !== discountId && !(groupId && row.groupId === groupId)));
+    if (groupId) {
+        promoGroupsDB.update(rows => rows.filter(row => row.id !== groupId));
+        promoGroupItemsDB.update(rows => rows.filter(row => row.groupId !== groupId));
+    }
+    auditLogDB.update(rows => [audit, ...rows]);
+}
+
+async function savePromotionBundleLocked(group: any, discount: any, items: any[], expectedSnapshot?: PromotionSnapshot): Promise<void> {
+    validatePromotionForPersistence(group, discount, items);
+    const before = await getPromotionAuditSnapshot(discount.id, group?.id || '');
+    const after = promotionSnapshotAfterSave(expectedSnapshot || before, group, discount, items);
+    if (expectedSnapshot && !promotionSnapshotsMatch(before, expectedSnapshot)) {
+        if (promotionSnapshotsMatch(before, after)) {
+            if (isTauri()) await refreshSavedPromotions();
+            return;
+        }
+        throw new Error('This promotion changed while it was open. Close the editor and reopen the latest version.');
+    }
+    const audit = promotionAuditRow(
+        before.group || before.discounts.length ? 'promotion_updated' : 'promotion_created',
+        group?.id || discount.id, before, after,
+    );
+    if (!isTauri()) {
+        applySavedPromotionStores(group, discount, items, audit);
+        return;
+    }
+    const serverDataEpoch = await captureServerDataEpochForMutation();
+    const products = await getLocalProductsForPromotionItems(items);
+    await sqlite.commitBatch(promotionSaveMutations({
+        before, group, discount, items, products, audit,
+        queue: isMultiMode(), serverDataEpoch, uuid: () => crypto.randomUUID(),
+    }));
+    applySavedPromotionStores(group, discount, items, audit);
+    await refreshSavedPromotions();
 }
 
 async function selectPromotionDeleteTargets(discountId: string, groupId = '') {
@@ -2812,37 +3390,41 @@ async function deleteLocalPromotionBundle(discountIds: string[], groupId = ''): 
     if (groupId) await d.execute(`DELETE FROM promo_groups WHERE id = ?`, [groupId]);
 }
 
-export async function deletePromotionBundle(discountId: string, groupId = ''): Promise<void> {
+export async function deletePromotionBundle(discountId: string, groupId = '', expectedSnapshot?: PromotionSnapshot): Promise<void> {
+    return promotionMutationMutex.runExclusive(() => deletePromotionBundleLocked(discountId, groupId, expectedSnapshot));
+}
+
+async function deletePromotionBundleLocked(discountId: string, groupId: string, expectedSnapshot?: PromotionSnapshot): Promise<void> {
+    const before = await getPromotionAuditSnapshot(discountId, groupId);
+    if (expectedSnapshot && !promotionSnapshotsMatch(before, expectedSnapshot)) {
+        if (!before.group && !before.discounts.length && !before.items.length) {
+            if (isTauri()) await refreshSavedPromotions();
+            return;
+        }
+        throw new Error('This promotion changed while confirmation was open. Review its latest version before deleting.');
+    }
+    const audit = promotionAuditRow('promotion_deleted', groupId || discountId, before, null);
+    if (!isTauri()) {
+        applyDeletedPromotionStores(discountId, groupId, audit);
+        return;
+    }
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const targets = await selectPromotionDeleteTargets(discountId, groupId);
     const discountIds = targets.discountIds.length > 0 ? targets.discountIds : [discountId].filter(Boolean);
-    const before = await getPromotionAuditSnapshot(discountId, groupId);
 
-    await deleteLocalPromotionBundle(discountIds, groupId);
-    await recordAuditEvent(
-        'promotion_deleted',
-        'promotion',
-        groupId || discountId,
-        before,
-        null,
-    );
-
-    for (const itemId of targets.itemIds) await recordTombstone('promo_group_items', itemId, serverDataEpoch);
-    for (const id of discountIds) await recordTombstone('discounts', id, serverDataEpoch);
-    if (groupId) await recordTombstone('promo_groups', groupId, serverDataEpoch);
-    await hydrateSvelteStores(PROMOTION_SYNC_TABLES);
-
-    await writeOrQueueImmediately(
-        `promotion delete ${discountId || groupId}`,
-        () => mysql.mysqlDeletePromotionBundle(discountIds, groupId),
-        () => queueOffline(
-            'promotion_delete',
-            'promotionDelete',
-            { discountIds, groupId },
-            'id',
-            serverDataEpoch,
-        ),
-    );
+    const deletions: sqlite.LocalMutation[] = [
+        ...targets.itemIds.map(id => ({ table: 'promo_group_items', kind: 'remove' as const, data: { id } })),
+        ...discountIds.map(id => ({ table: 'discounts', kind: 'remove' as const, data: { id } })),
+        ...(groupId ? [{ table: 'promo_groups', kind: 'remove' as const, data: { id: groupId } }] : []),
+    ];
+    await sqlite.commitBatch([
+        ...deletions,
+        ...deletions.map(row => tombstoneMutation(row.table, row.data.id)),
+        { table: 'audit_logs', data: audit, ...(isMultiMode() ? { queueId: crypto.randomUUID(), serverDataEpoch } : {}) },
+        ...(isMultiMode() ? [{ table: 'promotion_delete', kind: 'queue' as const, data: { discountIds, groupId, baseSnapshot: before }, queueId: crypto.randomUUID(), serverDataEpoch }] : []),
+    ]);
+    applyDeletedPromotionStores(discountId, groupId, audit);
+    await refreshSavedPromotions();
 }
 
 function promotionStamp(...values: unknown[]): string {
@@ -2868,6 +3450,19 @@ async function pushNewerLocalPromotionPackages(): Promise<number> {
     if (!mysqlDb) return 0;
 
     const local = await sqlite.getDb();
+    // A repair must never replay a change that was explicitly rejected by CAS.
+    const conflicts: any[] = await local.select(
+        `SELECT data FROM _sync_conflicts WHERE operation IN ('promotionBundle', 'promotionDelete')
+         OR table_name IN ('discounts', 'promo_groups', 'promo_group_items')`,
+    );
+    const conflictedGroups = new Set<string>();
+    for (const row of conflicts) {
+        try {
+            const data = JSON.parse(row.data);
+            const id = data?.group?.id || data?.discount?.groupId || data?.groupId;
+            if (id) conflictedGroups.add(id);
+        } catch { /* Malformed conflicts remain available in Sync diagnostics. */ }
+    }
     const discounts: any[] = await local.select(
         `SELECT * FROM discounts
          WHERE kind IN ('bundle_fixed_price', 'bogo_fixed_price', 'temporary_item')
@@ -2877,6 +3472,7 @@ async function pushNewerLocalPromotionPackages(): Promise<number> {
     let pushed = 0;
     for (const discount of discounts) {
         const groupId = discount.groupId;
+        if (conflictedGroups.has(groupId)) continue;
         const groupRows: any[] = await local.select(`SELECT * FROM promo_groups WHERE id = ? LIMIT 1`, [groupId]);
         const group = groupRows[0];
         if (!group) continue;
@@ -3016,6 +3612,9 @@ export interface PostCustomerAccountEntryInput {
     customerId: string;
     entryType: CustomerAccountEntryType;
     amountPence: number;
+    tipsAmount?: number;
+    serviceChargeAmount?: number;
+    cashbackAmount?: number;
     paymentMethod?: CustomerAccountPaymentMethod;
     reference?: string;
     description?: string;
@@ -3064,6 +3663,9 @@ function normalizeAccountEntry(row: any): CustomerAccountEntry {
         orderId: String(row?.orderId || ''),
         entryType: row?.entryType,
         amountPence: Number(row?.amountPence || 0),
+        tipsAmount: Number(row?.tipsAmount || 0),
+        serviceChargeAmount: Number(row?.serviceChargeAmount || 0),
+        cashbackAmount: Number(row?.cashbackAmount || 0),
         paymentMethod: row?.paymentMethod || '',
         reference: String(row?.reference || ''),
         description: String(row?.description || ''),
@@ -3195,25 +3797,31 @@ export async function saveCustomerAccountConfig(
         cacheBrowserAccount(account);
     } else if (isMultiMode()) {
         const config = await requireOnlineCustomerAccount('Customer-account changes');
+        const serverDataEpoch = await captureServerDataEpochForMutation();
         account = normalizeAccount(await invoke<CustomerAccount>('save_online_customer_account_config', {
             mysqlUri: buildMysqlUri(config),
-            input: normalizedInput,
+            input: { ...normalizedInput, serverDataEpoch },
         }), customerId);
-        await sqlite.upsert('customer_accounts', account, 'id');
+        // Native already attempts the cache update. Do not replay an older
+        // balance here after another till's newer sync has arrived.
     } else {
         account = normalizeAccount(await invoke<CustomerAccount>('save_local_customer_account_config', {
             input: normalizedInput,
         }), customerId);
     }
     cacheBrowserAccount(account);
-    await recordAuditEvent(
-        'customer_account_config_updated',
-        'customer_account',
-        customerId,
-        before,
-        account,
-        normalizedInput.employeeId,
-    );
+    try {
+        await recordAuditEvent(
+            'customer_account_config_updated',
+            'customer_account',
+            customerId,
+            before,
+            account,
+            normalizedInput.employeeId,
+        );
+    } catch (error) {
+        console.warn('database: customer account settings saved; audit cache write failed:', error);
+    }
     return account;
 }
 
@@ -3258,6 +3866,13 @@ export async function postCustomerAccountEntry(
         throw new Error('Payments and refunds must reduce the amount owed');
     }
     const paymentMethod = input.paymentMethod || '';
+    for (const field of ['tipsAmount', 'serviceChargeAmount', 'cashbackAmount'] as const) {
+        const value = input[field] ?? 0;
+        if (!Number.isSafeInteger(value) || value < 0
+            || (value !== 0 && (input.entryType !== 'payment' || paymentMethod !== 'card'))) {
+            throw new Error('Tips, service charge and cashback require a card account payment and whole non-negative pence');
+        }
+    }
     if (input.entryType === 'payment' && !['cash', 'card', 'other'].includes(paymentMethod)) {
         throw new Error('Account payments require a cash, card, or other payment method');
     }
@@ -3293,6 +3908,9 @@ export async function postCustomerAccountEntry(
         entryType: input.entryType,
         amountPence,
         paymentMethod,
+        tipsAmount: Number(input.tipsAmount || 0),
+        serviceChargeAmount: Number(input.serviceChargeAmount || 0),
+        cashbackAmount: Number(input.cashbackAmount || 0),
         reference: String(input.reference || ''),
         description: String(input.description || ''),
         receiptNumber: Math.max(0, Math.trunc(Number(input.receiptNumber || acknowledgementNumber))),
@@ -3413,12 +4031,309 @@ export interface CustomerLoyaltyHistoryRow {
     createdAt: string;
 }
 
+export interface AdjustCustomerLoyaltyInput {
+    customerId: string;
+    expectedPoints: number;
+    newPoints: number;
+    reason: string;
+    employeeId: string;
+    actorExpectedUpdatedAt?: string;
+    idempotencyKey?: string;
+}
+
+export interface PreparedCustomerLoyaltyAdjustment {
+    id: string;
+    customerId: string;
+    expectedPoints: number;
+    newPoints: number;
+    reason: string;
+    employeeId: string;
+    actorExpectedUpdatedAt: string;
+    createdAt: string;
+    serverDataEpoch: string;
+}
+
+export interface CustomerLoyaltyAdjustmentResult {
+    customerId: string;
+    loyaltyPoints: number;
+    customerUpdatedAt: string;
+    entry: LoyaltyLog;
+    audit?: AuditLog;
+}
+
+function normalizeCustomerLoyaltyAdjustmentResult(
+    value: any,
+    fallback: {
+        customerId: string;
+        newPoints: number;
+        entryId: string;
+        storedReason: string;
+        createdAt: string;
+    },
+): CustomerLoyaltyAdjustmentResult {
+    const entry = value?.entry || {};
+    const audit = value?.audit;
+    return {
+        customerId: String(value?.customerId || fallback.customerId),
+        loyaltyPoints: Number(value?.loyaltyPoints ?? fallback.newPoints),
+        customerUpdatedAt: String(value?.customerUpdatedAt || entry.updatedAt || fallback.createdAt),
+        entry: {
+            id: String(entry.id || fallback.entryId),
+            customerId: String(entry.customerId || fallback.customerId),
+            orderId: String(entry.orderId || ''),
+            pointsChange: Number(entry.pointsChange ?? 0),
+            reason: String(entry.reason || fallback.storedReason) as LoyaltyLog['reason'],
+            createdAt: String(entry.createdAt || fallback.createdAt),
+            updatedAt: String(entry.updatedAt || entry.createdAt || fallback.createdAt),
+        },
+        audit: audit ? {
+            id: String(audit.id || ''),
+            employeeId: String(audit.employeeId || ''),
+            action: String(audit.action || ''),
+            entityType: String(audit.entityType || ''),
+            entityId: String(audit.entityId || ''),
+            oldData: String(audit.oldData || ''),
+            newData: String(audit.newData || ''),
+            createdAt: String(audit.createdAt || fallback.createdAt),
+        } : undefined,
+    };
+}
+
+function shouldApplyCustomerLoyaltyAdjustmentResult(
+    customer: Customer,
+    result: CustomerLoyaltyAdjustmentResult,
+): boolean {
+    const currentVersion = String(customer.updatedAt || '');
+    const resultVersion = String(result.customerUpdatedAt || '');
+    if (!currentVersion) return true;
+    if (!resultVersion) return false;
+    const versionOrder = currentVersion.localeCompare(resultVersion);
+    if (versionOrder < 0) return true;
+    if (versionOrder > 0) return false;
+
+    // Equal millisecond timestamps are possible on a busy shared database.
+    // Only accept the result when the cache still contains this operation's
+    // expected balance (or already contains its result), never an unrelated
+    // balance that arrived at the same timestamp.
+    const currentPoints = Number(customer.loyaltyPoints || 0);
+    const expectedPoints = result.loyaltyPoints - result.entry.pointsChange;
+    return currentPoints === expectedPoints || currentPoints === result.loyaltyPoints;
+}
+
+export async function prepareCustomerLoyaltyAdjustment(
+    input: AdjustCustomerLoyaltyInput,
+): Promise<PreparedCustomerLoyaltyAdjustment> {
+    const customerId = String(input.customerId || '').trim();
+    const employeeId = String(input.employeeId || '').trim();
+    const reason = String(input.reason || '').trim();
+    const expectedPoints = Number(input.expectedPoints);
+    const newPoints = Number(input.newPoints);
+    if (!customerId) throw new Error('Customer ID is required');
+    if (!employeeId) throw new Error('Sign in before adjusting loyalty points');
+    const actor = get(currentEmployee);
+    if (!actor || actor.id !== employeeId) {
+        throw new Error('Sign in again before adjusting loyalty points');
+    }
+    if (isSupportEmployee(actor)
+        || !hasPermission(actor, 'adjust_customer_loyalty', get(settingsDB))) {
+        throw new Error('You do not have permission to adjust loyalty points');
+    }
+    const preview = customerLoyaltyAdjustmentPreview(expectedPoints, 'set', String(newPoints));
+    if (preview.error) throw new Error(preview.error);
+    const reasonError = customerLoyaltyReasonError(reason);
+    if (reasonError) throw new Error(reasonError);
+
+    const id = String(input.idempotencyKey || crypto.randomUUID()).trim();
+    if (!id || id.length > 36 || /\p{Cc}/u.test(id)) {
+        throw new Error('The loyalty adjustment reference is invalid');
+    }
+    return {
+        id,
+        customerId,
+        expectedPoints,
+        newPoints,
+        reason,
+        employeeId,
+        actorExpectedUpdatedAt: String(
+            currentEmployeeAuthorizationVersion()
+            || input.actorExpectedUpdatedAt
+            || actor.updatedAt
+            || '',
+        ),
+        createdAt: new Date().toISOString(),
+        serverDataEpoch: await captureServerDataEpochForMutation(),
+    };
+}
+
+/**
+ * Atomically correct a customer's loyalty balance and append permanent
+ * loyalty/audit history. A prepared request is immutable so an ambiguous
+ * transport failure can be retried without ever creating a second movement.
+ */
+export async function submitCustomerLoyaltyAdjustment(
+    input: PreparedCustomerLoyaltyAdjustment,
+): Promise<CustomerLoyaltyAdjustmentResult> {
+    const id = String(input.id || '').trim();
+    const customerId = String(input.customerId || '').trim();
+    const employeeId = String(input.employeeId || '').trim();
+    const reason = String(input.reason || '').trim();
+    const expectedPoints = Number(input.expectedPoints);
+    const newPoints = Number(input.newPoints);
+    const createdAt = String(input.createdAt || '').trim();
+    if (!id || id.length > 36 || /\p{Cc}/u.test(id)) {
+        throw new Error('The loyalty adjustment reference is invalid');
+    }
+    if (!customerId) throw new Error('Customer ID is required');
+    if (!employeeId) throw new Error('Sign in before adjusting loyalty points');
+    const actor = get(currentEmployee);
+    if (!actor || actor.id !== employeeId) {
+        throw new Error('Sign in again before adjusting loyalty points');
+    }
+    if (isSupportEmployee(actor)
+        || !hasPermission(actor, 'adjust_customer_loyalty', get(settingsDB))) {
+        throw new Error('You do not have permission to adjust loyalty points');
+    }
+    const preview = customerLoyaltyAdjustmentPreview(expectedPoints, 'set', String(newPoints));
+    if (preview.error) throw new Error(preview.error);
+    const reasonError = customerLoyaltyReasonError(reason);
+    if (reasonError) throw new Error(reasonError);
+    if (!createdAt || Number.isNaN(new Date(createdAt).getTime())) {
+        throw new Error('The loyalty adjustment timestamp is invalid');
+    }
+    const storedReason = manualLoyaltyReason(reason);
+    const nativeInput: PreparedCustomerLoyaltyAdjustment = {
+        id,
+        customerId,
+        expectedPoints,
+        newPoints,
+        reason,
+        employeeId,
+        actorExpectedUpdatedAt: String(input.actorExpectedUpdatedAt || ''),
+        createdAt,
+        serverDataEpoch: String(input.serverDataEpoch || ''),
+    };
+
+    let result: CustomerLoyaltyAdjustmentResult;
+    if (!isTauri()) {
+        const existingEntry = get(loyaltyLogDB).find((entry) => entry.id === id);
+        if (existingEntry) {
+            const expectedChange = newPoints - expectedPoints;
+            if (existingEntry.customerId !== customerId
+                || existingEntry.pointsChange !== expectedChange
+                || existingEntry.reason !== storedReason) {
+                throw new Error('This loyalty adjustment reference was already used for a different correction');
+            }
+            const existingCustomer = get(customersDB).find((customer) => customer.id === customerId);
+            if (!existingCustomer) throw new Error('Customer was not found');
+            const existingAudit = get(auditLogDB).find((entry) => entry.id === id);
+            result = normalizeCustomerLoyaltyAdjustmentResult({
+                customerId,
+                loyaltyPoints: existingCustomer.loyaltyPoints,
+                customerUpdatedAt: existingCustomer.updatedAt,
+                entry: existingEntry,
+                audit: existingAudit,
+            }, { customerId, newPoints, entryId: id, storedReason, createdAt });
+        } else {
+            const customer = get(customersDB).find((candidate) => candidate.id === customerId);
+            if (!customer) throw new Error('Customer was not found');
+            if (Number(customer.loyaltyPoints || 0) !== expectedPoints) {
+                throw new Error('Customer loyalty balance changed; refresh and try again');
+            }
+            const updatedAt = createdAt;
+            const entry: LoyaltyLog = {
+                id,
+                customerId,
+                orderId: '',
+                pointsChange: newPoints - expectedPoints,
+                reason: storedReason as LoyaltyLog['reason'],
+                createdAt,
+                updatedAt,
+            };
+            const updatedCustomer: Customer = { ...customer, loyaltyPoints: newPoints, updatedAt };
+            const audit: AuditLog = {
+                id,
+                employeeId,
+                action: 'customer_loyalty_adjusted',
+                entityType: 'customer',
+                entityId: customerId,
+                oldData: JSON.stringify({ loyaltyPoints: expectedPoints }),
+                newData: JSON.stringify({
+                    loyaltyPoints: newPoints,
+                    pointsChange: entry.pointsChange,
+                    reason,
+                }),
+                createdAt,
+            };
+            customersDB.update((customers) => customers.map((candidate) =>
+                candidate.id === customerId ? updatedCustomer : candidate));
+            loyaltyLogDB.update((entries) => [entry, ...entries.filter((candidate) => candidate.id !== id)]);
+            auditLogDB.update((entries) => [audit, ...entries.filter((candidate) => candidate.id !== id)]);
+            result = normalizeCustomerLoyaltyAdjustmentResult({
+                customerId,
+                loyaltyPoints: newPoints,
+                customerUpdatedAt: updatedAt,
+                entry,
+                audit,
+            }, { customerId, newPoints, entryId: id, storedReason, createdAt });
+        }
+    } else if (isMultiMode()) {
+        const config = await requireOnlineCustomerAccount('Loyalty point corrections');
+        result = normalizeCustomerLoyaltyAdjustmentResult(
+            await invoke<CustomerLoyaltyAdjustmentResult>('adjust_online_customer_loyalty', {
+                mysqlUri: buildMysqlUri(config),
+                input: nativeInput,
+            }),
+            { customerId, newPoints, entryId: id, storedReason, createdAt },
+        );
+    } else {
+        result = normalizeCustomerLoyaltyAdjustmentResult(
+            await invoke<CustomerLoyaltyAdjustmentResult>('adjust_local_customer_loyalty', {
+                input: nativeInput,
+            }),
+            { customerId, newPoints, entryId: id, storedReason, createdAt },
+        );
+    }
+
+    customersDB.update((customers) => customers.map((customer) =>
+        customer.id === customerId && shouldApplyCustomerLoyaltyAdjustmentResult(customer, result)
+            ? { ...customer, loyaltyPoints: result.loyaltyPoints, updatedAt: result.customerUpdatedAt }
+            : customer));
+    loyaltyLogDB.update((entries) => [result.entry, ...entries.filter((entry) => entry.id !== result.entry.id)]);
+    if (result.audit?.id) {
+        auditLogDB.update((logs) => [result.audit!, ...logs.filter((entry) => entry.id !== result.audit!.id)]);
+    } else {
+        await recordAuditEvent(
+            'customer_loyalty_adjusted',
+            'customer',
+            customerId,
+            { loyaltyPoints: expectedPoints },
+            { loyaltyPoints: result.loyaltyPoints, pointsChange: result.entry.pointsChange, reason },
+            employeeId,
+        );
+    }
+    notifyOwnerCloudDataChanged();
+    return result;
+}
+
+export async function adjustCustomerLoyalty(
+    input: AdjustCustomerLoyaltyInput,
+): Promise<CustomerLoyaltyAdjustmentResult> {
+    return submitCustomerLoyaltyAdjustment(
+        await prepareCustomerLoyaltyAdjustment(input),
+    );
+}
+
 export async function isCustomerLoyaltyCodeInUse(
     loyaltyCode: string,
     excludeCustomerId = '',
 ): Promise<boolean> {
     const normalized = loyaltyCode.trim().toUpperCase();
     if (!normalized) return false;
+    if (!isTauri()) {
+        const excludedId = String(excludeCustomerId || '').trim();
+        return get(customersDB).some((customer) => customer.id !== excludedId
+            && normalizeLoyaltyCode(customer.loyaltyCode) === normalized);
+    }
     const d = await sqlite.getDb();
     const rows: any[] = await d.select(
         `SELECT 1
@@ -3588,6 +4503,55 @@ export async function getCustomerLoyaltyHistory(
         reason: String(row.reason || ''),
         createdAt: String(row.createdAt || ''),
     }));
+}
+
+export interface CustomerLoyaltySnapshot {
+    customer: Customer | null;
+    history: CustomerLoyaltyHistoryRow[];
+    source: 'server' | 'local' | 'preview';
+}
+
+/** One statement reads the balance and its bounded ledger consistently.
+ * Shared-mode corrections must never mistake a stale SQLite cache for live
+ * MariaDB data. This read does not write either cache or reactive stores.
+ */
+export async function getCustomerLoyaltySnapshot(customerId: string, limit = 50): Promise<CustomerLoyaltySnapshot> {
+    const id = String(customerId || '').trim();
+    if (!id) throw new Error('Customer ID is required');
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(Number(limit) || 50)));
+    if (!isTauri()) {
+        const customer = get(customersDB).find(candidate => candidate.id === id);
+        return { customer: customer ? { ...customer } : null, history: await getCustomerLoyaltyHistory(id, safeLimit), source: 'preview' };
+    }
+    const shared = isMultiMode();
+    if (shared) await requireOnlineCustomerAccount('Refreshing customer points');
+    const d = shared ? await getMysqlDb() : await sqlite.getDb();
+    if (!d) throw new Error('Could not refresh customer points from MariaDB. Reconnect and try again.');
+    const rows: any[] = await d.select(
+        `SELECT c.*, l.id AS historyId, l.orderId AS historyOrderId,
+                o.orderNumber AS historyOrderNumber, l.pointsChange AS historyPointsChange,
+                l.reason AS historyReason, l.createdAt AS historyCreatedAt
+         FROM customers c
+         LEFT JOIN (SELECT * FROM loyalty_logs WHERE customerId = ?
+                    ORDER BY createdAt DESC, id DESC LIMIT ?) l ON l.customerId = c.id
+         LEFT JOIN orders o ON o.id = l.orderId
+         WHERE c.id = ?
+         ORDER BY l.createdAt DESC, l.id DESC`,
+        [id, safeLimit, id],
+    );
+    const row = rows[0];
+    const customer: Customer | null = row ? {
+        id: String(row.id), ...customerProfileFields(row),
+        loyaltyPoints: Number(row.loyaltyPoints ?? 0),
+        createdAt: String(row.createdAt ?? ''), updatedAt: String(row.updatedAt ?? ''),
+    } : null;
+    const history = rows.filter(row => row.historyId != null).map(row => ({
+        id: String(row.historyId), orderId: String(row.historyOrderId ?? ''),
+        orderNumber: row.historyOrderNumber == null ? null : Number(row.historyOrderNumber),
+        pointsChange: Number(row.historyPointsChange ?? 0), reason: String(row.historyReason ?? ''),
+        createdAt: String(row.historyCreatedAt ?? ''),
+    }));
+    return { customer, history, source: shared ? 'server' : 'local' };
 }
 
 export interface AuditLogPage {
@@ -3774,18 +4738,13 @@ export async function getProductsPage(options: sqlite.ProductPageOptions = {}): 
 export async function getCustomersPage(options: sqlite.CustomerPageOptions = {}): Promise<sqlite.CustomerPageResult> {
     if (!isTauri()) {
         const query = String(options.query || '').trim().toLowerCase();
+        const accountFilter = options.accountFilter === 'outstanding' ? 'outstanding' : 'all';
         const limit = Math.max(1, Math.min(100, Number(options.limit || 40)));
         const offset = Math.max(0, Number(options.offset || 0));
-        const rows = get(customersDB)
-            .filter((customer) => !query || [
-                customer.name,
-                customer.postcode,
-                customer.phone,
-                customer.email,
-                customer.loyaltyCode,
-            ].some((value) => String(value || '').toLowerCase().includes(query)))
+        const accounts = get(customerAccountsDB);
+        const allRows = get(customersDB)
             .map((customer) => {
-                const account = get(customerAccountsDB).find((candidate) => candidate.customerId === customer.id);
+                const account = accounts.find((candidate) => candidate.customerId === customer.id);
                 return {
                     ...customer,
                     accountId: account?.id || customer.id,
@@ -3793,9 +4752,33 @@ export async function getCustomersPage(options: sqlite.CustomerPageOptions = {})
                     accountCreditLimitPence: account?.creditLimitPence || 0,
                     accountBalancePence: account?.balancePence || 0,
                 };
-            })
-            .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
-        return { rows: rows.slice(offset, offset + limit), total: rows.length };
+            });
+        const rows = allRows
+            .filter((customer) => accountFilter !== 'outstanding' || customer.accountBalancePence > 0)
+            .filter((customer) => !query || [
+                customer.name,
+                customer.postcode,
+                customer.phone,
+                customer.email,
+                customer.loyaltyCode,
+            ].some((value) => String(value || '').toLowerCase().includes(query)))
+            .sort((left, right) => accountFilter === 'outstanding'
+                ? right.accountBalancePence - left.accountBalancePence
+                    || left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+                : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' }));
+        const outstandingRows = allRows.filter((customer) => customer.accountBalancePence > 0);
+        return {
+            rows: rows.slice(offset, offset + limit),
+            total: rows.length,
+            summary: {
+                customerCount: allRows.length,
+                outstandingCount: outstandingRows.length,
+                outstandingBalancePence: outstandingRows.reduce(
+                    (total, customer) => total + customer.accountBalancePence,
+                    0,
+                ),
+            },
+        };
     }
     return sqlite.getCustomersPage(options);
 }
@@ -3872,12 +4855,93 @@ export async function getTaxRateProductUsageCount(taxRateId: string): Promise<nu
     return sqlite.getTaxRateProductUsageCount(taxRateId);
 }
 
+const stockReceiptPreview = createStockReceiptPreview();
+
 export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
-    if (!isTauri()) return [];
+    if (!isTauri()) return stockReceiptPreview.recent(limit);
     return sqlite.getRecentStockReceipts(limit);
 }
 
 export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Promise<sqlite.OrderPageResult> {
+    if (!isTauri()) {
+        const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit || 25))));
+        const offset = Math.max(0, Math.floor(Number(options.offset || 0)));
+        const status = options.status || 'all';
+        const search = String(options.query || '').trim().toLowerCase();
+        const lines = get(orderLinesDB);
+        const payments = get(paymentsDB);
+        const employeeNames = new Map(get(employeesDB).map((employee) => [employee.id, employee.name]));
+        const registerNames = new Map(get(registersDB).map((register) => [register.id, register.name]));
+        const customerNames = new Map(get(customersDB).map((customer) => [customer.id, customer.name]));
+
+        const matchesStatus = (order: any): boolean => {
+            if (status === 'all') return true;
+            if (status === 'refunds') {
+                return order.type === 'return'
+                    || ['refunded', 'partially_refunded', 'voided'].includes(order.status);
+            }
+            if (status === 'completed') return order.status === 'completed' && order.type !== 'return';
+            if (status === 'voided') {
+                return order.status === 'voided'
+                    || (order.type === 'return' && String(order.notes || '').startsWith('Void of receipt '));
+            }
+            return order.status === status;
+        };
+
+        const enrichedOrders = get(ordersDB).map((order) => ({
+            ...order,
+            cashierName: employeeNames.get(order.employeeId) || '',
+            tillName: registerNames.get(order.tillNumber)
+                || (order.tillNumber === 'browser-preview-till' ? 'Browser Preview' : order.tillNumber || ''),
+            customerName: customerNames.get(order.customerId) || '',
+        }));
+        const matchesSearch = (order: any): boolean => {
+            if (!search) return true;
+            const orderValues = [
+                order.orderNumber,
+                order.receiptKey,
+                order.status,
+                order.type,
+                order.notes,
+                order.total,
+                order.cashierName,
+                order.tillName,
+                order.customerName,
+            ];
+            if (orderValues.some((value) => String(value ?? '').toLowerCase().includes(search))) return true;
+            if (lines.some((line) => line.orderId === order.id && [line.productName, line.productId, line.notes]
+                .some((value) => String(value ?? '').toLowerCase().includes(search)))) return true;
+            return payments.some((payment) => payment.orderId === order.id && [payment.method, payment.reference]
+                .some((value) => String(value ?? '').toLowerCase().includes(search)));
+        };
+        const timestamp = (order: any): number => {
+            const value = order.completedAt || order.createdAt || order.updatedAt || '';
+            const parsed = new Date(value).getTime();
+            return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const filtered = enrichedOrders
+            .filter((order) => matchesStatus(order) && matchesSearch(order))
+            .sort((left, right) => timestamp(right) - timestamp(left)
+                || Number(right.orderNumber || 0) - Number(left.orderNumber || 0));
+        const rows = filtered.slice(offset, offset + limit);
+        const pageIds = new Set(rows.map((order) => order.id));
+
+        return {
+            rows,
+            total: filtered.length,
+            overallTotal: enrichedOrders.length,
+            lines: lines
+                .filter((line) => pageIds.has(line.orderId))
+                .sort((left, right) => left.orderId.localeCompare(right.orderId)
+                    || String(left.updatedAt || '').localeCompare(String(right.updatedAt || ''))
+                    || left.id.localeCompare(right.id)),
+            payments: payments
+                .filter((payment) => pageIds.has(payment.orderId))
+                .sort((left, right) => left.orderId.localeCompare(right.orderId)
+                    || String(left.createdAt || '').localeCompare(String(right.createdAt || ''))
+                    || left.id.localeCompare(right.id)),
+        };
+    }
     const result = await sqlite.getOrdersPage(options);
     return {
         ...result,
@@ -3904,20 +4968,72 @@ export async function getPosHeldOrders(tillNumber = '', limit = 100): Promise<sq
  * Claim a shared held order before restoring it into a trolley. MariaDB's
  * conditional delete is atomic and its delete trigger publishes a tombstone.
  */
-export async function claimHeldOrder(orderId: string): Promise<boolean> {
+export async function prepareHeldOrderClaim(): Promise<{ claimId: string; serverDataEpoch: string }> {
+    return { claimId: crypto.randomUUID(), serverDataEpoch: await captureServerDataEpochForMutation() };
+}
+
+export async function heldRecoverySaleCompleted(saleIds: string[]): Promise<boolean> {
+    if (!saleIds.length) return false;
+    if (isMultiMode() && !get(connectionState).mysqlOnline) {
+        throw new Error('Reconnect MariaDB before recovering this trolley so completed payments can be checked.');
+    }
+    const databases = [await sqlite.getDb()];
+    if (isMultiMode()) databases.push(await mysql.getDb());
+    const safelyCancelled = new Set<string>();
+    for (const d of databases) {
+        for (let offset = 0; offset < saleIds.length; offset += 100) {
+            const ids = saleIds.slice(offset, offset + 100);
+            const rows: any[] = await d.select(`SELECT id FROM orders WHERE id IN (${ids.map(() => '?').join(',')}) AND status <> 'hold' LIMIT 1`, ids);
+            if (rows.length) return true;
+            const deleted: any[] = await d.select(`SELECT row_id FROM tombstones WHERE table_name = 'orders' AND row_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, ids);
+            if (deleted.length) return true;
+            const attempts: any[] = await d.select(`SELECT id, status FROM payment_terminal_attempts WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+            for (const attempt of attempts) {
+                if (attempt.status === 'completed') return true;
+                if (['declined', 'cancelled'].includes(attempt.status)) safelyCancelled.add(attempt.id);
+                else throw new Error('An interrupted card payment still needs reconciliation. Resolve it before restoring this trolley.');
+            }
+        }
+    }
+    const local = databases[0];
+    const intents: any[] = await local.select('SELECT orderId FROM _online_financial_intent');
+    if (intents.some(row => saleIds.includes(row.orderId))) {
+        throw new Error('An online payment is still being recovered. Resolve it before restoring this trolley.');
+    }
+    if (saleIds.some(id => !safelyCancelled.has(id))) {
+        // Missing history is not proof of a failed payment (history may have
+        // been purged). Keep the draft but require review, never charge twice.
+        throw new Error('An attempted payment has no conclusive result. Review payment recovery before restoring this trolley.');
+    }
+    return false;
+}
+
+export async function claimHeldOrder(orderId: string, claimId: string, expectedServerDataEpoch: string): Promise<boolean> {
     if (!isMultiMode()) return true;
     if (!get(connectionState).mysqlOnline) {
         throw new Error('The main database must be online to retrieve a shared held order');
     }
-    const serverDataEpoch = await captureServerDataEpochForMutation();
     await flushOfflineQueue();
+    await assertHeldOrderUploadComplete(orderId);
     const config = get(connectionState).mysqlConfig;
     if (!config) throw new Error('MariaDB configuration is unavailable');
     return invoke<boolean>('claim_mysql_held_order', {
         mysqlUri: buildMysqlUri(config),
         orderId,
-        serverDataEpoch,
+        claimId,
+        serverDataEpoch: expectedServerDataEpoch,
     });
+}
+
+export async function assertHeldOrderUploadComplete(orderId: string): Promise<void> {
+    if (!isMultiMode()) return;
+    const d = await sqlite.getDb();
+    const [pending, conflicts] = await Promise.all([
+        d.select<any[]>(`SELECT table_name, operation, data FROM _offline_queue WHERE table_name IN ('orders','order_lines')`),
+        d.select<any[]>(`SELECT table_name, operation, data FROM _sync_conflicts WHERE table_name IN ('orders','order_lines')`),
+    ]);
+    const reason = heldUploadBlockReason(orderId, pending, conflicts);
+    if (reason) throw new Error(reason);
 }
 
 export async function getPosRecentReceipts(limit = 10): Promise<sqlite.PosRecentReceiptsResult> {
@@ -4010,23 +5126,16 @@ export async function addProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
     try {
-        await sqlite.addProduct(p);
-        if (hasImage) await sqlite.upsertProductImage(p.id, image, p.updatedAt || new Date().toISOString());
+        const stamp = p.updatedAt || new Date().toISOString();
+        await persistLocalChanges([
+            { table: 'products', data: { ...p, updatedAt: stamp } },
+            ...(hasImage ? [{ table: 'product_images', data: { id: p.id, image, updatedAt: stamp } }] : []),
+        ], serverDataEpoch);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    if (isMultiMode()) {
-        await queueLocalProductSnapshot(p.id, p, serverDataEpoch);
-        if (hasImage) {
-            await queueOffline('product_images', 'upsert', {
-                id: p.id,
-                image,
-                updatedAt: p.updatedAt || new Date().toISOString(),
-            }, 'id', serverDataEpoch);
-        }
-        void flushOfflineQueue().catch((e) => console.warn('database: product add outbox flush failed:', e));
-    }
+    drainLocalChanges();
 }
 
 export async function updateProduct(p: any): Promise<void> {
@@ -4038,23 +5147,16 @@ export async function updateProduct(p: any): Promise<void> {
     p = await prepareProductGoodsMenuWrite(normalizeProductIdentifiers(p));
     await sqlite.assertProductIdentifiersUnique(p);
     try {
-        await sqlite.updateProduct(p);
-        if (hasImage) await sqlite.upsertProductImage(p.id, image, p.updatedAt || new Date().toISOString());
+        const stamp = p.updatedAt || new Date().toISOString();
+        await persistLocalChanges([
+            { table: 'products', data: { ...p, updatedAt: stamp } },
+            ...(hasImage ? [{ table: 'product_images', data: { id: p.id, image, updatedAt: stamp } }] : []),
+        ], serverDataEpoch);
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
     }
-    if (isMultiMode()) {
-        await queueLocalProductSnapshot(p.id, p, serverDataEpoch);
-        if (hasImage) {
-            await queueOffline('product_images', 'upsert', {
-                id: p.id,
-                image,
-                updatedAt: p.updatedAt || new Date().toISOString(),
-            }, 'id', serverDataEpoch);
-        }
-        void flushOfflineQueue().catch((e) => console.warn('database: product update outbox flush failed:', e));
-    }
+    drainLocalChanges();
 }
 
 export async function updateProductFields(
@@ -4087,20 +5189,12 @@ export async function updateProductFields(
     }
     await sqlite.assertProductIdentifiersUnique(stamped);
     try {
-        await sqlite.updateProductFields(stamped);
-        if (hasImage) await sqlite.upsertProductImage(stamped.id, image, stamped.updatedAt);
+        await persistLocalChanges([
+            { table: 'products', kind: 'patch', data: stamped },
+            ...(hasImage ? [{ table: 'product_images', data: { id: stamped.id, image, updatedAt: stamped.updatedAt } }] : []),
+        ], serverDataEpoch);
         patchProductInStore({ ...stamped, ...(hasImage ? { image } : {}) });
-        if (isMultiMode()) {
-            await queueLocalProductSnapshot(stamped.id, stamped, serverDataEpoch);
-            if (hasImage) {
-                await queueOffline('product_images', 'upsert', {
-                    id: stamped.id,
-                    image,
-                    updatedAt: stamped.updatedAt,
-                }, 'id', serverDataEpoch);
-            }
-            void flushOfflineQueue().catch((e) => console.warn('database: product field outbox flush failed:', e));
-        }
+        drainLocalChanges();
     } catch (e) {
         if (isProductIdentifierConflict(e)) throw friendlyProductIdentifierError(e);
         throw e;
@@ -4175,7 +5269,7 @@ export async function adjustStock(productId: string, delta: number): Promise<voi
     if (!delta) return;
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const before = await getLocalRow('products', 'id', productId);
-    await sqlite.adjustStock(productId, delta);
+    await persistLocalChanges([{ table: 'products', kind: 'adjustStock', data: { id: productId, delta } }], serverDataEpoch);
     const after = await getLocalRow('products', 'id', productId);
     await recordAuditEvent(
         'stock_adjusted',
@@ -4184,11 +5278,7 @@ export async function adjustStock(productId: string, delta: number): Promise<voi
         before ? { id: before.id, name: before.name, stockLevel: before.stockLevel } : null,
         after ? { id: after.id, name: after.name, stockLevel: after.stockLevel, delta } : { delta },
     );
-    await pushWriteInBackground(
-        `stock delta for ${productId}`,
-        () => mysql.mysqlAdjustStock(productId, delta),
-        () => queueOffline('products', 'adjustStock', { id: productId, delta }, 'id', serverDataEpoch),
-    );
+    drainLocalChanges();
 }
 
 /** Set an item's counted stock without overwriting sales made by another till. */
@@ -4253,6 +5343,16 @@ export interface StockReceiptBundle {
 
 /** Commit stock receipt, lines, stock deltas, logs and its outbox row atomically. */
 export async function commitStockReceipt(bundle: StockReceiptBundle): Promise<void> {
+    validateStockReceiptBundle(bundle);
+    if (!isTauri()) {
+        const result = stockReceiptPreview.commit(bundle, get(productsDB));
+        if (result) {
+            productsDB.set(result.products);
+            inventoryLogDB.update((logs) => [...result.logs, ...logs]);
+            auditLogDB.update((logs) => [result.audit, ...logs]);
+        }
+        return;
+    }
     const queueForSync = isMultiMode();
     const outboxId = queueForSync ? crypto.randomUUID() : null;
     await invoke('commit_local_stock_receipt', { bundle, outboxId });
@@ -4266,6 +5366,23 @@ export async function commitStockReceipt(bundle: StockReceiptBundle): Promise<vo
                 syncError: String(error),
             }));
         });
+    }
+    try {
+        // Read the committed values, rather than applying the delta again: retrying
+        // an already-saved receipt must never increment the checkout cache twice.
+        const cachedIds = new Set(get(productsDB).map((product) => product.id));
+        const affectedIds = bundle.lines.map((line) => line.productId).filter((id) => cachedIds.has(id));
+        if (affectedIds.length > 0) {
+            const stock = new Map((await sqlite.getProductStockLevels(affectedIds)).map((row) => [row.id, row]));
+            productsDB.update((products) => products.map((product) => {
+                const committed = stock.get(product.id);
+                return committed ? { ...product, stockLevel: committed.stockLevel, updatedAt: committed.updatedAt } : product;
+            }));
+        }
+    } catch (error) {
+        // The receipt is already durable. Navigation/background hydration retries
+        // this cache refresh; do not misreport it as a failed stock receipt.
+        console.warn('database: stock receipt saved, but cached stock refresh failed:', error);
     }
     notifyOwnerCloudDataChanged();
 }
@@ -4305,6 +5422,9 @@ export interface CustomerAccountChange {
     orderId: string;
     entryType: CustomerAccountEntryType;
     amountPence: number;
+    tipsAmount?: number;
+    serviceChargeAmount?: number;
+    cashbackAmount?: number;
     paymentMethod?: CustomerAccountPaymentMethod;
     reference?: string;
     description?: string;
@@ -4796,14 +5916,10 @@ export async function commitPreparedTerminalSale(bundle: SaleBundle): Promise<Sa
 export async function deleteProduct(id: string): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const before = await getLocalRow('products', 'id', id);
-    await sqlite.deleteProduct(id);
+    await persistLocalChanges([{ table: 'products', kind: 'patch', data: { id, isActive: false, showInGoods: false, updatedAt: new Date().toISOString() } }], serverDataEpoch);
     const after = await getLocalRow('products', 'id', id);
     await recordAuditEvent('product_deactivated', 'product', id, before, after);
-    await pushWriteInBackground(
-        'product deactivation',
-        () => mysql.mysqlDeleteProduct(id),
-        () => queueLocalProductSnapshot(id, undefined, serverDataEpoch),
-    );
+    drainLocalChanges();
     await removeProductTiles(id);
 }
 
@@ -4814,7 +5930,9 @@ export async function removeProductTiles(productId: string): Promise<void> {
 
 export async function bulkAddProducts(products: any[]): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
-    await sqlite.bulkAddProducts(products);
+    for (let offset = 0; offset < products.length; offset += 250) {
+        await persistLocalChanges(products.slice(offset, offset + 250).map(data => ({ table: 'products', kind: 'insert', data })), serverDataEpoch);
+    }
     await recordAuditEvent(
         'products_imported',
         'product',
@@ -4831,15 +5949,7 @@ export async function bulkAddProducts(products: any[]): Promise<void> {
             })),
         },
     );
-    await pushWriteInBackground(
-        'bulk product import',
-        () => mysql.mysqlBulkAddProducts(products),
-        async () => {
-            for (const p of products) {
-                await queueOffline('products', 'upsert', p, 'id', serverDataEpoch);
-            }
-        },
-    );
+    drainLocalChanges();
 }
 
 // ─── POS Page / Tile Helpers ────────────────────────────────────────────────
@@ -4848,56 +5958,36 @@ export async function savePosPage(p: any): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const stamped = { ...p, updatedAt: new Date().toISOString() };
     const before = await getLocalRow('pos_pages', 'id', stamped.id);
-    await sqlite.savePosPage(stamped);
+    await persistLocalChanges([{ table: 'pos_pages', data: stamped }], serverDataEpoch);
     const after = await getLocalRow('pos_pages', 'id', stamped.id);
     await recordTableAudit('pos_pages', before ? 'updated' : 'created', 'id', before, after || stamped);
-    await pushWriteInBackground(
-        'POS page save',
-        () => mysql.mysqlSavePosPage(stamped),
-        () => queueOffline('pos_pages', 'upsert', stamped, 'id', serverDataEpoch),
-    );
+    drainLocalChanges();
 }
 
 export async function deletePosPage(id: string): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const before = await getLocalRow('pos_pages', 'id', id);
-    await sqlite.deletePosPage(id);
+    await persistLocalChanges([{ table: 'pos_pages', kind: 'remove', data: { id } }, tombstoneMutation('pos_pages', id)], serverDataEpoch);
     await recordTableAudit('pos_pages', 'deleted', 'id', before, null);
-    await pushWriteInBackground(
-        'POS page delete',
-        () => mysql.mysqlDeletePosPage(id),
-        () => queueOffline('pos_pages', 'remove', { id }, 'id', serverDataEpoch),
-    );
-    // Propagate the page deletion to other tills. (Child tiles are removed
-    // locally on each till via deletePosPage's cascade.)
-    await recordTombstone('pos_pages', id, serverDataEpoch);
+    drainLocalChanges();
 }
 
 export async function addTile(t: any): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const stamped = { ...t, updatedAt: new Date().toISOString() };
     const before = await getLocalRow('pos_tiles', 'id', stamped.id);
-    await sqlite.addTile(stamped);
+    await persistLocalChanges([{ table: 'pos_tiles', data: stamped }], serverDataEpoch);
     const after = await getLocalRow('pos_tiles', 'id', stamped.id);
     await recordTableAudit('pos_tiles', before ? 'updated' : 'created', 'id', before, after || stamped);
-    await pushWriteInBackground(
-        'POS tile save',
-        () => mysql.mysqlAddTile(stamped),
-        () => queueOffline('pos_tiles', 'upsert', stamped, 'id', serverDataEpoch),
-    );
+    drainLocalChanges();
 }
 
 export async function deleteTile(id: string): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const before = await getLocalRow('pos_tiles', 'id', id);
-    await sqlite.deleteTile(id);
+    await persistLocalChanges([{ table: 'pos_tiles', kind: 'remove', data: { id } }, tombstoneMutation('pos_tiles', id)], serverDataEpoch);
     await recordTableAudit('pos_tiles', 'deleted', 'id', before, null);
-    await pushWriteInBackground(
-        'POS tile delete',
-        () => mysql.mysqlDeleteTile(id),
-        () => queueOffline('pos_tiles', 'remove', { id }, 'id', serverDataEpoch),
-    );
-    await recordTombstone('pos_tiles', id, serverDataEpoch);
+    drainLocalChanges();
 }
 
 // ─── Goods Menu Helpers ─────────────────────────────────────────────────────
@@ -4946,6 +6036,36 @@ export interface ReportSnapshot {
     employeeSales: sqlite.EmployeeSalesSummary[];
     source: 'mariadb' | 'sqlite';
     warning?: string;
+}
+
+export type ReportComparisonTotals = Pick<sqlite.BusinessSummary, 'netSales' | 'grossProfit'>;
+
+/** Read only the two headline totals, using the displayed report's source. */
+export async function getReportComparisonTotals(
+    startDate: string,
+    endDate: string,
+    source: ReportSnapshot['source'],
+    tillNumber?: string,
+): Promise<ReportComparisonTotals> {
+    let summary: sqlite.BusinessSummary;
+    if (!isTauri()) {
+        const [startTime, endTime] = reportDateBounds(startDate, endDate);
+        summary = getBrowserReportSnapshotForPeriod(startTime, endTime, 'quantity', 0, tillNumber).business;
+    } else if (source === 'mariadb') {
+        const connection = get(connectionState);
+        if (!connection.mysqlOnline || !connection.mysqlReady) {
+            throw new Error('Reconnect to the shared database to compare this report.');
+        }
+        // Never compare a live current period with a silently substituted cache.
+        summary = await withTimeout(mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber), 8_000, 'Previous-period totals timed out');
+    } else {
+        summary = await withTimeout(sqlite.getBusinessSummary(startDate, endDate, tillNumber), 8_000, 'Previous-period totals timed out');
+    }
+    const netSales = Number(summary.netSales), grossProfit = Number(summary.grossProfit);
+    if (!Number.isFinite(netSales) || !Number.isFinite(grossProfit)) {
+        throw new Error('Previous-period totals could not be verified.');
+    }
+    return { netSales, grossProfit };
 }
 
 function browserReportOrders(startTime: string, endTime: string, tillNumber?: string): any[] {
@@ -5037,6 +6157,9 @@ function browserBreakdown(
     return {
         totalCash,
         totalCard,
+        ...sumPaymentExtras(payments.filter(payment => orders.some(order => order.id === payment.orderId)),
+            get(customerAccountEntriesDB).filter(entry => entry.entryType === 'payment' && entry.paymentMethod === 'card'
+                && entry.amountPence < 0 && entry.createdAt >= startTime && entry.createdAt < endTime)),
         totalLoyalty,
         totalAccount,
         cashTxCount,
@@ -5096,9 +6219,10 @@ function getBrowserReportSnapshotForPeriod(
         .slice(0, Math.max(1, limit));
 
     const entries = get(customerAccountEntriesDB);
-    const registerNames = new Map(get(registersDB).map((register) => [register.id, register.name]));
+    const registers = get(registersDB);
+    const registerNames = new Map(registers.map((register) => [register.id, register.name]));
     const tillIds = new Set([
-        ...get(registersDB).filter((register) => register.isActive).map((register) => register.id),
+        ...registers.filter((register) => register.isActive).map((register) => register.id),
         ...get(ordersDB).map((order) => order.tillNumber).filter(Boolean),
         ...entries.map((entry) => entry.tillNumber).filter(Boolean),
     ]);
@@ -5109,17 +6233,61 @@ function getBrowserReportSnapshotForPeriod(
     }));
     const periodStart = new Date(startTime).getTime();
     const periodEnd = new Date(endTime).getTime();
-    const tillSummaries: sqlite.TillSalesSummary[] = tillOptions.map((option) => {
-        const tillOrders = browserReportOrders(startTime, endTime, option.id);
+    const periodPaymentEntries = entries.filter((entry) => {
+        const createdAt = new Date(entry.createdAt).getTime();
+        return entry.entryType === 'payment'
+            && createdAt >= periodStart
+            && createdAt < periodEnd
+            && (!tillNumber || entry.tillNumber === tillNumber);
+    });
+    const optionNames = new Map(tillOptions.map((option) => [option.id, option.name]));
+    const placeholderIds = new Set(['register-main', 'legacy-till']);
+    const summaryIds: string[] = [];
+    const includedSummaryIds = new Set<string>();
+    const includeSummaryId = (id: string) => {
+        if (includedSummaryIds.has(id)) return;
+        includedSummaryIds.add(id);
+        summaryIds.push(id);
+    };
+
+    if (tillNumber) {
+        // A selected till remains visible even when it is inactive or this exact
+        // period has no activity.
+        includeSummaryId(tillNumber);
+    } else {
+        // Do not fill the close report with dormant historical/placeholder rows.
+        // Any such ID is still appended below when it has exact-period activity.
+        for (const register of registers) {
+            if (Number(register.isActive ?? 1) !== 0 && !placeholderIds.has(register.id)) {
+                includeSummaryId(register.id);
+            }
+        }
+        for (const order of orders) includeSummaryId(String(order.tillNumber || ''));
+        for (const entry of periodPaymentEntries) includeSummaryId(String(entry.tillNumber || ''));
+    }
+
+    const usedSummaryNames = new Map<string, number>();
+    const tillSummaryOptions: sqlite.TillReportOption[] = summaryIds.map((id) => {
+        const baseName = id === ''
+            ? 'Unassigned / legacy'
+            : optionNames.get(id) || registerNames.get(id) || id;
+        const occurrence = (usedSummaryNames.get(baseName) || 0) + 1;
+        usedSummaryNames.set(baseName, occurrence);
+        return { id, name: occurrence === 1 ? baseName : `${baseName} (${occurrence})` };
+    });
+    const tillSummaries: sqlite.TillSalesSummary[] = tillSummaryOptions.map((option) => {
+        const tillOrders = orders.filter((order) => option.id
+            ? order.tillNumber === option.id
+            : !order.tillNumber);
         const ids = new Set(tillOrders.map((order) => order.id));
         const tillLines = get(orderLinesDB).filter((line) => ids.has(line.orderId));
         const tender = browserBreakdown(tillOrders, startTime, endTime);
-        const collections = entries.filter((entry) => entry.tillNumber === option.id
-            && entry.entryType === 'payment'
-            && new Date(entry.createdAt).getTime() >= periodStart
-            && new Date(entry.createdAt).getTime() < periodEnd);
+        const collections = periodPaymentEntries.filter((entry) => (option.id
+            ? entry.tillNumber === option.id
+            : !entry.tillNumber));
         return {
             ...option,
+            ...sumPaymentExtras(get(paymentsDB).filter(payment => ids.has(payment.orderId)), collections),
             netSales: tillOrders.reduce((sum, order) => sum + Number(order.total || 0), 0),
             grossSales: tillOrders.filter((order) => order.type !== 'return')
                 .reduce((sum, order) => sum + Number(order.total || 0) + Number(order.discountAmount || 0), 0),
@@ -5245,41 +6413,23 @@ async function getMysqlReportSnapshot(
     limit: number,
     tillNumber?: string
 ): Promise<ReportSnapshot> {
-    // The SQL plugin uses a connection pool and does not expose a transaction
-    // handle. Verify the headline totals after loading and retry once if a sale
-    // landed mid-read, so the sections do not silently describe different
-    // moments.
-    for (let attempt = 0; attempt < 2; attempt++) {
-        const [allTillsOverviewBefore, overviewBefore, breakdownBefore, businessBefore] = await Promise.all([
-            tillNumber ? mysql.mysqlGetSalesOverview(startDate, endDate) : Promise.resolve(null),
-            mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber),
-            mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber),
-            mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber),
+    const config = get(connectionState).mysqlConfig;
+    if (!config) throw new Error('MariaDB configuration is unavailable');
+    // Every section reads the SAME repeatable-read snapshot on one native
+    // connection. No repeated headline scans or retries during busy trading.
+    return withMysqlSession(buildMysqlUri(config), 'report', async d => {
+        const [overview, breakdown, business, topProducts, tillOptions, tillSummaries, dailyTrend, employeeSales] = await Promise.all([
+            mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber, d),
+            mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber, d),
+            mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber, d),
+            mysql.mysqlGetTopProducts(startDate, endDate, sortBy, limit, tillNumber, d),
+            mysql.mysqlGetTillReportOptions(d),
+            mysql.mysqlGetTillSalesSummaries(startDate, endDate, d),
+            mysql.mysqlGetDailySalesTrend(startDate, endDate, tillNumber, d),
+            mysql.mysqlGetEmployeeSalesSummaries(startDate, endDate, tillNumber, d),
         ]);
-        const [topProducts, tillOptions, tillSummaries, dailyTrend, employeeSales] = await Promise.all([
-            mysql.mysqlGetTopProducts(startDate, endDate, sortBy, limit, tillNumber),
-            mysql.mysqlGetTillReportOptions(),
-            mysql.mysqlGetTillSalesSummaries(startDate, endDate),
-            mysql.mysqlGetDailySalesTrend(startDate, endDate, tillNumber),
-            mysql.mysqlGetEmployeeSalesSummaries(startDate, endDate, tillNumber),
-        ]);
-        const [overviewAfter, breakdownAfter, businessAfter, allTillsOverviewAfter] = await Promise.all([
-            mysql.mysqlGetSalesOverview(startDate, endDate, tillNumber),
-            mysql.mysqlGetPaymentBreakdown(startDate, endDate, tillNumber),
-            mysql.mysqlGetBusinessSummary(startDate, endDate, tillNumber),
-            tillNumber ? mysql.mysqlGetSalesOverview(startDate, endDate) : Promise.resolve(null),
-        ]);
-        if (
-            JSON.stringify([allTillsOverviewBefore, overviewBefore, breakdownBefore, businessBefore]) ===
-            JSON.stringify([allTillsOverviewAfter, overviewAfter, breakdownAfter, businessAfter])
-        ) {
-            return {
-                overview: overviewAfter, breakdown: breakdownAfter, topProducts, tillOptions, tillSummaries,
-                dailyTrend, business: businessAfter, employeeSales, source: 'mariadb',
-            };
-        }
-    }
-    throw new Error('MariaDB report changed repeatedly while loading');
+        return { overview, breakdown, business, topProducts, tillOptions, tillSummaries, dailyTrend, employeeSales, source: 'mariadb' };
+    });
 }
 
 function reportDateBounds(startDate: string, endDate: string): [string, string] {
@@ -5289,11 +6439,15 @@ function reportDateBounds(startDate: string, endDate: string): [string, string] 
     return [start.toISOString(), end.toISOString()];
 }
 
-async function missingRemoteReportOrderCount(startDate: string, endDate: string, tillNumber?: string): Promise<number> {
+async function missingRemoteReportOrderCountBetween(
+    startTime: string,
+    endTime: string,
+    tillNumber?: string,
+): Promise<number> {
     const localDb = await sqlite.getDb();
     const remoteDb = await mysql.getDb();
     const tillFilter = tillNumber ? ' AND tillNumber = ?' : '';
-    const params: any[] = [...reportDateBounds(startDate, endDate)];
+    const params: any[] = [startTime, endTime];
     if (tillNumber) params.push(tillNumber);
     const localRows: any[] = await localDb.select(
         `SELECT id FROM orders
@@ -5314,12 +6468,28 @@ async function missingRemoteReportOrderCount(startDate: string, endDate: string,
     return missing;
 }
 
+async function missingRemoteReportOrderCount(startDate: string, endDate: string, tillNumber?: string): Promise<number> {
+    return missingRemoteReportOrderCountBetween(...reportDateBounds(startDate, endDate), tillNumber);
+}
+
 async function pendingQueuedReportWriteCount(): Promise<number> {
     const d = await sqlite.getDb();
     const rows: any[] = await d.select(
         `SELECT COUNT(*) AS count FROM _offline_queue
          WHERE operation = 'saleBundle'
-            OR table_name IN ('orders','order_lines','payments','till_report_markers')`,
+            OR table_name IN (${REPORT_CONTRIBUTING_QUEUE_TABLES.map(() => '?').join(',')})`,
+        [...REPORT_CONTRIBUTING_QUEUE_TABLES],
+    );
+    return Number(rows[0]?.count || 0);
+}
+
+async function pendingReportSyncConflictCount(): Promise<number> {
+    const d = await sqlite.getDb();
+    const rows: any[] = await d.select(
+        `SELECT COUNT(*) AS count FROM _sync_conflicts
+         WHERE operation = 'saleBundle'
+            OR table_name IN (${REPORT_CONTRIBUTING_CONFLICT_TABLES.map(() => '?').join(',')})`,
+        [...REPORT_CONTRIBUTING_CONFLICT_TABLES],
     );
     return Number(rows[0]?.count || 0);
 }
@@ -5340,12 +6510,14 @@ async function pendingReportWriteCount(): Promise<number> {
     return queuedWrites + onlineIntent;
 }
 
-async function pendingTerminalRecoveryCount(): Promise<number> {
+async function pendingTerminalRecoveryCount(tillNumber = ''): Promise<number> {
     const d = await sqlite.getDb();
     const rows: any[] = await d.select(
         `SELECT COUNT(*) AS count FROM payment_terminal_attempts
          WHERE status IN ('prepared', 'started', 'uncertain', 'approved',
-                          'commit_failed', 'completion_pending')`,
+                          'commit_failed', 'completion_pending')
+           ${tillNumber ? "AND (tillId = ? OR TRIM(COALESCE(tillId, '')) = '')" : ''}`,
+        tillNumber ? [tillNumber] : [],
     );
     return Number(rows[0]?.count || 0);
 }
@@ -5470,21 +6642,82 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
 
 // ─── Till / Marker Queries ──────────────────────────────────────────────────
 
-export async function getLastReportMarker(tillNumber: string): Promise<string | null> {
+const browserReportMarkers = new Map<string, {
+    id: string;
+    tillNumber: string;
+    markerTime: string;
+    periodStart: string;
+    periodEnd: string;
+    employeeId: string;
+    reportText: string;
+    reportTotal: number;
+    createdAt: string;
+    updatedAt: string;
+}>();
+
+export interface PeriodReportReadOptions {
+    /** A closable Z report must never substitute local SQLite for MariaDB. */
+    requireAuthoritative?: boolean;
+}
+
+export async function getLastReportMarker(
+    tillNumber: string,
+    options: PeriodReportReadOptions = {},
+): Promise<string | null> {
+    if (!isTauri()) {
+        return latestEffectiveReportMarker(tillNumber, browserReportMarkers.values());
+    }
     const localMarker = await sqlite.getLastReportMarker(tillNumber);
     if (isMultiMode()) {
         try {
             const pendingBeforeFlush = await pendingReportWriteCount();
-            if (pendingBeforeFlush > 0) await flushOfflineQueue();
-            const mysqlDb = await getMysqlDb();
+            if (pendingBeforeFlush > 0) {
+                await withTimeout(
+                    flushOfflineQueue(),
+                    2_500,
+                    'Pending report sync did not finish in time',
+                );
+            }
+            const pendingAfterFlush = await pendingReportWriteCount();
+            if (pendingAfterFlush > 0) {
+                if (options.requireAuthoritative) {
+                    throw new Error(
+                        `${pendingAfterFlush} report-contributing local change${pendingAfterFlush === 1 ? '' : 's'} `
+                        + 'must synchronize before this Z report can close',
+                    );
+                }
+                return localMarker;
+            }
+            const mysqlDb = await withTimeout(
+                getMysqlDb(),
+                2_500,
+                'MariaDB report-marker connection timed out',
+            );
             if (mysqlDb) {
-                const remoteMarker = await mysql.mysqlGetLastReportMarker(tillNumber);
-                if (!localMarker) return remoteMarker;
-                if (!remoteMarker) return localMarker;
-                return remoteMarker > localMarker ? remoteMarker : localMarker;
+                const remoteMarker = await withTimeout(
+                    mysql.mysqlGetLastReportMarker(tillNumber),
+                    3_000,
+                    'MariaDB report-marker query timed out',
+                );
+                if (options.requireAuthoritative
+                    && localMarker
+                    && (!remoteMarker || Date.parse(localMarker) > Date.parse(remoteMarker))) {
+                    throw new Error(
+                        'The latest local report marker is not yet confirmed in MariaDB',
+                    );
+                }
+                return newestReportMarker(remoteMarker, localMarker);
             }
         } catch (e) {
+            if (options.requireAuthoritative) {
+                throw new Error(
+                    `A closable Z report requires the authoritative MariaDB marker: ${String(e)}`,
+                );
+            }
             console.warn('database: live report marker failed, using local SQLite:', e);
+        }
+        if (options.requireAuthoritative) {
+            throw new Error('A closable Z report requires MariaDB, but no live connection was available');
         }
     }
     return localMarker;
@@ -5496,11 +6729,33 @@ export interface WholeSystemCloseSession {
     periodStart: string;
     cutoffAt: string;
     expectedLastMarker: string | null;
-    report: {
-        overview: sqlite.SalesOverview;
-        breakdown: sqlite.PaymentBreakdown;
-        topProducts: sqlite.TopProduct[];
-    };
+    report: sqlite.TillPeriodReport;
+}
+
+export interface PreparedTillReportCloseSession {
+    expectedLastMarker: string | null;
+    periodStart: string;
+    cutoffAt: string;
+    report: sqlite.TillPeriodReport;
+}
+
+export type WholeSystemCloseProgressPhase =
+    | 'checking-connection'
+    | 'starting'
+    | 'waiting-for-tills'
+    | 'building-report'
+    | 'cancelling'
+    | 'ready';
+
+export interface WholeSystemCloseProgress {
+    phase: WholeSystemCloseProgressPhase;
+    message: string;
+    elapsedMs: number;
+}
+
+export interface WholeSystemCloseOptions {
+    onProgress?: (progress: WholeSystemCloseProgress) => void;
+    signal?: AbortSignal;
 }
 
 interface WholeSystemCloseBarrierResult {
@@ -5521,82 +6776,361 @@ interface FrozenWholeSystemReportResult {
     overview: sqlite.SalesOverview;
     breakdown: sqlite.PaymentBreakdown;
     topProducts: sqlite.TopProduct[];
+    tillSummaries: sqlite.TillSalesSummary[];
+}
+
+interface PreparedTillReportCloseResult {
+    expectedLastMarker: string | null;
+    periodStart: string;
+    cutoffAt: string;
+    overview: sqlite.SalesOverview;
+    breakdown: sqlite.PaymentBreakdown;
+    topProducts: sqlite.TopProduct[];
+    tillSummaries: sqlite.TillSalesSummary[];
 }
 
 const WHOLE_SYSTEM_CLOSE_WAIT_MS = 50_000;
 const WHOLE_SYSTEM_CLOSE_POLL_MS = 1_000;
+// Native close commands have their own ~25 second database deadline. Cleanup
+// waits slightly longer so an abandoned invoke cannot commit after we report a
+// successful cancellation.
+const WHOLE_SYSTEM_CLOSE_NATIVE_CLEANUP_MS = 30_000;
+const WHOLE_SYSTEM_CLOSE_ABORT_ATTEMPTS = 2;
+const WHOLE_SYSTEM_CLOSE_ABORT_RETRY_MS = 500;
+const WHOLE_SYSTEM_CLOSE_PRESENCE_REFRESH_MS = 8_000;
+const WHOLE_SYSTEM_CLOSE_RELEASE_UNCONFIRMED_CODE = 'WHOLE_SYSTEM_CLOSE_RELEASE_UNCONFIRMED';
 
-function waitForWholeSystemClosePoll(): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, WHOLE_SYSTEM_CLOSE_POLL_MS));
+function wholeSystemCloseCancelledError(): Error {
+    return new Error('Whole-system close cancelled');
+}
+
+export function isWholeSystemCloseReleaseUnconfirmed(error: unknown): boolean {
+    return Boolean(
+        error
+        && typeof error === 'object'
+        && (error as { code?: unknown }).code === WHOLE_SYSTEM_CLOSE_RELEASE_UNCONFIRMED_CODE,
+    );
+}
+
+function wholeSystemCloseReleaseUnconfirmedError(releaseError: unknown): Error {
+    const error = new Error(
+        `The whole-system close lock could not be confirmed as released. `
+        + `Do not start another close until MariaDB reconnects or the lock expires. ${String(releaseError)}`,
+    ) as Error & { code: string };
+    error.name = 'WholeSystemCloseReleaseUnconfirmedError';
+    error.code = WHOLE_SYSTEM_CLOSE_RELEASE_UNCONFIRMED_CODE;
+    return error;
+}
+
+function throwIfWholeSystemCloseCancelled(signal?: AbortSignal): void {
+    if (signal?.aborted) throw wholeSystemCloseCancelledError();
+}
+
+function waitForWholeSystemClosePoll(signal?: AbortSignal): Promise<void> {
+    throwIfWholeSystemCloseCancelled(signal);
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timeoutId);
+            reject(wholeSystemCloseCancelledError());
+        };
+        const timeoutId = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, WHOLE_SYSTEM_CLOSE_POLL_MS);
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
+async function runWholeSystemCloseOperation<T>(
+    operation: () => Promise<T>,
+    deadline: number,
+    signal: AbortSignal | undefined,
+    timeoutMessage: string,
+): Promise<T> {
+    throwIfWholeSystemCloseCancelled(signal);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error(timeoutMessage);
+
+    return await new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const finish = (callback: () => void) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            signal?.removeEventListener('abort', onAbort);
+            callback();
+        };
+        const onAbort = () => finish(() => reject(wholeSystemCloseCancelledError()));
+        const timeoutId = setTimeout(
+            () => finish(() => reject(new Error(timeoutMessage))),
+            remainingMs,
+        );
+        if (signal?.aborted) {
+            onAbort();
+            return;
+        }
+        signal?.addEventListener('abort', onAbort, { once: true });
+        operation().then(
+            value => finish(() => resolve(value)),
+            error => finish(() => reject(error)),
+        );
+    });
 }
 
 function isWholeSystemCloseWaiting(error: unknown): boolean {
     return String(error).includes('WHOLE_SYSTEM_CLOSE_WAITING');
 }
 
-export async function abortWholeSystemClose(token: string): Promise<void> {
-    if (!token || !isMultiMode()) return;
-    const state = get(connectionState);
-    if (!state.mysqlConfig) return;
-    const ownerTillId = await sqlite.getOrCreateTillId();
-    await invoke('abort_whole_system_close', {
-        mysqlUri: buildMysqlUri(state.mysqlConfig),
-        token,
-        ownerTillId,
-    });
-    await publishTillPresence(true).catch(() => undefined);
+function wholeSystemCloseWaitingDetail(error: unknown): string {
+    return String(error).replace(/^.*WHOLE_SYSTEM_CLOSE_WAITING:\s*/, '').trim();
 }
 
-export async function beginWholeSystemClose(): Promise<WholeSystemCloseSession> {
+function wholeSystemCloseWaitingMessage(detail: string, frozen = false): string {
+    const fallback = frozen
+        ? 'Waiting for every till to acknowledge the frozen close.'
+        : 'Waiting for every active till to become ready.';
+    if (!detail) return fallback;
+    const guidance = /\boffline\b/i.test(detail)
+        ? ' Bring that till online, or retire it in Settings → Shop licence if it is no longer used.'
+        : '';
+    return `${frozen ? 'Waiting for till acknowledgement' : 'Waiting for tills'}: ${detail}${guidance}`;
+}
+
+export async function abortWholeSystemClose(token: string): Promise<void> {
+    if (!token) return;
+    if (!isMultiMode()) {
+        throw new Error('Cannot confirm close-lock release outside MariaDB multi-till mode');
+    }
+    const state = get(connectionState);
+    if (!state.mysqlConfig) {
+        throw new Error('Cannot confirm close-lock release because MariaDB configuration is unavailable');
+    }
+    const ownerTillId = await sqlite.getOrCreateTillId();
+    let releaseError: unknown = new Error('Close-lock release was not attempted');
+    let released = false;
+    for (let attempt = 1; attempt <= WHOLE_SYSTEM_CLOSE_ABORT_ATTEMPTS; attempt += 1) {
+        const outcome = invoke('abort_whole_system_close', {
+            mysqlUri: buildMysqlUri(state.mysqlConfig),
+            token,
+            ownerTillId,
+        }).then(
+            () => ({ ok: true as const }),
+            error => ({ ok: false as const, error }),
+        );
+        try {
+            const result = await withTimeout(
+                outcome,
+                WHOLE_SYSTEM_CLOSE_NATIVE_CLEANUP_MS,
+                'Timed out while releasing the whole-system close lock',
+            );
+            if (result.ok) {
+                released = true;
+                break;
+            }
+            releaseError = result.error;
+        } catch (error) {
+            // The raw command is still unresolved. Starting another release
+            // command could recreate the same row-lock race, so stop here.
+            releaseError = error;
+            break;
+        }
+        if (attempt < WHOLE_SYSTEM_CLOSE_ABORT_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, WHOLE_SYSTEM_CLOSE_ABORT_RETRY_MS));
+        }
+    }
+    if (!released) {
+        throw new Error(`Could not confirm whole-system close-lock release: ${String(releaseError)}`);
+    }
+    await withTimeout(
+        publishTillPresence(true),
+        WHOLE_SYSTEM_CLOSE_PRESENCE_REFRESH_MS,
+        'Timed out while refreshing till presence after releasing the close lock',
+    ).catch(() => undefined);
+}
+
+/**
+ * Capture a closable per-till Z report in one MariaDB transaction. The native
+ * command holds the shared financial barrier while it samples server time and
+ * reads every report section, so no local clock or mixed autocommit snapshot
+ * can move a transaction across the cutoff.
+ */
+export async function prepareTillReportClose(
+    tillNumber: string,
+): Promise<PreparedTillReportCloseSession> {
+    const normalizedTill = String(tillNumber || '').trim();
+    if (!isTauri() || !isMultiMode() || !normalizedTill) {
+        throw new Error('Authoritative till close requires a MariaDB till ID');
+    }
+    return wholeSystemCloseLocalMutex.runExclusive(async () => {
+        let state = get(connectionState);
+        if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
+        if (!state.mysqlOnline) {
+            await pingMysql();
+            state = get(connectionState);
+        }
+        if (!state.mysqlOnline || !state.mysqlConfig) {
+            throw new Error('MariaDB is offline. The till reporting period was not opened.');
+        }
+        await assertMariaDbCommerceWritesAllowed();
+        let pendingWrites = await pendingReportWriteCount();
+        if (pendingWrites > 0) {
+            await withTimeout(
+                flushOfflineQueue(),
+                2_500,
+                'Pending report sync did not finish in time',
+            );
+            pendingWrites = await pendingReportWriteCount();
+        }
+        if (pendingWrites > 0) {
+            throw new Error(
+                `${pendingWrites} report-contributing local change${pendingWrites === 1 ? '' : 's'} `
+                + 'must synchronize before this Z report can close',
+            );
+        }
+        const syncConflicts = await pendingReportSyncConflictCount();
+        if (syncConflicts > 0) {
+            throw new Error(
+                `${syncConflicts} retained financial sync conflict${syncConflicts === 1 ? '' : 's'} `
+                + 'must be reviewed before this Z report can close',
+            );
+        }
+        const pendingTerminalAttempts = await pendingTerminalRecoveryCount(normalizedTill);
+        if (pendingTerminalAttempts > 0) {
+            throw new Error(
+                `This till has ${pendingTerminalAttempts} card payment attempt${pendingTerminalAttempts === 1 ? '' : 's'} `
+                + 'to complete or recover before its Z report can close',
+            );
+        }
+        const prepared = await invoke<PreparedTillReportCloseResult>('prepare_till_report_close', {
+            mysqlUri: buildMysqlUri(state.mysqlConfig),
+            tillNumber: normalizedTill,
+        });
+        return {
+            expectedLastMarker: prepared.expectedLastMarker,
+            periodStart: prepared.periodStart,
+            cutoffAt: prepared.cutoffAt,
+            report: {
+                overview: prepared.overview,
+                breakdown: prepared.breakdown,
+                topProducts: prepared.topProducts,
+                tillSummaries: prepared.tillSummaries,
+                source: 'mariadb',
+            },
+        };
+    });
+}
+
+export async function beginWholeSystemClose(
+    options: WholeSystemCloseOptions = {},
+): Promise<WholeSystemCloseSession> {
+    const startedAt = Date.now();
+    const reportProgress = (phase: WholeSystemCloseProgressPhase, message: string) => {
+        try {
+            options.onProgress?.({ phase, message, elapsedMs: Date.now() - startedAt });
+        } catch (error) {
+            console.warn('database: whole-system close progress callback failed:', error);
+        }
+    };
+
+    throwIfWholeSystemCloseCancelled(options.signal);
     if (!isMultiMode()) {
         throw new Error('Whole-system coordinated close requires MariaDB multi-till mode');
     }
+    reportProgress('checking-connection', 'Checking the MariaDB connection…');
     const state = get(connectionState);
     if (!state.mysqlOnline || !state.mysqlConfig || !(await pingMysql())) {
         throw new Error('MariaDB is offline. Whole-system end-of-day was not started.');
     }
+    throwIfWholeSystemCloseCancelled(options.signal);
     const mysqlUri = buildMysqlUri(state.mysqlConfig);
     const ownerTillId = await sqlite.getOrCreateTillId();
+    throwIfWholeSystemCloseCancelled(options.signal);
     let token = '';
+    let inFlightNativeSettlement: Promise<void> | null = null;
+    const trackNativeCloseOperation = <T>(operation: Promise<T>): Promise<T> => {
+        const settlement = operation.then(
+            () => undefined,
+            () => undefined,
+        );
+        inFlightNativeSettlement = settlement;
+        void settlement.then(() => {
+            if (inFlightNativeSettlement === settlement) inFlightNativeSettlement = null;
+        });
+        return operation;
+    };
     try {
+        reportProgress('starting', 'Starting a protected whole-system close…');
         let barrier = await invoke<WholeSystemCloseBarrierResult>('begin_whole_system_close', {
             mysqlUri,
             ownerTillId,
         });
         token = barrier.token;
         if (!token) throw new Error('MariaDB did not issue a whole-system close token');
+        throwIfWholeSystemCloseCancelled(options.signal);
 
         const freezeDeadline = Date.now() + WHOLE_SYSTEM_CLOSE_WAIT_MS;
         let lastWaitingError = '';
+        reportProgress('starting', 'Checking that every active till is ready…');
         while (barrier.state !== 'frozen') {
-            await publishTillPresence(true);
+            await runWholeSystemCloseOperation(
+                () => publishTillPresence(true),
+                freezeDeadline,
+                options.signal,
+                'Timed out while this till prepared for whole-system close',
+            );
             try {
-                barrier = await invoke<WholeSystemCloseBarrierResult>('freeze_whole_system_close', {
-                    mysqlUri,
-                    token,
-                    ownerTillId,
-                });
+                barrier = await runWholeSystemCloseOperation(
+                    () => trackNativeCloseOperation(
+                        invoke<WholeSystemCloseBarrierResult>('freeze_whole_system_close', {
+                            mysqlUri,
+                            token,
+                            ownerTillId,
+                        }),
+                    ),
+                    freezeDeadline,
+                    options.signal,
+                    'Timed out while checking till readiness for whole-system close',
+                );
             } catch (error) {
                 if (!isWholeSystemCloseWaiting(error)) throw error;
-                lastWaitingError = String(error).replace(/^.*WHOLE_SYSTEM_CLOSE_WAITING:\s*/, '');
+                lastWaitingError = wholeSystemCloseWaitingDetail(error);
+                reportProgress(
+                    'waiting-for-tills',
+                    wholeSystemCloseWaitingMessage(lastWaitingError),
+                );
                 if (Date.now() >= freezeDeadline) {
                     throw new Error(
                         `Tills were not ready for whole-system close: ${lastWaitingError || 'readiness timed out'}`,
                     );
                 }
-                await waitForWholeSystemClosePoll();
+                await waitForWholeSystemClosePoll(options.signal);
             }
         }
 
         const periodStart = barrier.latestMarker || '2000-01-01T00:00:00.000Z';
         const snapshotDeadline = Date.now() + WHOLE_SYSTEM_CLOSE_WAIT_MS;
+        reportProgress('building-report', 'Tills are frozen. Building the final sales report…');
         while (true) {
-            await publishTillPresence(true);
+            await runWholeSystemCloseOperation(
+                () => publishTillPresence(true),
+                snapshotDeadline,
+                options.signal,
+                'Timed out while this till acknowledged the frozen close',
+            );
             try {
-                const frozen = await invoke<FrozenWholeSystemReportResult>(
-                    'get_frozen_whole_system_report',
-                    { mysqlUri, token, ownerTillId, periodStart },
+                const frozen = await runWholeSystemCloseOperation(
+                    () => trackNativeCloseOperation(
+                        invoke<FrozenWholeSystemReportResult>(
+                            'get_frozen_whole_system_report',
+                            { mysqlUri, token, ownerTillId, periodStart },
+                        ),
+                    ),
+                    snapshotDeadline,
+                    options.signal,
+                    'Timed out while building the frozen whole-system report',
                 );
+                reportProgress('ready', 'Whole-system report is ready.');
                 return {
                     token,
                     ownerTillId,
@@ -5607,20 +7141,47 @@ export async function beginWholeSystemClose(): Promise<WholeSystemCloseSession> 
                         overview: frozen.overview,
                         breakdown: frozen.breakdown,
                         topProducts: frozen.topProducts,
+                        tillSummaries: frozen.tillSummaries,
                     },
                 };
             } catch (error) {
                 if (!isWholeSystemCloseWaiting(error)) throw error;
+                const waitingDetail = wholeSystemCloseWaitingDetail(error);
+                reportProgress(
+                    'waiting-for-tills',
+                    wholeSystemCloseWaitingMessage(waitingDetail, true),
+                );
                 if (Date.now() >= snapshotDeadline) {
                     throw new Error(
                         `Tills did not acknowledge the frozen close: ${String(error)}`,
                     );
                 }
-                await waitForWholeSystemClosePoll();
+                await waitForWholeSystemClosePoll(options.signal);
             }
         }
     } catch (error) {
-        if (token) await abortWholeSystemClose(token).catch(() => undefined);
+        if (token) {
+            const settlement = inFlightNativeSettlement as Promise<void> | null;
+            if (settlement) {
+                reportProgress(
+                    'cancelling',
+                    options.signal?.aborted
+                        ? 'Cancellation requested. Waiting for the current database step to stop safely…'
+                        : 'The close could not continue. Waiting for the current database step to stop safely…',
+                );
+                await withTimeout(
+                    settlement,
+                    WHOLE_SYSTEM_CLOSE_NATIVE_CLEANUP_MS,
+                    'The in-flight whole-system close command did not settle during cleanup',
+                ).catch(() => undefined);
+            }
+            reportProgress('cancelling', 'Releasing the whole-system close lock…');
+            try {
+                await abortWholeSystemClose(token);
+            } catch (releaseError) {
+                throw wholeSystemCloseReleaseUnconfirmedError(releaseError);
+            }
+        }
         throw error;
     }
 }
@@ -5678,6 +7239,102 @@ export async function finishWholeSystemClose(
     return row;
 }
 
+export async function commitTillReportClose(
+    tillNumber: string,
+    expectedLastMarker: string | null,
+    periodStart: string,
+    periodEnd: string,
+    extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {},
+): Promise<any> {
+    const normalizedTill = String(tillNumber || '').trim();
+    if (!isTauri() || !isMultiMode() || !normalizedTill) {
+        throw new Error('Authoritative till close requires a MariaDB till ID');
+    }
+    const row = await wholeSystemCloseLocalMutex.runExclusive(async () => {
+        let state = get(connectionState);
+        if (!state.mysqlConfig) throw new Error('MariaDB configuration is unavailable');
+        if (!state.mysqlOnline) {
+            await pingMysql();
+            state = get(connectionState);
+        }
+        if (!state.mysqlOnline || !state.mysqlConfig) {
+            throw new Error('MariaDB is offline. The till reporting period was not closed.');
+        }
+        await assertMariaDbCommerceWritesAllowed();
+        let pendingWrites = await pendingReportWriteCount();
+        if (pendingWrites > 0) {
+            await withTimeout(
+                flushOfflineQueue(),
+                2_500,
+                'Pending report sync did not finish in time',
+            );
+            pendingWrites = await pendingReportWriteCount();
+        }
+        if (pendingWrites > 0) {
+            throw new Error(
+                `${pendingWrites} report-contributing local change${pendingWrites === 1 ? '' : 's'} `
+                + 'must synchronize before this Z report can close',
+            );
+        }
+        const syncConflicts = await pendingReportSyncConflictCount();
+        if (syncConflicts > 0) {
+            throw new Error(
+                `${syncConflicts} retained financial sync conflict${syncConflicts === 1 ? '' : 's'} `
+                + 'must be reviewed before this Z report can close',
+            );
+        }
+        const pendingTerminalAttempts = await pendingTerminalRecoveryCount(normalizedTill);
+        if (pendingTerminalAttempts > 0) {
+            throw new Error(
+                `This till has ${pendingTerminalAttempts} card payment attempt${pendingTerminalAttempts === 1 ? '' : 's'} `
+                + 'to complete or recover before its Z report can close',
+            );
+        }
+        return invoke<any>('commit_till_report_close', {
+            mysqlUri: buildMysqlUri(state.mysqlConfig),
+            input: {
+                id: crypto.randomUUID(),
+                tillNumber: normalizedTill,
+                expectedLastMarker,
+                periodStart,
+                periodEnd,
+                employeeId: extra.employeeId || '',
+                reportText: extra.reportText || '',
+                reportTotal: extra.reportTotal || 0,
+            },
+        });
+    });
+
+    // MariaDB has already committed the authoritative marker. Local cache and
+    // audit failures must not turn that durable close into an offline marker or
+    // make the UI attempt the same period again.
+    try {
+        await sqlite.upsert('till_report_markers', row, 'id');
+    } catch (error) {
+        console.warn('database: till report closed remotely but local marker cache failed:', error);
+    }
+    try {
+        await recordAuditEvent(
+            'report_period_closed',
+            'report',
+            row.id,
+            null,
+            {
+                scope: 'till',
+                tillNumber: normalizedTill,
+                periodStart,
+                periodEnd,
+                reportTotal: extra.reportTotal || 0,
+            },
+            extra.employeeId || currentAuditEmployeeId(),
+        );
+    } catch (error) {
+        console.warn('database: till report closed remotely but local audit write failed:', error);
+    }
+    await publishTillPresence(true).catch(() => undefined);
+    return row;
+}
+
 async function saveReportMarkerAfterClosePreflight(
     tillNumber: string,
     periodStart: string,
@@ -5714,13 +7371,38 @@ export async function saveReportMarker(
     periodEnd: string,
     extra: { employeeId?: string; reportText?: string; reportTotal?: number } = {},
 ): Promise<any> {
-    if (!isMultiMode()) {
-        return saveReportMarkerAfterClosePreflight(tillNumber, periodStart, periodEnd, extra);
+    if (!isTauri()) {
+        assertCurrentReportPeriod(
+            latestEffectiveReportMarker(tillNumber, browserReportMarkers.values()),
+            periodStart,
+            periodEnd,
+        );
+        const stamp = new Date().toISOString();
+        const row = {
+            id: crypto.randomUUID(),
+            tillNumber,
+            type: 'period',
+            markerTime: periodEnd,
+            periodStart,
+            periodEnd,
+            employeeId: extra.employeeId || '',
+            reportText: extra.reportText || '',
+            reportTotal: extra.reportTotal || 0,
+            createdAt: stamp,
+            updatedAt: stamp,
+        };
+        browserReportMarkers.set(tillNumber, row);
+        return row;
     }
-    return wholeSystemCloseLocalMutex.runExclusive(async () => {
-        await assertMariaDbCommerceWritesAllowed();
-        return saveReportMarkerAfterClosePreflight(tillNumber, periodStart, periodEnd, extra);
-    });
+    if (!isMultiMode()) {
+        return wholeSystemCloseLocalMutex.runExclusive(async () => {
+            assertCurrentReportPeriod(await sqlite.getLastReportMarker(tillNumber), periodStart, periodEnd);
+            return saveReportMarkerAfterClosePreflight(tillNumber, periodStart, periodEnd, extra);
+        });
+    }
+    throw new Error(
+        'Multi-till report markers require an authoritative coordinated close; generate a fresh Z report',
+    );
 }
 
 export async function recordManagerApproval(approval: any): Promise<void> {
@@ -5784,6 +7466,779 @@ export async function setTillName(name: string): Promise<void> {
     });
 }
 
+export { ATTENDANCE_CHANGED_EVENT };
+const browserAttendanceRows: EmployeeAttendance[] = [];
+function notifyAttendanceChanged(): void {
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event(ATTENDANCE_CHANGED_EVENT));
+}
+
+function browserAttendanceRow(row: EmployeeAttendance): EmployeeAttendance {
+    const employees = get(employeesDB);
+    const registers = get(registersDB);
+    return {
+        ...row,
+        employeeName: employees.find((employee) => employee.id === row.employeeId)?.name || '',
+        clockInTillName: registers.find((register) => register.id === row.clockInTillId)?.name || row.clockInTillId,
+        clockOutTillName: registers.find((register) => register.id === row.clockOutTillId)?.name || row.clockOutTillId,
+    };
+}
+
+function getBrowserAttendancePage(options: sqlite.AttendancePageOptions): sqlite.AttendancePageResult {
+    const employeeId = String(options.employeeId || '').trim();
+    const status = options.status || 'all';
+    const query = String(options.query || '').trim().toLowerCase();
+    const startAt = String(options.startAt || '');
+    const endAt = String(options.endAt || '');
+    const filtered = browserAttendanceRows
+        .map(browserAttendanceRow)
+        .filter((row) => !employeeId || row.employeeId === employeeId)
+        .filter((row) => status === 'all' || row.status === status)
+        .filter((row) => !startAt || row.clockInAt >= startAt)
+        .filter((row) => !endAt || row.clockInAt < endAt)
+        .filter((row) => !query || [
+            row.employeeName, row.clockInTillName, row.clockOutTillName, row.notes,
+        ].some((value) => String(value || '').toLowerCase().includes(query)))
+        .sort((left, right) =>
+            Number(left.status !== 'open') - Number(right.status !== 'open')
+            || right.clockInAt.localeCompare(left.clockInAt)
+            || right.id.localeCompare(left.id)
+        );
+    const offset = Math.max(0, Number(options.offset || 0));
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 30)));
+    return {
+        rows: filtered.slice(offset, offset + limit),
+        total: filtered.length,
+        overallTotal: employeeId
+            ? browserAttendanceRows.filter((row) => row.employeeId === employeeId).length
+            : browserAttendanceRows.length,
+        totalWorkedSeconds: filtered.reduce((total, row) => total + attendanceDurationSeconds(row), 0),
+        openCount: filtered.filter((row) => row.status === 'open').length,
+        source: 'browser',
+    };
+}
+
+export async function getAttendancePage(
+    options: sqlite.AttendancePageOptions = {},
+): Promise<sqlite.AttendancePageResult> {
+    if (!isTauri()) return getBrowserAttendancePage(options);
+    if (isMultiMode()) {
+        // MariaDB schema preparation and the first sync start in the background
+        // so the till can render its local cache immediately. Do not race that
+        // startup with an attendance query: the page watches mysqlOnline and
+        // retries as soon as the authoritative store is ready.
+        const state = get(connectionState);
+        if (!state.mysqlOnline || !state.mysqlReady) {
+            return {
+                ...(await sqlite.getAttendancePage(options)),
+                source: 'sqlite',
+                warning: 'Showing the local attendance cache while MariaDB is connecting. Clock actions will become available automatically when it is ready.',
+            };
+        }
+        try {
+            const result = await withTimeout(
+                mysql.mysqlGetAttendancePage(options),
+                6_000,
+                'MariaDB attendance lookup timed out',
+            );
+            return { ...result, source: 'mariadb' };
+        } catch (error) {
+            console.warn('database: MariaDB attendance lookup failed, using local cache:', error);
+            const local = await sqlite.getAttendancePage(options);
+            const offline = isTransientSyncError(error);
+            return {
+                ...local,
+                source: 'sqlite',
+                warning: offline
+                    ? 'Showing the local attendance cache because MariaDB is unavailable. Clock actions are disabled until it reconnects.'
+                    : 'Showing the local attendance cache because the live attendance report failed. Staff clock actions verify MariaDB separately before saving.',
+            };
+        }
+    }
+    return { ...(await sqlite.getAttendancePage(options)), source: 'sqlite' };
+}
+
+/**
+ * MariaDB is authoritative for attendance in multi-till mode. Quarantine an
+ * orphaned local open row before caching a different authoritative state, so
+ * SQLite's one-open-session index cannot turn a successful remote clock action
+ * into a false failure. The conflict copy preserves the orphan for diagnosis.
+ */
+async function reconcileLocalAttendanceOpen(
+    employeeId: string,
+    authoritativeOpen: EmployeeAttendance | null,
+): Promise<void> {
+    const localOpen = await sqlite.getOpenEmployeeAttendance(employeeId);
+    if (localOpen && localOpen.id !== authoritativeOpen?.id) {
+        const remoteVersion = await mysql.mysqlGetEmployeeAttendanceById(localOpen.id);
+        if (remoteVersion) {
+            await sqlite.upsert('employee_attendance', remoteVersion, 'id');
+        } else {
+            const d = await sqlite.getDb();
+            const stamp = new Date().toISOString();
+            await d.execute(
+                `INSERT OR REPLACE INTO _sync_conflicts
+                    (id, table_name, operation, data, reason, created_at)
+                 VALUES (?, 'employee_attendance', 'stale_cache', ?, ?, ?)`,
+                [
+                    `attendance-cache:${localOpen.id}`,
+                    JSON.stringify(localOpen),
+                    'Local open attendance was absent from authoritative MariaDB and was removed from the cache',
+                    stamp,
+                ],
+            );
+            await sqlite.remove('employee_attendance', localOpen.id, 'id');
+        }
+    }
+    if (authoritativeOpen) {
+        await sqlite.upsert('employee_attendance', authoritativeOpen, 'id');
+    }
+}
+
+async function reconcileAttendanceCacheWithoutFailingRemoteAction(
+    employeeId: string,
+    authoritativeOpen: EmployeeAttendance | null,
+): Promise<void> {
+    try {
+        await reconcileLocalAttendanceOpen(employeeId, authoritativeOpen);
+    } catch (error) {
+        // The shared write/query already succeeded. Keep that success truthful;
+        // the next sync/status read will retry the disposable local cache.
+        console.warn('database: authoritative attendance succeeded but the local cache could not be reconciled:', error);
+    }
+}
+
+export async function getOpenEmployeeAttendance(employeeId: string, requireLive = false): Promise<EmployeeAttendance | null> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) return null;
+    if (!isTauri()) {
+        const row = browserAttendanceRows.find((entry) =>
+            entry.employeeId === normalizedId && entry.status === 'open'
+        );
+        return row ? browserAttendanceRow(row) : null;
+    }
+    if (isMultiMode()) {
+        const state = get(connectionState);
+        if (!state.mysqlOnline || !state.mysqlReady) {
+            if (requireLive) throw new Error('Connect to the shared database to check attendance.');
+            return sqlite.getOpenEmployeeAttendance(normalizedId);
+        }
+        try {
+            const row = await withTimeout(
+                mysql.mysqlGetOpenEmployeeAttendance(normalizedId),
+                5_000,
+                'MariaDB attendance status timed out',
+            );
+            await reconcileAttendanceCacheWithoutFailingRemoteAction(normalizedId, row);
+            return row;
+        } catch (error) {
+            if (requireLive) throw error;
+            console.warn('database: MariaDB attendance status failed, using local cache:', error);
+        }
+    }
+    return sqlite.getOpenEmployeeAttendance(normalizedId);
+}
+
+/**
+ * Deactivation must use the shared attendance source in multi-till mode. A
+ * local-cache fallback could miss a clock-in recorded by another till and
+ * would make an offline deactivation unsafe to replay later.
+ */
+export async function assertEmployeeCanDeactivate(
+    employeeId: string,
+    employeeName = '',
+): Promise<void> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) throw new Error('Staff ID is required before deactivation');
+
+    let openAttendance: EmployeeAttendance | null;
+    if (isTauri() && isMultiMode()) {
+        const state = get(connectionState);
+        if (!state.mysqlOnline || !state.mysqlReady) {
+            throw new Error(
+                'Cannot safely deactivate staff while MariaDB attendance is unavailable. Reconnect this till, then clock the staff member out from Attendance if needed.',
+            );
+        }
+        try {
+            openAttendance = await withTimeout(
+                mysql.mysqlGetOpenEmployeeAttendance(normalizedId),
+                5_000,
+                'Live attendance status check timed out',
+            );
+        } catch (error) {
+            throw new Error(
+                `Cannot safely deactivate staff because live attendance could not be verified: ${String(error).replace(/^Error:\s*/, '')}`,
+            );
+        }
+    } else {
+        openAttendance = await getOpenEmployeeAttendance(normalizedId);
+    }
+
+    if (openAttendance) {
+        throw new Error(openAttendanceDeactivationMessage(employeeName));
+    }
+}
+
+/**
+ * Save all staff security changes server-first in multi-till mode. Roles,
+ * PINs, and active state are authorization data and must never sit in an
+ * offline queue while another till continues using older privileges.
+ */
+export const EMPLOYEE_PROFILE_CONFLICT_MESSAGE =
+    'This staff member changed on another till. The latest details were reloaded; review them and try again.';
+
+export class EmployeeProfileConflictError extends Error {
+    readonly code = mysql.EMPLOYEE_PROFILE_CONFLICT_CODE;
+
+    constructor(message = EMPLOYEE_PROFILE_CONFLICT_MESSAGE) {
+        super(message);
+        this.name = 'EmployeeProfileConflictError';
+    }
+}
+
+export interface SaveEmployeeProfileOptions {
+    /** null means this must be a brand-new row; edits require the version shown to the user. */
+    expectedUpdatedAt: string | null;
+    previousIsActive?: boolean;
+}
+
+function updateEmployeeRuntimeStore(employee: Employee): void {
+    employeesDB.update((list) => {
+        const exists = list.some((candidate) => candidate.id === employee.id);
+        return exists
+            ? list.map((candidate) => candidate.id === employee.id ? employee : candidate)
+            : [...list, employee];
+    });
+}
+
+async function reconcileAuthoritativeEmployeeCache(
+    employeeId: string,
+    authoritative: Employee | null,
+): Promise<Employee | null> {
+    if (!authoritative) {
+        try {
+            await sqlite.remove('employees', employeeId, 'id');
+        } catch (error) {
+            console.warn('database: could not remove a missing authoritative employee from SQLite:', error);
+        }
+        employeesDB.update((list) => list.filter((employee) => employee.id !== employeeId));
+        return null;
+    }
+
+    const managed = normalizeEmployeeForManagement(authoritative);
+    if (!managed) {
+        throw new Error('MariaDB returned a malformed staff profile');
+    }
+    try {
+        await sqlite.upsert('employees', authoritative, 'id');
+    } catch (error) {
+        // The shared row is still authoritative for this running till. Keeping
+        // the live store current prevents a broken cache from retaining access.
+        console.warn('database: could not cache the authoritative employee in SQLite:', error);
+    }
+    updateEmployeeRuntimeStore(managed);
+    return managed;
+}
+
+/** Resolve one staff identity from MariaDB without falling back to stale SQLite. */
+export async function getAuthoritativeEmployeeForSession(employeeId: string): Promise<Employee | null> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) return null;
+    const state = get(connectionState);
+    if (!isMultiMode()) {
+        return normalizeEmployeeForRuntime(
+            get(employeesDB).find((employee) => employee.id === normalizedId),
+        );
+    }
+    if (!state.mysqlOnline || !state.mysqlReady) {
+        throw new Error('The shared staff database is not ready for authoritative sign-in checks');
+    }
+
+    let authoritative: Employee | null;
+    try {
+        authoritative = await withTimeout(
+            mysql.mysqlGetEmployeeProfileById(normalizedId),
+            5_000,
+            'Authoritative staff check timed out',
+        );
+    } catch (error) {
+        throw new Error(
+            `Could not verify this staff account with MariaDB: ${String(error).replace(/^Error:\s*/, '')}`,
+        );
+    }
+    const managed = await reconcileAuthoritativeEmployeeCache(normalizedId, authoritative);
+    return normalizeEmployeeForRuntime(managed);
+}
+
+async function reloadEmployeeAfterProfileConflict(employeeId: string): Promise<void> {
+    const authoritative = await withTimeout(
+        mysql.mysqlGetEmployeeProfileById(employeeId),
+        5_000,
+        'Reloading the latest staff details timed out',
+    );
+    await reconcileAuthoritativeEmployeeCache(employeeId, authoritative);
+}
+
+/** Upgrade only the credential representation after MariaDB has already
+ * verified the same legacy PIN for this exact authoritative row version. */
+export async function upgradeEmployeeLegacyPin(
+    employee: Employee,
+    oldPin: string,
+    newPinHash: string,
+): Promise<Employee> {
+    if (!isMultiMode()) {
+        throw new Error('Shared legacy PIN upgrade is only available in multi-till mode');
+    }
+    const state = get(connectionState);
+    if (!state.mysqlOnline || !state.mysqlReady || !state.mysqlConfig) {
+        throw new Error('Legacy staff PIN upgrade requires MariaDB to be connected and ready');
+    }
+    const saved = await withTimeout(
+        invoke<Employee>('upgrade_mariadb_employee_legacy_pin', {
+            mysqlUri: buildMysqlUri(state.mysqlConfig),
+            employeeId: employee.id,
+            expectedUpdatedAt: String(employee.updatedAt || ''),
+            oldPin,
+            newPinHash,
+        }),
+        12_000,
+        'MariaDB staff PIN upgrade timed out',
+    );
+    const managed = await reconcileAuthoritativeEmployeeCache(employee.id, saved);
+    const runtime = normalizeEmployeeForRuntime(managed);
+    if (!runtime) throw new Error('MariaDB returned an invalid upgraded staff profile');
+    return runtime;
+}
+
+export async function saveEmployeeProfile(
+    employee: Employee,
+    options: SaveEmployeeProfileOptions,
+): Promise<Employee> {
+    if (!options || (options.expectedUpdatedAt !== null && typeof options.expectedUpdatedAt !== 'string')) {
+        throw new Error('Staff changes require an expected profile version');
+    }
+    const normalizedEmployee = normalizeEmployeeForPersistence(employee);
+    const isDeactivation = Boolean(options.previousIsActive) && !normalizedEmployee.isActive;
+    const requiresSharedWrite = isMultiMode();
+    if (requiresSharedWrite) {
+        const state = get(connectionState);
+        if (!state.mysqlOnline || !state.mysqlReady) {
+            throw new Error('Staff changes require the shared MariaDB database to be connected and ready');
+        }
+    }
+    if (isDeactivation) {
+        await assertEmployeeCanDeactivate(normalizedEmployee.id, normalizedEmployee.name);
+    }
+    // Multi-till before/after data is read and audited inside the authoritative
+    // MariaDB CAS transaction. SQLite supplies the audit only in single mode.
+    const auditBefore = requiresSharedWrite
+        ? null
+        : await getAuditBefore('employees', normalizedEmployee, 'id');
+    if (!requiresSharedWrite) {
+        const currentVersion = auditBefore ? String(auditBefore.updatedAt || '') : null;
+        const expectedVersion = options.expectedUpdatedAt;
+        if (
+            (expectedVersion === null && auditBefore)
+            || (expectedVersion !== null && currentVersion !== expectedVersion)
+        ) {
+            throw new EmployeeProfileConflictError();
+        }
+    }
+
+    let savedEmployee: Employee = normalizedEmployee;
+    if (requiresSharedWrite) {
+        try {
+            await ensureDatabaseIdentityForSync();
+            const config = get(connectionState).mysqlConfig;
+            if (!config) throw new Error('MariaDB configuration is unavailable');
+            savedEmployee = await withTimeout(
+                invoke<Employee>('save_mariadb_employee_profile_cas', {
+                    mysqlUri: buildMysqlUri(config),
+                    employee: normalizedEmployee,
+                    expectedUpdatedAt: options.expectedUpdatedAt,
+                    actorEmployeeId: currentAuditEmployeeId(),
+                    actorExpectedUpdatedAt: currentEmployeeAuthorizationVersion(),
+                }),
+                12_000,
+                'MariaDB staff change timed out',
+            );
+        } catch (error) {
+            const message = String(error).replace(/^Error:\s*/, '');
+            if (message.includes(mysql.EMPLOYEE_PROFILE_CONFLICT_CODE)) {
+                try {
+                    await reloadEmployeeAfterProfileConflict(normalizedEmployee.id);
+                } catch (reloadError) {
+                    console.warn('database: stale employee edit was rejected but its latest row could not be cached:', reloadError);
+                    throw new EmployeeProfileConflictError(
+                        'This staff member changed on another till. Reload the staff page before trying again.',
+                    );
+                }
+                throw new EmployeeProfileConflictError();
+            }
+            if (message.includes('ATTENDANCE_OPEN_SESSION') || message.includes('ATTENDANCE_STILL_OPEN')) {
+                throw new Error(openAttendanceDeactivationMessage(normalizedEmployee.name));
+            }
+            throw new Error(`Staff change was not saved: ${message}`);
+        }
+    }
+
+    const runtimeEmployee = normalizeEmployeeForManagement(savedEmployee);
+    if (!runtimeEmployee) throw new Error('The saved staff profile could not be validated');
+    let cacheSaved = false;
+    try {
+        await sqlite.upsert('employees', savedEmployee, 'id');
+        cacheSaved = true;
+    } catch (error) {
+        // MariaDB has already accepted the authorization change. Reflect it in
+        // memory even if this till's cache needs repair, so stale privileges
+        // cannot remain usable on the current till.
+        if (!requiresSharedWrite) throw error;
+        updateEmployeeRuntimeStore(runtimeEmployee);
+        console.error(
+            'database: staff change is saved in MariaDB, but this till could not update its SQLite employee cache:',
+            error,
+        );
+    }
+    if (!requiresSharedWrite) {
+        const auditAfter = cacheSaved
+            ? await getLocalRow('employees', 'id', savedEmployee.id)
+            : savedEmployee;
+        await recordTableAudit(
+            'employees',
+            auditBefore ? 'updated' : 'created',
+            'id',
+            auditBefore,
+            auditAfter || savedEmployee,
+        );
+    }
+    // In multi mode the same native transaction already committed the redacted
+    // audit row; creating a local outbox audit here would duplicate it.
+    updateEmployeeRuntimeStore(runtimeEmployee);
+    if (requiresSharedWrite) {
+        connectionState.update(state => ({ ...state, mysqlOnline: true, syncError: null }));
+    }
+    return runtimeEmployee;
+}
+
+async function requireOnlineAttendanceWrites(employeeId: string): Promise<EmployeeAttendance | null> {
+    if (!isMultiMode()) return null;
+    const state = get(connectionState);
+    if (!state.mysqlOnline || !state.mysqlReady) {
+        throw new Error('Attendance requires the shared MariaDB database to finish connecting so another till cannot create a duplicate clock-in');
+    }
+    try {
+        return await withTimeout(
+            mysql.mysqlGetOpenEmployeeAttendance(employeeId),
+            5_000,
+            'Live attendance status check timed out',
+        );
+    } catch (error) {
+        throw new Error(`Live attendance status could not be verified: ${String(error).replace(/^Error:\s*/, '')}`);
+    }
+}
+
+async function requireAuthoritativeAttendanceActor(
+    employeeId: string,
+    actorEmployeeId: string,
+    action: 'self' | 'manage',
+    attendanceToken?: string,
+): Promise<void> {
+    if (attendanceToken !== undefined) {
+        if (action !== 'self') throw new Error('Staff clock sign-in only permits your own attendance');
+        await authorizeAttendanceAction(attendanceToken, employeeId, actorEmployeeId);
+        return;
+    }
+    if (!isTauri() || !isMultiMode()) return;
+    const actorId = String(actorEmployeeId || '').trim();
+    const subjectId = String(employeeId || '').trim();
+    const sessionEmployee = get(currentEmployee);
+    if (!actorId || !sessionEmployee || sessionEmployee.id !== actorId) {
+        throw new Error('The signed-in staff member no longer matches this attendance action');
+    }
+    if (action === 'self' && actorId !== subjectId) {
+        throw new Error('Staff can only clock themselves in or out');
+    }
+    // Attendance writes need a real, authoritative employee identity for
+    // immutable audit attribution. Synthetic support sessions remain read-only.
+    if (isSupportEmployee(sessionEmployee)) {
+        throw new Error('Support sessions can review attendance but cannot change it');
+    }
+    const expectedVersion = currentEmployeeAuthorizationVersion();
+    if (!expectedVersion) {
+        throw new Error('Staff access must be verified again before changing attendance');
+    }
+    const authoritative = await withTimeout(
+        getAuthoritativeEmployeeForSession(actorId),
+        5_000,
+        'MariaDB staff verification timed out',
+    );
+    if (
+        !authoritative?.isActive
+        || String(authoritative.updatedAt || '') !== expectedVersion
+    ) {
+        throw new Error('Your staff profile changed. Sign in again before changing attendance');
+    }
+    if (action === 'manage' && !hasPermission(authoritative, 'manage_attendance', get(settingsDB))) {
+        throw new Error('Your current staff role cannot manage another employee’s attendance');
+    }
+}
+
+async function auditAttendanceChange(
+    action: string,
+    row: EmployeeAttendance,
+    oldRow: EmployeeAttendance | null,
+    actorEmployeeId: string,
+): Promise<void> {
+    // MariaDB attendance triggers write the audit row in the same transaction
+    // as the shared attendance mutation, with authoritative OLD/NEW values.
+    // Writing another local outbox audit here would duplicate that record and
+    // could never provide the same crash-atomic guarantee.
+    if (isMultiMode()) return;
+    try {
+        await recordAuditEvent(action, 'employee_attendance', row.id, oldRow, row, actorEmployeeId);
+    } catch (error) {
+        console.error('database: attendance was saved but its audit event could not be recorded:', error);
+    }
+}
+
+export async function clockInEmployeeAttendance(
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId = employeeId,
+    notes = '',
+    attendanceToken?: string,
+): Promise<EmployeeAttendance> {
+    const normalizedEmployeeId = String(employeeId || '').trim();
+    const normalizedActorId = String(actorEmployeeId || '').trim() || normalizedEmployeeId;
+    if (!normalizedEmployeeId) throw new Error('Choose an employee to clock in');
+    await requireAuthoritativeAttendanceActor(normalizedEmployeeId, normalizedActorId, 'self', attendanceToken);
+    if (!isTauri()) {
+        if (browserAttendanceRows.some((row) => row.employeeId === normalizedEmployeeId && row.status === 'open')) {
+            throw new Error('ATTENDANCE_ALREADY_CLOCKED_IN');
+        }
+        const stamp = new Date().toISOString();
+        const row: EmployeeAttendance = {
+            id: crypto.randomUUID(), employeeId: normalizedEmployeeId,
+            clockInAt: stamp, clockOutAt: '', clockInTillId: tillId, clockOutTillId: '',
+            status: 'open', notes: String(notes || '').trim().slice(0, 500),
+            createdByEmployeeId: normalizedActorId, updatedByEmployeeId: normalizedActorId,
+            createdAt: stamp, updatedAt: stamp,
+        };
+        browserAttendanceRows.push(row);
+        notifyAttendanceChanged();
+        return browserAttendanceRow(row);
+    }
+
+    let row: EmployeeAttendance;
+    if (isMultiMode()) {
+        const openRow = await requireOnlineAttendanceWrites(normalizedEmployeeId);
+        if (openRow) throw new Error('ATTENDANCE_ALREADY_CLOCKED_IN');
+        try {
+            row = await withTimeout(
+                mysql.mysqlInsertOpenEmployeeAttendance(
+                    crypto.randomUUID(), normalizedEmployeeId, tillId, normalizedActorId,
+                    String(notes || '').trim().slice(0, 500),
+                ),
+                7_000,
+                'Attendance clock-in timed out',
+            );
+        } catch (error) {
+            if (String(error).includes('ATTENDANCE_EMPLOYEE_INACTIVE')) {
+                throw new Error('This staff account is inactive and cannot clock in');
+            }
+            throw error;
+        }
+        await reconcileAttendanceCacheWithoutFailingRemoteAction(normalizedEmployeeId, row);
+    } else {
+        const stamp = new Date().toISOString();
+        try {
+            row = await sqlite.insertOpenEmployeeAttendance({
+                id: crypto.randomUUID(), employeeId: normalizedEmployeeId,
+                clockInAt: stamp, clockOutAt: '', clockInTillId: tillId, clockOutTillId: '',
+                status: 'open', notes: String(notes || '').trim().slice(0, 500),
+                createdByEmployeeId: normalizedActorId, updatedByEmployeeId: normalizedActorId,
+                createdAt: stamp, updatedAt: stamp,
+            });
+        } catch (error) {
+            if (String(error).toLowerCase().includes('unique')) {
+                throw new Error('ATTENDANCE_ALREADY_CLOCKED_IN');
+            }
+            throw error;
+        }
+    }
+    await auditAttendanceChange('attendance_clocked_in', row, null, normalizedActorId);
+    notifyAttendanceChanged();
+    return row;
+}
+
+export async function clockOutEmployeeAttendance(
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId: string,
+    expectedAttendanceId: string,
+    attendanceToken?: string,
+): Promise<EmployeeAttendance> {
+    const normalizedEmployeeId = String(employeeId || '').trim();
+    const normalizedActorId = String(actorEmployeeId || '').trim() || normalizedEmployeeId;
+    const normalizedExpectedId = String(expectedAttendanceId || '').trim();
+    if (!normalizedEmployeeId) throw new Error('Choose an employee to clock out');
+    if (!normalizedExpectedId) throw new Error('The attendance session to clock out is required');
+    await requireAuthoritativeAttendanceActor(
+        normalizedEmployeeId, normalizedActorId,
+        normalizedActorId === normalizedEmployeeId ? 'self' : 'manage', attendanceToken,
+    );
+    if (!isTauri()) {
+        const index = browserAttendanceRows.findIndex((row) =>
+            row.employeeId === normalizedEmployeeId && row.status === 'open'
+        );
+        if (index < 0) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+        if (!attendanceOpenSessionMatches(normalizedExpectedId, browserAttendanceRows[index].id)) {
+            throw new Error('ATTENDANCE_SESSION_CHANGED');
+        }
+        const oldRow = { ...browserAttendanceRows[index] };
+        const stamp = new Date().toISOString();
+        browserAttendanceRows[index] = {
+            ...oldRow, clockOutAt: stamp, clockOutTillId: tillId, status: 'closed',
+            updatedByEmployeeId: normalizedActorId, updatedAt: stamp,
+        };
+        notifyAttendanceChanged();
+        return browserAttendanceRow(browserAttendanceRows[index]);
+    }
+
+    const oldRow = isMultiMode()
+        ? await requireOnlineAttendanceWrites(normalizedEmployeeId)
+        : await getOpenEmployeeAttendance(normalizedEmployeeId);
+    if (!oldRow) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    if (!attendanceOpenSessionMatches(normalizedExpectedId, oldRow.id)) {
+        throw new Error('ATTENDANCE_SESSION_CHANGED');
+    }
+    let row: EmployeeAttendance;
+    if (isMultiMode()) {
+        row = await withTimeout(
+            mysql.mysqlCloseOpenEmployeeAttendance(oldRow.id, normalizedEmployeeId, tillId, normalizedActorId),
+            7_000,
+            'Attendance clock-out timed out',
+        );
+        const nextOpen = await mysql.mysqlGetOpenEmployeeAttendance(normalizedEmployeeId).catch(() => null);
+        await reconcileAttendanceCacheWithoutFailingRemoteAction(normalizedEmployeeId, nextOpen);
+    } else {
+        row = await sqlite.closeOpenEmployeeAttendance(
+            normalizedEmployeeId, tillId, normalizedActorId, new Date().toISOString(),
+        );
+    }
+    await auditAttendanceChange('attendance_clocked_out', row, oldRow, normalizedActorId);
+    notifyAttendanceChanged();
+    return row;
+}
+
+export async function saveClosedEmployeeAttendance(
+    input: EmployeeAttendance,
+    actorEmployeeId: string,
+): Promise<EmployeeAttendance> {
+    validateClosedAttendance(input.clockInAt, input.clockOutAt);
+    const employeeId = String(input.employeeId || '').trim();
+    if (!employeeId) throw new Error('Choose a staff member');
+    const actorId = String(actorEmployeeId || '').trim();
+    if (!actorId) throw new Error('A signed-in manager is required');
+    const notes = String(input.notes || '').trim();
+    if (notes.length > 500) throw new Error('Attendance notes cannot exceed 500 characters');
+    const expectedUpdatedAt = String(input.updatedAt || '').trim();
+    let oldRow: EmployeeAttendance | null;
+    if (isTauri() && isMultiMode()) {
+        await requireAuthoritativeAttendanceActor(employeeId, actorId, 'manage');
+        await requireOnlineAttendanceWrites(employeeId);
+        oldRow = await withTimeout(
+            mysql.mysqlGetEmployeeAttendanceById(input.id),
+            5_000,
+            'Live attendance record lookup timed out',
+        );
+        if (oldRow?.status === 'open') {
+            throw new Error('Clock out this employee before correcting the attendance record');
+        }
+        if (expectedUpdatedAt) {
+            if (!oldRow || !attendanceCorrectionVersionMatches(expectedUpdatedAt, oldRow.updatedAt)) {
+                throw new Error(
+                    `${ATTENDANCE_CORRECTION_CONFLICT_CODE}: ${ATTENDANCE_CORRECTION_CONFLICT_MESSAGE}`,
+                );
+            }
+        } else if (oldRow) {
+            // A manual record is insert-only. Treat an unexpected ID match as
+            // a conflict rather than converting it into an unversioned update.
+            throw new Error(
+                `${ATTENDANCE_CORRECTION_CONFLICT_CODE}: ${ATTENDANCE_CORRECTION_CONFLICT_MESSAGE}`,
+            );
+        }
+    } else if (isTauri()) {
+        oldRow = await (async () => {
+            const d = await sqlite.getDb();
+            const rows = await d.select<EmployeeAttendance[]>(
+                `SELECT * FROM employee_attendance WHERE id = ? LIMIT 1`,
+                [input.id],
+            );
+            return rows[0] || null;
+        })();
+    } else {
+        oldRow = browserAttendanceRows.find((row) => row.id === input.id) || null;
+    }
+    if (oldRow?.status === 'open') {
+        throw new Error('Clock out this employee before correcting the attendance record');
+    }
+    const stamp = new Date().toISOString();
+    const candidate: EmployeeAttendance = {
+        id: input.id || crypto.randomUUID(), employeeId,
+        clockInAt: input.clockInAt, clockOutAt: input.clockOutAt,
+        clockInTillId: String(input.clockInTillId || ''),
+        clockOutTillId: String(input.clockOutTillId || ''),
+        status: 'closed', notes,
+        createdByEmployeeId: oldRow?.createdByEmployeeId || actorId,
+        updatedByEmployeeId: actorId,
+        createdAt: oldRow?.createdAt || stamp,
+        updatedAt: stamp,
+    };
+    let row: EmployeeAttendance;
+    if (!isTauri()) {
+        const index = browserAttendanceRows.findIndex((entry) => entry.id === candidate.id);
+        if (index >= 0) browserAttendanceRows[index] = candidate;
+        else browserAttendanceRows.push(candidate);
+        row = browserAttendanceRow(candidate);
+    } else if (isMultiMode()) {
+        try {
+            row = await withTimeout(
+                mysql.mysqlSaveClosedEmployeeAttendance(candidate, expectedUpdatedAt),
+                7_000,
+                'Attendance correction timed out',
+            );
+        } catch (error) {
+            if (String(error).includes(ATTENDANCE_CORRECTION_CONFLICT_CODE)) {
+                throw new Error(
+                    `${ATTENDANCE_CORRECTION_CONFLICT_CODE}: ${ATTENDANCE_CORRECTION_CONFLICT_MESSAGE}`,
+                );
+            }
+            throw error;
+        }
+        try {
+            await sqlite.upsert('employee_attendance', row, 'id');
+        } catch (error) {
+            console.warn('database: attendance correction succeeded in MariaDB but its local cache update failed:', error);
+        }
+    } else {
+        await sqlite.upsert('employee_attendance', candidate, 'id');
+        const d = await sqlite.getDb();
+        const rows = await d.select<EmployeeAttendance[]>(
+            `SELECT * FROM employee_attendance WHERE id = ? LIMIT 1`,
+            [candidate.id],
+        );
+        row = rows[0];
+    }
+    await auditAttendanceChange(
+        oldRow ? 'attendance_corrected' : 'attendance_manual_record_added',
+        row,
+        oldRow,
+        actorId,
+    );
+    notifyAttendanceChanged();
+    return row;
+}
+
 export async function findOpenShiftId(employeeId: string, registerId: string): Promise<string | null> {
     const d = await sqlite.getDb();
     const existing: any[] = await d.select(
@@ -5828,6 +8283,11 @@ export async function retireOpenShiftsBefore(employeeId: string, registerId: str
 }
 
 export async function ensureOpenShift(employeeId: string, registerId: string, openingFloat = 0): Promise<string> {
+    assertCheckoutDeviceMode('Opening a till shift');
+    const employee = get(employeesDB).find((candidate) => candidate.id === employeeId);
+    if (!isPosShiftEligibleEmployee(employee)) {
+        throw new Error('This staff account is not allowed to open a POS till shift');
+    }
     const existingShift = await findOpenShiftForRegister(registerId);
     const existingId = existingShift?.id || null;
     if (existingId) {
@@ -5869,11 +8329,10 @@ export async function ensureOpenShift(employeeId: string, registerId: string, op
 async function closeShiftLocalFirstAfterClosePreflight(shift: any): Promise<void> {
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const stamped = { ...shift, updatedAt: shift.updatedAt || new Date().toISOString() };
-    await sqlite.upsert('shifts', stamped);
+    await persistLocalChanges([{ table: 'shifts', data: stamped }], serverDataEpoch);
     shiftsDB.update(list => list.map(existing => existing.id === stamped.id ? stamped : existing));
 
     if (!isMultiMode()) return;
-    await queueOffline('shifts', 'upsert', stamped, 'id', serverDataEpoch);
     void flushOfflineQueue().catch((error) => {
         console.warn('database: shift close outbox flush failed:', error);
         connectionState.update(state => ({ ...state, mysqlOnline: false, syncError: String(error) }));
@@ -6256,7 +8715,7 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
     promo_group_items: ['id', 'groupId', 'productId', 'updatedAt'],
     orders: ['id', 'orderNumber', 'receiptKey', 'shiftId', 'employeeId', 'taxTotal', 'total', 'tillNumber', 'updatedAt'],
     order_lines: ['id', 'orderId', 'productId', 'costPrice', 'taxRate', 'taxAmount', 'lineTotal', 'updatedAt'],
-    payments: ['id', 'orderId', 'amount', 'cashAmount', 'cardAmount', 'loyaltyAmount', 'accountAmount', 'updatedAt'],
+    payments: ['id', 'orderId', 'amount', 'cashAmount', 'cardAmount', 'loyaltyAmount', 'accountAmount', 'tipsAmount', 'serviceChargeAmount', 'cashbackAmount', 'updatedAt'],
     customers: ['id', 'name', 'postcode', 'loyaltyCode', 'loyaltyPoints', 'updatedAt'],
     customer_accounts: ['id', 'customerId', 'isEnabled', 'creditLimitPence', 'balancePence', 'createdAt', 'updatedAt'],
     customer_account_entries: [
@@ -6264,6 +8723,7 @@ const CRITICAL_SCHEMA: Record<string, string[]> = {
         'paymentMethod', 'reference', 'description', 'receiptNumber', 'receiptKey',
         'employeeId', 'tillNumber', 'shiftId', 'idempotencyKey', 'reversesEntryId',
         'balanceAfterPence', 'createdAt', 'updatedAt',
+        'tipsAmount', 'serviceChargeAmount', 'cashbackAmount',
     ],
     daily_sales_summary: [
         'date', 'tillNumber', 'cashTotal', 'cardTotal', 'accountTotal',
@@ -6500,8 +8960,8 @@ export async function validateDatabaseSchemas(): Promise<SchemaValidationResult>
         const local = await sqlite.getDb();
         const versionRows: any[] = await local.select(`PRAGMA user_version`);
         const localSchemaVersion = Number(versionRows[0]?.user_version || 0);
-        if (localSchemaVersion !== 1) {
-            issues.push(`SQLite: schema version is ${localSchemaVersion}; expected 1`);
+        if (localSchemaVersion !== 2) {
+            issues.push(`SQLite: schema version is ${localSchemaVersion}; expected 2`);
         }
         for (const [table, expected] of Object.entries({
             ...CRITICAL_SCHEMA,
@@ -6730,11 +9190,24 @@ export async function validateDatabaseSchemas(): Promise<SchemaValidationResult>
     };
 }
 
+async function completeLocalControlledImport(): Promise<void> {
+    await sqlite.upsert('settings', {
+        key: 'bootstrap_uploaded',
+        value: '1',
+        updatedAt: new Date().toISOString(),
+    }, 'key');
+    await forceFullSync();
+}
+
 /** Explicit, guarded local-to-multi migration. Refuses to merge into a populated server. */
 export async function migrateLocalDataToServer(): Promise<void> {
     if (!isMultiMode()) throw new Error('Connect to MariaDB multi-till mode first');
     const remote = await getMysqlDb();
     if (!remote) throw new Error('MariaDB is unavailable');
+    if (await completeRecoveredControlledImport(
+        () => recoverCompletedControlledImportIfOwned(remote),
+        completeLocalControlledImport,
+    )) return;
     await ensureDatabaseIdentityForSync();
     const counts: any[] = await remote.select(
         `SELECT (SELECT COUNT(*) FROM products) AS products,
@@ -6743,25 +9216,17 @@ export async function migrateLocalDataToServer(): Promise<void> {
                 (SELECT COUNT(*) FROM customers) AS customers`
     );
     const c = counts[0] || {};
-    if (Number(c.products) > 0 || Number(c.categories) > 0 || Number(c.orders) > 0
-        || Number(c.customers) > 0) {
+    if ((Number(c.products) > 0 || Number(c.categories) > 0 || Number(c.orders) > 0
+        || Number(c.customers) > 0)) {
         throw new Error('Migration stopped: MariaDB already contains shop data');
     }
     const validation = await validateDatabaseSchemas();
     if (!validation.ok) throw new Error(validation.issues.join('; '));
     const localDb = await sqlite.getDb();
     await validateLocalDataForRestore(localDb);
-    await forcePushTables(localDb);
-    await verifyProductUploadCount(localDb);
-    await verifyPushedTableCounts(localDb, { exact: true, label: 'Migration upload verification' });
-    await publishServerDataEpoch(localDb);
-    await mysql.mysqlUpsert('settings', { key: 'bootstrap_done', value: '1' }, 'key');
-    await sqlite.upsert('settings', {
-        key: 'bootstrap_uploaded',
-        value: '1',
-        updatedAt: new Date().toISOString(),
-    }, 'key');
-    await forceFullSync();
+    await forcePushTables(localDb, 'controlled-import');
+    // Atomic native import already performed exact in-transaction counts.
+    await completeLocalControlledImport();
 }
 
 async function ensureCurrentRegisterOnServer(remote: any, localDb: any): Promise<void> {
@@ -6798,6 +9263,7 @@ async function clearLocalSyncMarkers(localDb: any): Promise<void> {
 }
 
 const LOCAL_CACHE_RESET_TABLES = [
+    'employee_attendance',
     'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
     'employees', 'customers', 'customer_accounts', 'customer_account_entries', 'registers',
@@ -7045,14 +9511,6 @@ export async function replaceMariaDbDataFromThisTill(): Promise<void> {
         if (!validation.ok) throw new Error(validation.issues.join('; '));
 
         const localDb = await sqlite.getDb();
-        const localCounts: any[] = await localDb.select(
-            `SELECT (SELECT COUNT(*) FROM products) AS products,
-                    (SELECT COUNT(*) FROM categories) AS categories,
-                    (SELECT COUNT(*) FROM customers) AS customers`
-        );
-        if (Number(localCounts[0]?.products || 0) === 0) {
-            throw new Error('This till has no restored products to upload');
-        }
         await validateLocalDataForRestore(localDb);
 
         const tillId = await sqlite.getOrCreateTillId();
@@ -7112,29 +9570,99 @@ export async function getNextOrderNumber(): Promise<number> {
 }
 
 export async function getTillPeriodReport(
-    tillNumber: string, startTime: string, endTime: string
-) {
+    tillNumber: string,
+    startTime: string,
+    endTime: string,
+    options: PeriodReportReadOptions = {},
+): Promise<sqlite.TillPeriodReport> {
     if (!isTauri()) {
         const snapshot = getBrowserReportSnapshotForPeriod(startTime, endTime, 'quantity', 10, tillNumber);
         return {
             overview: snapshot.overview,
             breakdown: snapshot.breakdown,
             topProducts: snapshot.topProducts,
+            tillSummaries: tillNumber
+                ? snapshot.tillSummaries.filter((summary) => summary.id === tillNumber)
+                : snapshot.tillSummaries,
+            source: 'browser',
         };
     }
     if (isMultiMode()) {
         try {
             const pendingBeforeFlush = await pendingReportWriteCount();
-            if (pendingBeforeFlush > 0) await flushOfflineQueue();
-            if (await pendingReportWriteCount() === 0) {
-                const mysqlDb = await getMysqlDb();
-                if (mysqlDb) return mysql.mysqlGetTillPeriodReport(tillNumber, startTime, endTime);
+            if (pendingBeforeFlush > 0) {
+                await withTimeout(
+                    flushOfflineQueue(),
+                    2_500,
+                    'Pending report sync did not finish in time',
+                );
             }
+            const pendingAfterFlush = await pendingReportWriteCount();
+            if (pendingAfterFlush === 0) {
+                const mysqlDb = await withTimeout(
+                    getMysqlDb(),
+                    2_500,
+                    'MariaDB Z-report connection timed out',
+                );
+                if (mysqlDb) {
+                    const report = await withTimeout(
+                        mysql.mysqlGetTillPeriodReport(tillNumber, startTime, endTime),
+                        10_000,
+                        'MariaDB Z-report queries timed out',
+                    );
+                    if (options.requireAuthoritative) {
+                        const missingOrders = await withTimeout(
+                            missingRemoteReportOrderCountBetween(startTime, endTime, tillNumber),
+                            3_000,
+                            'MariaDB Z-report consistency check timed out',
+                        );
+                        if (missingOrders > 0) {
+                            throw new Error(
+                                `MariaDB is missing ${missingOrders} local transaction${missingOrders === 1 ? '' : 's'}`,
+                            );
+                        }
+                    }
+                    return { ...report, source: 'mariadb' };
+                }
+            }
+            if (options.requireAuthoritative) {
+                throw new Error(
+                    pendingAfterFlush > 0
+                        ? `${pendingAfterFlush} report-contributing local change${pendingAfterFlush === 1 ? '' : 's'} must synchronize first`
+                        : 'MariaDB did not provide a live Z-report connection',
+                );
+            }
+            if (pendingAfterFlush > 0) {
+                const local = await sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+                return {
+                    ...local,
+                    source: 'sqlite',
+                    warning: `${pendingAfterFlush} report-contributing local change${pendingAfterFlush === 1 ? ' is' : 's are'} waiting to sync, so this is a local preview and cannot close a period.`,
+                };
+            }
+            const local = await sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+            return {
+                ...local,
+                source: 'sqlite',
+                warning: 'MariaDB did not provide a live connection, so this is a local preview and cannot close a period.',
+            };
         } catch (e) {
+            if (options.requireAuthoritative) {
+                throw new Error(
+                    `A closable Z report requires authoritative MariaDB totals: ${String(e)}`,
+                );
+            }
             console.warn('database: live till report failed, using local SQLite:', e);
+            const local = await sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+            return {
+                ...local,
+                source: 'sqlite',
+                warning: `MariaDB could not provide this preview (${String(e)}), so it is showing local SQLite. This preview cannot close a period.`,
+            };
         }
     }
-    return sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+    const local = await sqlite.getTillPeriodReport(tillNumber, startTime, endTime);
+    return { ...local, source: 'sqlite' };
 }
 
 // ─── Svelte Store Hydration ─────────────────────────────────────────────────
@@ -7161,6 +9689,27 @@ function withCustomerAccountSummaries(customers: any[], accounts: CustomerAccoun
             accountBalancePence: account?.balancePence || 0,
         };
     });
+}
+
+function normalizeHydratedEmployees(rows: any[]): Employee[] {
+    const normalized: Employee[] = [];
+    for (const row of rows) {
+        const hydrated = sqlite.rehydrateBooleans(row, ['isActive']) as Employee;
+        const candidate = normalizeEmployeeForManagement(hydrated);
+        if (candidate) {
+            normalized.push(candidate);
+            if (candidate.roleNeedsRepair || candidate.pinNeedsReset) {
+                console.warn(
+                    `database: employee ${String(row?.id || '(missing id)')} requires a role or PIN repair before sign-in`,
+                );
+            }
+        } else {
+            console.warn(
+                `database: ignored malformed employee row ${String(row?.id || '(missing id)')}`,
+            );
+        }
+    }
+    return normalized;
 }
 
 /**
@@ -7235,7 +9784,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
             'isActive', 'isAgeRestricted', 'isWeighable', 'showInGoods', 'trackStock'
         ])));
         taxRatesDB.set(taxRates.map(t => sqlite.rehydrateBooleans(t, ['isDefault'])));
-        employeesDB.set(emps.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
+        employeesDB.set(normalizeHydratedEmployees(emps));
         settingsDB.set(settings);
         hydrateTheme(settings);
         const normalizedAccounts = customerAccounts.map((account) =>
@@ -7287,7 +9836,7 @@ export async function hydrateSvelteStores(tables?: Iterable<string>): Promise<vo
     }
     if (shouldHydrate('employees')) {
         const rows = await sqlite.getAll('employees');
-        employeesDB.set(rows.map(e => sqlite.rehydrateBooleans(e, ['isActive'])));
+        employeesDB.set(normalizeHydratedEmployees(rows));
     }
     if (shouldHydrate('settings')) {
         const rows = await sqlite.getAll('settings');
@@ -7576,7 +10125,7 @@ async function runHeartbeat(): Promise<void> {
 /** Tables that should appear on other tills quickly without keeping weak tills busy at idle. */
 const FAST_SYNC_TABLES = [
     'app_identity',
-    'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements',
+    'orders', 'order_lines', 'payments', 'inventory_logs', 'shifts', 'cash_movements', 'employee_attendance',
     'customers', 'loyalty_logs', 'customer_accounts', 'customer_account_entries',
     'till_report_markers', 'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
 ];
@@ -7590,7 +10139,7 @@ const ALL_SYNC_TABLES = [
     'app_identity',
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'customer_accounts',
+    'employees', 'employee_attendance', 'settings', 'customers', 'customer_accounts',
     'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
@@ -7605,6 +10154,15 @@ function notifyPosHeldOrdersChanged(changedTables: Set<string>, removed = 0): vo
     if (removed > 0 || changedTables.has('orders') || changedTables.has('order_lines')) {
         window.dispatchEvent(new Event(POS_HELD_ORDERS_CHANGED_EVENT));
     }
+}
+
+function notifySyncedTableChanges(changedTables: Set<string>, removed = 0): void {
+    if (typeof window !== 'undefined' && (removed > 0 ||
+        ['customers', 'customer_accounts', 'customer_account_entries', 'loyalty_logs'].some(table => changedTables.has(table)))) {
+        window.dispatchEvent(new CustomEvent(POS_CUSTOMERS_CHANGED_EVENT));
+    }
+    notifyPosHeldOrdersChanged(changedTables, removed);
+    if (syncedTablesIncludeAttendance(changedTables)) notifyAttendanceChanged();
 }
 
 function overlapWatermark(since: string | null): string | null {
@@ -7646,7 +10204,7 @@ async function filterPendingLocalUpserts(table: string, rows: any[], idKey = 'id
     const d = await sqlite.getDb();
     const pendingRows: any[] = await d.select(
         `SELECT data, id_key FROM _offline_queue
-         WHERE table_name = ? AND operation = 'upsert'`,
+         WHERE table_name = ? AND operation IN ('upsert', 'adjustStock')`,
         [table],
     );
     if (pendingRows.length === 0) return rows;
@@ -7728,8 +10286,7 @@ async function applyRemoteSyncRows(
     }
     const rows = await filterRowsNeedingLocalUpsert(table, visibleRows, idKey);
     if (rows.length > 0) {
-        await sqlite.bulkUpsert(table, rows, idKey);
-        changes += rows.length;
+        changes += await sqlite.bulkUpsert(table, rows, idKey, true);
     }
     return changes;
 }
@@ -7845,17 +10402,65 @@ async function syncChangedTables(tableNames: Iterable<string>): Promise<{
     if (totalChanges > 0 || removed > 0 || transactionPurged) {
         await hydrateSvelteStores((removed > 0 || transactionPurged) ? undefined : changedTables);
     }
-    notifyPosHeldOrdersChanged(changedTables, removed);
+    notifySyncedTableChanges(changedTables, removed);
     return { allSucceeded, transactionPurged };
+}
+
+async function verifyOneSyncPage(): Promise<void> {
+    const remote = await getMysqlDb();
+    if (!remote) throw new Error('MariaDB is unavailable');
+    await ensureDatabaseIdentityForSync();
+    if (await resetLocalCacheIfServerEpochChanged(remote)) {
+        const result = await syncChangedTables([...ALL_SYNC_TABLES, 'tombstones']);
+        if (!result.allSucceeded) throw new Error('The restored database baseline is still downloading');
+        return;
+    }
+    // Short financial tables first; catalogue pages remain bounded even on an
+    // inexpensive till. Persist progress so daily restarts cannot starve it.
+    const tables = ['tombstones', ...FAST_SYNC_TABLES,
+        ...ALL_SYNC_TABLES.filter(table => !FAST_SYNC_TABLES.includes(table))];
+    const d = await sqlite.getDb();
+    const saved: any[] = await d.select('SELECT value FROM settings WHERE key = ?', ['sync_reconcile_v1']);
+    const checkpoint = readReconciliationCheckpoint(saved[0]?.value, tables.length);
+    const changedTables = new Set<string>();
+    let removed = 0;
+    await reconcileVersionPage(checkpoint, tables, {
+        versions: mysql.mysqlGetVersionPage,
+        repair: async (table, versions) => {
+            const key = table === 'settings' ? 'key' : 'id';
+            const candidates = await filterRowsNeedingLocalUpsert(table,
+                versions.map(row => ({ [key]: row.rowId, updatedAt: row.updatedAt })), key);
+            const rows = await mysql.mysqlGetSyncRowsByIds(table, candidates.map(row => row[key]));
+            if (table === 'tombstones') {
+                // Reuse the normal deletion protections and atomic local batch.
+                removed += await applyTombstoneRows(rows);
+                return removed;
+            }
+            const changed = await applyRemoteSyncRows(table, rows, key);
+            if (changed) changedTables.add(table);
+            return changed;
+        },
+        checkpoint: async next => {
+            await sqlite.upsert('settings', { key: 'sync_reconcile_v1', value: JSON.stringify(next), updatedAt: new Date().toISOString() }, 'key');
+        },
+    });
+    if (changedTables.size || removed) {
+        await hydrateSvelteStores(removed ? undefined : changedTables);
+        notifySyncedTableChanges(changedTables, removed);
+    }
 }
 
 /** Poll one tiny MariaDB cursor, then pull only tables which actually changed. */
 export async function runChangeSyncCycle(): Promise<void> {
     if (!isMultiMode() || isChangeSyncRunning || isFastSyncRunning || isSyncRunning) return;
-    if (await pauseSyncIfRestorePending()) return;
+    // Acquire before the first await: all three entry points share these guards.
     isChangeSyncRunning = true;
+    let finishActivity: ReturnType<typeof beginSyncActivity> | null = null;
+    let activityError: string | null = null;
+    let activitySucceeded = false;
     let reloadAfterPurge = false;
     try {
+        if (await pauseSyncIfRestorePending()) return;
         // A previous poll may already have downloaded the marker before the
         // till lost connectivity or closed. Applying the local marker does not
         // require MariaDB to still be online.
@@ -7872,28 +10477,43 @@ export async function runChangeSyncCycle(): Promise<void> {
             const needsBaseline = localCursor === null || cursorExpired;
 
             if (needsBaseline) {
+                finishActivity = beginSyncActivity('change');
                 const baselineTables = new Set<string>([...ALL_SYNC_TABLES, 'tombstones']);
                 const result = await syncChangedTables(baselineTables);
                 if (result.allSucceeded) {
                     await writeLocalSyncChangeCursor(syncWindow.maxSeq);
                 }
+                if (!result.allSucceeded) activityError = 'Some changes could not be downloaded. The next cycle will retry.';
                 reloadAfterPurge = result.transactionPurged;
             } else if (syncWindow.changes.length > 0) {
+                finishActivity = beginSyncActivity('change');
                 const tables = new Set(syncWindow.changes.map(change => change.tableName));
                 const result = await syncChangedTables(tables);
                 if (result.allSucceeded) {
                     await writeLocalSyncChangeCursor(syncWindow.maxSeq);
                     connectionState.update(state => ({ ...state, mysqlOnline: true, syncError: null }));
                 }
+                if (!result.allSucceeded) activityError = 'Some changes could not be downloaded. The next cycle will retry.';
                 reloadAfterPurge = result.transactionPurged;
             }
         }
+        if (!reloadAfterPurge && get(connectionState).mysqlOnline) {
+            try { await verifyOneSyncPage(); }
+            catch (error) {
+                activityError = `Background verification will retry: ${String(error)}`;
+                console.warn(activityError);
+            }
+        }
+        activitySucceeded = get(connectionState).mysqlOnline && !activityError;
     } catch (error) {
+        activityError = String(error);
         console.warn('database: change-cursor sync failed:', error);
         resetRemoteConnections();
         connectionState.update(state => ({ ...state, mysqlOnline: false, syncError: String(error) }));
     } finally {
         isChangeSyncRunning = false;
+        if (finishActivity) finishActivity(activityError, activitySucceeded);
+        else recordSyncResult('change', activityError, activitySucceeded);
     }
     if (reloadAfterPurge && typeof window !== 'undefined') {
         window.location.reload();
@@ -7909,9 +10529,12 @@ export async function runChangeSyncCycle(): Promise<void> {
 export async function runFastSyncCycle(): Promise<void> {
     if (!isMultiMode() || isFastSyncRunning || isSyncRunning || isChangeSyncRunning) return;
     if (!get(connectionState).mysqlOnline) return;
-    if (await pauseSyncIfRestorePending()) return;
     isFastSyncRunning = true;
+    const finishActivity = beginSyncActivity('fast');
+    let activityError: string | null = null;
+    let activitySucceeded = false;
     try {
+        if (await pauseSyncIfRestorePending()) return;
         const wasOnline = get(connectionState).mysqlOnline;
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) {
@@ -7950,6 +10573,7 @@ export async function runFastSyncCycle(): Promise<void> {
                 successfulTables.add(table);
             } catch (e) {
                 // Leave this table's watermark untouched so we retry its rows next cycle.
+                activityError = 'Some tables could not be downloaded. The next cycle will retry.';
                 console.warn(`database: fast sync failed for ${table}:`, e);
             }
         }
@@ -7962,15 +10586,18 @@ export async function runFastSyncCycle(): Promise<void> {
             console.log(`database: fast sync found ${totalChanges} changes, rehydrating…`);
             await hydrateSvelteStores((removed > 0 || repairedPromotions > 0) ? undefined : changedTables);
         }
-        notifyPosHeldOrdersChanged(changedTables, removed);
+        notifySyncedTableChanges(changedTables, removed);
 
+        activitySucceeded = !activityError;
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
     } catch (e: any) {
+        activityError = String(e);
         console.warn('database: fast sync failed:', e);
         resetRemoteConnections();
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
     } finally {
         isFastSyncRunning = false;
+        finishActivity(activityError, activitySucceeded);
     }
 }
 
@@ -7992,12 +10619,15 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
         if (strict) throw new Error('MariaDB is offline');
         return;
     }
-    if (await pauseSyncIfRestorePending()) {
-        if (strict) throw new Error(RESTORE_PENDING_MARIADB_REPLACE_MESSAGE);
-        return;
-    }
     isSyncRunning = true;
+    const finishActivity = beginSyncActivity('full');
+    let activityError: string | null = null;
+    let activitySucceeded = false;
     try {
+        if (await pauseSyncIfRestorePending()) {
+            if (strict) throw new Error(RESTORE_PENDING_MARIADB_REPLACE_MESSAGE);
+            return;
+        }
         const mysqlDb = await getMysqlDb();
         if (!mysqlDb) {
             resetRemoteConnections();
@@ -8042,6 +10672,7 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
             }
         }
         await setTableWatermarks(successfulTables, newSyncTime);
+        if (pullFailures.length) activityError = 'Some tables could not be downloaded. The next cycle will retry.';
         if (strict && pullFailures.length > 0) {
             throw new Error(`Full MariaDB pull failed for ${pullFailures.join('; ')}`);
         }
@@ -8057,9 +10688,10 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
         if (totalChanges > 0 || removed > 0 || transactionPurged || repairedPromotions > 0) {
             await hydrateSvelteStores((removed > 0 || transactionPurged || repairedPromotions > 0) ? undefined : changedTables);
         }
-        notifyPosHeldOrdersChanged(changedTables, removed);
+        notifySyncedTableChanges(changedTables, removed);
 
-        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+        activitySucceeded = !activityError;
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: activityError }));
         console.log('database: full sync complete ✅');
         void mysql.mysqlPruneSyncChangeLog().catch(error => {
             console.warn('database: change-log pruning failed:', error);
@@ -8068,12 +10700,14 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
             window.location.reload();
         }
     } catch (e: any) {
+        activityError = String(e);
         console.warn('database: background sync failed:', e);
         resetRemoteConnections();
         connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
         if (strict) throw e;
     } finally {
         isSyncRunning = false;
+        finishActivity(activityError, activitySucceeded);
     }
 }
 
@@ -8305,9 +10939,15 @@ export async function forcePushToServer(): Promise<void> {
         const localDb = await sqlite.getDb();
         await validateLocalDataForRestore(localDb);
         // Reuse the shared push helper (skips device-local settings keys).
-        await forcePushTables(localDb);
+        // Repair pushes must not roll authorization or corrected attendance
+        // back to an older cache snapshot. Those rows remain server-owned.
+        await forcePushTables(localDb, 'preserve-remote');
         await verifyProductUploadCount(localDb);
-        await verifyPushedTableCounts(localDb, { exact: false, label: 'Force push verification' });
+        await verifyPushedTableCounts(localDb, {
+            exact: false,
+            label: 'Force push verification',
+            skipTables: new Set(PUSH_TABLES.filter(table => bulkPushTableAction(table, 'preserve-remote') === 'skip')),
+        });
         console.log('database: Force push complete.');
     } catch (e) {
         console.error('database: force push failed:', e);
@@ -8340,6 +10980,7 @@ export async function wipeAndPullFromServer(): Promise<void> {
 
         // Wipe local tables
         const tablesToWipe = [
+            'employee_attendance',
             'categories', 'products', 'product_images', 'pos_pages', 'pos_tiles',
             'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
             'employees', 'customers', 'customer_accounts', 'customer_account_entries', 'registers',

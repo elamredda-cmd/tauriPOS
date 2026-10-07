@@ -351,55 +351,57 @@
 
         {#if activePageId}
             <section class="tile-grid-workspace" aria-label="POS tile positions">
-                <div class="tile-grid">
-                    {#each displayTiles as slot, index}
-                        {@const absolutePos = currentPageIndex * POS_TILES_PER_PAGE + index + 1}
-                        {#if slot}
-                            <button
-                                type="button"
-                                class="product-tile"
-                                class:missing={!slot.product}
-                                disabled={tileProductsLoading && !slot.product}
-                                style="--product-color: {slot.product?.color || '#3b82f6'}"
-                                aria-label={slot.product
-                                    ? `Edit position ${absolutePos}, ${slot.product.name}`
-                                    : tileProductsLoading
-                                        ? `Loading item in position ${absolutePos}`
-                                        : `Remove unavailable item from position ${absolutePos}`}
-                                on:click={() => handleAssignedTileClick(slot.tile)}
-                            >
-                                {#if slot.product}
-                                    {#if slot.product.image}
-                                        <img src={slot.product.image} alt="" />
+                <div class="tile-grid-stage">
+                    <div class="tile-grid">
+                        {#each displayTiles as slot, index}
+                            {@const absolutePos = currentPageIndex * POS_TILES_PER_PAGE + index + 1}
+                            {#if slot}
+                                <button
+                                    type="button"
+                                    class="product-tile"
+                                    class:missing={!slot.product}
+                                    disabled={tileProductsLoading && !slot.product}
+                                    style="--product-color: {slot.product?.color || '#3b82f6'}"
+                                    aria-label={slot.product
+                                        ? `Edit position ${absolutePos}, ${slot.product.name}`
+                                        : tileProductsLoading
+                                            ? `Loading item in position ${absolutePos}`
+                                            : `Remove unavailable item from position ${absolutePos}`}
+                                    on:click={() => handleAssignedTileClick(slot.tile)}
+                                >
+                                    {#if slot.product}
+                                        {#if slot.product.image}
+                                            <img src={slot.product.image} alt="" />
+                                        {/if}
+                                        <span class="tile-shade" aria-hidden="true"></span>
+                                        <span class="tile-position">{absolutePos}</span>
+                                        <span class="tile-caption">
+                                            <strong>{slot.product.name}</strong>
+                                            <b>{formatMoney(slot.product.price)}</b>
+                                        </span>
+                                    {:else if tileProductsLoading}
+                                        <span class="tile-loading-spinner" aria-hidden="true"></span>
+                                        <strong>Loading item</strong>
+                                        <span>Position {absolutePos}</span>
+                                    {:else}
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                            <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+                                            <path d="M12 9v4"></path><path d="M12 17h.01"></path>
+                                        </svg>
+                                        <strong>Item unavailable</strong>
+                                        <span>Position {absolutePos}</span>
                                     {/if}
-                                    <span class="tile-shade" aria-hidden="true"></span>
-                                    <span class="tile-position">{absolutePos}</span>
-                                    <span class="tile-caption">
-                                        <strong>{slot.product.name}</strong>
-                                        <b>{formatMoney(slot.product.price)}</b>
-                                    </span>
-                                {:else if tileProductsLoading}
-                                    <span class="tile-loading-spinner" aria-hidden="true"></span>
-                                    <strong>Loading item</strong>
-                                    <span>Position {absolutePos}</span>
-                                {:else}
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
-                                        <path d="M12 9v4"></path><path d="M12 17h.01"></path>
+                                </button>
+                            {:else}
+                                <button type="button" class="empty-tile" aria-label={`Add product to position ${absolutePos}`} on:click={() => handleEmptyTileClick(absolutePos)}>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                                        <path d="M12 5v14"></path><path d="M5 12h14"></path>
                                     </svg>
-                                    <strong>Item unavailable</strong>
                                     <span>Position {absolutePos}</span>
-                                {/if}
-                            </button>
-                        {:else}
-                            <button type="button" class="empty-tile" aria-label={`Add product to position ${absolutePos}`} on:click={() => handleEmptyTileClick(absolutePos)}>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                                    <path d="M12 5v14"></path><path d="M5 12h14"></path>
-                                </svg>
-                                <span>Position {absolutePos}</span>
-                            </button>
-                        {/if}
-                    {/each}
+                                </button>
+                            {/if}
+                        {/each}
+                    </div>
                 </div>
 
                 <footer class="grid-pagination">
@@ -561,22 +563,33 @@
     .pos-page-tab.active .page-select { color: var(--text-main); background: color-mix(in srgb, var(--accent-primary) 10%, transparent); }
     .page-select i { width: .7rem; height: .7rem; flex: 0 0 auto; border-radius: 50%; }
     .page-select span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .page-edit { width: 42px; display: grid; place-items: center; border-left: 1px solid var(--border-flat); background: var(--bg-panel); color: var(--text-muted); }
+    .page-edit { width: 44px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border-left: 1px solid var(--border-flat); background: var(--bg-panel); color: var(--text-muted); }
     .page-edit:hover { color: var(--accent-primary); background: var(--bg-card-hover); }
     .page-edit svg, .add-pos-page svg { width: 19px; height: 19px; }
     .add-pos-page { height: 46px; padding: 0 .85rem; display: flex; align-items: center; gap: .45rem; border: 1px dashed var(--border-flat); border-radius: .45rem; background: transparent; color: var(--accent-primary); font-weight: 850; white-space: nowrap; }
     .add-pos-page:hover { border-color: var(--accent-primary); background: var(--bg-card); }
     .tile-grid-workspace { flex: 1; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) 48px; gap: .65rem; }
-    .tile-grid { min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .55rem; }
+    .tile-grid-stage { min-width: 0; min-height: 0; container-type: size; display: grid; place-items: center; }
+    .tile-grid { min-width: 0; min-height: 0; width: 100%; height: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: .55rem; }
+    @supports (width: 1cqw) {
+        /* Reserve the same horizontal space as checkout's fixed trolley. This
+           makes the preview follow the live tile shape as a till gets taller. */
+        @media (min-width: 721px) and (max-width: 899px) {
+            .tile-grid { width: min(100cqw, calc(100vw - 330px)); height: 100cqh; }
+        }
+        @media (min-width: 900px) and (max-width: 1180px) {
+            .tile-grid { width: min(100cqw, calc(100vw - 388px)); height: 100cqh; }
+        }
+    }
     .product-tile, .empty-tile { position: relative; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-flat); border-radius: .45rem; }
     .product-tile { background: var(--product-color); color: white; text-align: left; }
     .product-tile:hover { border-color: var(--accent-primary); }
     .product-tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: white; }
     .tile-shade { position: absolute; inset: 0; background: linear-gradient(to top, rgba(0,0,0,.88), rgba(0,0,0,.12) 68%); }
-    .tile-position { position: absolute; top: .4rem; left: .4rem; min-width: 1.5rem; height: 1.5rem; padding: 0 .35rem; display: grid; place-items: center; border-radius: .3rem; background: rgba(0,0,0,.58); color: white; font-size: .68rem; font-weight: 900; }
-    .tile-caption { position: absolute; left: .55rem; right: .55rem; bottom: .5rem; display: flex; align-items: end; justify-content: space-between; gap: .45rem; }
-    .tile-caption strong { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; font-size: .92rem; line-height: 1.05; text-shadow: 0 1px 2px #000; }
-    .tile-caption b { flex: 0 0 auto; padding: .25rem .4rem; border-radius: .25rem; background: var(--price-bg); color: var(--price-text); font-size: .78rem; }
+    .tile-position { position: absolute; top: .35rem; left: .35rem; min-width: 1.5rem; height: 1.5rem; padding: 0 .35rem; display: grid; place-items: center; border-radius: .3rem; background: rgba(0,0,0,.58); color: white; font-size: .68rem; font-weight: 900; }
+    .tile-caption { position: absolute; left: .4rem; right: .4rem; bottom: .4rem; display: flex; align-items: end; justify-content: space-between; gap: .25rem; }
+    .tile-caption strong { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; font-size: .82rem; line-height: 1.05; text-shadow: 0 1px 2px #000; }
+    .tile-caption b { flex: 0 0 auto; padding: .22rem .32rem; border-radius: .25rem; background: var(--price-bg); color: var(--price-text); font-size: .72rem; white-space: nowrap; }
     .product-tile.missing { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .3rem; background: color-mix(in srgb, var(--danger) 9%, var(--bg-card)); color: var(--danger); text-align: center; }
     .product-tile.missing svg { width: 28px; height: 28px; }
     .product-tile.missing span { color: var(--text-muted); font-size: .72rem; }
@@ -586,8 +599,8 @@
     .empty-tile:hover { border-color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 7%, transparent); color: var(--accent-primary); }
     .empty-tile svg { width: 27px; height: 27px; }
     .empty-tile span { font-size: .72rem; font-weight: 800; }
-    .grid-pagination { min-height: 48px; padding: .25rem .4rem; display: grid; grid-template-columns: 42px minmax(0,1fr) 42px; align-items: center; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
-    .grid-pagination button { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); color: var(--text-main); }
+    .grid-pagination { min-height: 48px; padding: .1rem .25rem; display: grid; grid-template-columns: 44px minmax(0,1fr) 44px; align-items: center; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); }
+    .grid-pagination button { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); color: var(--text-main); }
     .grid-pagination button:last-child { justify-self: end; }
     .grid-pagination button:disabled { opacity: .3; cursor: not-allowed; }
     .grid-pagination svg { width: 21px; height: 21px; }
@@ -603,7 +616,7 @@
     .designer-dialog > input { min-height: 48px; padding: 0 .8rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-main); }
     .designer-dialog footer { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .25rem; }
     .delete-page-button { margin-right: auto; }
-    .dialog-close { width: 40px; height: 40px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
+    .dialog-close { width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); color: var(--text-muted); }
     .dialog-close svg { width: 20px; height: 20px; }
     .product-picker { width: min(680px, 95vw); height: min(650px, 90vh); overflow: hidden; }
     .picker-find { font-size: .85rem; }
@@ -625,6 +638,19 @@
     .remove-product-summary i { width: 8px; height: 40px; border-radius: 2px; }
     .remove-product-summary div { min-width: 0; display: flex; flex-direction: column; }
     .remove-product-summary span { color: var(--text-muted); font-size: .78rem; }
-    @media (max-height: 680px) and (min-width: 721px) { .pos-page-tabs { min-height: 43px; } .pos-page-tab, .add-pos-page { height: 41px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 43px; } }
-    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid { grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } }
+    :where(.page-select, .page-edit, .add-pos-page, .product-tile, .empty-tile, .grid-pagination button, .dialog-close, .product-results button):focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
+        outline-offset: 2px;
+    }
+    :global(.back-office-route) .tile-designer-main { padding: 0 .7rem .7rem; }
+    :global(.back-office-route) .tile-grid { width: 100% !important; }
+    :global(.back-office-route) .tile-designer-page .pos-page-tabs { min-height: 40px !important; gap: .35rem; }
+    :global(.back-office-route) .tile-designer-page :where(.pos-page-tab, .add-pos-page) { height: 38px !important; min-height: 38px !important; }
+    :global(.back-office-route) .tile-designer-page .page-edit { width: 36px !important; min-width: 36px !important; min-height: 36px !important; }
+    :global(.back-office-route) .tile-grid-workspace { grid-template-rows: minmax(0, 1fr) 40px; gap: .45rem; }
+    :global(.back-office-route) .grid-pagination { min-height: 40px; grid-template-columns: 36px minmax(0, 1fr) 36px; }
+    :global(.back-office-route) .grid-pagination button { width: 34px; height: 34px; }
+    @media (max-height: 680px) and (min-width: 721px) { .pos-page-tabs { min-height: 44px; } .pos-page-tab, .add-pos-page { height: 44px; } .tile-grid-workspace { grid-template-rows: minmax(0,1fr) 48px; } }
+    @media (max-width: 900px) and (min-width: 721px) { .tile-caption strong { font-size: .72rem; } .tile-caption b { font-size: .68rem; } }
+    @media (max-width: 720px) { .tile-designer-page { overflow-y: auto; } .tile-designer-main { min-height: 720px; } .tile-grid-stage { container-type: normal; } .tile-grid { width: 100%; height: 100%; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-rows: repeat(8,minmax(96px,1fr)); } }
 </style>

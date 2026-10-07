@@ -17,7 +17,7 @@ jobs:
           - platform: "windows-latest" # Builds the Windows .exe/.msi
             args: ""
           - platform: "macos-latest" # Builds the macOS .dmg
-            args: "--target aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -36,6 +36,15 @@ jobs:
 
       - name: Install Frontend Dependencies
         run: npm ci
+
+      - name: Check frontend and native permissions
+        run: npm run check
+
+      - name: Test frontend
+        run: npx vitest run
+
+      - name: Test native payment and commerce logic
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --skip real_mariadb
 
       - name: Build Tauri Application
         uses: tauri-apps/tauri-action@v2

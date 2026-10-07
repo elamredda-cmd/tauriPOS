@@ -169,10 +169,19 @@
             return;
         }
         const rect = target.getBoundingClientRect();
+        const panelRect = document.querySelector<HTMLElement>(".touch-input-panel")?.getBoundingClientRect();
+        const viewportGutter = 8;
+        const previewWidth = Math.min(rect.width, Math.max(1, window.innerWidth - viewportGutter * 2));
+        const maxLeft = Math.max(viewportGutter, window.innerWidth - previewWidth - viewportGutter);
+        const maxTop = panelRect
+            ? Math.max(viewportGutter, panelRect.top - rect.height - 10)
+            : Math.max(viewportGutter, window.innerHeight - rect.height - viewportGutter);
+        const previewLeft = Math.min(Math.max(viewportGutter, rect.left), maxLeft);
+        const previewTop = Math.min(Math.max(viewportGutter, rect.top), maxTop);
         targetRectStyle = [
-            `left:${Math.max(8, rect.left)}px`,
-            `top:${Math.max(8, rect.top)}px`,
-            `width:${rect.width}px`,
+            `left:${previewLeft}px`,
+            `top:${previewTop}px`,
+            `width:${previewWidth}px`,
             `height:${rect.height}px`,
         ].join(";");
     }
@@ -193,7 +202,15 @@
     }
 
     onMount(() => {
-        const handlePointer = (event: PointerEvent) => { lastPointerTarget = event.target as Element | null; };
+        const handlePointer = (event: PointerEvent) => {
+            lastPointerTarget = event.target as Element | null;
+            // Done keeps the field focused. A second tap therefore has no
+            // focusin event, but must still reopen its automatic touch pad.
+            if (!visible && event.button === 0 && lastPointerTarget === document.activeElement
+                && canUseTouchInput(lastPointerTarget) && lastPointerTarget.dataset.touchKeyboard !== 'button') {
+                openFor(lastPointerTarget);
+            }
+        };
         const handleClose = () => done();
         const handleInput = (event: Event) => {
             const activeTarget = target;
@@ -328,6 +345,10 @@
     .touch-input-keyboard-panel {
         width: min(1040px, calc(100% - 1rem));
         overflow: hidden;
+    }
+
+    .touch-input-lifted {
+        max-width: calc(100vw - 1rem);
     }
 
     .touch-input-numeric-panel {

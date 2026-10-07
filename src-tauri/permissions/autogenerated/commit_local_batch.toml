@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-commit-local-batch"
+description = "Enables the commit_local_batch command without any pre-configured scope."
+commands.allow = ["commit_local_batch"]
+
+[[permission]]
+identifier = "deny-commit-local-batch"
+description = "Denies the commit_local_batch command without any pre-configured scope."
+commands.deny = ["commit_local_batch"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-commit-till-report-close"
+description = "Enables the commit_till_report_close command without any pre-configured scope."
+commands.allow = ["commit_till_report_close"]
+
+[[permission]]
+identifier = "deny-commit-till-report-close"
+description = "Denies the commit_till_report_close command without any pre-configured scope."
+commands.deny = ["commit_till_report_close"]

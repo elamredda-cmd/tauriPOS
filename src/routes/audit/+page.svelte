@@ -265,14 +265,14 @@
                         onClear={clearSearch}
                     />
                 </div>
-                <button class="btn btn-primary search-toolbar-action" disabled={loading} on:click={runSearch}>
+                <button class="btn btn-primary search-toolbar-action audit-find-button" disabled={loading} on:click={runSearch}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg>
                     Find
                 </button>
-                <div class="field search-control search-filter">
+                <div class="field search-control search-filter audit-action-filter">
                     <CustomSelect label="Action" bind:value={actionFilter} options={actionOptions} />
                 </div>
-                <div class="field search-control search-filter">
+                <div class="field search-control search-filter audit-entity-filter">
                     <CustomSelect label="Record Type" bind:value={entityFilter} options={entityOptions} />
                 </div>
             </div>
@@ -534,6 +534,13 @@
         .audit-filter-heading { flex-direction: row; align-items: center; justify-content: space-between; gap: 1rem; }
         .audit-filter-heading small { text-align: right; }
         .audit-event-toggle { grid-template-columns: 10px minmax(150px, 1fr) minmax(90px, .35fr) auto 20px; gap: .5rem; }
+    }
+    @media (min-width: 721px) and (max-width: 900px) {
+        .audit-filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) 96px; align-items: end; gap: .5rem; }
+        .audit-filter-grid .search-primary { width: auto; min-width: 0; max-width: none; grid-column: 1 / 4; }
+        .audit-find-button { width: 96px; grid-column: 4; }
+        .audit-action-filter { width: auto; grid-column: 1 / 3; }
+        .audit-entity-filter { width: auto; grid-column: 3 / 5; }
     }
     @media (max-width: 720px) {
         .audit-page { padding: .55rem; gap: .65rem; }

@@ -7,6 +7,7 @@
     import { ChevronRight, Delete as DeleteIcon, LockKeyhole, Maximize2, Minimize2, ScanLine, ShieldAlert, ShieldCheck, UsersRound, X } from "@lucide/svelte";
     import { playErrorSound, playItemAddedSound, playScanSuccessSound, playSuccessSound } from "$lib/sounds";
     import { randomTileColor } from "$lib/tileColors";
+    import { planBanknotePayment } from '$lib/cashShortcuts';
     import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
     import {
         productsDB,
@@ -49,7 +50,11 @@
         type Payment,
         type Product,
     } from "$lib/stores/db";
-    import { toast, toasts } from "$lib/stores/toast";
+    import { toast, toasts, isBlockingToast, isScanDismissibleToast, dismissSaleCompletionOnScan } from "$lib/stores/toast";
+    import { CheckoutScannerBuffer } from "$lib/checkoutScanner";
+    import CheckoutCustomerForm from '$lib/components/CheckoutCustomerForm.svelte';
+    import CartDiscountSummary from '$lib/components/CartDiscountSummary.svelte';
+    import { newCheckoutCustomerDraft, registerCheckoutCustomer, type CheckoutCustomerDraft } from '$lib/checkoutCustomer';
     import {
         searchProduct,
         searchProductByScalePlu,
@@ -76,18 +81,28 @@
         getOrderDetails,
         getOrderReversalContext,
         claimHeldOrder,
+        prepareHeldOrderClaim,
+        heldRecoverySaleCompleted,
+        saveHeldOrderBundle,
+        assertHeldOrderUploadComplete,
+        saveCustomerProfile,
+        isCustomerLoyaltyCodeInUse,
         flushOfflineQueue,
         POS_HELD_ORDERS_CHANGED_EVENT,
         type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
+    import { nextPromotionRefreshDelay, promotionEvaluationTime } from '$lib/promotionClock';
+    import { loadHeldRecovery, persistHeldRecovery, type HeldRecovery } from '$lib/heldOrderRecovery';
     import { calculateCartTotals, calculateTaxLine } from "$lib/utils/commerceMath";
     import { SequentialQueue } from "$lib/utils/sequentialQueue";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+    import ConnectionStatusPill from "$lib/components/ConnectionStatusPill.svelte";
+    import AttendanceClock from "$lib/components/AttendanceClock.svelte";
     import CustomSelect from "$lib/components/CustomSelect.svelte";
     import Receipt from "$lib/components/Receipt.svelte";
     import { getReceiptDesign } from "$lib/receipt";
-    import { authenticateEmployeePin, currentEmployee, currentShiftId, isSupportEmployee, logout, PinRateLimitError, restoreRememberedEmployeeSession, startSupportSession, verifyEmployeePin } from "$lib/stores/session";
+    import { authenticateEmployeePin, currentEmployee, currentShiftId, isEmployeeAuthorityCheckPending, logout, normalizeEmployeeForRuntime, PinRateLimitError, restoreRememberedEmployeeSession, startSupportSession, verifyEmployeePin } from "$lib/stores/session";
     import { connectionState } from "$lib/stores/connection";
     import { getBarcodeRules, parseScaleBarcode } from "$lib/barcodeRules";
     import { getScaleSaleDisplay } from "$lib/scaleSale";
@@ -98,7 +113,7 @@
     import SupportAccessPanel from "$lib/components/SupportAccessPanel.svelte";
     import type { SupportSessionGrant } from "$lib/supportAccess";
     import { broadcastCustomerDisplay, type CustomerDisplayPromotion, type CustomerDisplayState } from "$lib/customerDisplay";
-    import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount } from "$lib/refunds";
+    import { allocateRefundLines, allocateRefundPayment, getRemainingRefundAmount, refundCardInstructions } from "$lib/refunds";
     import { sendCctvAction, sendCctvItemAdded, sendCctvReceipt } from "$lib/cctvPos";
     import { cashDrawerTargetLabel, getCashDrawerConfig, openCashDrawer } from "$lib/cashDrawer";
     import { getLabelPrinterConfig, getReceiptPrinterConfig, printEscposReceipt, printProductLabels, sendEscposReceipt } from "$lib/printers";
@@ -107,6 +122,7 @@
     import { requireManualSaleAccess } from "$lib/licensing";
     import { requiresAgeVerification } from "$lib/ageRestriction";
     import { canAccessPath, hasPermission, permissionForPath, permissionLabels, roleLabels, type PermissionKey } from "$lib/permissions";
+    import { deviceOperatingMode, deviceOperatingModeLabel } from "$lib/deviceMode";
     import {
         acquireSumupLock,
         createSumupCheckout,
@@ -146,6 +162,16 @@
         type DojoPaymentAttempt,
         type DojoPaymentIntentStatus,
     } from "$lib/dojo";
+    import { monitorDojoSession } from "$lib/dojoSessionFlow";
+    import { retryDojoPayment } from '$lib/dojo';
+    import DojoRetryDialog from '$lib/components/DojoRetryDialog.svelte';
+    import DojoExpiryReview from '$lib/components/DojoExpiryReview.svelte';
+    import { refreshPaymentTerminalAttempt } from '$lib/terminalAttempts';
+    let dojoRetryDecision: ((retry: boolean) => void) | null = null;
+    let showCheckoutExpiryReview = false;
+    let checkoutExpiryAttempt: DojoPaymentAttempt | null = null;
+    import { getDojoPaymentBreakdown } from "$lib/dojoPaymentValidation";
+    import { cashbackRecoveryMessage } from "$lib/paymentExtraPresentation";
     import {
         assertPaymentTerminalAttemptReady,
         requirePreparedSaleBundle,
@@ -183,8 +209,7 @@
     let searchQuery = "";
     let scanInput: HTMLInputElement;
     let scannerFocusTimer: ReturnType<typeof setTimeout> | undefined;
-    let scannerBuffer = "";
-    let scannerLastKeyAt = 0;
+    const scannerBuffer = new CheckoutScannerBuffer();
     let scannerBufferTimer: ReturnType<typeof setTimeout> | undefined;
     let scanFlowWaiters: Array<() => void> = [];
     let posDestroyed = false;
@@ -205,6 +230,27 @@
         skipStockAdjustment?: boolean;
     }[] = [];
     let selectedCartIndex = 0;
+    let activeHeldRecovery: HeldRecovery | null = null;
+    let pendingHeldRecovery: HeldRecovery | null = null;
+    let heldRecoveryWriteError = '';
+    $: if (activeHeldRecovery) persistRecoveredTrolley(cart, selectedCustomerId, selectedManualDiscountId);
+
+    async function persistRecoveredTrolley(lines: typeof cart, customerId: string, discountId: string) {
+        if (!activeHeldRecovery) return;
+        try {
+            if (!lines.length) {
+                activeHeldRecovery = null;
+                pendingHeldRecovery = null;
+                await persistHeldRecovery(null);
+            } else {
+                const draft = { ...activeHeldRecovery, cart: lines, customerId, discountId };
+                await persistHeldRecovery(draft);
+            }
+            heldRecoveryWriteError = '';
+        } catch {
+            heldRecoveryWriteError = 'Trolley recovery could not be saved. Free some storage before taking payment.';
+        }
+    }
     let customerDisplayCompleteUntil = 0;
     let customerDisplayChange = 0;
     const MAX_CART_QUANTITY = 9999;
@@ -220,6 +266,7 @@
     let heldOrderView: "this" | "other" = "this";
     let showPaymentModal = false;
     let showDiscountModal = false;
+    let showAppliedDiscounts = false;
     let pendingAgeRestrictedAdd: PendingAgeRestrictedAdd | null = null;
     let ageRestrictedConfirmButton: HTMLButtonElement;
     let selectedManualDiscountId = "";
@@ -230,12 +277,21 @@
     let terminalPaymentMessage = "";
     let terminalCancelRequested = false;
     let activeDojoSessionId = "";
+    let showDojoSignatureConfirm = false;
+    let dojoSignatureDecision: ((accepted: boolean) => void) | null = null;
     let recoveringSumupPayments = false;
     let recoveringDojoPayments = false;
     let cartItemEls: HTMLElement[] = [];
     let cartScrollFrame: number | undefined;
     let lastCartScrollIndex = -1;
     let customerSearch = "";
+    let paymentCustomerSearchOpen = false;
+    let paymentCustomerToggle: HTMLButtonElement;
+    let showNewPaymentCustomer = false;
+    let newPaymentCustomer: CheckoutCustomerDraft | null = null;
+    let newPaymentCustomerSaving = false;
+    let newPaymentCustomerError = '';
+    let newPaymentCustomerAuthorized = false;
     let selectedCustomerId = "";
     let selectedCustomerAccount: CustomerAccount | null = null;
     let customerAccountBusy = false;
@@ -279,6 +335,8 @@
             ? ($sumupConfigStore.readerName || "SumUp Solo")
             : "Card terminal";
     $: paymentCompleteDisabled =
+        cashShortcutBusy || loyaltyCreditBusy ||
+        showNewPaymentCustomer || newPaymentCustomerSaving ||
         isCompletingSale ||
         (paymentMethod === "cash" && paymentInputAmount < paymentDue) ||
         cardCashPartInvalid ||
@@ -335,6 +393,7 @@
     let loginFullscreenBusy = false;
     let showSupportAccess = false;
     let loginDialog: HTMLElement;
+    let loginPinInput: HTMLInputElement | null = null;
     let showManagerApprovalModal = false;
     let managerApprovalPermission: PermissionKey = "price_override";
     let managerApprovalTitle = "";
@@ -348,11 +407,14 @@
     let pendingShiftEmployee: Employee | null = null;
     let openingFloatString = "0";
     let openingShiftBusy = false;
-    let lastRevokedEmployeeId = "";
     let rememberedSessionChecked = false;
     let restoringRememberedSession = false;
     $: activeLoginEmployees = $employeesDB
-        .filter((employee) => employee.isActive)
+        .map(normalizeEmployeeForRuntime)
+        .filter((employee): employee is Employee => Boolean(employee?.isActive))
+        .filter((employee) => $deviceOperatingMode !== 'back_office'
+            || employee.role === 'attendance'
+            || canAccessPath(employee, '/admin', $settingsDB))
         .sort((a, b) => a.name.localeCompare(b.name));
     $: selectedLoginEmployee = activeLoginEmployees.find((employee) => employee.id === selectedLoginEmployeeId) || null;
     $: if (loginError && loginPin && loginPin !== loginErrorPin) loginError = "";
@@ -377,40 +439,15 @@
     $: if (showManagerApprovalModal && (!managerApprovalEmployeeId || !managerApprovers.some((employee) => employee.id === managerApprovalEmployeeId))) {
         managerApprovalEmployeeId = managerApprovers[0]?.id || "";
     }
-    $: {
-        const sessionEmployee = $currentEmployee;
-        if (sessionEmployee) {
-            if (isSupportEmployee(sessionEmployee)) {
-                lastRevokedEmployeeId = "";
-            } else {
-                const latestEmployee = $employeesDB.find((employee) => employee.id === sessionEmployee.id);
-                if (!latestEmployee?.isActive) {
-                    if (lastRevokedEmployeeId !== sessionEmployee.id) {
-                        lastRevokedEmployeeId = sessionEmployee.id;
-                        toast("Your staff account is no longer active. Sign in with an active user.", "error");
-                    }
-                    logout();
-                } else {
-                    lastRevokedEmployeeId = "";
-                    if (latestEmployee !== sessionEmployee) currentEmployee.set(latestEmployee);
-                }
-            }
-        }
-    }
-    $: if (!rememberedSessionChecked && !$currentEmployee && $employeesDB.length > 0) {
+    $: if (
+        !rememberedSessionChecked
+        && !$currentEmployee
+        && $employeesDB.length > 0
+        && !isEmployeeAuthorityCheckPending($connectionState)
+    ) {
         rememberedSessionChecked = true;
         void restoreLastEmployeeSession();
     }
-    $: syncLabel = $connectionState.mode === "single"
-        ? "Local"
-        : $connectionState.mode === "multi"
-            ? ($connectionState.mysqlOnline ? ($connectionState.syncError ? "Sync issue" : "Synced") : "Offline")
-            : "Setup";
-    $: syncStyle = syncLabel === "Synced"
-        ? "sync-pill-ok"
-        : syncLabel === "Offline" || syncLabel === "Sync issue"
-            ? "sync-pill-danger"
-            : "sync-pill-neutral";
     $: cashDrawerConfig = getCashDrawerConfig($settingsDB);
     $: receiptPrinterConfig = getReceiptPrinterConfig($settingsDB);
     $: scaleHardwareConfig = getScaleHardwareConfig($settingsDB);
@@ -507,16 +544,19 @@
         }, 2000);
     }
 
-    function scannerFocusBlocked(): boolean {
+    function scannerFocusBlocked(allowCompletedSaleScan = false): boolean {
         if (typeof document === "undefined") return true;
         return !$currentEmployee ||
-            $toasts.length > 0 ||
+            attendanceClockOpen ||
+            $toasts.some(item => isBlockingToast(item) && !(allowCompletedSaleScan && isScanDismissibleToast(item))) ||
             showNumpad ||
             showChangePricePad ||
             showGoodsModal ||
             showHeldOrders ||
             showPaymentModal ||
+            showCheckoutExpiryReview ||
             showDiscountModal ||
+            showAppliedDiscounts ||
             showNotFoundModal ||
             showQuickAddModal ||
             showScaleModal ||
@@ -559,37 +599,42 @@
     }
 
     function clearScannerBuffer() {
-        scannerBuffer = "";
-        scannerLastKeyAt = 0;
+        scannerBuffer.clear();
         if (scannerBufferTimer) clearTimeout(scannerBufferTimer);
         scannerBufferTimer = undefined;
     }
 
     function handleGlobalScannerKeydown(event: KeyboardEvent) {
-        if (scannerFocusBlocked()) return;
-        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+        // A completed-sale prompt is the only overlay a new scan can dismiss.
+        // Buffer the entire code before removing it so the first character is
+        // not lost while the dialog restores focus to the checkout input.
+        if (scannerFocusBlocked(true) || event.defaultPrevented || event.metaKey ||
+            event.ctrlKey || event.altKey || event.isComposing || event.repeat) {
+            clearScannerBuffer();
+            return;
+        }
 
         const active = document.activeElement as HTMLElement | null;
-        if (active === scanInput) return;
-        if (active?.matches("input, textarea, select, [contenteditable='true']")) return;
+        if (!scannerBuffer.pending) {
+            if (active === scanInput && !$toasts.some(isScanDismissibleToast)) return;
+            if (active !== scanInput && active?.closest("input, textarea, select, [contenteditable='true']")) return;
+        }
 
-        if (event.key === "Enter") {
-            const scanned = scannerBuffer.trim();
+        const result = scannerBuffer.push(event.key, Date.now());
+        if (result.barcode) {
             clearScannerBuffer();
-            if (scanned.length < 4) return;
             event.preventDefault();
-            searchQuery = scanned;
+            event.stopImmediatePropagation();
+            dismissSaleCompletionOnScan();
+            searchQuery = result.barcode;
             void handleSearch().finally(() => focusScannerSoon(true));
             return;
         }
 
-        if (event.key.length !== 1 || !/^[A-Za-z0-9._-]$/.test(event.key)) return;
-
-        const nowMs = Date.now();
-        if (scannerLastKeyAt && nowMs - scannerLastKeyAt > 120) scannerBuffer = "";
-        scannerLastKeyAt = nowMs;
-        scannerBuffer += event.key;
-        if (scannerBuffer.length > 64) scannerBuffer = scannerBuffer.slice(-64);
+        if (!result.captured) return;
+        // Retain ownership through focus changes and consume Enter exactly once.
+        event.preventDefault();
+        event.stopImmediatePropagation();
         if (scannerBufferTimer) clearTimeout(scannerBufferTimer);
         scannerBufferTimer = setTimeout(clearScannerBuffer, 350);
     }
@@ -725,7 +770,7 @@
             $discountsDB,
             $promoGroupsDB,
             eligiblePromoGroupItems,
-            promoClock,
+            promotionEvaluationTime(promoClock),
         ),
         manualPercentageDiscount,
         cart,
@@ -793,7 +838,7 @@
                 }],
             };
         });
-        return { lines, totalSavings: lines.reduce((sum, line) => sum + line.savings, 0) };
+        return { ...evaluation, lines, totalSavings: lines.reduce((sum, line) => sum + line.savings, 0) };
     }
 
     type CartPromoNotice = {
@@ -1013,6 +1058,25 @@
     }
 
     let promoClock = new Date().toISOString();
+    let promotionTimer: ReturnType<typeof setTimeout> | null = null;
+    let promotionClockMounted = false;
+    let refreshingSaleQuote = false;
+
+    function refreshPromotionClock() {
+        if (!isCompletingSale) promoClock = new Date().toISOString();
+    }
+
+    function schedulePromotionRefresh(windows: Parameters<typeof nextPromotionRefreshDelay>[0], _clock: string, paused: boolean) {
+        if (promotionTimer) clearTimeout(promotionTimer);
+        promotionTimer = null;
+        if (!promotionClockMounted || paused) return;
+        promotionTimer = setTimeout(refreshPromotionClock, nextPromotionRefreshDelay(windows, Date.now()));
+    }
+
+    $: if (promotionClockMounted) schedulePromotionRefresh([...$discountsDB, ...$promoGroupsDB], promoClock, isCompletingSale);
+    $: attendanceEnabled = ($settingsDB.find(s => s.key === 'time_attendance_enabled')?.value ?? 'false') === 'true';
+    $: if (!attendanceEnabled) attendanceClockOpen = false;
+    let attendanceClockOpen = false;
     $: headerTime = new Date(promoClock).toLocaleTimeString('en-GB', {
         hour: '2-digit',
         minute: '2-digit',
@@ -1020,17 +1084,24 @@
     }).toUpperCase();
 
     onMount(() => {
-        const timer = setInterval(() => {
-            promoClock = new Date().toISOString();
-        }, 60000);
+        promotionClockMounted = true;
+        refreshPromotionClock();
+        window.addEventListener('focus', refreshPromotionClock);
+        document.addEventListener('visibilitychange', refreshPromotionClock);
 
         const handleFullscreenChange = () => {
             if (!isTauri()) loginFullscreen = Boolean(document.fullscreenElement);
         };
         void refreshLoginFullscreenState();
 
-        // Auto-generate and cache till identity for this machine
-        if (isTauri()) {
+        // Checkout hardware, receipt allocation and scanner listeners must not
+        // start on a computer configured only for Back Office work.
+        const checkoutDevice = $deviceOperatingMode !== 'back_office';
+        if (checkoutDevice) {
+            void loadHeldRecovery().then(draft => { if (!posDestroyed) pendingHeldRecovery = draft; })
+                .catch(error => toast(String(error), 'error'));
+        }
+        if (isTauri() && checkoutDevice) {
             void Promise.allSettled([loadSumupConfig(), loadDojoConfig()])
                 .then(() => Promise.allSettled([recoverApprovedSumupSales(), recoverApprovedDojoSales()]))
                 .catch((error) => console.warn("Could not initialize card terminals:", error));
@@ -1039,20 +1110,28 @@
                 await ensureTillReceiptSequence();
                 tillName = await getTillName();
             });
-        } else {
+        } else if (checkoutDevice) {
             tillId = "browser-preview-till";
             tillName = "Browser Preview";
             if (!get(currentShiftId)) currentShiftId.set("browser-preview-shift");
+        } else {
+            tillName = 'Back Office';
+            currentShiftId.set('');
         }
-        document.addEventListener("pointerup", handlePosPointerUp);
-        document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+        if (checkoutDevice) {
+            document.addEventListener("pointerup", handlePosPointerUp);
+            document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+            focusScannerSoon();
+        }
         document.addEventListener("fullscreenchange", handleFullscreenChange);
         const handleHeldOrdersChanged = () => void refreshHeldOrderSummaries();
         window.addEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
-        focusScannerSoon();
 
         return () => {
-            clearInterval(timer);
+            promotionClockMounted = false;
+            if (promotionTimer) clearTimeout(promotionTimer);
+            window.removeEventListener('focus', refreshPromotionClock);
+            document.removeEventListener('visibilitychange', refreshPromotionClock);
             if (scannerFocusTimer) clearTimeout(scannerFocusTimer);
             clearScannerBuffer();
             document.removeEventListener("pointerup", handlePosPointerUp);
@@ -1064,6 +1143,8 @@
 
     onDestroy(() => {
         posDestroyed = true;
+        dismissDojoSignatureDecision();
+        if (trolleyMessageTimeout) clearTimeout(trolleyMessageTimeout);
         for (const resolve of scanFlowWaiters.splice(0)) resolve();
         scanQueue.destroy();
         if (cartScrollFrame) cancelAnimationFrame(cartScrollFrame);
@@ -1139,15 +1220,35 @@
             logout();
             loginErrorPin = loginPin;
             loginPin = "";
+            const message = error instanceof Error ? error.message : '';
             loginError = error instanceof PinRateLimitError
                 ? error.message
-                : "Could not open this till shift. Check the database connection and try again.";
+                : message.includes('Back Office access') || message.includes('MariaDB is still preparing staff access')
+                    ? message
+                    : "Could not open this till shift. Check the database connection and try again.";
         } finally {
             loginBusy = false;
         }
     }
 
     async function prepareEmployeeSession(employee: Employee) {
+        const normalizedEmployee = normalizeEmployeeForRuntime(employee);
+        if (!normalizedEmployee?.isActive) {
+            throw new Error('This staff account has an invalid or inactive role');
+        }
+        employee = normalizedEmployee;
+        if (employee.role === 'attendance') {
+            currentShiftId.set('');
+            return;
+        }
+        if ($deviceOperatingMode === 'back_office') {
+            if (!canAccessPath(employee, '/admin', $settingsDB)) {
+                throw new Error('This staff account does not have Back Office access.');
+            }
+            currentShiftId.set('');
+            await goto('/admin', { replaceState: true });
+            return;
+        }
         if (!isTauri()) {
             currentShiftId.set(get(currentShiftId) || "browser-preview-shift");
             return;
@@ -1171,10 +1272,10 @@
     }
 
     async function restoreLastEmployeeSession() {
-        const employee = restoreRememberedEmployeeSession();
-        if (!employee) return;
         restoringRememberedSession = true;
         try {
+            const employee = await restoreRememberedEmployeeSession();
+            if (!employee) return;
             await prepareEmployeeSession(employee);
             selectedLoginEmployeeId = "";
             loginPin = "";
@@ -1182,7 +1283,10 @@
         } catch (error) {
             console.error("Could not restore previous staff session:", error);
             logout();
-            loginError = "Could not reopen the previous staff session. Sign in again.";
+            const message = error instanceof Error ? error.message : '';
+            loginError = message.includes('Back Office access')
+                ? message
+                : "Could not reopen the previous staff session. Sign in again.";
         } finally {
             restoringRememberedSession = false;
         }
@@ -1225,7 +1329,13 @@
         loginPin = "";
         loginError = "";
         loginErrorPin = "";
-        void tick().then(() => loginDialog?.focus({ preventScroll: true }));
+        void tick().then(() => {
+            if ($deviceOperatingMode === 'back_office' && employeeId) {
+                loginPinInput?.focus({ preventScroll: true });
+                return;
+            }
+            loginDialog?.focus({ preventScroll: true });
+        });
     }
 
     function openSupportAccess() {
@@ -1263,6 +1373,10 @@
     function handleLoginKeydown(event: KeyboardEvent): boolean {
         if ($currentEmployee || !selectedLoginEmployee || pendingShiftEmployee || loginBusy) return false;
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return false;
+        if (
+            $deviceOperatingMode === 'back_office'
+            && (event.target as HTMLElement | null)?.matches('.login-desktop-pin-input')
+        ) return false;
 
         if (/^\d$/.test(event.key)) {
             event.preventDefault();
@@ -1285,6 +1399,20 @@
             return true;
         }
         return false;
+    }
+
+    function handleDesktopLoginPinInput(event: Event & { currentTarget: HTMLInputElement }) {
+        const sanitized = event.currentTarget.value.replace(/\D/g, '').slice(0, 8);
+        event.currentTarget.value = sanitized;
+        loginPin = sanitized;
+        if (loginError) loginError = '';
+    }
+
+    function handleDesktopLoginPinKeydown(event: KeyboardEvent) {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            chooseLoginEmployee('');
+        }
     }
 
     function logoutEmployee() {
@@ -1845,9 +1973,49 @@
         showTrolleyFeedback("Cart cleared", "success");
     }
 
-    function openHeldOrders() {
+    async function openHeldOrders() {
+        try { pendingHeldRecovery = activeHeldRecovery ? null : await loadHeldRecovery(); }
+        catch (error) { toast(String(error), 'error'); }
         heldOrderView = "this";
         showHeldOrders = true;
+    }
+
+    async function recoverInterruptedTrolley() {
+        if (cart.length || retrievingHeldOrderId) {
+            toast('Finish or hold the current trolley before recovering another one.', 'error');
+            return;
+        }
+        try {
+            const draft = await loadHeldRecovery();
+            if (!draft) return;
+            retrievingHeldOrderId = draft.orderId;
+            if (await heldRecoverySaleCompleted(draft.saleIds)) {
+                await persistHeldRecovery(null);
+                pendingHeldRecovery = null;
+                toast('This trolley already has a saved receipt. It has not been restored or charged again.', 'success');
+                return;
+            }
+            if (!await claimHeldOrder(draft.orderId, draft.claimId, draft.serverDataEpoch)) {
+                await persistHeldRecovery(null);
+                pendingHeldRecovery = null;
+                toast('This trolley was retrieved on another till.', 'error');
+                return;
+            }
+            try { await removeSql('orders', draft.orderId); }
+            catch (error) {
+                if ($connectionState.mode !== 'multi') throw error;
+                console.warn('Held trolley cleanup will finish on sync:', error);
+            }
+            cart = draft.cart as typeof cart;
+            selectedCustomerId = draft.customerId;
+            selectedManualDiscountId = draft.discountId;
+            activeHeldRecovery = draft;
+            pendingHeldRecovery = null;
+            showHeldOrders = false;
+            showTrolleyFeedback('Interrupted trolley recovered.', 'success');
+            void triggerSync();
+        } catch (error) { toast(`Recovery kept for retry: ${String(error)}`, 'error'); }
+        finally { retrievingHeldOrderId = ''; }
     }
 
     async function holdOrder() {
@@ -1872,6 +2040,7 @@
             customerId: selectedCustomerId,
             employeeId: $currentEmployee?.id || "",
             orderNumber: 0,
+            receiptKey: '',
             type: "sale" as const,
             status: "hold" as const,
             originalOrderId: "",
@@ -1913,12 +2082,15 @@
         });
         try {
             isHoldingOrder = true;
-            await upsert("orders", newOrder);
-            for (const line of lines) await upsert("order_lines", line);
+            await saveHeldOrderBundle(newOrder, lines, !!activeHeldRecovery);
+            activeHeldRecovery = null;
+            pendingHeldRecovery = null;
+            heldRecoveryWriteError = '';
             let sharedAcrossTills = $connectionState.mode !== "multi";
             if ($connectionState.mode === "multi" && $connectionState.mysqlOnline) {
                 try {
                     await flushOfflineQueue();
+                    await assertHeldOrderUploadComplete(orderId);
                     sharedAcrossTills = true;
                 } catch (syncError) {
                     console.warn("Held order is waiting to synchronize:", syncError);
@@ -1936,7 +2108,7 @@
             cart = [];
             selectedCartIndex = 0;
             clearTrolleyCustomer();
-            toast(
+            showTrolleyFeedback(
                 $connectionState.mode === "multi"
                     ? sharedAcrossTills
                         ? "Trolley held and shared across tills"
@@ -1988,9 +2160,20 @@
             skipStockAdjustment: l.notes?.startsWith("Scale price barcode:") || l.notes?.startsWith("Scale weight barcode:") || l.notes?.startsWith("Manual scale:") || false,
         }));
         retrievingHeldOrderId = orderId;
+        let recovery: HeldRecovery | null = null;
         try {
-            const claimed = await claimHeldOrder(orderId);
+            const pending = await loadHeldRecovery();
+            if (pending) throw new Error('Recover the interrupted trolley first using the recovery button.');
+            const claim = await prepareHeldOrderClaim();
+            recovery = { orderId, ...claim, cart: restoredCart, customerId: heldOrder?.customerId || '', discountId: heldOrder?.discountId || '', saleIds: [] };
+            // The durable local journal must commit BEFORE the shared row
+            // can be deleted. An uncertain claim is retried with the same ID.
+            await persistHeldRecovery(recovery);
+            pendingHeldRecovery = recovery;
+            const claimed = await claimHeldOrder(orderId, recovery.claimId, recovery.serverDataEpoch);
             if (!claimed) {
+                await persistHeldRecovery(null);
+                pendingHeldRecovery = null;
                 heldOrdersForTill = heldOrdersForTill.filter((order) => order.id !== orderId);
                 const staleLines = new Map(heldOrderLinesByOrder);
                 staleLines.delete(orderId);
@@ -2010,12 +2193,14 @@
             }
         } catch (e) {
             console.error(e);
-            toast("Could not retrieve the held order. Try again.", "error");
+            toast(`Could not retrieve this trolley: ${String(e).replace(/^Error:\s*/, '')}`, "error");
             return;
         } finally {
             retrievingHeldOrderId = "";
         }
         cart = restoredCart;
+        activeHeldRecovery = recovery;
+        pendingHeldRecovery = null;
         clearTrolleyCustomer();
         selectedCustomerId = heldOrder?.customerId || "";
         sendCctvAction({
@@ -2032,7 +2217,7 @@
         nextHeldLines.delete(orderId);
         heldOrderLinesByOrder = nextHeldLines;
         showHeldOrders = false;
-        toast(
+        showTrolleyFeedback(
             heldOrder?.tillNumber && heldOrder.tillNumber !== tillId
                 ? `Trolley retrieved from ${heldOrder.tillName || heldOrder.tillNumber}`
                 : "Trolley retrieved",
@@ -2317,13 +2502,15 @@
     let recentLoadToken = 0;
     const RECENT_RECEIPT_LIMIT = 10;
     $: scannerOverlayOpen =
-        $toasts.length > 0 ||
+        $toasts.some(isBlockingToast) ||
         showNumpad ||
         showChangePricePad ||
         showGoodsModal ||
         showHeldOrders ||
         showPaymentModal ||
+        showCheckoutExpiryReview ||
         showDiscountModal ||
+        showAppliedDiscounts ||
         showNotFoundModal ||
         showQuickAddModal ||
         showScaleModal ||
@@ -2567,6 +2754,14 @@
             toast("This transaction is incomplete on this till. Sync and try again.", "error");
             return;
         }
+        const originalHasCardExtras = originalPayments.some((entry) =>
+            Number(entry.tipsAmount || 0) > 0
+            || Number(entry.serviceChargeAmount || 0) > 0
+            || Number(entry.cashbackAmount || 0) > 0);
+        if (voiding && originalHasCardExtras) {
+            toast("This sale includes tips, service charge or cashback. Do not void it: use a goods-only refund and reconcile the additional amounts separately.", "error");
+            return;
+        }
         const originalLoyaltyChanges = reversalContext.originalLoyaltyChanges;
         const previousReversals = reversalContext.previousReversals as Order[];
         const previousReversalPayments = reversalContext.previousReversalPayments as Payment[];
@@ -2618,7 +2813,8 @@
             employeeId: $currentEmployee?.id || "",
             shiftId: $currentShiftId,
             tillNumber: tillId,
-            notes: voiding ? `Void of receipt ${original.orderNumber}` : `Refund of receipt ${original.orderNumber}`,
+            notes: voiding ? `Void of receipt ${original.orderNumber}`
+                : `Refund of receipt ${original.orderNumber}${originalHasCardExtras ? ' · Goods only; tips, service charge and cashback are unchanged' : ''}`,
             createdAt: timestamp,
             completedAt: timestamp,
             updatedAt: timestamp,
@@ -2816,7 +3012,9 @@
                 voiding ? "VOID" : partial ? "PARTIAL REFUND" : "REFUND",
             );
             await refreshPosOrderSummaries();
-            toast(voiding ? "Order voided and reversed" : "Refund recorded", "success");
+            toast(voiding ? "Order voided and reversed"
+                : originalHasCardExtras ? "Goods refund recorded. Tips, service charge and cashback are unchanged."
+                : "Refund recorded", "success");
             await openRecentTransactions();
         } catch (e) {
             if (managedRefundApproved) {
@@ -2890,6 +3088,7 @@
 
     let nextPoundAmount: number | null = null;
     const fixedQuickAmounts = [500, 1000, 2000, 5000];
+    let cashShortcutBusy = false;
 
     function calculateQuickAmounts(tPence: number) {
         let nextPound = Math.ceil(tPence / 100) * 100;
@@ -2900,11 +3099,13 @@
         calculateQuickAmounts(paymentDue);
     }
 
-    function openPayment() {
+    async function openPayment() {
         if (cart.length === 0) {
             toast("Cart is empty", "error");
             return;
         }
+        refreshPromotionClock();
+        await tick();
         const retainedCustomer = selectedCustomer;
         amountTenderedString = "0";
         paymentMethod = "cash";
@@ -2913,6 +3114,7 @@
         terminalPaymentMessage = "";
         terminalCancelRequested = false;
         customerSearch = "";
+        paymentCustomerSearchOpen = false;
         selectedCustomerAccount = null;
         customerAccountLoadToken += 1;
         customerAccountBusy = false;
@@ -2924,16 +3126,70 @@
             void selectPaymentCustomer(retainedCustomer);
         } else {
             if (selectedCustomerId) clearTrolleyCustomer();
-            tick().then(() => customerSearchInput?.focus({ preventScroll: true }));
+        }
+    }
+
+    async function togglePaymentCustomerSearch() {
+        if (isCompletingSale) return;
+        paymentCustomerSearchOpen = !paymentCustomerSearchOpen;
+        customerSearch = "";
+        if (paymentCustomerSearchOpen) {
+            await tick();
+            customerSearchInput?.focus({ preventScroll: true });
+        } else {
+            document.dispatchEvent(new Event("close-touch-keyboard"));
         }
     }
 
     function closePayment() {
-        if (isCompletingSale) return;
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || showNewPaymentCustomer || newPaymentCustomerSaving) return;
         customerAccountLoadToken += 1;
         customerAccountBusy = false;
         customerAccountLoadError = false;
         showPaymentModal = false;
+    }
+
+    function openNewPaymentCustomer() {
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || newPaymentCustomerSaving) return;
+        document.dispatchEvent(new Event('close-touch-keyboard'));
+        void requirePermission('open_customers', 'Add customer at checkout', () => {
+            if (!showPaymentModal || isCompletingSale) return;
+            newPaymentCustomer = newCheckoutCustomerDraft($customersDB);
+            newPaymentCustomerError = '';
+            newPaymentCustomerAuthorized = true;
+            showNewPaymentCustomer = true;
+        }, 'customer', '', 'Register a new customer during checkout');
+    }
+
+    function closeNewPaymentCustomer() {
+        if (newPaymentCustomerSaving) return;
+        document.dispatchEvent(new Event('close-touch-keyboard'));
+        showNewPaymentCustomer = false;
+        newPaymentCustomerAuthorized = false;
+        newPaymentCustomer = null;
+        newPaymentCustomerError = '';
+        tick().then(() => paymentCustomerToggle?.focus({ preventScroll: true }));
+    }
+
+    async function saveNewPaymentCustomer() {
+        if (newPaymentCustomerSaving || isCompletingSale || !newPaymentCustomer || !showPaymentModal) return;
+        if (!newPaymentCustomerAuthorized) { newPaymentCustomerError = 'Customer permission or manager approval is required.'; return; }
+        newPaymentCustomerSaving = true;
+        newPaymentCustomerError = '';
+        try {
+            const customer = await registerCheckoutCustomer(newPaymentCustomer, {
+                multi: $connectionState.mode === 'multi', online: $connectionState.mysqlOnline,
+                codeInUse: isCustomerLoyaltyCodeInUse, persist: saveCustomerProfile,
+            });
+            // A retry keeps its original UUID; never add a second store row.
+            customersDB.update(list => [...list.filter(existing => existing.id !== customer.id), customer]);
+            showNewPaymentCustomer = false;
+            newPaymentCustomerAuthorized = false;
+            newPaymentCustomer = null;
+            await selectPaymentCustomer(customer);
+        } catch (error) {
+            newPaymentCustomerError = String(error).replace(/^Error:\s*/, '');
+        } finally { newPaymentCustomerSaving = false; }
     }
 
     function cancelManagerApproval() {
@@ -2951,6 +3207,11 @@
     }
 
     function closeTopPosModal(): boolean {
+        if (showNewPaymentCustomer) {
+            if (newPaymentCustomerSaving) return false;
+            closeNewPaymentCustomer();
+            return true;
+        }
         if (pendingAgeRestrictedAdd) {
             cancelAgeRestrictedAdd();
             return true;
@@ -3007,6 +3268,10 @@
             showDiscountModal = false;
             return true;
         }
+        if (showAppliedDiscounts) {
+            showAppliedDiscounts = false;
+            return true;
+        }
         return false;
     }
 
@@ -3014,6 +3279,7 @@
         if (handleLoginKeydown(event)) return;
         if (
             showPaymentModal &&
+            !showNewPaymentCustomer && !newPaymentCustomerSaving &&
             paymentMethod === "cash" &&
             !isCompletingSale &&
             !event.defaultPrevented &&
@@ -3046,13 +3312,16 @@
     }
 
     async function selectPaymentCustomer(customer: Customer) {
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy) return;
         const customerId = customer.id;
         const loadToken = ++customerAccountLoadToken;
         selectedCustomerId = customer.id;
         selectedCustomerAccount = null;
         customerAccountLoadError = false;
         customerSearch = "";
+        paymentCustomerSearchOpen = false;
         document.dispatchEvent(new Event("close-touch-keyboard"));
+        tick().then(() => paymentCustomerToggle?.focus({ preventScroll: true }));
         useLoyaltyCredit = false;
         amountTenderedString = "0";
         hasTypedPayment = false;
@@ -3090,7 +3359,7 @@
     }
 
     async function toggleLoyaltyCredit() {
-        if (loyaltyCreditBusy || !selectedCustomer) return;
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || !selectedCustomer) return;
         const enabling = !useLoyaltyCredit;
         if (enabling && $connectionState.mode === "multi") {
             loyaltyCreditBusy = true;
@@ -3098,6 +3367,7 @@
                 const refreshed = await getPaymentCustomer(selectedCustomer.id);
                 if (!refreshed) {
                     toast("This customer no longer exists in the shared database", "error");
+                    loyaltyCreditBusy = false;
                     removePaymentCustomer();
                     return;
                 }
@@ -3134,14 +3404,17 @@
     }
 
     function removePaymentCustomer() {
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy) return;
         clearTrolleyCustomer();
         if (paymentMethod === "account") paymentMethod = "cash";
         amountTenderedString = "0";
         hasTypedPayment = false;
         calculateQuickAmounts(total);
+        tick().then(() => paymentCustomerToggle?.focus({ preventScroll: true }));
     }
 
     function handlePaymentPadKey(key: string) {
+        if (isCompletingSale || cashShortcutBusy) return;
         if (key === "C") {
             amountTenderedString = "0";
             hasTypedPayment = true;
@@ -3165,35 +3438,49 @@
     }
 
     async function setAmountAndComplete(amount: number) {
-        if (isCompletingSale) return;
-        amountTenderedString = amount.toString();
-        hasTypedPayment = true;
-        await tick();
-        await completeSale();
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || !showPaymentModal || paymentMethod !== 'cash'
+            || showNewPaymentCustomer || newPaymentCustomerSaving) return;
+        if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_ORDER_TOTAL_PENCE) {
+            toast('Payment amount is invalid or too large', 'error');
+            return;
+        }
+        // Lock before yielding so repeated note/exact-payment taps cannot submit twice.
+        cashShortcutBusy = true;
+        try {
+            amountTenderedString = amount.toString();
+            hasTypedPayment = true;
+            await tick();
+            await completeSale();
+        } finally {
+            cashShortcutBusy = false;
+        }
     }
 
     async function addQuickAmount(amount: number) {
-        if (isCompletingSale) return;
-        if (!hasTypedPayment || amountTenderedString === "0") {
-            amountTenderedString = "0";
-            hasTypedPayment = true;
-        }
-        const nextAmount = (parseInt(amountTenderedString) || 0) + amount;
-        if (nextAmount > MAX_ORDER_TOTAL_PENCE) {
-            toast("Payment amount is too large", "error");
-            return;
-        }
-        amountTenderedString = nextAmount.toString();
-        if (paymentMethod === "cash" && nextAmount >= paymentDue) {
-            await tick();
-            await completeSale();
+        if (isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || paymentDue <= 0 || !showPaymentModal || paymentMethod !== 'cash'
+            || showNewPaymentCustomer || newPaymentCustomerSaving) return;
+        try {
+            const plan = planBanknotePayment(
+                hasTypedPayment ? Number(amountTenderedString) : 0,
+                amount, paymentDue, MAX_ORDER_TOTAL_PENCE,
+            );
+            if (plan.shouldComplete) {
+                await setAmountAndComplete(plan.tenderedPence);
+            } else {
+                amountTenderedString = plan.tenderedPence.toString();
+                hasTypedPayment = true;
+            }
+        } catch (error) {
+            toast(String(error).replace(/^Error:\s*/, ''), 'error');
         }
     }
 
     function selectPaymentMethod(method: "cash" | "card" | "account") {
-        if (isCompletingSale) return;
+        if (isCompletingSale || cashShortcutBusy) return;
         if (method === "account" && !accountSaleAvailable) {
-            if (!selectedCustomer) toast("Select a customer before using Pay later", "info");
+            if (!selectedCustomer) {
+                if (!paymentCustomerSearchOpen) void togglePaymentCustomerSearch();
+            }
             else if (customerAccountBusy) toast("Wait while the customer account is checked", "info");
             else if (customerAccountLoadError) toast("The customer account could not be verified. Remove and select the customer again to retry", "error");
             else if (paymentDue <= 0) toast("Nothing remains to charge to the customer account", "info");
@@ -3204,6 +3491,9 @@
             return;
         }
         paymentMethod = method;
+        paymentCustomerSearchOpen = false;
+        customerSearch = "";
+        document.dispatchEvent(new Event("close-touch-keyboard"));
         if (method === "account" || (method === "card" && paymentInputAmount >= paymentDue)) {
             amountTenderedString = "0";
             hasTypedPayment = false;
@@ -3211,7 +3501,7 @@
     }
 
     function clearPaymentInput() {
-        if (isCompletingSale) return;
+        if (isCompletingSale || cashShortcutBusy) return;
         amountTenderedString = "0";
         hasTypedPayment = false;
     }
@@ -3340,15 +3630,15 @@
         }
     }
 
-    function dojoTerminalMessage(notification: string | undefined): string {
-        switch (notification) {
-            case "PresentCard": return "Ask the customer to tap or insert their card";
-            case "EnterPin": return "Waiting for the customer to enter their PIN";
-            case "RemoveCard": return "Ask the customer to remove their card";
-            case "PleaseWait": return "Dojo is processing the card";
-            case "SignatureVerification": return "Customer signature needs approval";
-            default: return "Waiting for the Dojo terminal";
-        }
+    function dismissDojoSignatureDecision() {
+        dojoSignatureDecision = null;
+        showDojoSignatureConfirm = false;
+    }
+
+    function finishDojoSignatureDecision(accepted: boolean) {
+        const decide = dojoSignatureDecision;
+        dismissDojoSignatureDecision();
+        decide?.(accepted);
     }
 
     function verifyDojoApproval(
@@ -3361,15 +3651,10 @@
         if (status.id !== expectedPaymentIntentId || status.reference !== expectedReference) {
             throw new Error("Dojo captured a payment with a different sale reference. Do not retry the card; check the Dojo portal.");
         }
-        if (status.amount !== expectedAmount) {
-            throw new Error("Dojo returned a different payment amount. Do not retry the card; check the Dojo portal.");
-        }
-        if ((status.currency || "").toUpperCase() !== expectedCurrency.toUpperCase()) {
-            throw new Error("Dojo returned a different currency. Do not retry the card; check the Dojo portal.");
-        }
         if (status.status !== "Captured") {
             throw new Error(`Dojo terminal completed but the payment intent is ${status.status}. Do not retry until it is checked.`);
         }
+        return getDojoPaymentBreakdown(status, expectedAmount, expectedCurrency);
     }
 
     async function processManagedDojoPayment(
@@ -3404,7 +3689,6 @@
         let networkStarted = false;
         let paymentIntentId = "";
         let terminalSessionId = "";
-        let signatureHandled = false;
         terminalCancelRequested = false;
         terminalPaymentStage = "reserving";
         terminalPaymentMessage = "Reserving the shared Dojo terminal";
@@ -3433,106 +3717,65 @@
             terminalPaymentStage = "waiting";
             terminalPaymentMessage = "Ask the customer to tap or insert their card";
 
-            let deadline = Date.now() + 180_000;
-            let nextLeaseRefresh = Date.now() + 25_000;
-            let cancellationSentAt = 0;
-            while (Date.now() < deadline) {
-                if (terminalCancelRequested && cancellationSentAt === 0) {
-                    terminalPaymentStage = "cancelling";
-                    terminalPaymentMessage = "Cancelling the payment on the Dojo terminal";
-                    await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-                    cancellationSentAt = Date.now();
-                    deadline = Math.min(deadline, cancellationSentAt + 25_000);
-                }
-
-                const session = await getDojoTerminalSessionStatus(terminalSessionId);
-                terminalPaymentMessage = dojoTerminalMessage(session.latestNotification);
-                if (session.status === "SignatureVerificationRequired" && !signatureHandled) {
-                    signatureHandled = true;
-                    terminalPaymentMessage = "Check the signature and choose accept or reject";
-                    const accepted = confirm("Dojo requires signature verification. Compare the customer's signature, then press OK to accept it or Cancel to reject it.");
-                    await respondToDojoSignature(terminalSessionId, accepted);
-                    terminalPaymentMessage = accepted ? "Signature accepted. Completing payment" : "Signature rejected";
-                }
-
-                if (["Captured", "SignatureVerificationAccepted"].includes(session.status)) {
-                    const paymentStatus = session.payment || await getDojoPaymentIntentStatus(paymentIntentId);
-                    verifyDojoApproval(paymentStatus, paymentIntentId, reference, amount, config.currency);
-                    const terminalReference = paymentStatus.transactionId || paymentIntentId;
-                    const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
-                    bundle.payment.reference = `Dojo ${terminalReference} [id:${paymentIntentId}]${loyaltyReference}`;
-                    approved = true;
-                    terminalPaymentStage = "approved";
-                    terminalPaymentMessage = "Card approved. Saving the sale";
-                    await updateDojoAttempt(reference, "approved", {
-                        clientTransactionId: paymentIntentId,
-                        terminalSessionId,
-                        providerReference: `Dojo ${terminalReference} [id:${paymentIntentId}]`,
-                        saleBundle: bundle,
-                    }).catch((error) => {
-                        console.error("Could not update the approved Dojo recovery journal:", error);
-                    });
-                    return bundle;
-                }
-
-                if (["Canceled", "Declined", "SignatureVerificationRejected"].includes(session.status)) {
-                    const cancelled = session.status === "Canceled";
-                    await updateDojoAttempt(reference, cancelled ? "cancelled" : "failed", {
-                        clientTransactionId: paymentIntentId,
-                        terminalSessionId,
-                        error: `Dojo status: ${session.status}`,
-                    });
-                    finalized = true;
-                    throw new Error(cancelled ? "The Dojo payment was cancelled" : "The card payment was not approved");
-                }
-                if (session.status === "Expired") {
-                    const paymentStatus = await getDojoPaymentIntentStatus(paymentIntentId);
-                    if (paymentStatus.status === "Captured") {
-                        verifyDojoApproval(paymentStatus, paymentIntentId, reference, amount, config.currency);
-                        const terminalReference = paymentStatus.transactionId || paymentIntentId;
-                        const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
-                        bundle.payment.reference = `Dojo ${terminalReference} [id:${paymentIntentId}]${loyaltyReference}`;
-                        approved = true;
-                        await updateDojoAttempt(reference, "approved", {
-                            clientTransactionId: paymentIntentId,
-                            terminalSessionId,
-                            providerReference: `Dojo ${terminalReference} [id:${paymentIntentId}]`,
-                            saleBundle: bundle,
-                        }).catch(() => undefined);
-                        return bundle;
-                    }
-                    if (["Canceled", "Reversed"].includes(paymentStatus.status)) {
-                        await updateDojoAttempt(reference, "cancelled", {
-                            clientTransactionId: paymentIntentId,
-                            terminalSessionId,
-                            error: `Dojo session expired; payment intent is ${paymentStatus.status}`,
-                        });
-                        finalized = true;
-                        throw new Error("The Dojo session expired without taking payment");
-                    }
-                    throw new Error("The Dojo session expired. Check the terminal screen or Dojo portal before retrying, because the result may be uncertain.");
-                }
-                if (session.status === "Authorized") {
-                    throw new Error("Dojo authorized but did not capture this Auto payment. Check the Dojo portal before retrying.");
-                }
-
-                if (Date.now() >= nextLeaseRefresh) {
-                    nextLeaseRefresh = Date.now() + 25_000;
-                    if (!(await refreshDojoLock(config, tillId, reference))) {
-                        await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-                        throw new Error("This till lost the shared-terminal reservation. Check Dojo before retrying.");
-                    }
-                }
-                await delay(1_200);
+            const result = await monitorDojoSession({
+                paymentIntentId,
+                terminalSessionId,
+                apiEnvironment: config.apiEnvironment,
+                retry: async () => {
+                    const retried = await retryDojoPayment(reference, terminalSessionId);
+                    terminalSessionId = retried.terminalSessionId;
+                    activeDojoSessionId = terminalSessionId;
+                    terminalCancelRequested = false;
+                    return terminalSessionId;
+                },
+                onDeclined: (decide) => { dojoRetryDecision = decide; },
+                onDeclineDismiss: () => { dojoRetryDecision = null; },
+                getSession: () => getDojoTerminalSessionStatus(terminalSessionId),
+                getPayment: () => getDojoPaymentIntentStatus(paymentIntentId),
+                submitSignature: (accepted) => respondToDojoSignature(terminalSessionId, accepted),
+                cancel: () => cancelDojoTerminalSession(terminalSessionId),
+                refreshLease: () => refreshDojoLock(config, tillId, reference),
+                shouldCancel: () => terminalCancelRequested,
+                isDisposed: () => posDestroyed,
+                onSignatureRequired: (decide) => {
+                    dojoSignatureDecision = decide;
+                    showDojoSignatureConfirm = true;
+                },
+                onSignatureDismiss: dismissDojoSignatureDecision,
+                onMessage: (message, cancelling) => {
+                    terminalPaymentMessage = message;
+                    terminalPaymentStage = cancelling ? "cancelling" : "waiting";
+                },
+            });
+            if (result.outcome !== "captured") {
+                await updateDojoAttempt(reference, result.outcome, {
+                    clientTransactionId: paymentIntentId,
+                    terminalSessionId,
+                    error: `Dojo status: ${result.status}`,
+                });
+                finalized = true;
+                throw new Error(result.outcome === "cancelled" ? "The Dojo payment was cancelled" : "The card payment was not approved");
             }
-
-            await cancelDojoTerminalSession(terminalSessionId).catch(() => undefined);
-            await updateDojoAttempt(reference, "uncertain", {
+            const paymentStatus = result.payment;
+            const breakdown = verifyDojoApproval(paymentStatus, paymentIntentId, reference, amount, config.currency);
+            bundle.payment.tipsAmount = breakdown.tipsAmount;
+            bundle.payment.serviceChargeAmount = breakdown.serviceChargeAmount;
+            bundle.payment.cashbackAmount = breakdown.cashbackAmount;
+            const terminalReference = paymentStatus.transactionId || paymentIntentId;
+            const loyaltyReference = bundle.payment.reference ? ` · ${bundle.payment.reference}` : "";
+            bundle.payment.reference = `Dojo ${terminalReference} [id:${paymentIntentId}]${loyaltyReference}`;
+            approved = true;
+            terminalPaymentStage = "approved";
+            terminalPaymentMessage = "Card approved. Saving the sale";
+            await updateDojoAttempt(reference, "approved", {
                 clientTransactionId: paymentIntentId,
                 terminalSessionId,
-                error: "Timed out waiting for the terminal result",
-            }).catch(() => undefined);
-            throw new Error("Dojo did not return a final result in time. Check the terminal and Dojo portal before retrying.");
+                providerReference: `Dojo ${terminalReference} [id:${paymentIntentId}]`,
+                saleBundle: bundle,
+            }).catch((error) => {
+                console.error("Could not update the approved Dojo recovery journal:", error);
+            });
+            return bundle;
         } catch (error) {
             if (!approved && !finalized) {
                 const message = String(error);
@@ -3541,9 +3784,17 @@
                     terminalSessionId,
                     error: message,
                 }).catch(() => undefined);
+                if (message.includes('Dojo session expired') && $currentEmployee?.role === 'admin') {
+                    checkoutExpiryAttempt = await refreshPaymentTerminalAttempt('dojo', reference).catch(() => null) as DojoPaymentAttempt | null;
+                    if (checkoutExpiryAttempt) {
+                        showPaymentModal = false;
+                        showCheckoutExpiryReview = true;
+                    }
+                }
             }
             throw error;
         } finally {
+            dismissDojoSignatureDecision();
             activeDojoSessionId = "";
             if (lockHeld) {
                 await releaseDojoLock(config, tillId, reference).catch((error) => {
@@ -3883,11 +4134,12 @@
             if (paymentIntent.id !== paymentIntentId || paymentIntent.reference !== bundle.order.originalOrderId) {
                 throw new Error("The original Dojo payment could not be verified. No refund was sent.");
             }
-            if (paymentIntent.amount !== originalCardAmount) {
-                throw new Error("The original Dojo amount does not match this sale. No refund was sent.");
+            const originalBreakdown = getDojoPaymentBreakdown(paymentIntent, originalCardAmount, config.currency);
+            if (voiding && (originalBreakdown.tipsAmount > 0 || originalBreakdown.serviceChargeAmount > 0 || originalBreakdown.cashbackAmount > 0)) {
+                throw new Error("The Dojo payment includes tips, service charge or cashback. No void was sent. Use a goods-only refund and reconcile the additional amounts separately.");
             }
-            if ((paymentIntent.currency || "").toUpperCase() !== config.currency.toUpperCase()) {
-                throw new Error("The original Dojo currency does not match this till. No refund was sent.");
+            if (paymentIntent.status !== "Captured") {
+                throw new Error(`The original Dojo payment is ${paymentIntent.status}, not available for a goods refund. No refund was sent.`);
             }
             if (paymentIntent.refundedAmount === undefined) {
                 throw new Error("Dojo did not return its refunded total. Check the Dojo portal before retrying.");
@@ -3911,8 +4163,10 @@
             await assertPaymentTerminalAttemptReady("dojo", reference);
             networkStarted = true;
             let requestError: unknown = null;
+            let refundRejected = false;
             try {
-                await refundDojoPaymentIntent(paymentIntentId, refundAmount, reference);
+                const result = await refundDojoPaymentIntent(paymentIntentId, refundAmount, reference);
+                refundRejected = result.paymentIntentId === paymentIntentId && result.rejected === true;
             } catch (error) {
                 requestError = error;
             }
@@ -3923,9 +4177,22 @@
                 if ((confirmed.refundedAmount ?? -1) >= previouslyRefundedAmount + refundAmount) break;
                 await delay(500);
             }
+            if (refundRejected && confirmed?.id === paymentIntentId
+                && confirmed.reference === bundle.order.originalOrderId && confirmed.status === 'Captured'
+                && confirmed.refundedAmount === previouslyRefundedAmount) {
+                getDojoPaymentBreakdown(confirmed, originalCardAmount, config.currency);
+                networkStarted = false; // Explicit rejection plus fresh, unchanged provider totals.
+                throw new Error('Dojo declined the refund. No refund was recorded. Contact Dojo if this sandbox terminal does not support refunds.');
+            }
             if ((confirmed?.refundedAmount ?? -1) !== previouslyRefundedAmount + refundAmount) {
                 throw new Error(`${requestError || "Dojo has not confirmed the refund"}. The refund result is uncertain; do not retry.`);
             }
+            if (!confirmed || confirmed.id !== paymentIntentId
+                || confirmed.reference !== bundle.order.originalOrderId
+                || !["Captured", "Refunded"].includes(confirmed.status)) {
+                throw new Error("Dojo has not confirmed the expected refund identity and final status. Do not refund again; check Dojo.");
+            }
+            getDojoPaymentBreakdown(confirmed, originalCardAmount, config.currency);
             approved = true;
             await updateDojoAttempt(reference, "approved", {
                 clientTransactionId: paymentIntentId,
@@ -3954,7 +4221,7 @@
     }
 
     async function cancelManagedTerminalPayment() {
-        if (!isCompletingSale || terminalPaymentStage === "approved" || terminalPaymentStage === "saving") return;
+        if (!isCompletingSale || terminalCancelRequested || terminalPaymentStage === "approved" || terminalPaymentStage === "saving") return;
         terminalCancelRequested = true;
         terminalPaymentStage = "cancelling";
         terminalPaymentMessage = `Cancelling the payment on the ${activeManagedProvider === "dojo" ? "Dojo terminal" : "Solo"}`;
@@ -3981,6 +4248,9 @@
         recoveringDojoPayments = true;
         try {
             const result = await runTerminalRecovery("dojo");
+            for (const cashback of result.cashbackToReview) {
+                toast(cashbackRecoveryMessage(cashback), "error", false, undefined, { persistent: true });
+            }
             if (result.completed > 0) {
                 toast(`Recovered ${result.completed} Dojo terminal transaction${result.completed === 1 ? "" : "s"}`, "success");
             }
@@ -3992,8 +4262,35 @@
         }
     }
 
+    async function finishCheckoutExpiryReview() {
+        const id = checkoutExpiryAttempt?.id;
+        if (!id) return;
+        try {
+            const result = await runTerminalRecovery('dojo');
+            const reviewed = await refreshPaymentTerminalAttempt('dojo', id);
+            if (reviewed.status === 'completed') {
+                const completed = requirePreparedSaleBundle(reviewed);
+                applyCompletedSaleToStores(completed);
+                cart = []; selectedCartIndex = 0; searchQuery = ''; notFoundBarcode = '';
+                selectedCustomerId = ''; useLoyaltyCredit = false;
+                const cashback = Number(completed.payment.cashbackAmount || 0);
+                toast(cashback > 0 ? `Payment recorded. Check whether cashback ${formatMoney(cashback)} was already handed over before paying it out.` : 'Receipt-checked card payment recorded successfully.',
+                    'success', true, () => printCompletedSaleReceipt(completed), { persistent: cashback > 0 });
+            } else if (reviewed.status === 'cancelled' || reviewed.status === 'failed') {
+                toast('Dojo confirmed cancellation. The trolley is ready for another payment.', 'info');
+                showPaymentModal = true;
+            } else {
+                toast('The review is saved. Payment recovery is still pending; use Reports → Payment checks before taking another payment.', 'error');
+            }
+            for (const cashback of result.cashbackToReview) {
+                if (cashback.attemptId !== id) toast(cashbackRecoveryMessage(cashback), 'error', false, undefined, { persistent: true });
+            }
+        } catch (error) { toast(`Payment review is saved; recovery needs checking: ${String(error)}`, 'error'); }
+    }
+
     async function completeSale() {
-        if (isCompletingSale) return;
+        if (showNewPaymentCustomer || newPaymentCustomerSaving || loyaltyCreditBusy) return;
+        if (isCompletingSale || refreshingSaleQuote) return;
         if (!$currentEmployee || !$currentShiftId || !tillId) {
             toast("This till has no active signed-in shift. Sign in again before taking payment.", "error");
             showPaymentModal = false;
@@ -4002,6 +4299,25 @@
         if (cart.length === 0) {
             toast("The trolley is empty", "error");
             showPaymentModal = false;
+            return;
+        }
+        // Recheck at confirmation, before deciding tender or sending money to a
+        // terminal. A delayed timer must not charge an expired offer.
+        const displayedTotal = total;
+        const displayedDue = paymentDue;
+        refreshingSaleQuote = true;
+        try {
+            refreshPromotionClock();
+            await tick();
+        } catch (error) {
+            toast(`Sale was not completed: ${error}`, 'error');
+            return;
+        } finally {
+            refreshingSaleQuote = false;
+        }
+        if (!showPaymentModal || cart.length === 0) return;
+        if (total !== displayedTotal || paymentDue !== displayedDue) {
+            toast('The amount due changed. Please review the updated total and confirm again.', 'info');
             return;
         }
         if (!Number.isSafeInteger(total) || total < 0 || total > MAX_ORDER_TOTAL_PENCE) {
@@ -4042,7 +4358,6 @@
         let approvedManagedBundle: SaleBundle | null = null;
         let approvedManagedProvider: "sumup" | "dojo" | null = null;
         try {
-            if (isTauri()) await ensureTillReceiptSequence();
             const activeSumupConfig = get(sumupConfigStore);
             const activeDojoConfig = get(dojoConfigStore);
 
@@ -4275,8 +4590,22 @@
                 selectedCustomerId = "";
                 useLoyaltyCredit = false;
                 playSuccessSound();
-                toast("Training sale completed. Nothing was saved.", "success");
+                toast("Training sale completed. Nothing was saved.", "success", false, undefined,
+                    { dismissOnScan: true, ...(paymentMethod === 'cash' ? { cashChangePence: change } : {}) });
                 return;
+            }
+
+            // The accepted price, tender and receipt lines are now captured in
+            // saleBundle. Do not rebuild them after asynchronous preparation.
+            if (isTauri()) await ensureTillReceiptSequence();
+
+            if (activeHeldRecovery && isTauri()) {
+                // Record the receipt identity before ANY payment work. Recovery
+                // checks these identities to avoid restoring an already paid cart.
+                activeHeldRecovery = { ...activeHeldRecovery, cart, customerId: selectedCustomerId,
+                    discountId: selectedManualDiscountId, saleIds: [...activeHeldRecovery.saleIds, orderId] };
+                await persistHeldRecovery(activeHeldRecovery);
+                if (heldRecoveryWriteError) throw new Error(heldRecoveryWriteError);
             }
 
             if (!isTauri()) {
@@ -4306,6 +4635,9 @@
                         ? `Preview sale charged to ${previewCustomerName}. Now owes ${formatMoney(previewBalance ?? accountBalanceAfterSale)}.`
                         : "Preview sale completed and added to the browser report.",
                     "success",
+                    false,
+                    undefined,
+                    { dismissOnScan: true, ...(paymentMethod === 'cash' ? { cashChangePence: change } : {}) },
                 );
                 return;
             }
@@ -4340,7 +4672,8 @@
                 approvedManagedProvider = null;
             }
             applyCompletedSaleToStores(committedSale);
-            void openDrawerAfterSuccessfulPayment(cashAmount);
+            const cashbackToGive = Number(committedSale.payment.cashbackAmount || 0);
+            void openDrawerAfterSuccessfulPayment(cashAmount + cashbackToGive);
             void printReceiptAfterSuccessfulPayment(committedSale);
             sendCompletedBundleToCctv(committedSale);
 
@@ -4364,12 +4697,16 @@
             toast(
                 paymentMethod === "account"
                     ? `Sale completed. ${formatMoney(accountAmount)} charged to ${completedAccountCustomerName}.`
-                    : paymentMethod === "cash" && change > 0
-                    ? `Sale completed. Change: ${formatMoney(change)}`
-                    : "Sale completed successfully",
+                    : paymentMethod === "cash"
+                    ? 'Cash payment saved successfully.'
+                    : cashbackToGive > 0
+                        ? `Give cashback ${formatMoney(cashbackToGive)}. This is cashback, not change. Sale completed successfully.`
+                        : "Sale completed successfully",
                 "success",
                 true,
                 () => printCompletedSaleReceipt(committedSale),
+                { dismissOnScan: cashbackToGive === 0, persistent: cashbackToGive > 0,
+                    ...(paymentMethod === 'cash' ? { cashChangePence: change } : {}) },
             );
             void triggerSync();
         } catch (e) {
@@ -4389,11 +4726,12 @@
                 useLoyaltyCredit = false;
                 toast("Card approved. The sale is safely queued and will save automatically when the database is ready. Do not charge it again.", "error");
                 setTimeout(() => void (approvedManagedProvider === "dojo" ? recoverApprovedDojoSales() : recoverApprovedSumupSales()), 2_000);
-            } else {
+            } else if (!showCheckoutExpiryReview) {
                 toast(`Sale was not completed: ${e}`, "error");
             }
         } finally {
             isCompletingSale = false;
+            refreshPromotionClock();
             terminalCancelRequested = false;
             terminalPaymentStage = "idle";
             terminalPaymentMessage = "";
@@ -4424,7 +4762,7 @@
                 <span class="login-brand-mark"><img src="/lbj-pos-logo.png" alt="" /></span>
                 <span class="login-brand-copy">
                     <strong>{$storeDB.name}</strong>
-                    <small>{tillName}</small>
+                    <small>{$deviceOperatingMode === 'back_office' ? deviceOperatingModeLabel($deviceOperatingMode) : tillName}</small>
                 </span>
                 <span class="login-brand-actions">
                     <button
@@ -4449,8 +4787,12 @@
                 <SupportAccessPanel onClose={() => (showSupportAccess = false)} onActivate={activateSupportSession} />
             {:else}
                 <div class="login-heading">
-                    <h1 id="staff-sign-in-title">Staff Sign In</h1>
-                    <p>{selectedLoginEmployee ? `Enter the PIN for ${selectedLoginEmployee.name}.` : "Choose your user to open this till."}</p>
+                    <h1 id="staff-sign-in-title">{$deviceOperatingMode === 'back_office' ? 'Back Office Sign In' : 'Staff Sign In'}</h1>
+                    <p>{selectedLoginEmployee
+                        ? `Enter the PIN for ${selectedLoginEmployee.name}.`
+                        : $deviceOperatingMode === 'back_office'
+                            ? 'Choose your user to open Back Office.'
+                            : 'Choose your user to open this till.'}</p>
                 </div>
                 {#if !selectedLoginEmployee}
                     {#if activeLoginEmployees.length > 0}
@@ -4472,8 +4814,8 @@
                         </div>
                     {:else}
                         <div class="login-empty-state">
-                            <strong class="block text-danger">No active staff accounts</strong>
-                            <p class="text-sm text-text-muted my-3">All staff accounts are deactivated. Open setup to recover access.</p>
+                            <strong class="block text-danger">{$deviceOperatingMode === 'back_office' ? 'No staff with Back Office access' : 'No active staff accounts'}</strong>
+                            <p class="text-sm text-text-muted my-3">{$deviceOperatingMode === 'back_office' ? 'An administrator must grant a management permission before this staff member can sign in here.' : 'All staff accounts are deactivated. Open setup to recover access.'}</p>
                             <button type="button" class="btn btn-primary" on:click={() => goto('/setup')}>Open Setup</button>
                         </div>
                     {/if}
@@ -4483,7 +4825,7 @@
                         <ChevronRight size={20} aria-hidden="true" />
                     </button>
                 {:else}
-                    <div class="login-pin-layout">
+                    <div class="login-pin-layout" class:back-office={$deviceOperatingMode === 'back_office'}>
                         <section class="login-person">
                             <span class="login-person-avatar" aria-hidden="true">{employeeInitials(selectedLoginEmployee.name)}</span>
                             <span class="login-person-label">Signing in as</span>
@@ -4496,16 +4838,49 @@
                                 Change user
                             </button>
                         </section>
-                        <TouchDigitPad
-                            bind:value={loginPin}
-                            masked={true}
-                            maxLength={8}
-                            placeholder="Enter PIN"
-                            submitLabel={loginBusy ? "Signing In..." : "Sign In"}
-                            submitDisabled={loginPin.length < 4 || loginBusy}
-                            disabled={loginBusy}
-                            onSubmit={login}
-                        />
+                        {#if $deviceOperatingMode === 'back_office'}
+                            <section class="login-desktop-pin" aria-label="PIN sign in">
+                                <span class="login-desktop-pin-icon" aria-hidden="true"><LockKeyhole size={24} strokeWidth={2.25} /></span>
+                                <div>
+                                    <label for="back-office-login-pin">Staff PIN</label>
+                                    <p>Use your keyboard to enter your PIN.</p>
+                                </div>
+                                <input
+                                    id="back-office-login-pin"
+                                    class="login-desktop-pin-input"
+                                    bind:this={loginPinInput}
+                                    value={loginPin}
+                                    type="password"
+                                    autocomplete="off"
+                                    maxlength="8"
+                                    pattern={"[0-9]{4,8}"}
+                                    placeholder="4 to 8 digits"
+                                    disabled={loginBusy}
+                                    data-touch-keyboard="off"
+                                    on:input={handleDesktopLoginPinInput}
+                                    on:keydown={handleDesktopLoginPinKeydown}
+                                />
+                                <button
+                                    type="submit"
+                                    class="btn btn-primary login-desktop-submit"
+                                    disabled={loginPin.length < 4 || loginBusy}
+                                >
+                                    {loginBusy ? 'Signing In…' : 'Sign In'}
+                                </button>
+                                <small>Press Enter to sign in · Esc to change user</small>
+                            </section>
+                        {:else}
+                            <TouchDigitPad
+                                bind:value={loginPin}
+                                masked={true}
+                                maxLength={8}
+                                placeholder="Enter PIN"
+                                submitLabel={loginBusy ? "Signing In..." : "Sign In"}
+                                submitDisabled={loginPin.length < 4 || loginBusy}
+                                disabled={loginBusy}
+                                onSubmit={login}
+                            />
+                        {/if}
                     </div>
                 {/if}
             {/if}
@@ -4560,10 +4935,19 @@
     </div>
 {/if}
 
+{#if attendanceEnabled}
+<AttendanceClock
+    bind:show={attendanceClockOpen}
+    staffSignIn={true}
+    allowHistoryNavigation={false}
+/>
+{/if}
+
 <div
     class="pos-checkout-shell flex h-screen w-screen overflow-hidden"
-    inert={!$currentEmployee || restoringRememberedSession || Boolean(pendingShiftEmployee)}
-    aria-hidden={!$currentEmployee || restoringRememberedSession || Boolean(pendingShiftEmployee)}
+    class:device-back-office-shell-hidden={$deviceOperatingMode === 'back_office'}
+    inert={!$currentEmployee || $currentEmployee?.role === 'attendance' || $deviceOperatingMode === 'back_office' || restoringRememberedSession || Boolean(pendingShiftEmployee)}
+    aria-hidden={!$currentEmployee || $currentEmployee?.role === 'attendance' || $deviceOperatingMode === 'back_office' || restoringRememberedSession || Boolean(pendingShiftEmployee)}
 >
     <!-- Main Content (Products) -->
     <main class="pos-products flex-1 flex flex-col p-2 md:p-3 lg:p-5 overflow-hidden">
@@ -4575,10 +4959,11 @@
                     <button
                         class="pos-admin-button h-12 min-w-[104px] rounded-md bg-bg-card border border-border-flat px-3 flex items-center justify-center gap-2 font-black text-text-main hover:bg-bg-card-hover hover:border-accent-primary transition-colors {isMenuDisabled ? 'opacity-70' : ''}"
                         aria-disabled={isMenuDisabled}
+                        aria-label="Open Admin"
                         title="Open Admin"
                         on:click|stopPropagation={() => handleMenuClick("/admin")}
                     >
-                        <img class="h-7 w-7 shrink-0 rounded object-contain" src="/lbj-pos-logo.png" alt="" />
+                        <img class="pos-admin-logo" src="/lbj-pos-logo.png" alt="" />
                         <span>Admin</span>
                     </button>
                 </div>
@@ -4621,21 +5006,23 @@
                 </span>
             </div>
             <div class="pos-header-status justify-self-end">
-                <time class="pos-clock" datetime={promoClock} title={new Date(promoClock).toLocaleString('en-GB')}>
+                <ConnectionStatusPill />
+                {#if attendanceEnabled}
+                <button
+                    type="button"
+                    class="pos-clock attendance-clock-trigger"
+                    title="Staff attendance · sign in to clock in or out"
+                    aria-label={`Staff attendance. ${headerTime}`}
+                    on:click={() => (attendanceClockOpen = true)}
+                >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                         <circle cx="12" cy="12" r="9"></circle>
                         <path d="M12 7v5l3 2"></path>
                     </svg>
                     {headerTime}
-                </time>
-                {#if $connectionState.mode === "multi"}
-                    <div
-                        class="sync-pill {syncStyle}"
-                        title={$connectionState.syncError || syncLabel}
-                    >
-                        <span></span>
-                        {syncLabel}
-                    </div>
+                </button>
+                {:else}
+                    <time class="pos-clock" aria-label={`Current time: ${headerTime}`}>{headerTime}</time>
                 {/if}
             </div>
         </header>
@@ -4664,7 +5051,7 @@
             {/each}
         </div>
 
-        <!-- Product Grid (Fixed 4x4) -->
+        <!-- Product slots reflow on narrow displays while retaining their order. -->
         <div class="pos-product-workspace flex flex-col gap-2 md:gap-3 lg:gap-5 flex-1 min-h-0">
             <div class="pos-product-grid grid grid-cols-4 grid-rows-4 gap-1 md:gap-2 lg:gap-3 flex-1 min-h-0">
                 {#each displayTiles as slot, tileIndex (`${currentPageIndex}:${tileIndex}:${slot?.tile.id || "empty"}:${slot?.product?.updatedAt || ""}:${slot?.product?.price ?? ""}`)}
@@ -4883,7 +5270,9 @@
         <div class="pos-cart-items flex-1 overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 relative">
             {#if trolleyMessage}
                 <div
-                    class="absolute top-2 left-3 right-3 z-10 p-3 rounded-md text-sm font-semibold shadow-lg text-center transition-all {trolleyMessageType ===
+                    role="status"
+                    aria-live="polite"
+                    class="trolley-inline-status pointer-events-none shrink-0 p-2 rounded-md text-xs font-semibold text-center {trolleyMessageType ===
                     'error'
                         ? 'bg-danger text-white'
                         : trolleyMessageType === 'success'
@@ -5091,26 +5480,22 @@
             <div
                 class="pos-total-row flex justify-between items-center py-3 border-y border-border-flat my-1"
             >
-                <div class="flex flex-col gap-0.5 min-w-0">
+                <div class="flex flex-col gap-0.5 min-w-0 flex-1">
                     <span
                         class="text-lg md:text-xl font-bold text-text-muted uppercase tracking-wider"
                         >Total</span
                     >
-                    {#if promoSavings > 0}
-                        <span
-                            class="pos-promo-summary {selectedPromotionNotice ? `pos-promo-summary-${selectedPromotionNotice.kind}` : 'pos-promo-summary-applied'}"
-                            title={selectedPromotionNotice?.title || `Promotions saved ${formatMoney(promoSavings)}`}
-                        >
-                            {selectedPromotionNotice?.detail || `Promotions -${formatMoney(promoSavings)}`}
-                        </span>
-                    {:else if selectedPromotionNotice}
-                        <span
-                            class="pos-promo-summary pos-promo-summary-{selectedPromotionNotice.kind}"
-                            title={selectedPromotionNotice.title}
-                        >
-                            {selectedPromotionNotice.detail}
-                        </span>
+                    <CartDiscountSummary
+                        lines={cartEval.lines}
+                        {formatMoney}
+                        bind:showDetails={showAppliedDiscounts}
+                        eligibilityHint={selectedPromotionNotice?.kind === "eligible" ? selectedPromotionNotice.detail : ""}
+                        eligibilityTitle={selectedPromotionNotice?.kind === "eligible" ? selectedPromotionNotice.title : ""}
+                    />
+                    {#if cartEval.optimizationLimited}
+                        <span class="text-xs text-amber-700" role="status">Complex offers: review the best price</span>
                     {/if}
+                    {#if heldRecoveryWriteError}<span class="text-xs text-red-700" role="alert">{heldRecoveryWriteError}</span>{/if}
                 </div>
                 <div class="flex flex-col items-end">
                     <span
@@ -5369,12 +5754,12 @@
 <!-- Numpad Modal (for Qty) -->
 {#if showNumpad}
     <div
-        class="fixed inset-0 bg-[var(--overlay)] z-[100] flex items-center justify-center p-5"
+        class="modal-overlay"
         data-pos-modal-overlay
     >
         <div
             use:modalFocusTrap={{ dismiss: () => (showNumpad = false) }}
-            class="quantity-pad-modal w-80 max-w-[95vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            class="quantity-pad-modal w-80 max-w-[95vw] max-h-[calc(100dvh-2rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="quantity-dialog-title"
@@ -5439,12 +5824,12 @@
 <!-- Change Price Modal -->
 {#if showChangePricePad}
     <div
-        class="fixed inset-0 bg-[var(--overlay)] z-[100] flex items-center justify-center p-5"
+        class="modal-overlay"
         data-pos-modal-overlay
     >
         <div
             use:modalFocusTrap={{ dismiss: () => (showChangePricePad = false) }}
-            class="change-price-modal w-96 max-w-[95vw] max-h-[85vh] md:max-h-[90vh] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
+            class="change-price-modal w-96 max-w-[95vw] max-h-[calc(100dvh-2rem)] overflow-y-auto p-6 rounded-md bg-bg-card flex flex-col gap-4 shadow-[var(--shadow)]"
             role="dialog"
             aria-modal="true"
             aria-labelledby="change-price-dialog-title"
@@ -5625,62 +6010,68 @@
     <div class="modal-overlay">
         <div
             use:modalFocusTrap={{ dismiss: closePayment, dismissDisabled: isCompletingSale }}
-            class="payment-modal w-[1040px] max-w-[96vw] max-h-[94vh] overflow-hidden p-3 md:p-4 rounded-md bg-bg-card border border-border-flat flex flex-col gap-3"
+            class="payment-modal"
+            class:is-cash={paymentMethod === 'cash'}
+            class:is-card={paymentMethod === 'card'}
+            class:is-account={paymentMethod === 'account'}
             role="dialog"
             aria-modal="true"
             aria-labelledby="payment-dialog-title"
         >
-            <div
-                class="payment-modal-header flex justify-between items-center border-b border-border-flat pb-3"
-            >
-                <h2 id="payment-dialog-title" class="m-0 text-text-main text-xl md:text-[1.5rem]">Payment</h2>
+            <div class="payment-modal-header">
+                <h2 id="payment-dialog-title">Payment</h2>
                 <button
-                    class="modal-close payment-close"
-                    aria-label="Close payment"
-                    title="Close payment"
+                    bind:this={paymentCustomerToggle}
+                    class="payment-customer-toggle"
+                    aria-expanded={paymentCustomerSearchOpen}
+                    aria-controls="payment-customer-search-panel"
                     disabled={isCompletingSale}
-                    on:click={closePayment}>✕</button
+                    on:click={togglePaymentCustomerSearch}
                 >
+                    <UsersRound size={18} aria-hidden="true" />
+                    <span>{selectedCustomer ? 'Change customer' : 'Find customer'}</span>
+                </button>
+                <button type="button" class="payment-customer-toggle" disabled={isCompletingSale || newPaymentCustomerSaving} on:click={openNewPaymentCustomer}>
+                    <span aria-hidden="true">＋</span><span>New customer</span>
+                </button>
+                <button class="modal-close payment-close" aria-label="Close payment" title="Close payment"
+                    disabled={isCompletingSale} on:click={closePayment}><X size={20} aria-hidden="true" /></button>
             </div>
 
-            <section class="payment-loyalty p-2.5 rounded-md border border-border-flat bg-bg-panel">
-                    <div class="payment-loyalty-search">
-                        <div class="payment-loyalty-heading">
-                            <ScanLine size={18} strokeWidth={2.3} aria-hidden="true" />
-                            <label for="payment-customer-search">Customer account &amp; loyalty</label>
-                            <span class="payment-loyalty-subtitle">Find a customer for Pay later or rewards</span>
+                <section class="payment-loyalty" aria-label="Customer and loyalty">
+                    {#if paymentCustomerSearchOpen}
+                        <div class="payment-loyalty-search" id="payment-customer-search-panel">
+                            <label for="payment-customer-search">Find a customer for loyalty or Pay later</label>
+                            <SearchField
+                                id="payment-customer-search"
+                                bind:inputElement={customerSearchInput}
+                                bind:value={customerSearch}
+                                placeholder="Name, loyalty code, phone or postcode"
+                                ariaLabel="Search customer accounts and loyalty"
+                                keyboardLabel="Open customer search keyboard"
+                                clearLabel="Clear customer search"
+                                disabled={isCompletingSale}
+                                onKeydown={handleCustomerSearchKeydown}
+                            />
+                            {#if customerMatches.length > 0}
+                                <div class="payment-customer-results" aria-label="Matching customers">
+                                    {#each customerMatches as customer}
+                                        <button disabled={isCompletingSale} on:click={() => selectPaymentCustomer(customer)}>
+                                            <strong>{customer.name}</strong>
+                                            <small>{customer.loyaltyCode || 'No loyalty code'} · {customer.postcode || 'No postcode'}</small>
+                                        </button>
+                                    {/each}
+                                </div>
+                            {:else if customerSearch.trim()}
+                                <p class="payment-search-empty" role="status">No matching customers.</p>
+                            {/if}
                         </div>
-                        <div class="payment-customer-search-row search-controls search-controls-fill">
-                            <div class="payment-customer-search-field search-primary">
-                                <SearchField
-                                    id="payment-customer-search"
-                                    bind:inputElement={customerSearchInput}
-                                    bind:value={customerSearch}
-                                    placeholder="Name, loyalty code, phone or postcode"
-                                    ariaLabel="Search customer accounts and loyalty"
-                                    keyboardLabel="Open customer search keyboard"
-                                    clearLabel="Clear customer search"
-                                    onKeydown={handleCustomerSearchKeydown}
-                                />
-                                {#if customerMatches.length > 0}
-                                    <div class="payment-customer-results">
-                                        {#each customerMatches as customer}
-                                            <button on:click={() => selectPaymentCustomer(customer)}>
-                                                <strong>{customer.name}</strong>
-                                                <small>{customer.loyaltyCode || 'No loyalty code'} · {customer.postcode || 'No postcode'}</small>
-                                            </button>
-                                        {/each}
-                                    </div>
-                                {/if}
-                            </div>
-                        </div>
-                    </div>
-                    {#if selectedCustomer}
+                    {:else if selectedCustomer}
                         <div class="payment-customer-card" aria-live="polite" aria-busy={customerAccountBusy}>
                             <div class="payment-customer-details">
                                 <span class="payment-customer-avatar" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
                                 <div class="payment-customer-identity">
-                                    <strong>{selectedCustomer.name}</strong>
+                                    <strong title={selectedCustomer.name}>{selectedCustomer.name}</strong>
                                     <span>{selectedCustomer.loyaltyCode || 'No loyalty code'}</span>
                                 </div>
                             </div>
@@ -5705,7 +6096,7 @@
                             </div>
                             <div class="payment-customer-actions">
                                 {#if loyaltyConfig.enabled}
-                                    <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale} on:click={toggleLoyaltyCredit}>
+                                    <button class="payment-customer-credit {useLoyaltyCredit ? 'active' : ''}" disabled={loyaltyCreditBusy || isCompletingSale || cashShortcutBusy} on:click={toggleLoyaltyCredit}>
                                         {loyaltyCreditBusy
                                             ? 'Checking...'
                                             : useLoyaltyCredit
@@ -5715,38 +6106,21 @@
                                                     : 'No loyalty value'}
                                     </button>
                                 {/if}
-                                <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" on:click={removePaymentCustomer}>
+                                <button class="btn-icon payment-customer-remove" aria-label="Remove selected customer" title="Remove selected customer" disabled={isCompletingSale} on:click={removePaymentCustomer}>
                                     <X size={18} strokeWidth={2.4} aria-hidden="true" />
                                 </button>
                             </div>
                         </div>
                     {:else}
-                        <div class="payment-customer-empty">
-                            <span class="payment-customer-avatar is-empty" aria-hidden="true"><UsersRound size={20} strokeWidth={2.2} /></span>
-                            <span>
-                                <strong>No customer selected</strong>
-                                <small>Search to use Pay later or loyalty rewards</small>
-                            </span>
+                        <div class="payment-customer-walk-in">
+                            <UsersRound size={22} aria-hidden="true" />
+                            <div><strong>Walk-in customer</strong><span>Add a customer for loyalty or Pay later</span></div>
                         </div>
                     {/if}
-            </section>
+                </section>
 
-            <div class="payment-body flex flex-col md:flex-row gap-3 md:gap-4 min-h-0">
-                <div class="payment-summary flex-1 flex flex-col gap-3 min-h-0">
-                    <div class="payment-total-card">
-                        <div class="payment-total-copy">
-                            <span>Amount due</span>
-                            <small>{cart.length} {cart.length === 1 ? 'line' : 'lines'} in trolley</small>
-                        </div>
-                        <strong>{formatMoney(paymentDue)}</strong>
-                    </div>
-                    {#if loyaltyCreditUsed > 0}
-                        <div class="payment-loyalty-applied">
-                            <span>Order {formatMoney(total)} minus loyalty credit</span>
-                            <strong>-{formatMoney(loyaltyCreditUsed)}</strong>
-                        </div>
-                    {/if}
-
+            <div class="payment-body">
+                <div class="payment-summary">
                     <div class="payment-methods" role="group" aria-label="Payment method">
                         <button
                             type="button"
@@ -5755,7 +6129,7 @@
                             aria-pressed={paymentMethod === "cash"}
                             on:click={() => selectPaymentMethod("cash")}
                         >
-                            <span class="payment-method-symbol">£</span>
+                            <span class="payment-method-symbol" aria-hidden="true">£</span>
                             <span>Cash</span>
                         </button
                         >
@@ -5799,199 +6173,102 @@
                         </button>
                     </div>
 
-                    {#if paymentMethod === "cash"}
+
+                    <section class="payment-totals" aria-label="Payment totals">
+                        <div class="payment-total-card">
+                            <div class="payment-total-copy">
+                                <span>{paymentMethod === 'card' ? paymentInputAmount > 0 && paymentInputAmount < paymentDue ? 'Card balance' : 'Card payment' : paymentMethod === 'account' ? 'Charge to account' : 'Amount due'}</span>
+                                <small>{cart.length} {cart.length === 1 ? 'line' : 'lines'} in trolley</small>
+                            </div>
+                            <strong>{formatMoney(paymentMethod === 'card' && paymentInputAmount > 0 && paymentInputAmount < paymentDue ? paymentDue - paymentInputAmount : paymentDue)}</strong>
+                        </div>
+                        {#if loyaltyCreditUsed > 0}
+                            <div class="payment-loyalty-applied">
+                                <span>Loyalty credit · order {formatMoney(total)}</span>
+                                <strong>−{formatMoney(loyaltyCreditUsed)}</strong>
+                            </div>
+                        {/if}
+                        {#if paymentMethod === 'cash'}
+                            <div class="payment-cash-totals" aria-live="polite" aria-atomic="true">
+                                <div class="payment-received"><span>Cash received</span><strong>{formatMoney(paymentInputAmount)}</strong></div>
+                                <div class="payment-change" class:is-ready={paymentInputAmount >= paymentDue}>
+                                    <span>{paymentInputAmount >= paymentDue ? 'Change to give' : 'Remaining'}</span>
+                                    <strong>{formatMoney(Math.abs(paymentInputAmount - paymentDue))}</strong>
+                                </div>
+                            </div>
+                        {:else if paymentMethod === 'card' && paymentInputAmount > 0 && paymentInputAmount < paymentDue}
+                            <div class="payment-split-row"><span>Cash received</span><strong>{formatMoney(paymentInputAmount)}</strong></div>
+                            <button class="payment-edit-cash" disabled={isCompletingSale} on:click={() => selectPaymentMethod('cash')}>Edit cash amount</button>
+                        {/if}
+                    </section>
+
+                    {#if paymentMethod === 'cash'}
                         <div class="payment-cash-options">
                             <div class="payment-section-heading">
-                                <span>Quick cash</span>
-                                <small>Amount received</small>
+                                <span>Pay now</span>
+                                <small>Completes the sale</small>
                             </div>
                             <div class="payment-quick-grid">
                                 <button
                                     type="button"
                                     class="payment-quick-button"
-                                    disabled={isCompletingSale}
+                                    aria-label={`Pay exact ${formatMoney(paymentDue)} now and complete sale`}
+                                    disabled={isCompletingSale || cashShortcutBusy || loyaltyCreditBusy}
                                     on:click={() => setAmountAndComplete(paymentDue)}
                                 >
-                                    <span>Pay full</span>
+                                    <span>Pay exact</span>
                                     <strong>{formatMoney(paymentDue)}</strong>
-                                    <small>Exact cash</small>
+                                    <small>No change</small>
                                 </button>
                             {#if nextPoundAmount !== null}
                                 <button
                                     type="button"
                                     class="payment-quick-button payment-quick-rounded"
-                                    disabled={isCompletingSale}
+                                    aria-label={`Pay ${formatMoney(nextPoundAmount)} now and complete sale with ${formatMoney(nextPoundAmount - paymentDue)} change`}
+                                    disabled={isCompletingSale || cashShortcutBusy || loyaltyCreditBusy}
                                     on:click={() =>
                                         setAmountAndComplete(nextPoundAmount!)}
                                 >
-                                    <span>Rounded cash</span>
+                                    <span>Pay rounded</span>
                                     <strong>{formatMoney(nextPoundAmount)}</strong>
                                     <small>{formatMoney(nextPoundAmount - paymentDue)} change</small>
                                 </button>
                             {/if}
                             </div>
                             <div class="payment-section-heading payment-notes-heading">
-                                <span>Cash notes</span>
+                                <span>Pay with notes</span>
+                                <small>Finishes when fully paid</small>
                             </div>
                             <div class="payment-note-grid">
                             {#each fixedQuickAmounts as amt}
                                 <button
                                     type="button"
                                     class="payment-note-button"
-                                    disabled={isCompletingSale}
+                                    data-note={amt / 100}
+                                    aria-label={`Add ${formatMoney(amt)} cash${paymentInputAmount + amt >= paymentDue ? ' and complete sale' : ''}`}
+                                    disabled={isCompletingSale || cashShortcutBusy || loyaltyCreditBusy || paymentDue <= 0}
                                     on:click={() => addQuickAmount(amt)}
                                 >
-                                    <span>+</span>
-                                    <strong>{formatMoney(amt)}</strong>
+                                    <img src={`/payment-notes/gbp-${amt / 100}.jpg`} alt="" aria-hidden="true" draggable="false" width="240" height="126" />
+                                    <span class="payment-note-label"><span aria-hidden="true">+</span><strong>£{amt / 100}</strong></span>
                                 </button>
                             {/each}
                             </div>
                         </div>
-                    {:else if paymentMethod === "card"}
-                        <div class="payment-card-summary">
-                            {#if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
-                                <div class="payment-card-amount">
-                                    <span>Card balance</span>
-                                    <strong>{formatMoney(paymentDue - paymentInputAmount)}</strong>
-                                </div>
-                                <div class="payment-split-row">
-                                    <span>Cash received</span>
-                                    <b>{formatMoney(paymentInputAmount)}</b>
-                                </div>
-                                <button class="payment-edit-cash" on:click={() => selectPaymentMethod("cash")}>Edit cash</button>
-                            {:else}
-                                <div class="payment-card-amount">
-                                    <span>Card payment</span>
-                                    <strong>{formatMoney(paymentDue)}</strong>
-                                </div>
-                            {/if}
-                        </div>
-                    {:else}
-                        <div class="payment-account-summary" aria-live="polite">
-                            <div>
-                                <span>Charge to account</span>
-                                <strong>{formatMoney(paymentDue)}</strong>
-                            </div>
-                            {#if selectedCustomer && selectedCustomerAccount}
-                                <p>
-                                    <span>{selectedCustomerAccount.balancePence < 0 ? 'Account credit' : 'Currently owes'} <b>{formatMoney(Math.abs(selectedCustomerAccount.balancePence))}</b></span>
-                                    <span>{accountBalanceAfterSale < 0 ? 'Credit after sale' : 'After this sale'} <b>{formatMoney(Math.abs(accountBalanceAfterSale))}</b></span>
-                                </p>
-                                {#if selectedCustomerAccount.creditLimitPence > 0}
-                                    <small>Account limit {formatMoney(selectedCustomerAccount.creditLimitPence)}</small>
-                                {:else}
-                                    <small>No account limit set</small>
-                                {/if}
-                            {:else}
-                                <p>Select a customer with Pay later enabled.</p>
-                            {/if}
-                        </div>
                     {/if}
-
-                    <div class="payment-result-actions flex flex-col gap-2 mt-auto">
-                        {#if paymentMethod === "cash"}
-                            {#if paymentInputAmount >= paymentDue}
-                                <div
-                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-lg md:text-xl font-black text-warning p-2 bg-bg-panel rounded-sm"
-                                >
-                                    Change: {formatMoney(
-                                        paymentInputAmount - paymentDue,
-                                    )}
-                                </div>
-                            {:else if paymentInputAmount > 0}
-                                <div
-                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-lg md:text-xl font-black text-danger p-2 bg-bg-panel rounded-sm"
-                                >
-                                    Remaining: {formatMoney(
-                                        paymentDue - paymentInputAmount,
-                                    )}
-                                </div>
-                            {:else}
-                                <div
-                                    class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm invisible"
-                                >
-                                    Change: £0.00
-                                </div>
-                            {/if}
-                        {:else if paymentMethod === "account"}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-sm md:text-base font-black p-2 rounded-sm {accountSaleAvailable ? 'text-success bg-success/10' : 'text-danger bg-danger/10'}"
-                            >
-                                {customerAccountBusy
-                                    ? 'Checking customer account…'
-                                    : !selectedCustomer
-                                        ? 'Select a customer to use Pay later'
-                                        : customerAccountLoadError
-                                            ? 'The customer account could not be verified. Select the customer again to retry'
-                                            : paymentDue <= 0
-                                                ? 'Nothing remains to charge to the customer account'
-                                        : !selectedCustomerAccount?.isEnabled
-                                            ? 'Pay later is not enabled for this customer'
-                                            : !accountLimitAllowsSale
-                                                ? 'This sale exceeds the customer account limit'
-                                                : $connectionState.mode === 'multi' && !$connectionState.mysqlOnline
-                                                    ? 'MariaDB must be online for Pay later'
-                                                    : !hasPermission($currentEmployee, 'charge_customer_account', $settingsDB)
-                                                        ? 'Permission required to charge customer accounts'
-                                                        : `${formatMoney(paymentDue)} will be added to ${selectedCustomer.name}'s account`}
-                            </div>
-                        {:else if managedCardEnabled && isCompletingSale}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-base md:text-lg font-black text-success p-2 bg-success/10 rounded-sm"
-                                aria-live="polite"
-                            >
-                                {terminalPaymentMessage || `Connecting to ${managedProviderName}`}
-                            </div>
-                        {:else if managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-sm md:text-base font-black text-danger p-2 bg-danger/10 rounded-sm"
-                            >
-                                MariaDB must be online to protect the shared Solo
-                            </div>
-                        {:else if paymentInputAmount > 0 && paymentInputAmount < paymentDue}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm"
-                            >
-                                Card remaining: {formatMoney(
-                                    paymentDue - paymentInputAmount,
-                                )}
-                            </div>
-                        {:else if cardCashPartInvalid}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-base md:text-lg font-black text-danger p-2 bg-bg-panel rounded-sm"
-                            >
-                                Cash part must be less than total
-                            </div>
-                        {:else}
-                            <div
-                                class="payment-status-line min-h-[52px] flex items-center justify-center text-center text-xl font-black text-warning p-2 bg-bg-panel rounded-sm invisible"
-                            >
-                                Change: £0.00
-                            </div>
-                        {/if}
-                        <button
-                            class="payment-complete-btn btn btn-success w-full p-3 text-lg md:text-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
-                            disabled={paymentCompleteDisabled}
-                            on:click={completeSale}
-                        >
-                            {isCompletingSale
-                                ? (managedCardEnabled && paymentMethod === 'card' ? `Processing ${managedProviderName}...` : 'Saving Sale...')
-                                : paymentMethod === 'account'
-                                    ? 'Confirm Pay Later'
-                                    : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : 'Complete Sale')}
-                        </button>
-                    </div>
                 </div>
 
-                <div class="payment-pad">
-                    {#if paymentMethod === "cash"}
+                {#if paymentMethod === 'cash'}
+                    <div class="payment-pad">
                         <div class="payment-pad-heading">
-                            <span>Amount received</span>
-                            <small>Cash entry</small>
+                            <span>Enter cash received</span>
+                            <small>Number pad</small>
                         </div>
                         <div class="payment-display-row">
                             <div
                                 class="np-display payment-display"
+                                id="payment-amount-received"
+                                data-modal-initial-focus
                                 role="spinbutton"
                                 aria-live="polite"
                                 aria-label="Amount received"
@@ -6036,41 +6313,123 @@
                                 </button>
                             {/each}
                         </div>
-                    {:else if paymentMethod === "card"}
+                    </div>
+                    {:else if paymentMethod === 'card'}
                         <div class="payment-card-terminal">
-                            <div class="payment-card-terminal-icon">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                            <div class="payment-card-terminal-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
                                     <rect x="3" y="5" width="18" height="14" rx="2"></rect>
                                     <path d="M3 10h18M7 15h4"></path>
                                 </svg>
                             </div>
-                            <span>{managedTerminalName}</span>
-                            <strong>{formatMoney(paymentInputAmount > 0 && paymentInputAmount < paymentDue ? paymentDue - paymentInputAmount : paymentDue)}</strong>
-                            {#if managedCardEnabled}
-                                <small>{terminalPaymentMessage || `The sale saves only after ${managedProviderName} confirms approval.`}</small>
-                                {#if isCompletingSale && !['approved', 'saving'].includes(terminalPaymentStage)}
-                                    <button class="btn btn-danger mt-3 w-full" disabled={terminalPaymentStage === 'cancelling'} on:click={cancelManagedTerminalPayment}>
-                                        {terminalPaymentStage === 'cancelling' ? 'Cancelling...' : 'Cancel Terminal'}
-                                    </button>
-                                {/if}
-                            {:else}
-                                <small>Complete the card transaction, then confirm the sale.</small>
+                            <div class="payment-terminal-copy">
+                                <strong>{managedTerminalName}</strong>
+                                <span role="status">{managedCardEnabled
+                                    ? terminalPaymentMessage || ($connectionState.mode !== 'multi' || !$connectionState.mysqlOnline ? 'Waiting for the shared database connection' : `Ready to send to ${managedProviderName}`)
+                                    : 'Take payment on your card terminal, then confirm below.'}</span>
+                            </div>
+                            {#if managedCardEnabled && isCompletingSale && !['approved', 'saving'].includes(terminalPaymentStage)}
+                                <button class="btn btn-danger payment-terminal-cancel" disabled={terminalPaymentStage === 'cancelling' || terminalCancelRequested} on:click={cancelManagedTerminalPayment}>
+                                    {terminalPaymentStage === 'cancelling' ? 'Cancelling…' : terminalCancelRequested ? 'Cancellation unconfirmed' : 'Cancel Terminal'}
+                                </button>
                             {/if}
                         </div>
                     {:else}
-                        <div class="payment-card-terminal payment-account-terminal">
-                            <div class="payment-card-terminal-icon account-icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                                    <path d="M5 4h14v16H5z"></path>
-                                    <path d="M8 8h8M8 12h8M8 16h5"></path>
-                                </svg>
-                            </div>
-                            <span>Customer account</span>
-                            <strong>{formatMoney(paymentDue)}</strong>
-                            <small>This records a debt, not cash or card received.</small>
+                        <div class="payment-account-summary" aria-live="polite">
+                            {#if selectedCustomer && selectedCustomerAccount}
+                                <div><span>{selectedCustomerAccount.balancePence < 0 ? 'Account credit' : 'Currently owes'}</span><strong>{formatMoney(Math.abs(selectedCustomerAccount.balancePence))}</strong></div>
+                                <div><span>{accountBalanceAfterSale < 0 ? 'Credit after sale' : 'After this sale'}</span><strong>{formatMoney(Math.abs(accountBalanceAfterSale))}</strong></div>
+                                <small>{selectedCustomerAccount.creditLimitPence > 0 ? `Account limit ${formatMoney(selectedCustomerAccount.creditLimitPence)}` : 'No account limit set'}</small>
+                            {:else}
+                                <p>Select a customer with Pay later enabled.</p>
+                            {/if}
+                            <small>This records a debt on the customer’s account.</small>
                         </div>
-                    {/if}
-                </div>
+                {/if}
+            </div>
+            <div class="payment-result-actions">
+                {#if paymentMethod === "account"}
+                    <div
+                        class="payment-footer-message" class:is-error={!accountSaleAvailable} role="status"
+                    >
+                        {customerAccountBusy
+                            ? 'Checking customer account…'
+                            : !selectedCustomer
+                                ? 'Select a customer to use Pay later'
+                                : customerAccountLoadError
+                                    ? 'The customer account could not be verified. Select the customer again to retry'
+                                    : paymentDue <= 0
+                                        ? 'Nothing remains to charge to the customer account'
+                                : !selectedCustomerAccount?.isEnabled
+                                    ? 'Pay later is not enabled for this customer'
+                                    : !accountLimitAllowsSale
+                                        ? 'This sale exceeds the customer account limit'
+                                        : $connectionState.mode === 'multi' && !$connectionState.mysqlOnline
+                                            ? 'MariaDB must be online for Pay later'
+                                            : !hasPermission($currentEmployee, 'charge_customer_account', $settingsDB)
+                                                ? 'Permission required to charge customer accounts'
+                                                : `${formatMoney(paymentDue)} will be added to ${selectedCustomer.name}'s account`}
+                    </div>
+                {:else if paymentMethod === 'card' && managedCardEnabled && isCompletingSale}
+                    <div
+                        class="payment-footer-message" role="status"
+                    >
+                        {terminalPaymentMessage || `Connecting to ${managedProviderName}`}
+                    </div>
+                {:else if paymentMethod === 'card' && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)}
+                    <div
+                        class="payment-footer-message is-error" role="status"
+                    >
+                        Reconnect to the shared database before taking a terminal payment.
+                    </div>
+                {:else if cardCashPartInvalid}
+                    <p class="payment-footer-message is-error" role="status">Cash part must be less than total. Return to Cash to edit it.</p>
+                {:else}
+                    <p class="payment-footer-message">
+                        {paymentMethod === 'cash'
+                            ? paymentInputAmount < paymentDue ? 'Enter cash received, or choose Pay now.' : 'Check the change, then complete the sale.'
+                            : managedCardEnabled ? `Send payment to ${managedProviderName} when ready.` : 'Confirm only after the card terminal approves.'}
+                    </p>
+                {/if}
+                <button
+                    class="payment-complete-btn btn btn-success disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:brightness-100"
+                    disabled={paymentCompleteDisabled}
+                    on:click={completeSale}
+                >
+                    {isCompletingSale
+                        ? (managedCardEnabled && paymentMethod === 'card' ? `Processing ${managedProviderName}...` : 'Saving Sale...')
+                        : paymentMethod === 'account'
+                            ? 'Confirm Pay Later'
+                            : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : paymentMethod === 'card' ? 'Confirm Card Payment' : 'Complete Sale')}
+                </button>
+            </div>
+        </div>
+    </div>
+{/if}
+
+{#if showPaymentModal && showNewPaymentCustomer && newPaymentCustomer}
+    <div class="modal-overlay checkout-customer-overlay" data-pos-modal-overlay>
+        <div
+            class="checkout-customer-dialog"
+            use:modalFocusTrap={{ dismiss: closeNewPaymentCustomer, dismissDisabled: newPaymentCustomerSaving }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="checkout-new-customer-title"
+            aria-busy={newPaymentCustomerSaving}
+        >
+            <header class="checkout-customer-header">
+                <h2 id="checkout-new-customer-title">New customer</h2>
+                <button type="button" class="modal-close" aria-label="Close new customer" disabled={newPaymentCustomerSaving} on:click={closeNewPaymentCustomer}><X size={20} aria-hidden="true" /></button>
+            </header>
+            <div class="checkout-customer-body">
+                <CheckoutCustomerForm
+                    bind:draft={newPaymentCustomer}
+                    saving={newPaymentCustomerSaving}
+                    error={newPaymentCustomerError}
+                    offline={$connectionState.mode === 'multi' && !$connectionState.mysqlOnline}
+                    onSave={saveNewPaymentCustomer}
+                    onCancel={closeNewPaymentCustomer}
+                />
             </div>
         </div>
     </div>
@@ -6094,6 +6453,15 @@
                     on:click={() => (showHeldOrders = false)}>✕</button
                 >
             </div>
+            {#if pendingHeldRecovery && !activeHeldRecovery}
+                <div class="rounded-md border border-amber-300 bg-amber-50 p-3 flex flex-col gap-2 text-sm text-amber-950">
+                    <strong>An interrupted trolley is saved on this till.</strong>
+                    <span>Recovery checks the claim and any saved payment before restoring it.</span>
+                    <button type="button" class="btn-primary min-h-[44px]" disabled={!!retrievingHeldOrderId || cart.length > 0} on:click={recoverInterruptedTrolley}>
+                        {retrievingHeldOrderId ? 'Checking…' : 'Recover interrupted trolley'}
+                    </button>
+                </div>
+            {/if}
             <div class="held-order-tabs" aria-label="Choose held trolley source">
                 <button
                     type="button"
@@ -6414,7 +6782,7 @@
     >
         <div
             use:modalFocusTrap={{ dismiss: closeQuickAdd, dismissDisabled: quickAddBusy }}
-            class="quick-add-modal w-[920px] max-w-[97vw] max-h-[calc(100vh-1rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
+            class="quick-add-modal w-[920px] max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-2rem)] overflow-y-auto p-5 sm:p-6 rounded-md bg-bg-card border border-border-flat flex flex-col gap-5"
             role="dialog"
             aria-modal="true"
             aria-labelledby="quick-add-dialog-title"
@@ -6699,13 +7067,28 @@
 />
 
 <ConfirmDialog
+    bind:show={showDojoSignatureConfirm}
+    title="Verify Customer Signature"
+    message="Compare the customer's signature with the card or merchant receipt, then accept or reject it. Dojo is still checking the payment while this dialog is open."
+    confirmText="Accept Signature"
+    cancelText="Reject Signature"
+    dismissDisabled={true}
+    on:confirm={() => finishDojoSignatureDecision(true)}
+    on:cancel={() => finishDojoSignatureDecision(false)}
+/>
+<DojoRetryDialog bind:decide={dojoRetryDecision} />
+<DojoExpiryReview bind:show={showCheckoutExpiryReview} attempt={checkoutExpiryAttempt}
+    employeeId={$currentEmployee?.role === 'admin' ? $currentEmployee.id : ''} onSaved={finishCheckoutExpiryReview} />
+
+<ConfirmDialog
     bind:show={showReversalConfirm}
     title={pendingReversal?.voiding ? "Void This Sale?" : "Confirm Refund?"}
-    message={pendingReversal?.voiding
-        ? "This will void the complete sale, restore stock, and record a reversal. Void is allowed only in the original open till session. Complete any card reversal on the external terminal before confirming."
+    message={(pendingReversal?.voiding
+        ? "This will void the complete sale, restore stock, and record a reversal. Void is allowed only in the original open till session."
         : pendingReversal?.partial
-            ? `Refund ${formatMoney(toPence(Number(partialRefundInput || 0)))} as an amount adjustment? Stock quantities will not change. Complete any card refund on the external terminal first.`
-            : "This will refund the remaining sale balance and restore stock. Complete any card refund on the external terminal before confirming."}
+            ? `Refund ${formatMoney(toPence(Number(partialRefundInput || 0)))} as a goods amount adjustment? Stock quantities will not change. Tips, service charge and cashback are excluded.`
+            : "This will refund the remaining goods balance and restore stock. Tips, service charge and cashback are excluded.")
+        + ' ' + refundCardInstructions(getCachedReceiptPayments(pendingReversal?.orderId || ''))}
     confirmText={isReversingOrder ? "Processing..." : pendingReversal?.voiding ? "Void Sale" : "Confirm Refund"}
     variant="danger"
     on:confirm={confirmPendingReversal}
@@ -6716,6 +7099,18 @@
 />
 
 <style>
+    .device-back-office-shell-hidden {
+        display: none;
+    }
+
+    .pos-admin-logo {
+        width: 28px;
+        height: 28px;
+        flex: 0 0 28px;
+        border-radius: .25rem;
+        object-fit: contain;
+    }
+
     .pos-pad-clear {
         color: var(--danger) !important;
         border-color: color-mix(in srgb, var(--danger) 42%, var(--border-flat)) !important;
@@ -6814,6 +7209,64 @@
     .login-error.visible { color: var(--danger); }
     .login-change-user { width: 100%; margin-top: auto; }
     .login-pin-layout :global(.digit-pad) { min-height: 410px; }
+    .login-pin-layout.back-office {
+        min-height: 300px;
+        grid-template-columns: minmax(220px, .72fr) minmax(320px, 1fr);
+        align-items: stretch;
+    }
+    .login-pin-layout.back-office .login-person { min-height: 300px; }
+    .login-desktop-pin {
+        min-width: 0;
+        min-height: 300px;
+        padding: 1.35rem;
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        grid-auto-rows: max-content;
+        align-content: center;
+        gap: .9rem .75rem;
+        border: 1px solid var(--border-flat);
+        border-radius: .5rem;
+        background: var(--bg-panel);
+    }
+    .login-desktop-pin-icon {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        grid-row: 1;
+        color: var(--accent-primary);
+        border: 1px solid color-mix(in srgb, var(--accent-primary) 38%, var(--border-flat));
+        border-radius: .42rem;
+        background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-card));
+    }
+    .login-desktop-pin > div { min-width: 0; align-self: center; }
+    .login-desktop-pin label { display: block; color: var(--text-main); font-size: .92rem; font-weight: 900; }
+    .login-desktop-pin p { margin: .18rem 0 0; color: var(--text-muted); font-size: .73rem; }
+    .login-desktop-pin-input {
+        width: 100%;
+        height: 46px;
+        grid-column: 1 / -1;
+        padding: 0 .85rem;
+        border: 1px solid var(--border-flat);
+        border-radius: .42rem;
+        outline: none;
+        background: var(--bg-card);
+        color: var(--text-main);
+        font-size: 1.1rem;
+        font-weight: 850;
+        letter-spacing: .18em;
+    }
+    .login-desktop-pin-input:focus {
+        border-color: var(--accent-primary);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-primary) 22%, transparent);
+    }
+    .login-desktop-submit { width: 100%; grid-column: 1 / -1; min-height: 44px; }
+    .login-desktop-pin > small {
+        grid-column: 1 / -1;
+        color: var(--text-muted);
+        font-size: .69rem;
+        text-align: center;
+    }
     @media (max-height: 700px) and (min-width: 651px) {
         .login-form { gap: .7rem; padding: .85rem; }
         .login-brand-row { min-height: 40px; padding-bottom: .55rem; }
@@ -6830,17 +7283,20 @@
         .login-person p:not(.login-error) { display: none; }
         .login-error { min-height: 1.2rem; }
         .login-pin-layout :global(.digit-pad) { min-height: 0; }
+        .login-pin-layout.back-office { min-height: 0; grid-template-columns: 1fr; }
+        .login-pin-layout.back-office .login-person,
+        .login-desktop-pin { min-height: 0; }
     }
-    .scale-workspace { width: 98vw; max-width: 1180px; height: calc(100vh - .75rem); max-height: 760px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
+    .scale-workspace { width: min(1180px, calc(100vw - 2rem)); max-width: 100%; height: min(760px, calc(100dvh - 2rem)); max-height: calc(100dvh - 2rem); overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-base); box-shadow: 0 24px 80px var(--shadow); }
     .scale-header { padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--border-flat); background: var(--bg-card); }
     .scale-header h2 { margin: .1rem 0; font-size: 1.55rem; }
     .scale-header p { margin: 0; color: var(--text-muted); font-size: .85rem; }
     .scale-kicker { color: var(--success); font-size: .65rem; font-weight: 900; letter-spacing: .14em; text-transform: uppercase; }
-    .scale-close { width: 2.5rem; height: 2.5rem; border-radius: .6rem; }
+    .scale-close { width: 2.75rem; height: 2.75rem; border-radius: .6rem; }
     .scale-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, .75fr); }
     .scale-products { min-height: 0; padding: .75rem; display: flex; flex-direction: column; gap: .65rem; }
-    .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 38px; padding-bottom: .1rem; }
-    .scale-page-tabs button { min-height: 36px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
+    .scale-page-tabs { display: flex; gap: .4rem; overflow-x: auto; min-height: 44px; padding-bottom: .1rem; }
+    .scale-page-tabs button { min-height: 44px; padding: 0 .75rem; display: flex; align-items: center; gap: .4rem; white-space: nowrap; color: var(--text-main); font-size: .75rem; font-weight: 800; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); }
     .scale-page-tabs button i { width: .5rem; height: .5rem; border-radius: 50%; background: var(--scale-page-color); }
     .scale-product-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(3, minmax(92px, 1fr)); gap: .55rem; }
     .scale-product { position: relative; min-height: 92px; padding: .7rem; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; gap: .15rem; color: var(--text-main); text-align: left; border: 2px solid var(--border-flat); border-radius: .7rem; background: var(--bg-card); }
@@ -6854,11 +7310,11 @@
     .scale-product.selected { border-color: var(--success); box-shadow: inset 0 0 0 1px var(--success), 0 0 0 2px color-mix(in srgb, var(--success) 22%, transparent); }
     .scale-product-check { position: absolute; z-index: 3; top: .5rem; right: .5rem; width: 1.65rem; height: 1.65rem; display: grid; place-items: center; color: white !important; border: 2px solid white; border-radius: 50%; background: var(--success); box-shadow: 0 2px 8px rgba(0, 0, 0, .28); }
     .scale-product-check svg { width: 1rem; height: 1rem; }
-    .scale-pagination { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-muted); font-size: .72rem; }
+    .scale-pagination { min-height: 44px; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-muted); font-size: .72rem; }
     .scale-pagination div { display: flex; align-items: center; gap: .4rem; }
-    .scale-pagination button { min-height: 34px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }
+    .scale-pagination button { min-height: 44px; padding: 0 .65rem; border: 1px solid var(--border-flat); border-radius: .5rem; background: var(--bg-card); color: var(--text-main); font-size: .72rem; font-weight: 800; }
     .scale-pagination button:disabled { opacity: .3; }
-    .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 72px 42px 64px 66px minmax(190px, 1fr) 52px 48px; gap: .38rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
+    .scale-entry { padding: .7rem; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 72px 44px 64px 66px minmax(190px, 1fr) 52px 48px; gap: .38rem; border-left: 1px solid var(--border-flat); background: var(--bg-panel); }
     .scale-selected, .scale-display, .scale-live, .scale-total { padding: .6rem .7rem; display: flex; flex-direction: column; gap: .1rem; border: 1px solid var(--border-flat); border-radius: .6rem; background: var(--bg-card); }
     .scale-selected span, .scale-display span, .scale-live span, .scale-total span { color: var(--text-muted); font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
     .scale-selected { min-width: 0; min-height: 0; overflow: hidden; flex-direction: row; align-items: center; justify-content: space-between; gap: .65rem; }
@@ -6870,13 +7326,13 @@
     .scale-selected-ready { width: 2rem; height: 2rem; flex: 0 0 2rem; display: grid; place-items: center; color: white !important; border-radius: 50%; background: var(--success); }
     .scale-selected-ready svg { width: 1.1rem; height: 1.1rem; }
     .scale-units { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-    .scale-units button { min-height: 42px; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
+    .scale-units button { min-height: 44px; padding: .48rem; border: 1px solid var(--border-flat); border-radius: .55rem; background: var(--bg-card); color: var(--text-main); font-weight: 700; }
     .scale-display strong { font-size: 1.55rem; text-align: right; line-height: 1.1; }
     .scale-display small { font-size: .9rem; color: var(--text-muted); }
     .scale-live { min-height: 0; flex-direction: row; align-items: center; justify-content: space-between; gap: .6rem; }
     .scale-live div { min-width: 0; display: flex; flex-direction: column; gap: .1rem; }
     .scale-live small { color: var(--text-muted); font-size: .74rem; line-height: 1.2; word-break: break-word; }
-    .scale-live button { min-height: 40px; padding: 0 .7rem; white-space: nowrap; }
+    .scale-live button { min-height: 44px; padding: 0 .7rem; white-space: nowrap; }
     .scale-numpad { min-height: 0; display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(4, minmax(44px, 1fr)); gap: .42rem; }
     .scale-numpad .payment-np-button { min-height: 44px !important; border-radius: .55rem; font-size: 1.28rem !important; }
     .scale-total { margin-top: 0; flex-direction: row; align-items: center; justify-content: space-between; }
@@ -6885,9 +7341,9 @@
     .scale-empty { padding: 2rem; color: var(--text-muted); text-align: center; border: 1px dashed var(--border-flat); border-radius: .8rem; }
     @media (max-width: 880px) { .scale-layout { grid-template-columns: 1fr 310px; } .scale-product-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     @media (max-width: 1040px) and (max-height: 820px) {
-        .scale-workspace { width: calc(100vw - .5rem); height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
+        .scale-workspace { width: min(1180px, calc(100vw - 2rem)); height: calc(100dvh - 2rem); max-height: calc(100dvh - 2rem); }
         .scale-layout { grid-template-columns: minmax(0, 1fr) minmax(270px, .7fr); }
-        .scale-entry { padding: .5rem; grid-template-rows: 64px 40px 56px 58px minmax(178px, 1fr) 46px 46px; gap: .35rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 64px 44px 56px 58px minmax(178px, 1fr) 46px 46px; gap: .35rem; }
         .scale-selected, .scale-display, .scale-live, .scale-total { padding: .45rem .55rem; }
         .scale-product { padding: .55rem; }
         .scale-product span, .scale-product small { font-size: .68rem; }
@@ -6895,21 +7351,21 @@
         .scale-product-grid { grid-template-rows: repeat(3, minmax(78px, 1fr)); }
         .scale-product { min-height: 78px; }
         .scale-live { min-height: 0; }
-        .scale-live button { min-height: 38px; padding: 0 .5rem; }
+        .scale-live button { min-height: 44px; padding: 0 .5rem; }
         .scale-numpad { min-height: 0; gap: .32rem; }
-        .scale-numpad .payment-np-button { min-height: 40px !important; font-size: 1.15rem !important; }
+        .scale-numpad .payment-np-button { min-height: 44px !important; font-size: 1.15rem !important; }
     }
     @media (max-height: 690px) {
-        .scale-workspace { height: calc(100vh - .5rem); max-height: calc(100vh - .5rem); }
+        .scale-workspace { height: calc(100dvh - 2rem); max-height: calc(100dvh - 2rem); }
         .scale-header p, .scale-selected small { display: none; }
         .scale-header { padding: .45rem .8rem; }
         .scale-products { padding: .5rem; gap: .3rem; }
-        .scale-entry { padding: .5rem; grid-template-rows: 48px 38px 50px 50px minmax(160px, 1fr) 42px 44px; gap: .3rem; }
-        .scale-page-tabs { min-height: 34px; }
-        .scale-page-tabs button { min-height: 32px; padding: 0 .55rem; }
+        .scale-entry { padding: .5rem; grid-template-rows: 48px 44px 50px 50px minmax(160px, 1fr) 44px 44px; gap: .3rem; }
+        .scale-page-tabs { min-height: 44px; }
+        .scale-page-tabs button { min-height: 44px; padding: 0 .55rem; }
         .scale-numpad { min-height: 0; gap: .28rem; }
-        .scale-numpad .payment-np-button { min-height: 38px !important; font-size: 1.05rem !important; }
-        .scale-add { min-height: 42px; }
+        .scale-numpad .payment-np-button { min-height: 44px !important; font-size: 1.05rem !important; }
+        .scale-add { min-height: 44px; }
     }
     @media (max-width: 760px) {
         .scale-layout { grid-template-columns: 1fr; overflow-y: auto; }

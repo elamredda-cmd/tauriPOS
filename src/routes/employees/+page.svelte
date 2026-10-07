@@ -6,8 +6,15 @@
     import TouchToggle from '$lib/components/TouchToggle.svelte';
     import { employeesDB, type Employee, uuid, now } from '$lib/stores/db';
     import { toast } from '$lib/stores/toast';
-    import { employeeHasLinkedHistory, remove, upsert } from '$lib/stores/database';
-    import { currentEmployee, hashPin } from '$lib/stores/session';
+    import {
+        deleteEmployeeProfile,
+        employeeHasLinkedHistory,
+        EmployeeProfileConflictError,
+        saveEmployeeProfile,
+    } from '$lib/stores/database';
+    import { connectionState } from '$lib/stores/connection';
+    import { currentEmployee, hashPin, normalizeEmployeeForPersistence, normalizeEmployeeForRuntime } from '$lib/stores/session';
+    import { employeeRoles, roleLabels } from '$lib/permissions';
 
     let show = false;
     let editing = false;
@@ -19,9 +26,8 @@
     let statusBusyId = '';
     let deleteCheckBusyId = '';
 
-    const roles: Employee['role'][] = ['admin', 'manager', 'supervisor', 'cashier'];
-    const roleOptions = roles.map((role) => ({
-        label: role.charAt(0).toUpperCase() + role.slice(1),
+    const roleOptions = employeeRoles.map((role) => ({
+        label: roleLabels[role],
         value: role,
     }));
 
@@ -29,11 +35,14 @@
         Number(b.isActive) - Number(a.isActive) ||
         a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
     );
-    $: activeCount = $employeesDB.filter((employee) => employee.isActive).length;
+    $: activeCount = $employeesDB.filter((employee) =>
+        employee.isActive && !employee.roleNeedsRepair && !employee.pinNeedsReset
+    ).length;
     $: adminCount = $employeesDB.filter((employee) => employee.role === 'admin').length;
     $: managerCount = $employeesDB.filter((employee) => employee.role === 'manager').length;
     $: supervisorCount = $employeesDB.filter((employee) => employee.role === 'supervisor').length;
     $: cashierCount = $employeesDB.filter((employee) => employee.role === 'cashier').length;
+    $: attendanceCount = $employeesDB.filter((employee) => employee.role === 'attendance').length;
 
     function initials(name: string): string {
         return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0] || '').join('').toUpperCase() || '?';
@@ -66,8 +75,12 @@
     }
 
     function isLastActiveAdmin(employee: Employee): boolean {
-        return employee.isActive && employee.role === 'admin' &&
-            $employeesDB.filter((item) => item.isActive && item.role === 'admin').length <= 1;
+        const candidate = normalizeEmployeeForRuntime(employee);
+        return Boolean(candidate?.isActive && candidate.role === 'admin' &&
+            $employeesDB.filter((item) => {
+                const normalized = normalizeEmployeeForRuntime(item);
+                return normalized?.isActive && normalized.role === 'admin';
+            }).length <= 1);
     }
 
     async function save() {
@@ -84,6 +97,14 @@
         }
         if (!editing && !pin) {
             toast('A PIN is required for a new staff member', 'error');
+            return;
+        }
+        if (!employeeRoles.includes(role)) {
+            toast('Choose a valid role for this staff member', 'error');
+            return;
+        }
+        if (editing && originalEmployee?.pinNeedsReset && !pin) {
+            toast('Set a new PIN before saving this staff member', 'error');
             return;
         }
         if (pin && !/^\d{4,8}$/.test(pin)) {
@@ -124,7 +145,7 @@
                 }
             }
 
-            const employee: Employee = {
+            const employee: Employee = normalizeEmployeeForPersistence({
                 id: String(cur.id),
                 storeId: originalEmployee?.storeId || cur.storeId || '',
                 name,
@@ -135,18 +156,29 @@
                 isActive,
                 createdAt: originalEmployee?.createdAt || cur.createdAt || now(),
                 updatedAt: now(),
-            };
+            });
 
-            await upsert('employees', employee);
-            employeesDB.update((list) => editing
-                ? list.map((item) => item.id === employee.id ? employee : item)
-                : [...list, employee]
-            );
-            if ($currentEmployee?.id === employee.id) currentEmployee.set(employee);
+            const savedEmployee = await saveEmployeeProfile(employee, {
+                expectedUpdatedAt: editing ? String(originalEmployee?.updatedAt || '') : null,
+                previousIsActive: Boolean(originalEmployee?.isActive),
+            });
+            if ($currentEmployee?.id === savedEmployee.id) currentEmployee.set(savedEmployee);
             show = false;
             toast(editing ? 'Staff member updated' : 'Staff member added');
         } catch (error) {
             console.error('Could not save staff member:', error);
+            if (error instanceof EmployeeProfileConflictError) {
+                const latest = $employeesDB.find((employee) => employee.id === cur.id) || null;
+                if (latest) {
+                    originalEmployee = latest;
+                    cur = { ...latest, pin: '' };
+                    editing = true;
+                } else {
+                    show = false;
+                }
+                toast(error.message, 'error');
+                return;
+            }
             toast(`Could not save staff member: ${String(error).replace(/^Error:\s*/, '')}`, 'error');
         } finally {
             saveBusy = false;
@@ -167,11 +199,17 @@
         statusBusyId = employee.id;
         try {
             const updated: Employee = { ...employee, isActive: !employee.isActive, updatedAt: now() };
-            await upsert('employees', updated);
-            employeesDB.update((list) => list.map((item) => item.id === employee.id ? updated : item));
-            toast(updated.isActive ? 'Staff member activated' : 'Staff member deactivated', 'info');
+            const savedEmployee = await saveEmployeeProfile(updated, {
+                expectedUpdatedAt: String(employee.updatedAt || ''),
+                previousIsActive: employee.isActive,
+            });
+            toast(savedEmployee.isActive ? 'Staff member activated' : 'Staff member deactivated', 'info');
         } catch (error) {
             console.error('Could not update staff status:', error);
+            if (error instanceof EmployeeProfileConflictError) {
+                toast(error.message, 'error');
+                return;
+            }
             toast(`Could not update status: ${String(error).replace(/^Error:\s*/, '')}`, 'error');
         } finally {
             statusBusyId = '';
@@ -180,6 +218,10 @@
 
     async function requestDelete(employee: Employee) {
         if (deleteCheckBusyId) return;
+        if ($connectionState.mode === 'multi') {
+            toast('Shared staff profiles are kept for reports and audit history. Deactivate this account instead.', 'info');
+            return;
+        }
         if (employee.id === $currentEmployee?.id) {
             toast('You cannot delete the account currently signed in', 'error');
             return;
@@ -209,8 +251,7 @@
         if (!employeeToDelete) return;
         const employeeId = employeeToDelete.id;
         try {
-            await remove('employees', employeeId);
-            employeesDB.update((list) => list.filter((employee) => employee.id !== employeeId));
+            await deleteEmployeeProfile(employeeId);
             toast('Staff member deleted');
         } catch (error) {
             console.error('Could not delete staff member:', error);
@@ -223,6 +264,12 @@
 
 <MgmtPage title="Staff">
     <div slot="actions" class="staff-page-actions">
+        <a class="btn btn-secondary attendance-button" href="/attendance">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>
+            </svg>
+            <span>Attendance</span>
+        </a>
         {#if $currentEmployee?.role === 'admin'}
             <a class="btn btn-secondary role-permissions-button" href="/employees/permissions">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -247,6 +294,7 @@
             <div><span>Managers</span><strong>{managerCount}</strong></div>
             <div><span>Supervisors</span><strong>{supervisorCount}</strong></div>
             <div><span>Cashiers</span><strong>{cashierCount}</strong></div>
+            <div><span>Attendance only</span><strong>{attendanceCount}</strong></div>
         </div>
 
         <div class="staff-table-wrap">
@@ -256,17 +304,24 @@
                 </thead>
                 <tbody>
                     {#each sortedEmployees as employee}
-                        <tr class:inactive-row={!employee.isActive}>
+                        <tr class:inactive-row={!employee.isActive || employee.roleNeedsRepair || employee.pinNeedsReset}>
                             <td>
                                 <div class="staff-person">
                                     <span class="staff-avatar" aria-hidden="true">{initials(employee.name)}</span>
                                     <div><strong>{employee.name}</strong><small>{employee.email || 'No email address'}</small></div>
                                 </div>
                             </td>
-                            <td><span class="role-badge role-{employee.role}">{employee.role}</span></td>
                             <td>
-                                <span class="status-label {employee.isActive ? 'active' : 'inactive'}">
-                                    <i></i>{employee.isActive ? 'Active' : 'Inactive'}
+                                <span class="role-badge role-{employee.role}" class:role-repair={employee.roleNeedsRepair}>
+                                    {employee.roleNeedsRepair ? 'Choose role' : (roleLabels[employee.role] || 'Invalid role')}
+                                </span>
+                                {#if employee.pinNeedsReset}
+                                    <small class="repair-note">PIN reset required</small>
+                                {/if}
+                            </td>
+                            <td>
+                                <span class="status-label {employee.isActive && !employee.roleNeedsRepair && !employee.pinNeedsReset ? 'active' : 'inactive'}">
+                                    <i></i>{employee.roleNeedsRepair || employee.pinNeedsReset ? 'Repair required' : employee.isActive ? 'Active' : 'Inactive'}
                                 </span>
                             </td>
                             <td class="action-cell">
@@ -277,7 +332,7 @@
                                     <button
                                         class="btn-icon act-btn status-action"
                                         class:activate={!employee.isActive}
-                                        disabled={statusBusyId === employee.id}
+                                        disabled={statusBusyId === employee.id || employee.roleNeedsRepair || employee.pinNeedsReset}
                                         title={employee.isActive ? `Deactivate ${employee.name}` : `Activate ${employee.name}`}
                                         aria-label={employee.isActive ? `Deactivate ${employee.name}` : `Activate ${employee.name}`}
                                         on:click={() => toggle(employee)}
@@ -318,17 +373,30 @@
 
 <Modal bind:show title={editing ? 'Edit Staff Member' : 'Add Staff Member'} width="560px">
     <div class="staff-form">
+        {#if editing && (originalEmployee?.roleNeedsRepair || originalEmployee?.pinNeedsReset)}
+            <div class="repair-alert span-2">
+                <strong>Staff access needs repair</strong>
+                <span>{originalEmployee.roleNeedsRepair && originalEmployee.pinNeedsReset
+                    ? 'Choose a valid role and set a new PIN before saving.'
+                    : originalEmployee.roleNeedsRepair
+                        ? 'Choose a valid role before saving.'
+                        : 'Set a new PIN before saving.'}</span>
+            </div>
+        {/if}
         <div class="field span-2">
             <label for="staff-name">Name *</label>
             <input id="staff-name" bind:value={cur.name} autocomplete="name" />
         </div>
         <div class="field">
-            <label for="staff-pin">{editing ? 'New PIN' : 'PIN *'}</label>
-            <input id="staff-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" bind:value={cur.pin} autocomplete="new-password" placeholder={editing ? 'Leave unchanged' : '4 to 8 digits'} />
-            <small>{editing ? 'Leave blank to keep the existing PIN.' : 'Use 4 to 8 numbers.'}</small>
+            <label for="staff-pin">{editing ? `New PIN${originalEmployee?.pinNeedsReset ? ' *' : ''}` : 'PIN *'}</label>
+            <input id="staff-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" bind:value={cur.pin} autocomplete="new-password" placeholder={editing && !originalEmployee?.pinNeedsReset ? 'Leave unchanged' : '4 to 8 digits'} />
+            <small>{editing && !originalEmployee?.pinNeedsReset ? 'Leave blank to keep the existing PIN.' : 'Use 4 to 8 numbers.'}</small>
         </div>
         <div class="field">
             <CustomSelect label="Role" bind:value={cur.role} options={roleOptions} largeOptions />
+            {#if cur.role === 'attendance'}
+                <small>Clock in/out and personal attendance only. This role cannot open checkout or a till shift.</small>
+            {/if}
         </div>
         <div class="field span-2">
             <label for="staff-email">Email</label>
@@ -357,10 +425,10 @@
 
 <style>
     .staff-page-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .65rem; }
-    .role-permissions-button, .add-staff-button { min-height: 48px; display: inline-flex; align-items: center; gap: .55rem; }
-    .role-permissions-button svg, .add-staff-button svg { width: 20px; height: 20px; }
+    .attendance-button, .role-permissions-button, .add-staff-button { min-height: 48px; display: inline-flex; align-items: center; gap: .55rem; }
+    .attendance-button svg, .role-permissions-button svg, .add-staff-button svg { width: 20px; height: 20px; }
     .staff-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-    .staff-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--border-flat); background: var(--border-flat); }
+    .staff-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--border-flat); background: var(--border-flat); }
     .staff-summary > div { min-width: 0; padding: .8rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; background: var(--bg-card); }
     .staff-summary span { overflow: hidden; color: var(--text-muted); font-size: .72rem; font-weight: 850; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
     .staff-summary strong { color: var(--text-main); font-size: 1.3rem; }
@@ -380,6 +448,9 @@
     .role-manager { color: var(--warning); }
     .role-supervisor { color: var(--success); }
     .role-cashier { color: var(--accent-primary); }
+    .role-attendance { color: var(--text-muted); }
+    .role-repair { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border-flat)); }
+    .repair-note { display: block; margin-top: .3rem; color: var(--danger); font-size: .68rem; font-weight: 850; }
     .status-label { display: inline-flex; align-items: center; gap: .45rem; font-size: .78rem; font-weight: 850; }
     .status-label i { width: .55rem; height: .55rem; border-radius: 50%; background: currentColor; }
     .status-label.active { color: var(--success); }
@@ -396,8 +467,13 @@
     .staff-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .staff-form .field { min-width: 0; }
     .staff-form .field small, .staff-active-control small { color: var(--text-muted); font-size: .72rem; line-height: 1.35; }
+    .repair-alert { display: flex; flex-direction: column; gap: .2rem; padding: .75rem .85rem; color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 38%, var(--border-flat)); border-radius: .4rem; background: color-mix(in srgb, var(--danger) 8%, var(--bg-card)); }
+    .repair-alert span { color: var(--text-muted); font-size: .78rem; }
     .staff-active-control { padding: .85rem; display: flex; flex-direction: column; gap: .45rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-panel); }
     @keyframes staff-spin { to { transform: rotate(360deg); } }
+    @media (min-width: 701px) and (max-width: 1000px) {
+        .staff-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
     @media (max-width: 760px) {
         .staff-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .staff-form { grid-template-columns: minmax(0, 1fr); }

@@ -7,18 +7,22 @@ import {
     postCustomerAccountEntry,
     type SaleBundle,
 } from '$lib/stores/database';
-import { connectionState, type MysqlConfig } from '$lib/stores/connection';
+import { connectionState, buildMysqlUri, type MysqlConfig } from '$lib/stores/connection';
+import { readDojoOperatorResolution } from '$lib/dojoExpiryReview';
 import {
     mysqlAcquirePaymentTerminalLock,
     mysqlRefreshPaymentTerminalLock,
     mysqlReleasePaymentTerminalLock,
 } from '$lib/stores/mysql';
 import {
+    acknowledgeApprovedPaymentTerminalAttempt,
     getRecoverablePaymentTerminalAttempts,
     isCustomerAccountPaymentPayload,
+    persistVerifiedDojoPaymentAccounting,
     prunePaymentTerminalAttempts,
     refreshPaymentTerminalAttempt,
     updatePaymentTerminalAttempt,
+    withTerminalPaymentExtras,
     type TerminalPaymentAttempt,
     type TerminalProvider,
 } from '$lib/terminalAttempts';
@@ -29,14 +33,18 @@ import {
     type SumupTransactionStatus,
 } from '$lib/sumup';
 import {
+    cancelExpiredSandboxDojoPaymentIntent,
     findDojoPaymentIntentByReference,
     getDojoPaymentIntentStatus,
     getDojoTerminalSessionStatus,
     loadDojoConfig,
+    refundDojoPaymentIntent,
     type DojoPaymentIntentStatus,
     type DojoRecoveredPayment,
     type DojoTerminalSessionStatus,
 } from '$lib/dojo';
+import { getDojoPaymentBreakdown } from '$lib/dojoPaymentValidation';
+import { TERMINAL_PAYMENT_EXTRA_FIELDS, type TerminalPaymentExtras } from '$lib/terminalAttemptState';
 import {
     getDb as getSqliteDb,
     getOrCreateTillId,
@@ -53,8 +61,9 @@ export type ProviderReconciliation =
         clientTransactionId: string;
         terminalSessionId?: string;
         providerReference: string;
+        extras?: TerminalPaymentExtras;
     }
-    | { outcome: 'failed' | 'cancelled'; error: string }
+    | { outcome: 'failed' | 'cancelled'; error: string; finalityAlreadyConfirmed?: true }
     | { outcome: 'uncertain'; error: string };
 
 export interface TerminalRecoveryResult {
@@ -63,6 +72,7 @@ export interface TerminalRecoveryResult {
     finalizedWithoutLedger: number;
     stillUncertain: number;
     errors: string[];
+    cashbackToReview: Array<{ attemptId: string; amount: number; currency: string }>;
 }
 
 let recoveryPromise: Promise<TerminalRecoveryResult> | null = null;
@@ -95,7 +105,11 @@ export function providerMissingReconciliation(
         && nowMs - firstObservedAt >= PROVIDER_MISSING_SETTLE_MS;
     const marker = `${PROVIDER_MISSING_PREFIX}:${provider}:${firstObservedAt}:${observations}:`;
     return settled
-        ? { outcome: 'cancelled', error: `${marker} provider repeatedly confirmed no ${missingEffect} over 24 hours` }
+        ? {
+            outcome: 'cancelled',
+            error: `${marker} provider repeatedly confirmed no ${missingEffect} over 24 hours`,
+            finalityAlreadyConfirmed: true,
+        }
         : { outcome: 'uncertain', error: `${marker} provider has not confirmed the ${missingEffect}; automatic retry remains blocked` };
 }
 
@@ -129,6 +143,20 @@ export function settleProviderFinalReconciliation(
         };
 }
 
+/** Apply the final-result policy once; never discard settled missing history. */
+export function settleRecoveredProviderOutcome(
+    attempt: Pick<TerminalPaymentAttempt, 'error'>,
+    provider: TerminalProvider,
+    result: ProviderReconciliation,
+    nowMs = Date.now(),
+): ProviderReconciliation {
+    if ((result.outcome === 'failed' || result.outcome === 'cancelled')
+        && !result.finalityAlreadyConfirmed) {
+        return settleProviderFinalReconciliation(attempt, provider, result.outcome, result.error, nowMs);
+    }
+    return result;
+}
+
 export function classifySumupPaymentStatus(status: string): 'approved' | 'failed' | 'cancelled' | 'missing' | 'uncertain' {
     const outcome = status.trim().toUpperCase();
     if (outcome === 'SUCCESSFUL' || outcome === 'PAID_OUT') return 'approved';
@@ -148,7 +176,7 @@ export function classifyDojoPaymentStatus(
     const terminal = terminalStatus.trim().toUpperCase();
     if (payment === 'CAPTURED') return 'approved';
     if (payment === 'CANCELED' || payment === 'REVERSED') return 'cancelled';
-    if (['DECLINED', 'SIGNATUREVERIFICATIONREJECTED'].includes(terminal)) return 'failed';
+    if (payment === 'CREATED' && ['DECLINED', 'SIGNATUREVERIFICATIONREJECTED'].includes(terminal)) return 'failed';
     if (terminal === 'CANCELED' && (!payment || payment === 'CREATED' || payment === 'CANCELED')) {
         return 'cancelled';
     }
@@ -251,36 +279,56 @@ async function reconcileSumup(attempt: TerminalPaymentAttempt): Promise<Provider
     return verifySumupPayment(attempt, status!);
 }
 
-function verifyDojoPayment(
+export function verifyDojoPayment(
     attempt: TerminalPaymentAttempt,
     payment: DojoPaymentIntentStatus,
     terminalSessionId = '',
     terminalStatus = '',
 ): ProviderReconciliation {
+    // Identity is required for negative results too: a different canceled
+    // intent must never release this terminal's durable active journal.
+    if (!payment.id || (attempt.clientTransactionId && payment.id !== attempt.clientTransactionId) || payment.reference !== attempt.id) {
+        return { outcome: 'uncertain', error: 'Dojo returned a payment with a different durable identity or reference' };
+    }
+    try {
+        const reviewed = readDojoOperatorResolution(attempt, payment);
+        if (reviewed && payment.status !== 'Captured') {
+            if (reviewed.decision === 'paid' && payment.status === 'Created') {
+                return { outcome: 'approved', clientTransactionId: payment.id,
+                    terminalSessionId: attempt.terminalSessionId,
+                    providerReference: `Dojo receipt confirmed by ${reviewed.employeeName}: ${reviewed.receiptReference} [id:${payment.id}]`,
+                    extras: { tipsAmount: reviewed.tipsAmount, serviceChargeAmount: reviewed.serviceChargeAmount, cashbackAmount: reviewed.cashbackAmount } };
+            }
+            if (reviewed.decision === 'not_paid' && payment.status === 'Canceled') {
+                return { outcome: 'cancelled', error: `Administrator checked the failed payment; Dojo confirmed cancellation. Receipt: ${reviewed.receiptReference}`, finalityAlreadyConfirmed: true };
+            }
+            return { outcome: 'uncertain', error: 'Dojo now disagrees with the recorded receipt decision. Administrator review is required.' };
+        }
+    } catch (error) { return { outcome: 'uncertain', error: String(error) }; }
+    const detail = `terminal ${terminalStatus || 'unknown'}, payment intent ${payment.status || 'Unknown'}`;
     const classification = classifyDojoPaymentStatus(payment.status, terminalStatus);
     if (classification === 'failed' || classification === 'cancelled') {
         return {
             outcome: classification,
-            error: `Dojo final status: ${terminalStatus || payment.status}`,
+            error: `Dojo final status: ${detail}`,
         };
     }
     if (classification !== 'approved') {
-        return { outcome: 'uncertain', error: `Dojo is not final (${terminalStatus || payment.status || 'Unknown'})` };
+        return { outcome: 'uncertain', error: `Dojo is not final (${detail})` };
     }
-    if (payment.reference !== attempt.id) {
-        return { outcome: 'uncertain', error: 'Dojo returned a captured payment with a different durable reference' };
-    }
-    if (payment.amount !== attempt.amount) {
-        return { outcome: 'uncertain', error: 'Dojo returned a captured payment with a different amount' };
-    }
-    if ((payment.currency || '').toUpperCase() !== attempt.currency.toUpperCase()) {
-        return { outcome: 'uncertain', error: 'Dojo returned a captured payment with a different currency' };
+    let extras: TerminalPaymentExtras;
+    try {
+        const { tipsAmount, serviceChargeAmount, cashbackAmount } = getDojoPaymentBreakdown(payment, attempt.amount, attempt.currency);
+        extras = { tipsAmount, serviceChargeAmount, cashbackAmount };
+    } catch (error) {
+        return { outcome: 'uncertain', error: String(error) };
     }
     return {
         outcome: 'approved',
         clientTransactionId: payment.id,
         terminalSessionId,
         providerReference: dojoReference(payment),
+        extras,
     };
 }
 
@@ -297,6 +345,30 @@ async function reconcileDojoRefund(attempt: TerminalPaymentAttempt): Promise<Pro
     if (!latest || latest.refundedAmount === undefined) {
         return { outcome: 'uncertain', error: 'Dojo did not return an authoritative refund total' };
     }
+    if (isCustomerAccountPaymentPayload(attempt.saleBundle) || !attempt.saleBundle.order.originalOrderId
+        || latest.id !== attempt.clientTransactionId
+        || latest.reference !== attempt.saleBundle.order.originalOrderId
+        || !['Captured', 'Refunded'].includes(latest.status)) {
+        return { outcome: 'uncertain', error: 'Dojo did not confirm the original refund identity and final payment state' };
+    }
+    const db = await getSqliteDb();
+    const originals = await db.select<Array<{ cardAmount: number; amount: number; reference: string }>>(
+        'SELECT cardAmount, amount, reference FROM payments WHERE orderId = ? LIMIT 1',
+        [attempt.saleBundle.order.originalOrderId],
+    );
+    const original = originals[0];
+    if (!original || !original.reference.includes(`[id:${attempt.clientTransactionId}]`)) {
+        return { outcome: 'uncertain', error: 'The original Dojo sale is not available for refund verification; synchronize and review it' };
+    }
+    try {
+        getDojoPaymentBreakdown(latest, Number(original.cardAmount || original.amount), attempt.currency);
+    } catch (error) {
+        return { outcome: 'uncertain', error: String(error) };
+    }
+    const refundPayment = attempt.saleBundle.payment;
+    if (TERMINAL_PAYMENT_EXTRA_FIELDS.some((field) => Number(refundPayment[field] || 0) !== 0)) {
+        return { outcome: 'uncertain', error: 'A goods refund cannot also post the original tips, service charge or cashback' };
+    }
     const before = attempt.expectedProviderAmount - attempt.amount;
     if (latest.refundedAmount === attempt.expectedProviderAmount) {
         return {
@@ -306,6 +378,26 @@ async function reconcileDojoRefund(attempt: TerminalPaymentAttempt): Promise<Pro
         };
     }
     if (latest.refundedAmount === before) {
+        // Recover an interrupted/refused refund using Dojo's documented retry
+        // contract: the exact original body and idempotency key, never a new key.
+        // Only recent, unapproved work is replayed; older work stays protected.
+        const age = Date.now() - Date.parse(attempt.createdAt);
+        if (['started', 'uncertain'].includes(attempt.status) && age >= 0 && age < PROVIDER_MISSING_SETTLE_MS) {
+            const result = await refundDojoPaymentIntent(attempt.clientTransactionId, attempt.amount, attempt.id);
+            const checked = await getDojoPaymentIntentStatus(attempt.clientTransactionId);
+            if (checked.id !== latest.id || checked.reference !== latest.reference || !['Captured', 'Refunded'].includes(checked.status)) {
+                return { outcome: 'uncertain', error: 'Dojo refund recheck returned a different identity or state' };
+            }
+            getDojoPaymentBreakdown(checked, Number(original.cardAmount || original.amount), attempt.currency);
+            if (checked.refundedAmount === attempt.expectedProviderAmount) {
+                return { outcome: 'approved', clientTransactionId: checked.id,
+                    providerReference: `Dojo refund ${checked.transactionId || checked.id} [id:${checked.id}]` };
+            }
+            if (result.paymentIntentId === latest.id && result.rejected === true && checked.refundedAmount === before) {
+                return { outcome: 'failed', error: 'Dojo explicitly rejected the original refund; its refunded total is unchanged. No refund recorded.', finalityAlreadyConfirmed: true };
+            }
+            return { outcome: 'uncertain', error: 'Dojo refund recheck did not confirm success or rejection; do not refund again' };
+        }
         return providerMissingReconciliation(attempt, 'dojo', Date.now(), 'refund');
     }
     return {
@@ -319,12 +411,20 @@ async function reconcileDojo(attempt: TerminalPaymentAttempt): Promise<ProviderR
 
     let session: DojoTerminalSessionStatus | null = null;
     let recovered: DojoRecoveredPayment | null = null;
-    if (attempt.terminalSessionId) {
+    if (attempt.clientTransactionId) {
+        const payment = await getDojoPaymentIntentStatus(attempt.clientTransactionId);
+        if (payment.terminalHistoryError) return { outcome: 'uncertain', error: payment.terminalHistoryError };
+        recovered = { payment, terminalSessionId: payment.latestTerminalSessionId || attempt.terminalSessionId };
+        if (recovered.terminalSessionId) session = await getDojoTerminalSessionStatus(recovered.terminalSessionId);
+    } else if (attempt.terminalSessionId) {
         session = await getDojoTerminalSessionStatus(attempt.terminalSessionId);
     } else {
         recovered = await findDojoPaymentIntentByReference(attempt.id, attempt.createdAt);
         if (!recovered) {
             return providerMissingReconciliation(attempt, 'dojo');
+        }
+        if (recovered.terminalSessionId) {
+            session = await getDojoTerminalSessionStatus(recovered.terminalSessionId);
         }
     }
 
@@ -332,17 +432,107 @@ async function reconcileDojo(attempt: TerminalPaymentAttempt): Promise<ProviderR
         || session?.paymentIntentId
         || recovered?.payment.id
         || '';
-    const terminalSessionId = attempt.terminalSessionId
-        || recovered?.terminalSessionId
+    const terminalSessionId = recovered?.terminalSessionId
+        || attempt.terminalSessionId
         || '';
-    const terminalStatus = session?.status || recovered?.terminalSessionStatus || '';
-    const payment = session?.payment
-        || recovered?.payment
-        || (paymentIntentId ? await getDojoPaymentIntentStatus(paymentIntentId) : null);
+    if (session && (session.id !== terminalSessionId
+        || !session.paymentIntentId
+        || session.paymentIntentId !== paymentIntentId
+        || !session.terminalId
+        || session.terminalId !== attempt.terminalKey.slice(attempt.terminalKey.lastIndexOf(':') + 1))) {
+        return { outcome: 'uncertain', error: 'Dojo returned a different terminal session, terminal or linked payment intent' };
+    }
+    // A search result's history label is not enough to assert terminal finality.
+    const terminalStatus = session?.status || '';
+    // Read after the terminal, so a late capture always wins over its label.
+    const payment = paymentIntentId ? await getDojoPaymentIntentStatus(paymentIntentId) : recovered?.payment;
     if (!payment) {
         return { outcome: 'uncertain', error: 'Dojo found terminal work but no payment intent to reconcile' };
     }
+    if (payment.id !== paymentIntentId) {
+        return { outcome: 'uncertain', error: 'Dojo payment intent does not match the verified terminal session' };
+    }
+    const pendingRetry = /DOJO_RETRY_PENDING:([^\s]+)/.exec(attempt.error || '')?.[1];
+    if (pendingRetry && terminalSessionId === pendingRetry && payment.status === 'Created') {
+        return { outcome: 'uncertain', error: `${attempt.error} The retry session is not yet confirmed. Check Dojo.` };
+    }
+    if (payment.latestTerminalSessionId && payment.latestTerminalSessionId !== terminalSessionId) {
+        return { outcome: 'uncertain', error: 'Dojo session history changed while checking; check the latest result again.' };
+    }
     return verifyDojoPayment(attempt, payment, terminalSessionId, terminalStatus);
+}
+
+export async function reviewExpiredDojoPayment(
+    attemptId: string, employeeId: string, pin: string,
+    review: { decision: 'paid' | 'not_paid'; receiptReference: string; note: string; tipsAmount: number; serviceChargeAmount: number; cashbackAmount: number },
+): Promise<void> {
+    const state = get(connectionState);
+    if (!isTauri() || !state.mysqlConfig || !state.mysqlOnline || !state.mysqlReady || state.mode !== 'multi') {
+        throw new Error('Reconnect MariaDB in the native POS before reviewing a card payment.');
+    }
+    await assertMariaDbCommerceWritesAllowed();
+    const attempt = await refreshPaymentTerminalAttempt('dojo', attemptId);
+    const tillId = await getOrCreateTillId();
+    const leaseReference = `review:${attemptId}:${crypto.randomUUID()}`;
+    const result = await runWithTerminalRecoveryLease({
+        acquire: async () => (await mysqlAcquirePaymentTerminalLock(attempt.terminalKey, tillId, 'Administrator payment review', leaseReference, 600)).acquired,
+        refresh: () => mysqlRefreshPaymentTerminalLock(attempt.terminalKey, tillId, leaseReference, 600),
+        release: () => mysqlReleasePaymentTerminalLock(attempt.terminalKey, tillId, leaseReference),
+    }, async assertHeld => {
+        await assertHeld();
+        await refreshPaymentTerminalAttempt('dojo', attemptId);
+        await invoke('dojo_review_expired_payment', { mysqlUri: buildMysqlUri(state.mysqlConfig!),
+            employeeId, pin, tillId, leaseReference, review: { attemptId, ...review } });
+        await assertHeld();
+        await refreshPaymentTerminalAttempt('dojo', attemptId);
+    });
+    if (!result.acquired) throw new Error('This terminal is being used or checked on another till. Wait for it to finish.');
+}
+
+/** Explicit operator action for an expired SANDBOX collection, never a retry. */
+export async function cancelExpiredSandboxDojoPayment(attemptId: string): Promise<void> {
+    if (!isTauri()) throw new Error('Sandbox payment recovery requires the native POS app');
+    const state = get(connectionState);
+    if (state.mode !== 'multi' || !state.mysqlOnline) {
+        throw new Error('Reconnect the shared database before canceling a sandbox test payment');
+    }
+    const config = await loadDojoConfig();
+    if (!config.apiKeyConfigured || config.apiEnvironment !== 'Sandbox') {
+        throw new Error('This action requires a saved Dojo sandbox key; live payments are not supported');
+    }
+    const validate = (attempt: TerminalPaymentAttempt) => {
+        if (attempt.id !== attemptId || attempt.provider !== 'dojo'
+            || !['sale', 'customer_account_payment'].includes(attempt.operationKind)
+            || !['prepared', 'started', 'uncertain'].includes(attempt.status)
+            || !attempt.clientTransactionId || !attempt.terminalSessionId) {
+            throw new Error('Only an unresolved, unapproved sandbox collection with durable provider IDs can be canceled');
+        }
+    };
+    const initial = await refreshPaymentTerminalAttempt('dojo', attemptId);
+    validate(initial);
+    await assertMariaDbCommerceWritesAllowed();
+    const tillId = await getOrCreateTillId();
+    const reference = `sandbox-cancel:${attemptId}:${crypto.randomUUID()}`;
+    const leased = await runWithTerminalRecoveryLease({
+        acquire: async () => (await mysqlAcquirePaymentTerminalLock(initial.terminalKey, tillId, `${await getTillName()} sandbox recovery`.slice(0, 255), reference, 600)).acquired,
+        refresh: () => mysqlRefreshPaymentTerminalLock(initial.terminalKey, tillId, reference, 600),
+        release: () => mysqlReleasePaymentTerminalLock(initial.terminalKey, tillId, reference),
+    }, async (assertHeld) => {
+        await assertHeld();
+        const current = await refreshPaymentTerminalAttempt('dojo', attemptId);
+        validate(current);
+        if (current.terminalKey !== initial.terminalKey) throw new Error('The terminal journal changed; refresh before continuing');
+        await assertMariaDbCommerceWritesAllowed();
+        await assertHeld();
+        // Native code reads this refreshed journal itself, verifies the actual
+        // saved key/session/payment, sends one DELETE, then requires Canceled.
+        // Four bounded HTTP requests fit within this freshly renewed 10m lease.
+        await cancelExpiredSandboxDojoPaymentIntent(attemptId);
+        await assertHeld();
+        // Deliberately no journal status write. Normal recovery still requires
+        // separated final observations and is free to recover a racing capture.
+    });
+    if (!leased.acquired) throw new Error('The Dojo terminal is currently being checked by another till; try again after it finishes');
 }
 
 function withProviderReference(attempt: TerminalPaymentAttempt, reference: string): TerminalPaymentAttempt['saleBundle'] {
@@ -434,10 +624,18 @@ async function commitAttemptLedger(
             allowCreditBalance: payload.allowCreditBalance,
             reportEpoch: payload.reportEpoch,
             serverDataEpoch: payload.serverDataEpoch,
+            tipsAmount: payload.tipsAmount,
+            serviceChargeAmount: payload.serviceChargeAmount,
+            cashbackAmount: payload.cashbackAmount,
         });
     } else {
         const locallyCommitted = await loadCommittedLocalBundle(attempt.saleBundle);
         if (locallyCommitted) {
+            const preparedPayment = attempt.saleBundle.payment;
+            if (TERMINAL_PAYMENT_EXTRA_FIELDS.some((field) =>
+                Number(locallyCommitted.payment[field] || 0) !== Number(preparedPayment[field] || 0))) {
+                throw new Error('The existing local sale has different terminal extra amounts; administrator review is required');
+            }
             // A crash can occur after SQLite commits but before its outbox is
             // created. Replay the locally allocated receipt identity directly
             // to MariaDB before declaring terminal recovery complete.
@@ -461,17 +659,46 @@ async function commitAttemptLedger(
     });
 }
 
+async function verifyCompletedDojoAccounting(
+    attempt: TerminalPaymentAttempt,
+    extras: TerminalPaymentExtras,
+): Promise<void> {
+    const db = await getSqliteDb();
+    const payload = attempt.saleBundle;
+    const accountPayment = isCustomerAccountPaymentPayload(payload);
+    const rows = accountPayment
+        ? await db.select<any[]>('SELECT * FROM customer_account_entries WHERE idempotencyKey = ? AND customerId = ? LIMIT 1', [payload.idempotencyKey, payload.customerId])
+        : await db.select<any[]>('SELECT * FROM payments WHERE id = ? AND orderId = ? LIMIT 1', [payload.payment.id, payload.order.id]);
+    const stored = rows[0];
+    const expectedBase = attempt.operationKind === 'refund' ? -attempt.amount : attempt.amount;
+    const actualBase = accountPayment ? -Number(stored?.amountPence) : Number(stored?.cardAmount || stored?.amount);
+    if (!stored || actualBase !== expectedBase || !String(stored.reference || '').includes(`[id:${attempt.clientTransactionId}]`)) {
+        throw new Error('The completed Dojo journal does not match its saved financial payment; administrator review is required');
+    }
+    const journalPayment = accountPayment ? payload : payload.payment;
+    if (TERMINAL_PAYMENT_EXTRA_FIELDS.some((field) => Number(stored[field] || 0) !== extras[field]
+        || Number(journalPayment[field] || 0) !== extras[field])) {
+        throw new Error('A completed Dojo payment has unrecorded or conflicting extra amounts; administrator review is required');
+    }
+}
+
 async function recoverAttempt(
     attempt: TerminalPaymentAttempt,
     assertLeaseHeld: AssertTerminalRecoveryLease,
 ): Promise<'completed' | 'final' | 'uncertain'> {
     if (attempt.status === 'completed') {
         // Local completion can be newer than a stale operational MariaDB row.
-        await assertLeaseHeld();
-        const current = await updatePaymentTerminalAttempt(attempt.provider, attempt.id, 'completed', {
-            saleBundle: attempt.saleBundle,
-            error: '',
-        });
+        if (attempt.provider === 'dojo') {
+            await assertLeaseHeld();
+            const verified = attempt.operationKind === 'refund'
+                ? await reconcileDojoRefund(attempt)
+                : verifyDojoPayment(attempt, await getDojoPaymentIntentStatus(attempt.clientTransactionId), attempt.terminalSessionId);
+            if (verified.outcome !== 'approved') {
+                throw new Error(`Completed Dojo work needs review before shared acknowledgement: ${verified.error}`);
+            }
+            await verifyCompletedDojoAccounting(attempt, verified.extras ?? { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 });
+        }
+        const current = await acknowledgeApprovedPaymentTerminalAttempt(attempt, assertLeaseHeld);
         return current.status === 'completed' ? 'completed' : 'uncertain';
     }
     if (attempt.status === 'failed' || attempt.status === 'cancelled') {
@@ -487,17 +714,24 @@ async function recoverAttempt(
     }
     if (['approved', 'commit_failed', 'completion_pending'].includes(attempt.status)) {
         try {
+            if (attempt.provider === 'dojo') {
+                // Legacy journals may predate accounting for terminal extras.
+                // Revalidate actual capture before trusting or enriching them.
+                await assertLeaseHeld();
+                const verified = attempt.operationKind === 'refund'
+                    ? await reconcileDojoRefund(attempt)
+                    : verifyDojoPayment(attempt, await getDojoPaymentIntentStatus(attempt.clientTransactionId), attempt.terminalSessionId);
+                if (verified.outcome !== 'approved') {
+                    throw new Error(`Approved Dojo work needs review before ledger recovery: ${verified.error}`);
+                }
+                if (verified.extras) {
+                    attempt = await persistVerifiedDojoPaymentAccounting(attempt, verified.extras, assertLeaseHeld);
+                }
+            }
             // A local provider result can be ahead of MariaDB after a network
             // loss. Compare-and-set it before touching the ledger, and adopt
             // any state another till has already moved farther forward.
-            await assertLeaseHeld();
-            attempt = await updatePaymentTerminalAttempt(attempt.provider, attempt.id, attempt.status, {
-                clientTransactionId: attempt.clientTransactionId,
-                terminalSessionId: attempt.terminalSessionId,
-                providerReference: attempt.providerReference,
-                saleBundle: attempt.saleBundle,
-                error: attempt.error,
-            });
+            attempt = await acknowledgeApprovedPaymentTerminalAttempt(attempt, assertLeaseHeld);
             if (attempt.status === 'completed') return 'completed';
             if (!['approved', 'commit_failed', 'completion_pending'].includes(attempt.status)) {
                 return 'uncertain';
@@ -536,14 +770,7 @@ async function recoverAttempt(
             error: `Provider reconciliation could not complete: ${String(error)}`,
         };
     }
-    if (reconciliation.outcome === 'failed' || reconciliation.outcome === 'cancelled') {
-        reconciliation = settleProviderFinalReconciliation(
-            attempt,
-            attempt.provider,
-            reconciliation.outcome,
-            reconciliation.error,
-        );
-    }
+    reconciliation = settleRecoveredProviderOutcome(attempt, attempt.provider, reconciliation);
     // A provider response is only allowed to affect the journal while this
     // worker still exclusively owns the physical terminal. This closes the
     // failed-vs-captured race between two recovery workers.
@@ -566,9 +793,14 @@ async function recoverAttempt(
     if (reconciliation.outcome !== 'approved') return 'uncertain';
 
     attempt.clientTransactionId = reconciliation.clientTransactionId;
-    attempt.terminalSessionId = reconciliation.terminalSessionId || attempt.terminalSessionId;
+    // This is the immutable first-session anchor. Dojo's intent history,
+    // verified above, identifies any later retry sessions.
+    attempt.terminalSessionId ||= reconciliation.terminalSessionId || '';
     attempt.providerReference = reconciliation.providerReference;
     attempt.saleBundle = withProviderReference(attempt, reconciliation.providerReference);
+    if (reconciliation.extras) {
+        attempt.saleBundle = withTerminalPaymentExtras(attempt.saleBundle, reconciliation.extras);
+    }
     attempt = await updatePaymentTerminalAttempt(attempt.provider, attempt.id, 'approved', {
         clientTransactionId: attempt.clientTransactionId,
         terminalSessionId: attempt.terminalSessionId,
@@ -654,6 +886,7 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
         finalizedWithoutLedger: 0,
         stillUncertain: 0,
         errors: [],
+        cashbackToReview: [],
     };
     if (!isTauri()) return result;
 
@@ -671,7 +904,23 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
             result.scanned += 1;
             try {
                 const outcome = await recoverAttemptWithLease(attempt);
-                if (outcome === 'completed') result.completed += 1;
+                if (outcome === 'completed') {
+                    result.completed += 1;
+                    // Recovery cannot know whether cash was handed over before
+                    // a crash. Report recorded cashback for operator review;
+                    // never open a drawer or trigger a payout here.
+                    try {
+                        const completed = await refreshPaymentTerminalAttempt(attempt.provider, attempt.id);
+                        const payload = completed.saleBundle;
+                        const payment = isCustomerAccountPaymentPayload(payload) ? payload : payload.payment;
+                        const cashback = Number(payment.cashbackAmount || 0);
+                        if (completed.operationKind !== 'refund' && Number.isSafeInteger(cashback) && cashback > 0) {
+                            result.cashbackToReview.push({ attemptId: completed.id, amount: cashback, currency: completed.currency });
+                        }
+                    } catch (error) {
+                        result.errors.push(`Payment ${attempt.id} completed, but its cashback record could not be checked. Review the receipt before paying out any cash: ${String(error)}`);
+                    }
+                }
                 else if (outcome === 'final') result.finalizedWithoutLedger += 1;
                 else result.stillUncertain += 1;
             } catch (error) {

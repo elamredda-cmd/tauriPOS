@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import { isTauri } from '@tauri-apps/api/core';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
+    import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { toast } from '$lib/stores/toast';
     import {
@@ -39,6 +40,8 @@
     let loadError = '';
     let browserPreview = false;
     let presenceRefreshTimer: ReturnType<typeof setInterval> | null = null;
+    let showDismissWarningConfirm = false;
+    let conflictPendingDismiss: SyncConflict | null = null;
     $: syncActionsAvailable = !browserPreview
         && runtimeDiagnostics?.syncApplicable === true
         && runtimeDiagnostics.syncReady;
@@ -148,14 +151,14 @@
 
     async function dismissConflictWithWarning(conflict: SyncConflict) {
         if (isRetainedLocalSaleConflict(conflict)) {
-            const reference = syncConflictSaleReference(conflict);
-            const confirmed = window.confirm(
-                `Dismiss the warning for ${reference}?\n\n` +
-                'This does not upload the sale and does not remove it from this till. ' +
-                'The local sale remains available for administrator review.',
-            );
-            if (!confirmed) return;
+            conflictPendingDismiss = conflict;
+            showDismissWarningConfirm = true;
+            return;
         }
+        await performConflictDismiss(conflict);
+    }
+
+    async function performConflictDismiss(conflict: SyncConflict) {
         await runAction(
             isRetainedLocalSaleConflict(conflict) ? 'Dismiss sale warning' : 'Dismiss conflict',
             () => dismissSyncConflict(conflict.id, {
@@ -163,6 +166,13 @@
             }),
             { requiresSyncReady: false },
         );
+    }
+
+    async function confirmRetainedSaleDismiss() {
+        const conflict = conflictPendingDismiss;
+        showDismissWarningConfirm = false;
+        conflictPendingDismiss = null;
+        if (conflict) await performConflictDismiss(conflict);
     }
 
     onMount(() => {
@@ -411,3 +421,13 @@
         </section>
     </div>
 </MgmtPage>
+
+<ConfirmDialog
+    bind:show={showDismissWarningConfirm}
+    title="Dismiss Retained Sale Warning"
+    message={`Dismiss the warning for ${conflictPendingDismiss ? syncConflictSaleReference(conflictPendingDismiss) : 'this sale'}? This does not upload or remove the sale. It remains on this till for administrator review.`}
+    confirmText="Dismiss Warning"
+    variant="danger"
+    on:confirm={confirmRetainedSaleDismiss}
+    on:cancel={() => conflictPendingDismiss = null}
+/>

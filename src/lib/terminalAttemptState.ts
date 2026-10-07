@@ -72,6 +72,42 @@ export function terminalAttemptStateStrength(status: string): number {
     }
 }
 
+export const TERMINAL_PAYMENT_EXTRA_FIELDS = ['tipsAmount', 'serviceChargeAmount', 'cashbackAmount'] as const;
+export type TerminalPaymentExtras = Record<typeof TERMINAL_PAYMENT_EXTRA_FIELDS[number], number>;
+
+/** Only fill absent legacy accounting fields; all existing financial data is immutable. */
+export function assertTerminalAccountingEnrichment(previousJson: string, enrichedJson: string): void {
+    const previous = JSON.parse(previousJson);
+    const enriched = JSON.parse(enrichedJson);
+    const paymentOf = (payload: any) => {
+        if (payload?.kind === 'customer_account_payment') return payload;
+        if (payload?.order?.type !== 'sale' || !payload.payment) {
+            throw new Error('Only original sales and customer-account payments can enrich terminal accounting');
+        }
+        return payload.payment;
+    };
+    const before = paymentOf(previous);
+    const after = paymentOf(enriched);
+    for (const field of TERMINAL_PAYMENT_EXTRA_FIELDS) {
+        if (!Number.isSafeInteger(after[field]) || after[field] < 0) {
+            throw new Error('Verified terminal extra amounts must be nonnegative whole minor units');
+        }
+        if (Object.prototype.hasOwnProperty.call(before, field) && before[field] !== after[field]) {
+            throw new Error('Previously recorded terminal extra amounts cannot be changed; administrator review is required');
+        }
+        delete before[field];
+        delete after[field];
+    }
+    const canonical = (value: any): any => Array.isArray(value)
+        ? value.map(canonical)
+        : value && typeof value === 'object'
+            ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]))
+            : value;
+    if (JSON.stringify(canonical(previous)) !== JSON.stringify(canonical(enriched))) {
+        throw new Error('Terminal accounting enrichment cannot change the original financial payload');
+    }
+}
+
 export interface MergeableTerminalAttemptSnapshot {
     status: string;
     clientTransactionId: string;

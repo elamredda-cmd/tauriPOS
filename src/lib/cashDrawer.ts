@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import { settingsDB, type Setting } from '$lib/stores/db';
 import { getReceiptPrinterConfig, type PrinterConnectionType, type ReceiptPrinterModel } from '$lib/printers';
 import { executePrinterModule } from '$lib/printerModules';
+import { assertCheckoutDeviceMode } from '$lib/deviceMode';
 
 export interface CashDrawerConfig {
     enabled: boolean;
@@ -100,6 +101,7 @@ function buildDrawerPulse(config: CashDrawerConfig): number[] {
 }
 
 export async function openCashDrawer(config = getCashDrawerConfig()): Promise<void> {
+    assertCheckoutDeviceMode('Opening the cash drawer');
     if (!config.enabled) {
         throw new Error('Cash drawer is disabled in settings');
     }

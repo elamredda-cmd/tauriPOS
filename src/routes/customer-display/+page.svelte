@@ -1,12 +1,14 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
     import { isTauri } from '@tauri-apps/api/core';
-    import { listen } from '@tauri-apps/api/event';
-    import { formatMoney } from '$lib/stores/db';
+    import { emitTo, listen } from '@tauri-apps/api/event';
+    import CustomerDisplayPlayer from '$lib/components/CustomerDisplayPlayer.svelte';
+    import { loadDisplayContent, normalizeDisplayContent, DISPLAY_CONTENT_KEY, DISPLAY_CONTENT_EVENT, type DisplayContent } from '$lib/customerDisplayContent';
+    import { formatMoney, storeDB } from '$lib/stores/db';
     import type { CustomerDisplayState } from '$lib/customerDisplay';
 
     let state: CustomerDisplayState = {
-        storeName: 'L&Bj POS',
+        storeName: $storeDB.name,
         tillName: '',
         lines: [],
         subtotal: 0,
@@ -16,6 +18,7 @@
         message: 'Welcome',
         change: 0,
     };
+    let content = loadDisplayContent();
     let linesEl: HTMLDivElement;
     let previousLinesKey = '';
 
@@ -34,12 +37,21 @@
     }
 
     onMount(() => {
-        if (!isTauri()) return;
-        let unlisten: (() => void) | undefined;
-        listen<CustomerDisplayState>('customer-display-state', (event) => {
-            state = event.payload;
-        }).then((stop) => unlisten = stop);
-        return () => unlisten?.();
+        content = loadDisplayContent();
+        const storage = (event: StorageEvent) => { if (event.key === DISPLAY_CONTENT_KEY) content = loadDisplayContent(); };
+        window.addEventListener('storage', storage);
+        let disposed = false;
+        const stops: (() => void)[] = [];
+        if (isTauri()) void (async () => {
+            const stateStop = await listen<CustomerDisplayState>('customer-display-state', event => { state = event.payload; });
+            if (disposed) { stateStop(); return; }
+            stops.push(stateStop);
+            const contentStop = await listen<DisplayContent>(DISPLAY_CONTENT_EVENT, event => { content = normalizeDisplayContent(event.payload); });
+            if (disposed) { contentStop(); return; }
+            stops.push(contentStop);
+            await emitTo('main', 'customer-display-ready');
+        })().catch(error => console.warn('Customer screen could not connect:', error));
+        return () => { disposed = true; stops.forEach(stop => stop()); window.removeEventListener('storage', storage); };
     });
 </script>
 
@@ -57,6 +69,8 @@
             <h2>{state.message || 'Thank you for shopping with us'}</h2>
             {#if state.change > 0}<strong>Change: {formatMoney(state.change)}</strong>{/if}
         </section>
+    {:else if state.lines.length === 0 && state.status === 'shopping'}
+        <section class="idle-content"><CustomerDisplayPlayer {content} /></section>
     {:else}
         <section class="display-body">
             <div class="display-lines" bind:this={linesEl}>
@@ -84,18 +98,26 @@
                     {/each}
                 {/if}
             </div>
-            <aside>
+            <div class="summary-column">
+                {#if content.duringSale}<div class="sale-promotion"><CustomerDisplayPlayer {content} /></div>{/if}
+            <aside style:--total-size={`${Math.min(22, 140 / formatMoney(state.total).length)}cqi`}>
                 <div><span>Subtotal</span><strong>{formatMoney(state.subtotal)}</strong></div>
                 {#if state.discount > 0}<div class="saving"><span>Savings</span><strong>-{formatMoney(state.discount)}</strong></div>{/if}
                 <div class="display-total"><span>Total</span><strong>{formatMoney(state.total)}</strong></div>
                 <p>{state.status === 'payment' ? 'Payment in progress' : 'Thank you for shopping with us'}</p>
             </aside>
+            </div>
         </section>
     {/if}
 </main>
 
 <style>
     .customer-display { width: 100vw; height: 100vh; min-width: 0; overflow: hidden; padding: clamp(.75rem, 2.5vmin, 3rem); display: flex; flex-direction: column; gap: clamp(.65rem, 1.8vmin, 2rem); color: var(--text-main); background: var(--bg-base); }
+    .idle-content { flex: 1; min-width: 0; min-height: 200px; border-radius: 1rem; overflow: hidden; }
+    .summary-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; justify-content: flex-end; gap: 1rem; }
+    .sale-promotion { flex: 1; min-height: 120px; max-height: 50vh; border-radius: 1rem; overflow: hidden; }
+    .summary-column aside { width: 100%; flex: 0 0 auto; }
+    @media (max-width: 760px), (max-height: 650px), (max-aspect-ratio: 4/5) { .sale-promotion { display: none; } }
     header { min-width: 0; min-height: clamp(4rem, 11vh, 7rem); display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-bottom: clamp(.55rem, 1.5vmin, 1rem); border-bottom: 1px solid var(--border-flat); }
     .store-heading { min-width: 0; }
     header span { color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .14em; }
@@ -116,22 +138,21 @@
     .line-total > span { color: var(--text-muted); font-size: clamp(.72rem, 1.45vmin, .9rem); text-decoration: line-through; }
     .line-total > strong { font-size: clamp(1.1rem, 2.6vmin, 2rem); }
     .line-total small { color: var(--success); font-weight: 800; }
-    aside { min-width: 0; align-self: end; padding: clamp(.8rem, 2vmin, 2rem); display: flex; flex-direction: column; gap: clamp(.6rem, 1.4vmin, 1rem); border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-panel); }
+    aside { container-type: inline-size; min-width: 0; align-self: end; padding: clamp(.8rem, 2vmin, 2rem); display: flex; flex-direction: column; gap: clamp(.6rem, 1.4vmin, 1rem); border: 1px solid var(--border-flat); border-radius: 1rem; background: var(--bg-panel); }
     aside div { min-width: 0; display: flex; justify-content: space-between; gap: 1rem; font-size: clamp(.95rem, 2.2vmin, 1.5rem); }
     aside strong { white-space: nowrap; }
     aside .saving { color: var(--success); }
-    .display-total { padding-top: 1rem; align-items: end; border-top: 2px solid var(--border-flat); }
-    .display-total strong { max-width: 100%; overflow: hidden; color: var(--accent-primary); font-size: clamp(2rem, 7vmin, 6rem); line-height: .95; text-overflow: ellipsis; }
+    .display-total { padding-top: 1rem; flex-direction: column; align-items: stretch; gap: .35rem; border-top: 2px solid var(--border-flat); }
+    .display-total strong { max-width: 100%; overflow: hidden; color: var(--accent-primary); font-size: clamp(1rem, var(--total-size), 6rem); line-height: 1.05; text-align: right; text-overflow: clip; }
     aside p { margin: 0; color: var(--text-muted); text-align: center; }
     .display-empty, .display-message { min-height: 0; flex: 1; display: grid; place-content: center; padding: 1rem; text-align: center; }
     .display-empty h2, .display-message h2 { max-width: 95vw; margin: 0; font-size: clamp(2rem, 8vmin, 7rem); line-height: 1; overflow-wrap: anywhere; }
     .display-empty p, .display-message span { color: var(--text-muted); font-size: clamp(.9rem, 2.4vmin, 1.8rem); }
     .display-message strong { margin-top: clamp(.75rem, 3vmin, 2rem); color: var(--success); font-size: clamp(1.8rem, 6vmin, 5rem); }
-    @media (max-width: 760px), (orientation: portrait) {
+    @media (max-width: 760px), (max-aspect-ratio: 4/5) {
         .customer-display { overflow-y: auto; }
         .display-body { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) auto; }
         aside { width: 100%; align-self: stretch; }
-        .display-total strong { font-size: clamp(2.3rem, 12vw, 5rem); }
     }
     @media (max-height: 650px) and (orientation: landscape) {
         .customer-display { padding: .55rem .75rem; gap: .45rem; }
@@ -150,7 +171,6 @@
         aside { padding: .65rem; gap: .4rem; border-radius: .7rem; }
         aside div { font-size: clamp(.8rem, 2.8vh, 1.05rem); }
         .display-total { padding-top: .45rem; }
-        .display-total strong { font-size: clamp(1.8rem, 9vh, 3.5rem); }
         aside p { font-size: .7rem; }
     }
     @media (min-width: 1800px) {

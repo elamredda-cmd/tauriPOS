@@ -29,16 +29,32 @@
     import { activeTheme, hydrateTheme } from '$lib/stores/theme';
     import { applyTypography } from '$lib/typography';
     import { page } from '$app/stores';
-    import { currentEmployee, currentShiftId } from '$lib/stores/session';
+    import {
+        currentEmployee,
+        currentShiftId,
+        currentEmployeeSessionVersionMatches,
+        isSupportEmployee,
+        logout,
+        normalizeEmployeeForRuntime,
+        revalidateCurrentEmployeeSession,
+    } from '$lib/stores/session';
+    import { toast } from '$lib/stores/toast';
     import { canAccessPath } from '$lib/permissions';
     import { playCartButtonFeedback, primeSoundEngine } from '$lib/sounds';
     import GlobalTouchInput from '$lib/components/GlobalTouchInput.svelte';
+    import BackOfficeSidebar from '$lib/components/BackOfficeSidebar.svelte';
     import SystemPrintHost from '$lib/components/SystemPrintHost.svelte';
     import LicenseNoticeDialog from '$lib/components/LicenseNoticeDialog.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
     import { markAppNavigation } from '$lib/navigation';
     import { OWNER_CLOUD_ACTIVATION_EVENT, shouldStartOwnerCloudReporter } from '$lib/ownerCloudConfig';
     import { runTerminalRecovery } from '$lib/terminalRecovery';
+    import { cashbackRecoveryMessage } from '$lib/paymentExtraPresentation';
+    import {
+        deviceOperatingMode,
+        isBackOfficeBlockedPath,
+        loadDeviceOperatingMode,
+    } from '$lib/deviceMode';
 
     let dbReady = false;
     let dbError = '';
@@ -62,6 +78,17 @@
     const AUTOMATIC_BACKUP_START_DELAY_MS = 2 * 60 * 1000;
     const AUTOMATIC_BACKUP_CHECK_MS = 5 * 60 * 1000;
     let fullStoresHydrated = false;
+    let lastRevokedEmployeeId = '';
+    let employeeAuthorityRevalidationKey = '';
+    let employeeAuthorityRevalidationRunning = false;
+    let employeeAuthorityRevalidationInterval: ReturnType<typeof setInterval> | null = null;
+    $: backOfficeWorkspaceVisible = dbReady
+        && $deviceOperatingMode === 'back_office'
+        && Boolean($currentEmployee)
+        && $currentEmployee?.role !== 'attendance'
+        && $page.url.pathname !== '/'
+        && $page.url.pathname !== '/setup'
+        && !isBackOfficeBlockedPath($page.url.pathname);
 
     if (typeof window === 'undefined' || window.location.pathname !== '/customer-display') {
         primeSoundEngine();
@@ -90,6 +117,9 @@
         terminalRecoveryRunning = true;
         try {
             const result = await runTerminalRecovery();
+            for (const cashback of result.cashbackToReview) {
+                toast(cashbackRecoveryMessage(cashback), 'error', false, undefined, { persistent: true });
+            }
             if (result.errors.length > 0) {
                 console.warn('POS: managed terminal recovery needs attention:', result.errors);
             }
@@ -207,6 +237,11 @@
     async function startMultiTillSyncWhenReady(config: MysqlConfig) {
         if (syncStartupRunning) return;
         syncStartupRunning = true;
+        connectionState.update((state) => ({
+            ...state,
+            mysqlReady: false,
+            mysqlStatus: 'pending',
+        }));
         const schemaConfigKey = mysqlSchemaConfigKey(config);
         let startupStage: 'identity-preflight' | 'schema' | 'identity' | 'epoch' | 'financial-recovery' | 'background-sync' = 'identity-preflight';
         try {
@@ -228,6 +263,8 @@
             connectionState.update((state) => ({
                 ...state,
                 mysqlOnline: true,
+                mysqlReady: true,
+                mysqlStatus: 'online',
                 syncError: null,
             }));
             startTerminalRecoverySchedule();
@@ -247,6 +284,8 @@
             connectionState.update((state) => ({
                 ...state,
                 mysqlOnline: false,
+                mysqlReady: false,
+                mysqlStatus: transientStartupFailure ? 'offline' : 'blocked',
                 syncError,
             }));
 
@@ -271,12 +310,14 @@
         playCartButtonFeedback();
     }
 
-    function startBrowserPreviewMode() {
+    async function startBrowserPreviewMode() {
         console.warn('POS: Running outside Tauri; using seeded in-memory preview data.');
+        const operatingMode = await loadDeviceOperatingMode();
         connectionState.update((state) => ({
             ...state,
             mode: 'single',
             mysqlOnline: false,
+            mysqlReady: false,
             syncError: null,
         }));
         hydrateTheme(get(settingsDB));
@@ -356,11 +397,13 @@
                 },
             ]);
         }
-        if (!get(currentEmployee) && previewEmployee) {
+        if (!get(currentEmployee) && previewEmployee && window.location.pathname !== '/') {
             currentEmployee.set(previewEmployee);
         }
-        if (!get(currentShiftId)) {
+        if (operatingMode === 'checkout' && !get(currentShiftId)) {
             currentShiftId.set('browser-preview-shift');
+        } else if (operatingMode === 'back_office') {
+            currentShiftId.set('');
         }
         dbReady = true;
     }
@@ -389,25 +432,40 @@
     }
 
     onMount(async () => {
+        employeeAuthorityRevalidationInterval = setInterval(() => {
+            const state = get(connectionState);
+            const employee = get(currentEmployee);
+            if (
+                state.mode === 'multi'
+                && state.mysqlOnline
+                && state.mysqlReady
+                && employee
+                && !isSupportEmployee(employee)
+                && !employeeAuthorityRevalidationRunning
+            ) {
+                void revalidateEmployeeAgainstMariaDb(employee.id);
+            }
+        }, 30_000);
         try {
             if (!isTauri()) {
-                startBrowserPreviewMode();
+                await startBrowserPreviewMode();
                 return;
             }
 
             const startupPath = window.location.pathname;
             if (startupPath === '/customer-display') {
-                // The customer display is a second WebView. It only needs enough
-                // local state for theme and access guards, never its own sync engine.
+                // The main window owns schema setup. This read-only window must
+                // never execute migrations or start another sync engine.
+                await loadDeviceOperatingMode();
                 lastLightHydrationPath = startupPath;
                 await hydrateSvelteStores(getLightRouteHydrationTables(startupPath));
                 dbReady = true;
                 return;
             }
-
             console.log("POS: Starting DB init...");
             await initDb();
             console.log("POS: DB init done.");
+            await loadDeviceOperatingMode();
 
             // 1. One-time seed (only runs when products table is empty).
             console.log("POS: Starting migration...");
@@ -447,6 +505,8 @@
                 connectionState.update((state) => ({
                     ...state,
                     mysqlOnline: false,
+                    mysqlReady: false,
+                    mysqlStatus: 'blocked',
                     syncError: RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
                 }));
             } else if (savedMode === 'multi') {
@@ -475,7 +535,6 @@
             console.log("POS initialized ✅");
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {
-                stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
                 ownerCloudActivationListener = () => void startOwnerCloudReporterIfNeeded(true);
                 window.addEventListener(OWNER_CLOUD_ACTIVATION_EVENT, ownerCloudActivationListener);
                 ownerCloudStartupTimer = setTimeout(() => {
@@ -488,7 +547,8 @@
             // A shop without an active administrator cannot be managed yet. Always send it
             // to setup so the first administrator can choose their own PIN.
             const hasActiveAdmin = get(employeesDB).some((employee) =>
-                employee.isActive && employee.role === 'admin'
+                normalizeEmployeeForRuntime(employee)?.isActive
+                    && normalizeEmployeeForRuntime(employee)?.role === 'admin'
             );
             if ((restorePendingMariaDbReplace || !savedMode || !hasActiveAdmin) && window.location.pathname !== '/setup') {
                 goto('/setup');
@@ -512,6 +572,10 @@
             clearInterval(terminalRecoveryInterval);
             terminalRecoveryInterval = null;
         }
+        if (employeeAuthorityRevalidationInterval) {
+            clearInterval(employeeAuthorityRevalidationInterval);
+            employeeAuthorityRevalidationInterval = null;
+        }
     });
 
     // Reactive theme application via store subscription.
@@ -528,22 +592,137 @@
 
     $: applyTypography($settingsDB);
 
+    async function revalidateEmployeeAgainstMariaDb(employeeId: string): Promise<void> {
+        employeeAuthorityRevalidationRunning = true;
+        try {
+            const authoritative = await revalidateCurrentEmployeeSession();
+            if (!authoritative) {
+                lastRevokedEmployeeId = employeeId;
+                toast('Your staff account is no longer available. Sign in with an active user.', 'error');
+                if (typeof window !== 'undefined' && $page.url.pathname !== '/') {
+                    await goto('/', { replaceState: true });
+                }
+            }
+        } catch (error) {
+            console.error('POS: authoritative staff-session check failed:', error);
+            toast('Your staff session could not be verified with MariaDB. Sign in again.', 'error');
+            if (typeof window !== 'undefined' && $page.url.pathname !== '/') {
+                await goto('/', { replaceState: true });
+            }
+        } finally {
+            employeeAuthorityRevalidationRunning = false;
+        }
+    }
+
+    // Revalidate once for each offline -> online transition. mysqlReady can
+    // stay true during a network outage, so mysqlOnline is part of this edge.
+    $: {
+        const employee = $currentEmployee;
+        const shouldRevalidate = $connectionState.mode === 'multi'
+            && $connectionState.mysqlOnline
+            && $connectionState.mysqlReady
+            && employee
+            && !isSupportEmployee(employee);
+        const revalidationEmployeeId = shouldRevalidate ? employee?.id || '' : '';
+        const nextKey = revalidationEmployeeId ? `online:${revalidationEmployeeId}` : '';
+        if (!nextKey) {
+            employeeAuthorityRevalidationKey = '';
+        } else if (
+            nextKey !== employeeAuthorityRevalidationKey
+            && !employeeAuthorityRevalidationRunning
+        ) {
+            employeeAuthorityRevalidationKey = nextKey;
+            void revalidateEmployeeAgainstMariaDb(revalidationEmployeeId);
+        }
+    }
+
+    // Keep authentication tied to the latest shared employee record on every
+    // route. Remote deactivation and role changes must not wait for checkout
+    // to be mounted before they take effect.
+    $: {
+        const sessionEmployee = $currentEmployee;
+        if (!sessionEmployee || isSupportEmployee(sessionEmployee)) {
+            lastRevokedEmployeeId = '';
+        } else {
+            const latestEmployee = normalizeEmployeeForRuntime(
+                $employeesDB.find((employee) => employee.id === sessionEmployee.id),
+            );
+            const versionChanged = Boolean(
+                latestEmployee?.isActive
+                && !currentEmployeeSessionVersionMatches(latestEmployee),
+            );
+            if (!latestEmployee?.isActive || versionChanged) {
+                if (lastRevokedEmployeeId !== sessionEmployee.id) {
+                    lastRevokedEmployeeId = sessionEmployee.id;
+                    toast(
+                        versionChanged
+                            ? 'Your staff profile changed. Sign in again to use the updated access.'
+                            : 'Your staff account is no longer active. Sign in with an active user.',
+                        'error',
+                    );
+                }
+                logout();
+                if (typeof window !== 'undefined' && $page.url.pathname !== '/') {
+                    void goto('/', { replaceState: true });
+                }
+            } else {
+                lastRevokedEmployeeId = '';
+                if (latestEmployee !== sessionEmployee) currentEmployee.set(latestEmployee);
+            }
+        }
+    }
+
     $: if (dbReady && typeof window !== 'undefined') {
         markAppNavigation($page.url.pathname);
+    }
+
+    // A customer-facing checkout display is a till function. Start and stop
+    // its watcher as this computer's role changes without affecting any other
+    // device on the shared database.
+    $: if (dbReady && typeof window !== 'undefined') {
+        const shouldWatchCustomerDisplay = isTauri()
+            && $deviceOperatingMode === 'checkout'
+            && $page.url.pathname !== '/customer-display';
+        if (shouldWatchCustomerDisplay && !stopCustomerDisplayAutoOpen) {
+            stopCustomerDisplayAutoOpen = startCustomerDisplayAutoOpenWatcher();
+        } else if (!shouldWatchCustomerDisplay && stopCustomerDisplayAutoOpen) {
+            stopCustomerDisplayAutoOpen();
+            stopCustomerDisplayAutoOpen = null;
+        }
     }
 
     $: if (dbReady && typeof window !== 'undefined') {
         const pathname = $page.url.pathname;
         const hasActiveAdmin = get(employeesDB).some((employee) =>
-            employee.isActive && employee.role === 'admin'
+            normalizeEmployeeForRuntime(employee)?.isActive
+                && normalizeEmployeeForRuntime(employee)?.role === 'admin'
         );
         const setupAllowed = pathname === '/setup' && (!hasActiveAdmin || restorePendingMariaDbReplace);
-        if (restorePendingMariaDbReplace && pathname !== '/setup') {
+        const backOfficeMode = $deviceOperatingMode === 'back_office';
+        const backOfficeDestination = canAccessPath($currentEmployee, '/admin', $settingsDB)
+            ? '/admin'
+            : '/';
+        if (
+            $currentEmployee?.role === 'attendance'
+            && pathname !== '/attendance'
+            && pathname !== '/customer-display'
+        ) {
+            void goto('/attendance', { replaceState: true });
+        } else if (restorePendingMariaDbReplace && pathname !== '/setup' && pathname !== '/customer-display') {
             goto('/setup');
-        } else if (!hasActiveAdmin && pathname !== '/setup') {
+        } else if (!hasActiveAdmin && pathname !== '/setup' && pathname !== '/customer-display') {
             goto('/setup');
+        } else if (backOfficeMode && isBackOfficeBlockedPath(pathname)) {
+            void goto(backOfficeDestination, { replaceState: true });
+        } else if (backOfficeMode && $currentEmployee && pathname === '/') {
+            if (backOfficeDestination === '/admin') {
+                void goto('/admin', { replaceState: true });
+            } else {
+                logout();
+                toast('This staff account does not have Back Office access.', 'error');
+            }
         } else if (!setupAllowed && !canAccessPath($currentEmployee, pathname, $settingsDB)) {
-            goto('/');
+            void goto('/', { replaceState: true });
         }
     }
 
@@ -590,7 +769,16 @@
         </div>
     </div>
 {:else if dbReady}
-    <slot />
+    {#if backOfficeWorkspaceVisible}
+        <div class="back-office-workspace">
+            <BackOfficeSidebar />
+            <div class="back-office-route" id="back-office-page-content">
+                <slot />
+            </div>
+        </div>
+    {:else}
+        <slot />
+    {/if}
 {:else if dbError}
     <div class="fixed inset-0 flex items-center justify-center bg-bg-base font-sans text-text-main">
         <div class="max-w-[480px] rounded-md border border-danger bg-bg-panel p-6 text-center">
@@ -610,5 +798,70 @@
 <SystemPrintHost />
 <LicenseNoticeDialog enabled={dbReady} />
 <Toast />
-<GlobalTouchInput />
+{#if $deviceOperatingMode === 'checkout'}
+    <GlobalTouchInput />
 {/if}
+{/if}
+
+<style>
+    .back-office-workspace {
+        width: 100vw;
+        height: var(--workspace-height, 100dvh);
+        overflow: hidden;
+        display: grid;
+        grid-template-columns: 196px minmax(0, 1fr);
+        background: var(--bg-base);
+    }
+
+    .back-office-route {
+        min-width: 0;
+        min-height: 0;
+        width: 100%;
+        height: var(--workspace-height, 100dvh);
+        overflow: hidden;
+    }
+
+    :global(.back-office-route .admin-page),
+    :global(.back-office-route .management-page),
+    :global(.back-office-route .items-management-page),
+    :global(.back-office-route .tiles-management-page),
+    :global(.back-office-route .tile-designer-page),
+    :global(.back-office-route .scale-page),
+    :global(.back-office-route .barcode-page),
+    :global(.back-office-route .studio-shell) {
+        width: 100% !important;
+        max-width: 100%;
+        height: var(--workspace-height, 100dvh) !important;
+    }
+
+    @media (max-width: 1100px) {
+        .back-office-workspace { grid-template-columns: 88px minmax(0, 1fr); }
+    }
+    @media (max-width: 600px) {
+        .back-office-workspace {
+            --workspace-height: calc(100dvh - 76px);
+            height: 100dvh;
+            grid-template-columns: minmax(0, 1fr);
+            grid-template-rows: 76px minmax(0, 1fr);
+        }
+    }
+
+    @media print {
+        .back-office-workspace {
+            display: block;
+            width: auto;
+            height: auto;
+            overflow: visible;
+        }
+
+        .back-office-workspace :global(.back-office-sidebar) {
+            display: none;
+        }
+
+        .back-office-route {
+            width: auto;
+            height: auto;
+            overflow: visible;
+        }
+    }
+</style>

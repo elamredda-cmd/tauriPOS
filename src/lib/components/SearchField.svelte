@@ -1,6 +1,7 @@
 <script lang="ts">
     import { tick } from "svelte";
     import { Keyboard, Search, X } from "@lucide/svelte";
+    import { deviceOperatingMode } from "$lib/deviceMode";
 
     export let id: string;
     export let value = "";
@@ -19,7 +20,10 @@
     export let onClear: () => void = () => {};
 
     $: hasClear = showClear && (clearVisible ?? value.length > 0);
-    $: touchKeyboardMode = showKeyboard ? touchKeyboard : touchKeyboard === "button" ? "auto" : touchKeyboard;
+    $: keyboardVisible = showKeyboard && $deviceOperatingMode !== "back_office";
+    $: touchKeyboardMode = $deviceOperatingMode === "back_office"
+        ? "off"
+        : showKeyboard ? touchKeyboard : touchKeyboard === "button" ? "auto" : touchKeyboard;
 
     function handleInput(event: Event & { currentTarget: HTMLInputElement }) {
         value = event.currentTarget.value;
@@ -34,7 +38,7 @@
     }
 
     function openKeyboard() {
-        if (!inputElement || disabled) return;
+        if (!inputElement || disabled || $deviceOperatingMode === "back_office") return;
         inputElement.focus({ preventScroll: true });
         document.dispatchEvent(new CustomEvent("open-touch-keyboard", { detail: { target: inputElement } }));
     }
@@ -42,7 +46,7 @@
 
 <div
     class="app-search-field"
-    class:has-keyboard={showKeyboard}
+    class:has-keyboard={keyboardVisible}
     class:has-clear={hasClear}
     class:is-disabled={disabled}
 >
@@ -79,7 +83,7 @@
         </button>
     {/if}
 
-    {#if showKeyboard}
+    {#if keyboardVisible}
         <button
             type="button"
             class="app-search-action app-search-keyboard"
@@ -115,7 +119,7 @@
     }
 
     .app-search-field.has-keyboard.has-clear .app-search-input {
-        padding-right: 5.85rem !important;
+        padding-right: 6.25rem !important;
     }
 
     .app-search-field:not(.has-keyboard).has-clear .app-search-input {
@@ -153,8 +157,8 @@
         position: absolute;
         z-index: 3;
         top: 50%;
-        width: 40px;
-        height: 40px;
+        width: 44px;
+        height: 44px;
         display: grid;
         place-items: center;
         translate: 0 -50%;
@@ -168,15 +172,15 @@
     }
 
     .app-search-keyboard {
-        right: .35rem;
+        right: .125rem;
     }
 
     .app-search-clear {
-        right: .35rem;
+        right: .125rem;
     }
 
     .app-search-field.has-keyboard .app-search-clear {
-        right: 2.85rem;
+        right: 3rem;
     }
 
     .app-search-action:hover:not(:disabled),

@@ -13,6 +13,16 @@ const sale = {
 };
 
 describe('receipt payment disclosure', () => {
+    it('discloses actual card collection without inflating product tender', () => {
+        const payment = { method: 'card' as const, amount: 1000, cardAmount: 1000,
+            tipsAmount: 100, serviceChargeAmount: 50, cashbackAmount: 2000 };
+        expect(receiptTenderBreakdown([payment]).card).toBe(1000);
+        expect(receiptTenderRows(sale, [payment])).toEqual([
+            { label: 'CARD', amount: 1000 }, { label: 'TIP', amount: 100 },
+            { label: 'SERVICE CHARGE', amount: 50 }, { label: 'CASHBACK PAID OUT', amount: 2000 },
+            { label: 'TOTAL CARD CHARGED', amount: 3150 },
+        ]);
+    });
     it('shows the exact loyalty and Pay Later parts of a mixed receipt', () => {
         const payment = {
             method: 'account' as const,

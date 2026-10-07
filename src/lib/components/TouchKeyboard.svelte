@@ -266,7 +266,7 @@
 
     .cursor-key {
         display: grid;
-        min-height: 42px;
+        min-height: 44px;
         place-items: center;
         padding: 0 .4rem;
         font-size: 1.12rem;
@@ -448,7 +448,7 @@
         }
     }
 
-    @media (max-height: 640px) {
+    @media (max-height: 760px) {
         .touch-keyboard {
             padding: .55rem;
         }
@@ -463,7 +463,7 @@
         }
 
         .keyboard-key {
-            height: 40px;
+            height: 44px;
         }
 
         .keyboard-row,

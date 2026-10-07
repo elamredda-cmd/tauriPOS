@@ -1,4 +1,5 @@
 import Database from '@tauri-apps/plugin-sql';
+import { readPaymentExtraTotalsByTill, reportPaymentExtraTotals, type PaymentExtraTotals } from '../paymentExtras';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { localDatabaseName } from './profile';
 import {
@@ -6,16 +7,20 @@ import {
     normalizeLoyaltyCode,
     planCustomerLoyaltyCodeRepairs,
 } from '../customerLoyaltyCode';
-import type {
-    CustomerAccount,
-    CustomerAccountEntry,
+import {
+    ATTENDANCE_ONLY_PIN_HASH_PREFIX,
+    type CustomerAccount,
+    type CustomerAccountEntry,
+    type EmployeeAttendance,
 } from './db';
+import { effectiveReportMarkerScopes } from '../reportMarkers';
+import { attendanceQueueQuarantineSql } from '../attendanceSyncPolicy';
 
 let db: Database | null = null;
 let productSearchIndexReady = false;
 const PRODUCT_SEARCH_COUNT_CAP = 1000;
 const PRODUCT_CONTAINS_SEARCH_MIN_LENGTH = 3;
-const LOCAL_SCHEMA_VERSION = 1;
+const LOCAL_SCHEMA_VERSION = 4;
 const PRE_SCHEMA_BACKUP_MARKER = `migration_local_pre_schema_backup_v${LOCAL_SCHEMA_VERSION}`;
 
 async function getLocalSchemaVersion(d: Database): Promise<number> {
@@ -79,7 +84,7 @@ async function repairCustomerLoyaltyCodes(d: Database): Promise<void> {
 const UPDATED_AT_INDEX_TABLES = [
     'products', 'product_images', 'categories', 'pos_pages', 'pos_tiles',
     'tax_rates', 'discounts', 'promo_groups', 'promo_group_items',
-    'employees', 'settings', 'customers', 'customer_accounts',
+    'employees', 'employee_attendance', 'settings', 'customers', 'customer_accounts',
     'customer_account_entries', 'registers',
     'suppliers', 'product_suppliers', 'inventory_logs',
     'orders', 'order_lines', 'payments',
@@ -240,6 +245,7 @@ export async function initDb() {
             status TEXT NOT NULL,
             saleBundle TEXT NOT NULL,
             providerReference TEXT DEFAULT '',
+            operatorResolution TEXT NOT NULL DEFAULT '',
             error TEXT DEFAULT '',
             tillId TEXT DEFAULT '',
             createdAt TEXT NOT NULL,
@@ -395,6 +401,25 @@ export async function initDb() {
             isActive INTEGER DEFAULT 1,
             createdAt TEXT,
             updatedAt TEXT
+        )
+    `);
+
+    // Staff hours are independent of till cash-up shifts and receipt history.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS employee_attendance (
+            id TEXT PRIMARY KEY,
+            employeeId TEXT NOT NULL,
+            clockInAt TEXT NOT NULL,
+            clockOutAt TEXT NOT NULL DEFAULT '',
+            clockInTillId TEXT NOT NULL DEFAULT '',
+            clockOutTillId TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            notes TEXT NOT NULL DEFAULT '',
+            createdByEmployeeId TEXT NOT NULL DEFAULT '',
+            updatedByEmployeeId TEXT NOT NULL DEFAULT '',
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL,
+            FOREIGN KEY(employeeId) REFERENCES employees(id) ON DELETE RESTRICT
         )
     `);
 
@@ -732,6 +757,10 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_stock_receipt_lines_receipt ON stock_receipt_lines(receiptId)`);
 
     await runDataMigrations();
+    // Install the permanent legacy staff/attendance outbox guard as part of
+    // the real SQLite startup path. Its one-shot upgrade is marker-backed, so
+    // a later startup cannot delete attendance rows rehydrated from MariaDB.
+    for (const sql of attendanceQueueQuarantineSql()) await d.execute(sql);
     await ensureProductSearchIndex();
 
     // Indexes on migration-added columns must run AFTER runMigrations().
@@ -739,6 +768,9 @@ export async function initDb() {
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_orders_shift_status ON orders(shiftId, status)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_cash_movements_shift ON cash_movements(shiftId)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(openedAt DESC, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_employee_attendance_employee_in ON employee_attendance(employeeId, clockInAt DESC, id)`);
+    await d.execute(`CREATE INDEX IF NOT EXISTS idx_employee_attendance_status_in ON employee_attendance(status, clockInAt DESC, id)`);
+    await d.execute(`CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_attendance_open ON employee_attendance(employeeId) WHERE status = 'open'`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_offline_queue_due ON _offline_queue(next_attempt_at, created_at)`);
     await d.execute(`CREATE INDEX IF NOT EXISTS idx_payment_terminal_attempt_status ON payment_terminal_attempts(status, updatedAt)`);
     await d.execute(`
@@ -854,6 +886,7 @@ async function runMigrations() {
     await addColumnIfMissing('payment_terminal_attempts', 'operationKind', "TEXT NOT NULL DEFAULT 'sale'");
     await addColumnIfMissing('payment_terminal_attempts', 'expectedProviderAmount', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing('payment_terminal_attempts', 'providerReference', "TEXT DEFAULT ''");
+    await addColumnIfMissing('payment_terminal_attempts', 'operatorResolution', "TEXT NOT NULL DEFAULT ''");
     await addColumnIfMissing('payment_terminal_attempts', 'tillId', "TEXT DEFAULT ''");
 
     // Experimental builds may already have one or both account tables with an
@@ -1098,6 +1131,11 @@ async function runMigrations() {
     await addColumnIfMissing('payments', 'cardAmount', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('payments', 'loyaltyAmount', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('payments', 'accountAmount', 'INTEGER DEFAULT 0');
+    for (const table of ['payments', 'customer_account_entries']) {
+        for (const column of ['tipsAmount', 'serviceChargeAmount', 'cashbackAmount']) {
+            await addColumnIfMissing(table, column, 'INTEGER NOT NULL DEFAULT 0');
+        }
+    }
     await addColumnIfMissing('daily_sales_summary', 'accountTotal', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('daily_sales_summary', 'accountRepaymentsCash', 'INTEGER DEFAULT 0');
     await addColumnIfMissing('daily_sales_summary', 'accountRepaymentsCard', 'INTEGER DEFAULT 0');
@@ -1163,6 +1201,34 @@ async function runMigrations() {
     await addColumnIfMissing('employees', 'storeId', 'TEXT');
     await addColumnIfMissing('employees', 'email', 'TEXT');
     await addColumnIfMissing('employees', 'pinHash', 'TEXT');
+    // Canonicalize harmless legacy whitespace before applying the role-aware
+    // PIN envelope migration. Otherwise `' attendance '` could be treated as
+    // a POS role and have its protective envelope removed.
+    await d.execute(`
+        UPDATE employees
+        SET role = TRIM(role)
+        WHERE role IS NOT NULL AND role <> TRIM(role)
+    `);
+    // Attendance-only hashes use an envelope that older POS builds cannot
+    // authenticate. This keeps rolling updates safe even before every till has
+    // learned the new role. A missing legacy hash is deliberately disabled and
+    // must be reset by a manager rather than falling back to plaintext.
+    await d.execute(`
+        UPDATE employees
+        SET pinHash = CASE
+              WHEN COALESCE(pinHash, '') = '' THEN '${ATTENDANCE_ONLY_PIN_HASH_PREFIX}reset-required'
+              ELSE '${ATTENDANCE_ONLY_PIN_HASH_PREFIX}' || pinHash
+            END,
+            pin = ''
+        WHERE role = 'attendance'
+          AND COALESCE(pinHash, '') NOT LIKE '${ATTENDANCE_ONLY_PIN_HASH_PREFIX}%'
+    `);
+    await d.execute(`
+        UPDATE employees
+        SET pinHash = substr(pinHash, ${ATTENDANCE_ONLY_PIN_HASH_PREFIX.length + 1})
+        WHERE COALESCE(role, '') <> 'attendance'
+          AND COALESCE(pinHash, '') LIKE '${ATTENDANCE_ONLY_PIN_HASH_PREFIX}%'
+    `);
 
     // Till cash-up and card reconciliation fields.
     await addColumnIfMissing('shifts', 'closedByEmployeeId', "TEXT DEFAULT ''");
@@ -1180,7 +1246,7 @@ async function runMigrations() {
     for (const t of [
         'categories', 'pos_pages', 'pos_tiles', 'tax_rates', 'customers',
         'customer_accounts', 'customer_account_entries',
-        'employees', 'registers', 'suppliers', 'product_suppliers',
+        'employees', 'employee_attendance', 'registers', 'suppliers', 'product_suppliers',
         'inventory_logs', 'promo_groups', 'promo_group_items',
         'shifts', 'cash_movements', 'loyalty_logs', 'audit_logs',
         'manager_approvals', 'stock_receipts', 'stock_receipt_lines'
@@ -1478,39 +1544,34 @@ export async function upsert(table: string, obj: any, idKey: string = 'id') {
     await d.execute(sql, values);
 }
 
-export async function bulkUpsert(table: string, rows: any[], idKey: string = 'id') {
-    if (rows.length === 0) return;
-    if (table === 'products') rows = rows.map(normalizeProductIdentifiers);
-    if (table === 'customers') rows = rows.map(normalizeCustomerLoyaltyCode);
-    const d = await getDb();
-    const validCols = await getTableColumns(table);
+export interface LocalMutation {
+    table: string;
+    kind?: 'upsert' | 'insert' | 'patch' | 'remove' | 'adjustStock' | 'queue';
+    idKey?: string;
+    data: Record<string, any>;
+    queueId?: string;
+    serverDataEpoch?: string;
+    protectPending?: boolean;
+}
 
-    // Filter properties to only those that exist as columns
-    const columns = Object.keys(rows[0]).filter(k => validCols.includes(k));
-    if (columns.length === 0) throw new Error(`bulkUpsert: no valid columns for table ${table}`);
+/** A single native transaction, including pending uploads when supplied. */
+export async function commitBatch(mutations: LocalMutation[]): Promise<number> {
+    if (!mutations.length) return 0;
+    if (mutations.length > 2000) throw new Error('Local batch exceeds 2000 mutations');
+    const normalized = mutations.map(mutation => ({
+        ...mutation,
+        data: mutation.table === 'products' ? normalizeProductIdentifiers(mutation.data)
+            : mutation.table === 'customers' ? normalizeCustomerLoyaltyCode(mutation.data) : mutation.data,
+    }));
+    return invoke<number>('commit_local_batch', { mutations: normalized });
+}
 
-    const placeholders = columns.map(() => '?').join(', ');
-    const updates = columns.filter(k => k !== idKey).map(k => `${k}=excluded.${k}`).join(', ');
-    
-    const sql = updates
-        ? `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO UPDATE SET ${updates}`
-        : `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT(${idKey}) DO NOTHING`;
-
-    // Do not manage BEGIN/COMMIT through the pooled plugin connection. A later
-    // execute may use a different connection and leave SQLite permanently locked.
-    for (const row of rows) {
-        // Membership identity historically used random IDs. If another client
-        // created the same group/product pair, replace the stale local identity
-        // before applying the authoritative MariaDB row.
-        if (table === 'promo_group_items' && row.groupId && row.productId && row.id) {
-            await d.execute(
-                `DELETE FROM promo_group_items WHERE groupId = ? AND productId = ? AND id <> ?`,
-                [row.groupId, row.productId, row.id]
-            );
-        }
-        const values = columns.map(k => normalizeValue(row[k]));
-        await d.execute(sql, values);
+export async function bulkUpsert(table: string, rows: any[], idKey = 'id', protectPending = false) {
+    let changed = 0;
+    for (let index = 0; index < rows.length; index += 500) {
+        changed += await commitBatch(rows.slice(index, index + 500).map(data => ({ table, data, idKey, protectPending })));
     }
+    return changed;
 }
 
 function normalizeProductIdentifiers<T extends Record<string, any>>(product: T): T {
@@ -1672,6 +1733,23 @@ export async function getProductsByIds(
             chunk,
         ) as any[];
         rows.push(...chunkRows);
+    }
+    return rows;
+}
+
+/** Read only stock values after a local receipt, without loading product images. */
+export async function getProductStockLevels(ids: string[]): Promise<Array<{ id: string; stockLevel: number; updatedAt: string }>> {
+    const uniqueIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) return [];
+    const d = await getDb();
+    const rows: Array<{ id: string; stockLevel: number; updatedAt: string }> = [];
+    for (let i = 0; i < uniqueIds.length; i += 500) {
+        const chunk = uniqueIds.slice(i, i + 500);
+        rows.push(...await d.select<Array<{ id: string; stockLevel: number; updatedAt: string }>>(
+            `SELECT id, COALESCE(stockLevel, 0) AS stockLevel, updatedAt
+             FROM products WHERE id IN (${chunk.map(() => '?').join(', ')})`,
+            chunk,
+        ));
     }
     return rows;
 }
@@ -1949,13 +2027,21 @@ export async function getAll(table: string): Promise<any[]> {
 
 export interface CustomerPageOptions {
     query?: string;
+    accountFilter?: 'all' | 'outstanding';
     limit?: number;
     offset?: number;
+}
+
+export interface CustomerPageSummary {
+    customerCount: number;
+    outstandingCount: number;
+    outstandingBalancePence: number;
 }
 
 export interface CustomerPageResult {
     rows: any[];
     total: number;
+    summary: CustomerPageSummary;
 }
 
 export interface CustomerAccountEntryPageOptions {
@@ -2005,20 +2091,31 @@ function rehydrateCustomerAccountEntry(row: any): CustomerAccountEntry {
     };
 }
 
-function customerPageWhere(query: string): { sql: string; params: string[] } {
+function customerPageWhere(
+    query: string,
+    accountFilter: CustomerPageOptions['accountFilter'] = 'all',
+): { sql: string; params: string[] } {
     const search = String(query || '').trim();
-    if (!search) return { sql: '', params: [] };
-    const escaped = search.replace(/[\\%_]/g, (character) => `\\${character}`);
-    const value = `%${escaped}%`;
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (search) {
+        const escaped = search.replace(/[\\%_]/g, (character) => `\\${character}`);
+        const value = `%${escaped}%`;
+        clauses.push(`(
+            c.name LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR c.postcode LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR c.phone LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR c.email LIKE ? ESCAPE '\\' COLLATE NOCASE
+            OR c.loyaltyCode LIKE ? ESCAPE '\\' COLLATE NOCASE
+        )`);
+        params.push(value, value, value, value, value);
+    }
+    if (accountFilter === 'outstanding') {
+        clauses.push('COALESCE(a.balancePence, 0) > 0');
+    }
     return {
-        sql: `WHERE (
-            name LIKE ? ESCAPE '\\' COLLATE NOCASE
-            OR postcode LIKE ? ESCAPE '\\' COLLATE NOCASE
-            OR phone LIKE ? ESCAPE '\\' COLLATE NOCASE
-            OR email LIKE ? ESCAPE '\\' COLLATE NOCASE
-            OR loyaltyCode LIKE ? ESCAPE '\\' COLLATE NOCASE
-        )`,
-        params: [value, value, value, value, value],
+        sql: clauses.length > 0 ? `WHERE ${clauses.join('\nAND ')}` : '',
+        params,
     };
 }
 
@@ -2027,7 +2124,11 @@ export async function getCustomersPage(options: CustomerPageOptions = {}): Promi
     const d = await getDb();
     const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit || 40))));
     const offset = Math.max(0, Math.floor(Number(options.offset || 0)));
-    const filter = customerPageWhere(String(options.query || ''));
+    const accountFilter = options.accountFilter === 'outstanding' ? 'outstanding' : 'all';
+    const filter = customerPageWhere(String(options.query || ''), accountFilter);
+    const orderBy = accountFilter === 'outstanding'
+        ? 'ORDER BY COALESCE(a.balancePence, 0) DESC, c.name COLLATE NOCASE ASC, c.id ASC'
+        : 'ORDER BY c.name COLLATE NOCASE ASC, c.id ASC';
     const rows: any[] = await d.select(
         `SELECT c.*,
                 COALESCE(a.id, c.id) AS accountId,
@@ -2037,17 +2138,34 @@ export async function getCustomersPage(options: CustomerPageOptions = {}): Promi
          FROM customers c
          LEFT JOIN customer_accounts a ON a.customerId = c.id
          ${filter.sql}
-         ORDER BY c.name COLLATE NOCASE ASC, c.id ASC
+         ${orderBy}
          LIMIT ? OFFSET ?`,
         [...filter.params, limit, offset],
     );
     const countRows: any[] = await d.select(
-        `SELECT COUNT(*) AS count FROM customers ${filter.sql}`,
+        `SELECT COUNT(*) AS count
+         FROM customers c
+         LEFT JOIN customer_accounts a ON a.customerId = c.id
+         ${filter.sql}`,
         filter.params,
     );
+    const summaryRows: any[] = await d.select(
+        `SELECT
+            COUNT(*) AS customerCount,
+            COALESCE(SUM(CASE WHEN COALESCE(a.balancePence, 0) > 0 THEN 1 ELSE 0 END), 0) AS outstandingCount,
+            COALESCE(SUM(CASE WHEN COALESCE(a.balancePence, 0) > 0 THEN a.balancePence ELSE 0 END), 0) AS outstandingBalancePence
+         FROM customers c
+         LEFT JOIN customer_accounts a ON a.customerId = c.id`,
+    );
+    const summary = summaryRows[0] || {};
     return {
         rows: rows.map((row) => rehydrateBooleans(row, ['accountEnabled'])),
         total: Number(countRows[0]?.count || 0),
+        summary: {
+            customerCount: Number(summary.customerCount || 0),
+            outstandingCount: Number(summary.outstandingCount || 0),
+            outstandingBalancePence: Number(summary.outstandingBalancePence || 0),
+        },
     };
 }
 
@@ -2148,7 +2266,7 @@ export async function getTaxRateProductUsageCount(taxRateId: string): Promise<nu
 
 export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
     const d = await getDb();
-    const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
     return d.select(
         `SELECT * FROM stock_receipts
          ORDER BY createdAt DESC, id DESC
@@ -2336,6 +2454,183 @@ export async function getProductsPage(options: ProductPageOptions = {}): Promise
     };
 }
 
+export type AttendanceStatusFilter = 'all' | 'open' | 'closed' | string;
+
+export interface AttendancePageOptions {
+    employeeId?: string;
+    query?: string;
+    status?: AttendanceStatusFilter;
+    startAt?: string;
+    endAt?: string;
+    limit?: number;
+    offset?: number;
+}
+
+export interface AttendancePageResult {
+    rows: EmployeeAttendance[];
+    total: number;
+    overallTotal: number;
+    totalWorkedSeconds: number;
+    openCount: number;
+    source?: 'mariadb' | 'sqlite' | 'browser';
+    warning?: string;
+}
+
+const ATTENDANCE_BASE_SELECT = `
+    SELECT a.*,
+           COALESCE(e.name, '') AS employeeName,
+           COALESCE(clock_in_till.name, a.clockInTillId, '') AS clockInTillName,
+           COALESCE(clock_out_till.name, a.clockOutTillId, '') AS clockOutTillName
+    FROM employee_attendance a
+    LEFT JOIN employees e ON e.id = a.employeeId
+    LEFT JOIN registers clock_in_till ON clock_in_till.id = a.clockInTillId
+    LEFT JOIN registers clock_out_till ON clock_out_till.id = a.clockOutTillId
+`;
+
+function buildAttendancePageWhere(options: AttendancePageOptions): { whereSql: string; params: any[] } {
+    const where: string[] = [];
+    const params: any[] = [];
+    const employeeId = String(options.employeeId || '').trim();
+    if (employeeId) {
+        where.push('a.employeeId = ?');
+        params.push(employeeId);
+    }
+    const status = options.status || 'all';
+    if (status !== 'all') {
+        where.push('a.status = ?');
+        params.push(status);
+    }
+    const startAt = String(options.startAt || '').trim();
+    if (startAt) {
+        where.push('a.clockInAt >= ?');
+        params.push(startAt);
+    }
+    const endAt = String(options.endAt || '').trim();
+    if (endAt) {
+        where.push('a.clockInAt < ?');
+        params.push(endAt);
+    }
+    const search = String(options.query || '').trim().toLowerCase();
+    if (search) {
+        const like = `%${search}%`;
+        where.push(`(
+            LOWER(COALESCE(e.name, '')) LIKE ?
+            OR LOWER(COALESCE(clock_in_till.name, a.clockInTillId, '')) LIKE ?
+            OR LOWER(COALESCE(clock_out_till.name, a.clockOutTillId, '')) LIKE ?
+            OR LOWER(COALESCE(a.notes, '')) LIKE ?
+        )`);
+        params.push(like, like, like, like);
+    }
+    return {
+        whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '',
+        params,
+    };
+}
+
+export async function getAttendancePage(options: AttendancePageOptions = {}): Promise<AttendancePageResult> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Number(options.limit || 30)));
+    const offset = Math.max(0, Number(options.offset || 0));
+    const { whereSql, params } = buildAttendancePageWhere(options);
+    const overallEmployeeId = String(options.employeeId || '').trim();
+    const fromSql = `
+        FROM employee_attendance a
+        LEFT JOIN employees e ON e.id = a.employeeId
+        LEFT JOIN registers clock_in_till ON clock_in_till.id = a.clockInTillId
+        LEFT JOIN registers clock_out_till ON clock_out_till.id = a.clockOutTillId
+        ${whereSql}
+    `;
+    const [rows, counts, overallCounts] = await Promise.all([
+        d.select<EmployeeAttendance[]>(
+            `${ATTENDANCE_BASE_SELECT}
+             ${whereSql}
+             ORDER BY CASE WHEN a.status = 'open' THEN 0 ELSE 1 END,
+                      a.clockInAt DESC, a.id DESC
+             LIMIT ? OFFSET ?`,
+            [...params, limit, offset],
+        ),
+        d.select<any[]>(
+            `SELECT COUNT(*) AS count,
+                    COALESCE(SUM(CASE
+                        WHEN a.status = 'closed' AND a.clockOutAt > a.clockInAt
+                        THEN MAX(0, CAST(ROUND((julianday(a.clockOutAt) - julianday(a.clockInAt)) * 86400) AS INTEGER))
+                        WHEN a.status = 'open'
+                        THEN MAX(0, CAST(ROUND((julianday('now') - julianday(a.clockInAt)) * 86400) AS INTEGER))
+                        ELSE 0 END), 0) AS workedSeconds,
+                    COALESCE(SUM(CASE WHEN a.status = 'open' THEN 1 ELSE 0 END), 0) AS openCount
+             ${fromSql}`,
+            params,
+        ),
+        whereSql
+            ? d.select<any[]>(
+                `SELECT COUNT(*) AS count FROM employee_attendance${overallEmployeeId ? ' WHERE employeeId = ?' : ''}`,
+                overallEmployeeId ? [overallEmployeeId] : [],
+            )
+            : Promise.resolve(null),
+    ]);
+    const summary = counts[0] || {};
+    const total = Number(summary.count || 0);
+    return {
+        rows,
+        total,
+        overallTotal: overallCounts ? Number(overallCounts[0]?.count || 0) : total,
+        totalWorkedSeconds: Math.max(0, Number(summary.workedSeconds || 0)),
+        openCount: Math.max(0, Number(summary.openCount || 0)),
+    };
+}
+
+export async function getOpenEmployeeAttendance(employeeId: string): Promise<EmployeeAttendance | null> {
+    const normalizedId = String(employeeId || '').trim();
+    if (!normalizedId) return null;
+    const d = await getDb();
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${ATTENDANCE_BASE_SELECT}
+         WHERE a.employeeId = ? AND a.status = 'open'
+         ORDER BY a.clockInAt DESC, a.id DESC LIMIT 1`,
+        [normalizedId],
+    );
+    return rows[0] || null;
+}
+
+export async function insertOpenEmployeeAttendance(row: EmployeeAttendance): Promise<EmployeeAttendance> {
+    const d = await getDb();
+    await d.execute(
+        `INSERT INTO employee_attendance (
+            id, employeeId, clockInAt, clockOutAt, clockInTillId, clockOutTillId,
+            status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
+         ) VALUES (?, ?, ?, '', ?, '', 'open', ?, ?, ?, ?, ?)`,
+        [
+            row.id, row.employeeId, row.clockInAt, row.clockInTillId, row.notes,
+            row.createdByEmployeeId, row.updatedByEmployeeId, row.createdAt, row.updatedAt,
+        ],
+    );
+    return (await getOpenEmployeeAttendance(row.employeeId))!;
+}
+
+export async function closeOpenEmployeeAttendance(
+    employeeId: string,
+    tillId: string,
+    actorEmployeeId: string,
+    clockOutAt: string,
+): Promise<EmployeeAttendance> {
+    const current = await getOpenEmployeeAttendance(employeeId);
+    if (!current) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    const d = await getDb();
+    const result: any = await d.execute(
+        `UPDATE employee_attendance
+         SET clockOutAt = ?, clockOutTillId = ?, status = 'closed',
+             updatedByEmployeeId = ?, updatedAt = ?
+         WHERE id = ? AND status = 'open'`,
+        [clockOutAt, tillId, actorEmployeeId, clockOutAt, current.id],
+    );
+    if (Number(result?.rowsAffected || 0) !== 1) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    const rows = await d.select<EmployeeAttendance[]>(
+        `${ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
+        [current.id],
+    );
+    return rows[0];
+}
+
 export type ShiftStatusFilter = 'all' | 'open' | 'closed' | string;
 
 export interface ShiftPageOptions {
@@ -2414,6 +2709,9 @@ async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
                     COALESCE(SUM(CASE
                         WHEN COALESCE(p.cardAmount, 0) != 0 THEN p.cardAmount
                         WHEN p.method IN ('card', 'sumup', 'dojo', 'mobile') THEN p.amount ELSE 0 END), 0) AS cardPayments
+                    , COALESCE(SUM(p.tipsAmount), 0) AS tipsTotal
+                    , COALESCE(SUM(p.serviceChargeAmount), 0) AS serviceChargeTotal
+                    , COALESCE(SUM(p.cashbackAmount), 0) AS cashbackTotal
              FROM payments p
              JOIN orders o ON o.id = p.orderId
              WHERE o.shiftId IN (${placeholders})
@@ -2433,6 +2731,9 @@ async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
                     COALESCE(SUM(CASE WHEN paymentMethod = 'cash' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
                     COALESCE(SUM(CASE WHEN paymentMethod = 'card' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
                     COALESCE(SUM(CASE WHEN paymentMethod = 'other' THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther
+                    , COALESCE(SUM(tipsAmount), 0) AS accountTipsTotal
+                    , COALESCE(SUM(serviceChargeAmount), 0) AS accountServiceChargeTotal
+                    , COALESCE(SUM(cashbackAmount), 0) AS accountCashbackTotal
              FROM customer_account_entries
              WHERE shiftId IN (${placeholders})
                AND entryType = 'payment'
@@ -2451,6 +2752,12 @@ async function addShiftPageTotals(d: Database, rows: any[]): Promise<any[]> {
         salesTotal: Number(ordersByShift.get(String(row.id))?.salesTotal || 0),
         cashPayments: Number(paymentsByShift.get(String(row.id))?.cashPayments || 0),
         cardPayments: Number(paymentsByShift.get(String(row.id))?.cardPayments || 0),
+        tipsTotal: Number(paymentsByShift.get(String(row.id))?.tipsTotal || 0),
+        serviceChargeTotal: Number(paymentsByShift.get(String(row.id))?.serviceChargeTotal || 0),
+        cashbackTotal: Number(paymentsByShift.get(String(row.id))?.cashbackTotal || 0),
+        accountTipsTotal: Number(accountPaymentsByShift.get(String(row.id))?.accountTipsTotal || 0),
+        accountServiceChargeTotal: Number(accountPaymentsByShift.get(String(row.id))?.accountServiceChargeTotal || 0),
+        accountCashbackTotal: Number(accountPaymentsByShift.get(String(row.id))?.accountCashbackTotal || 0),
         cashMovements: Number(movementsByShift.get(String(row.id))?.cashMovements || 0),
         accountRepaymentsCash: Number(accountPaymentsByShift.get(String(row.id))?.accountRepaymentsCash || 0),
         accountRepaymentsCard: Number(accountPaymentsByShift.get(String(row.id))?.accountRepaymentsCard || 0),
@@ -2989,7 +3296,7 @@ export interface SalesOverview {
     totalItemsSold: number;
 }
 
-export interface PaymentBreakdown {
+export interface PaymentBreakdown extends PaymentExtraTotals {
     totalCash: number;
     totalCard: number;
     totalLoyalty: number;
@@ -3089,7 +3396,7 @@ export interface TillReportOption {
     name: string;
 }
 
-export interface TillSalesSummary extends TillReportOption {
+export interface TillSalesSummary extends TillReportOption, PaymentExtraTotals {
     netSales: number;
     grossSales: number;
     refunds: number;
@@ -3104,6 +3411,15 @@ export interface TillSalesSummary extends TillReportOption {
     accountRepaymentsCash: number;
     accountRepaymentsCard: number;
     accountRepaymentsOther: number;
+}
+
+export interface TillPeriodReport {
+    overview: SalesOverview;
+    breakdown: PaymentBreakdown;
+    topProducts: TopProduct[];
+    tillSummaries: TillSalesSummary[];
+    source?: 'mariadb' | 'sqlite' | 'browser';
+    warning?: string;
 }
 
 export interface DailySalesPoint {
@@ -3223,6 +3539,7 @@ export async function getPaymentBreakdown(startDate: string, endDate: string, ti
 
     const r = rows[0] || {};
     return {
+        ...reportPaymentExtraTotals(await readPaymentExtraTotalsByTill(d, bounds[0], bounds[1]), tillNumber),
         totalCash: r.totalCash || 0,
         totalCard: r.totalCard || 0,
         totalLoyalty: r.totalLoyalty || 0,
@@ -3380,14 +3697,22 @@ export async function aggregateDailySummary(date?: string): Promise<void> {
     }
 }
 
-/** Get the last report marker time for a specific till. */
+/**
+ * Get the effective last report marker for a till.
+ *
+ * A whole-system marker closes every till, so a later system marker must also
+ * advance a per-till Z report. Ignoring it repeats already-closed sales when a
+ * cashier uses "Close This Till" after a whole-system close.
+ */
 export async function getLastReportMarker(tillNumber: string): Promise<string | null> {
     const d = await getDb();
+    const scopes = effectiveReportMarkerScopes(tillNumber);
     const rows: any[] = await d.select(
         `SELECT markerTime FROM till_report_markers
-         WHERE tillNumber = ? AND type = 'period'
+         WHERE type = 'period'
+           AND tillNumber IN (${scopes.map(() => '?').join(',')})
          ORDER BY markerTime DESC LIMIT 1`,
-        [tillNumber]
+        scopes
     );
     return rows.length > 0 ? rows[0].markerTime : null;
 }
@@ -3452,6 +3777,25 @@ export async function setTillName(name: string): Promise<void> {
     );
 }
 
+/** Read this computer's operating role. Missing values default in deviceMode.ts. */
+export async function getDeviceOperatingMode(): Promise<string> {
+    const d = await getDb();
+    const rows: any[] = await d.select(
+        `SELECT value FROM settings WHERE key = 'device_operating_mode' LIMIT 1`,
+    );
+    return String(rows[0]?.value || '');
+}
+
+/** Save this computer's operating role directly to local SQLite. */
+export async function setDeviceOperatingMode(mode: string): Promise<void> {
+    const d = await getDb();
+    await d.execute(
+        `INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
+        ['device_operating_mode', mode, new Date().toISOString()],
+    );
+}
+
 /** Get all registered till names from orders for the till selector dropdown. */
 export async function getAllTillNumbers(): Promise<string[]> {
     const d = await getDb();
@@ -3511,14 +3855,26 @@ export async function getTillReportOptions(): Promise<TillReportOption[]> {
     });
 }
 
-/** Aggregate sales by till without multiplying totals across payment/line joins. */
-export async function getTillSalesSummaries(startDate: string, endDate: string): Promise<TillSalesSummary[]> {
+/** Aggregate sales by till for an exact, start-inclusive/end-exclusive period. */
+export async function getTillPeriodSalesSummaries(
+    startTime: string,
+    endTime: string,
+    tillNumber = '',
+): Promise<TillSalesSummary[]> {
     const d = await getDb();
-    const options = await getTillReportOptions();
-    const bounds = reportDateBounds(startDate, endDate);
-    const [rows, collectionRows] = await Promise.all([d.select<any[]>(
-        `SELECT
-            o.tillNumber as id,
+    const orderTillFilter = tillNumber ? ' AND o.tillNumber = ?' : '';
+    const collectionTillFilter = tillNumber ? ' AND tillNumber = ?' : '';
+    const periodParams: any[] = [startTime, endTime];
+    if (tillNumber) periodParams.push(tillNumber);
+    const [registerRows, rows, collectionRows] = await Promise.all([
+        d.select<any[]>(
+            `SELECT id, name, isActive
+             FROM registers
+             ORDER BY name, id`,
+        ),
+        d.select<any[]>(
+            `SELECT
+            COALESCE(o.tillNumber, '') as id,
             COALESCE(SUM(o.total), 0) as netSales,
             COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total ELSE 0 END), 0) as saleRevenue,
             COALESCE(SUM(CASE WHEN o.type != 'return' THEN o.total + o.discountAmount ELSE 0 END), 0) as grossSales,
@@ -3535,44 +3891,87 @@ export async function getTillSalesSummaries(startDate: string, endDate: string):
          WHERE o.status IN ('completed','refunded','partially_refunded','voided')
            AND o.status != 'voided'
            AND NOT (o.type = 'return' AND COALESCE(o.notes, '') LIKE 'Void of receipt %')
-           AND o.completedAt >= ? AND o.completedAt < ?
-         GROUP BY o.tillNumber
-         ORDER BY netSales DESC`,
-        bounds
-    ), d.select<any[]>(
-        `SELECT tillNumber AS id,
+           AND o.completedAt >= ? AND o.completedAt < ?${orderTillFilter}
+         GROUP BY COALESCE(o.tillNumber, '')
+             ORDER BY netSales DESC`,
+            periodParams,
+        ),
+        d.select<any[]>(
+            `SELECT COALESCE(tillNumber, '') AS id,
                 COALESCE(SUM(CASE WHEN paymentMethod = 'cash' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCash,
                 COALESCE(SUM(CASE WHEN paymentMethod = 'card' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsCard,
                 COALESCE(SUM(CASE WHEN paymentMethod = 'other' AND amountPence < 0 THEN -amountPence ELSE 0 END), 0) AS accountRepaymentsOther
          FROM customer_account_entries
          WHERE entryType = 'payment'
-           AND createdAt >= ? AND createdAt < ?
-         GROUP BY tillNumber`,
-        bounds,
-    )]);
+           AND createdAt >= ? AND createdAt < ?${collectionTillFilter}
+             GROUP BY COALESCE(tillNumber, '')`,
+            periodParams,
+        ),
+    ]);
     const byId = new Map(rows.map((row) => [String(row.id || ''), row]));
     const collectionsById = new Map(collectionRows.map((row) => [String(row.id || ''), row]));
+    const registerNames = new Map(registerRows.map((row) => [String(row.id), String(row.name || row.id)]));
+    const placeholderIds = new Set(['register-main', 'legacy-till']);
+    const optionIds: string[] = [];
+    const includedIds = new Set<string>();
+    const includeId = (id: string) => {
+        if (includedIds.has(id)) return;
+        includedIds.add(id);
+        optionIds.push(id);
+    };
+
+    if (tillNumber) {
+        // A single-till close must still return its selected till, even when the
+        // register is inactive or the exact period has no activity.
+        includeId(tillNumber);
+    } else {
+        // Zero-activity rows are useful only for real, active registers. Legacy
+        // placeholders, inactive registers and unknown IDs join the report only
+        // when an order or account payment exists inside this exact period.
+        for (const row of registerRows) {
+            const id = String(row.id);
+            if (Number(row.isActive ?? 1) !== 0 && !placeholderIds.has(id)) includeId(id);
+        }
+        for (const id of byId.keys()) includeId(id);
+        for (const id of collectionsById.keys()) includeId(id);
+    }
+
+    const usedNames = new Map<string, number>();
+    const options: TillReportOption[] = optionIds.map((id) => {
+        const baseName = id === '' ? 'Unassigned / legacy' : registerNames.get(id) || id;
+        const occurrence = (usedNames.get(baseName) || 0) + 1;
+        usedNames.set(baseName, occurrence);
+        return { id, name: occurrence === 1 ? baseName : `${baseName} (${occurrence})` };
+    });
+    const extrasByTill = await readPaymentExtraTotalsByTill(d, startTime, endTime);
     return options.map((option) => {
         const row = byId.get(option.id) || {};
         return {
+            ...extrasByTill.get(option.id),
             id: option.id,
             name: option.name,
-            netSales: row.netSales || 0,
-            grossSales: row.grossSales || 0,
-            refunds: row.refunds || 0,
-            taxTotal: row.taxTotal || 0,
-            transactions: row.transactions || 0,
-            refundTransactions: row.refundTransactions || 0,
-            itemsSold: row.itemsSold || 0,
-            cashTotal: row.cashTotal || 0,
-            cardTotal: row.cardTotal || 0,
-            loyaltyTotal: row.loyaltyTotal || 0,
-            accountTotal: row.accountTotal || 0,
+            netSales: Number(row.netSales || 0),
+            grossSales: Number(row.grossSales || 0),
+            refunds: Number(row.refunds || 0),
+            taxTotal: Number(row.taxTotal || 0),
+            transactions: Number(row.transactions || 0),
+            refundTransactions: Number(row.refundTransactions || 0),
+            itemsSold: Number(row.itemsSold || 0),
+            cashTotal: Number(row.cashTotal || 0),
+            cardTotal: Number(row.cardTotal || 0),
+            loyaltyTotal: Number(row.loyaltyTotal || 0),
+            accountTotal: Number(row.accountTotal || 0),
             accountRepaymentsCash: Number(collectionsById.get(option.id)?.accountRepaymentsCash || 0),
             accountRepaymentsCard: Number(collectionsById.get(option.id)?.accountRepaymentsCard || 0),
             accountRepaymentsOther: Number(collectionsById.get(option.id)?.accountRepaymentsOther || 0),
         };
     });
+}
+
+/** Aggregate sales by till without multiplying totals across payment/line joins. */
+export async function getTillSalesSummaries(startDate: string, endDate: string): Promise<TillSalesSummary[]> {
+    const [startTime, endTime] = reportDateBounds(startDate, endDate);
+    return getTillPeriodSalesSummaries(startTime, endTime);
 }
 
 /** Daily net-sales trend for the selected period and optional till. */
@@ -3678,7 +4077,7 @@ export async function getTillPeriodReport(
     tillNumber: string,
     startTime: string,
     endTime: string
-): Promise<{ overview: SalesOverview; breakdown: PaymentBreakdown; topProducts: TopProduct[] }> {
+): Promise<TillPeriodReport> {
     const d = await getDb();
     const tillFilter = tillNumber ? `AND o.tillNumber = ?` : '';
     const periodParams = tillNumber ? [tillNumber, startTime, endTime] : [startTime, endTime];
@@ -3751,6 +4150,7 @@ export async function getTillPeriodReport(
     ), getAccountReportActivity(d, startTime, endTime, tillNumber)]);
     const b = bRows[0] || {};
     const breakdown: PaymentBreakdown = {
+        ...reportPaymentExtraTotals(await readPaymentExtraTotalsByTill(d, startTime, endTime), tillNumber),
         totalCash: b.totalCash || 0,
         totalCard: b.totalCard || 0,
         totalLoyalty: b.totalLoyalty || 0,
@@ -3795,5 +4195,6 @@ export async function getTillPeriodReport(
         avgPrice: r.avgPrice || 0,
     }));
 
-    return { overview, breakdown, topProducts };
+    const tillSummaries = await getTillPeriodSalesSummaries(startTime, endTime, tillNumber);
+    return { overview, breakdown, topProducts, tillSummaries };
 }
