@@ -18,6 +18,7 @@ const SUPPORT_TOKEN_FORMAT: &str = "LBJSUP1";
 const SUPPORT_REQUEST_FORMAT: &str = "LBJSUPREQ1";
 const APP_IDENTITY_ID: &str = "main";
 const TRIAL_DAYS: i64 = 10;
+const TRIAL_CLOCK_SKEW_MINUTES: i64 = 5;
 const EXPIRY_WARNING_DAYS: i64 = 7;
 const SUPPORT_REQUEST_MINUTES: i64 = 10;
 const SUPPORT_SESSION_MINUTES: i64 = 30;
@@ -232,14 +233,17 @@ async fn ensure_trial_start(
     pool: &SqlitePool,
     identity: &mut IdentityRecord,
 ) -> Result<(), String> {
-    if parse_trial_start(&identity.created_at).is_some() {
+    // Only an empty legacy trial timestamp may be initialized. A malformed
+    // existing value must not silently grant another ten days, and paid
+    // licences do not depend on the unsigned trial timestamp.
+    if !identity.token.trim().is_empty() || !identity.created_at.trim().is_empty() {
         return Ok(());
     }
     let stamp = Utc::now().to_rfc3339();
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE app_identity
          SET createdAt = ?, updatedAt = ?
-         WHERE id = ? AND shopId = ?",
+         WHERE id = ? AND shopId = ? AND TRIM(COALESCE(createdAt, '')) = ''",
     )
     .bind(&stamp)
     .bind(&stamp)
@@ -248,7 +252,11 @@ async fn ensure_trial_start(
     .execute(pool)
     .await
     .map_err(|error| format!("Could not initialize the shop trial: {error}"))?;
-    identity.created_at = stamp;
+    if result.rows_affected() == 1 {
+        identity.created_at = stamp;
+    } else {
+        *identity = read_identity(pool).await?;
+    }
     Ok(())
 }
 
@@ -537,7 +545,7 @@ fn ensure_not_older_than_installed(
     let Some(installed) = installed_claims else {
         return Ok(());
     };
-    if installed.license_id == new_claims.license_id {
+    if installed == new_claims {
         return Ok(());
     }
 
@@ -552,6 +560,81 @@ fn ensure_not_older_than_installed(
         );
     }
     Ok(())
+}
+
+/// Licensing is ordered by signed issue time, never by the mutable row's
+/// updatedAt. Used by both SQLite download and MariaDB upload transactions.
+pub(crate) fn merge_shop_license_identity(
+    installed: Option<&serde_json::Map<String, serde_json::Value>>,
+    incoming: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    merge_shop_license_identity_with_keys(installed, incoming, &configured_public_keys()?)
+}
+
+fn merge_shop_license_identity_with_keys(
+    installed: Option<&serde_json::Map<String, serde_json::Value>>,
+    incoming: &serde_json::Map<String, serde_json::Value>,
+    keys: &HashMap<String, VerifyingKey>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    use serde_json::Value;
+    let field = |row: &serde_json::Map<String, Value>, name: &str| {
+        row.get(name).and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let shop = field(incoming, "shopId");
+    if field(incoming, "id") != APP_IDENTITY_ID || shop.trim().is_empty() {
+        return Err("The synchronized shop identity is invalid".into());
+    }
+    if installed.is_some_and(|row| field(row, "shopId") != shop) {
+        return Err("DATABASE_IDENTITY_MISMATCH: Licence sync cannot replace another shop's identity".into());
+    }
+    let incoming_token = field(incoming, "identitySignature");
+    let installed_token = installed.map(|row| field(row, "identitySignature")).unwrap_or_default();
+    let verified = |token: &str| verified_claims_from_result(decode_and_verify_token(
+        token, &shop, 1, Local::now().date_naive(), keys,
+    ));
+    let current_claims = verified(&installed_token);
+    let incoming_claims = verified(&incoming_token);
+    let keep_installed = match (&current_claims, &incoming_claims) {
+        (Some(current), Some(next)) => {
+            current != next && DateTime::parse_from_rfc3339(&next.issued_at).unwrap()
+                <= DateTime::parse_from_rfc3339(&current.issued_at).unwrap()
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => {
+            if !incoming_token.trim().is_empty() && incoming_token != installed_token {
+                return Err("The synchronized licence signature or claims are invalid".into());
+            }
+            // A missing remote token must not erase a damaged paid record and
+            // turn it back into a free trial. A fresh signed code repairs it.
+            !installed_token.trim().is_empty()
+        }
+    };
+    let mut merged = if keep_installed {
+        installed.cloned().unwrap_or_else(|| incoming.clone())
+    } else {
+        incoming.clone()
+    };
+    let selected = if keep_installed { current_claims.as_ref() } else { incoming_claims.as_ref() };
+    if let Some(claims) = selected {
+        merged.insert("licenseId".into(), Value::from(claims.license_id.clone()));
+    } else if field(&merged, "identitySignature").trim().is_empty() {
+        merged.insert("licenseId".into(), Value::from(""));
+    }
+    if let Some(current) = installed {
+        let existing_start = field(current, "createdAt");
+        let next_start = field(incoming, "createdAt");
+        let start = match (parse_trial_start(&existing_start), parse_trial_start(&next_start)) {
+            (Some(old), Some(next)) if next < old => next_start,
+            (Some(_), _) => existing_start,
+            // Corrupt existing timestamps stay invalid rather than receiving
+            // a fresh trial from another till. Empty legacy values may adopt.
+            (None, _) if !existing_start.trim().is_empty() => existing_start,
+            _ => next_start,
+        };
+        merged.insert("createdAt".into(), Value::from(start));
+    }
+    Ok(merged)
 }
 
 fn blank_status(
@@ -624,7 +707,14 @@ fn parse_trial_start(value: &str) -> Option<DateTime<Utc>> {
 
 fn trial_status(identity: &IdentityRecord, active_tills: u32, now: DateTime<Utc>) -> LicenseStatus {
     let enforced = enforcement_enabled();
-    let started_at = parse_trial_start(&identity.created_at).unwrap_or(now);
+    let Some(started_at) = parse_trial_start(&identity.created_at) else {
+        return blank_status(identity, active_tills, "invalid",
+            "The shop trial start date is invalid. Contact support or install a signed licence".into());
+    };
+    if started_at > now + Duration::minutes(TRIAL_CLOCK_SKEW_MINUTES) {
+        return blank_status(identity, active_tills, "invalid",
+            "The shop trial starts in the future. Check this till's date and time".into());
+    }
     let ends_at = started_at + Duration::days(TRIAL_DAYS);
     let seconds_remaining = ends_at.signed_duration_since(now).num_seconds();
     let trial_active = seconds_remaining > 0;
@@ -888,6 +978,32 @@ pub async fn activate_support_access(
     })
 }
 
+async fn save_activated_token(
+    pool: &SqlitePool,
+    identity: &IdentityRecord,
+    claims: &LicenseClaims,
+    token: &str,
+) -> Result<(), String> {
+    let result = sqlx::query(
+        "UPDATE app_identity
+         SET licenseId = ?, identitySignature = ?, updatedAt = ?
+         WHERE id = ? AND shopId = ? AND COALESCE(identitySignature, '') = ?",
+    )
+    .bind(&claims.license_id)
+    .bind(token)
+    .bind(Utc::now().to_rfc3339())
+    .bind(APP_IDENTITY_ID)
+    .bind(&identity.shop_id)
+    .bind(&identity.token)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("Could not save the licence: {error}"))?;
+    if result.rows_affected() != 1 {
+        return Err("The shop identity or installed licence changed during activation. Refresh and try again".into());
+    }
+    Ok(())
+}
+
 async fn activate_token(app: &AppHandle, token: String) -> Result<LicenseStatus, String> {
     let token = token.trim().to_string();
     let pool = open_local_db(app).await?;
@@ -920,23 +1036,7 @@ async fn activate_token(app: &AppHandle, token: String) -> Result<LicenseStatus,
     ));
     ensure_not_older_than_installed(&claims, installed_claims.as_ref())?;
 
-    let stamp = Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "UPDATE app_identity
-         SET licenseId = ?, identitySignature = ?, updatedAt = ?
-         WHERE id = ? AND shopId = ?",
-    )
-    .bind(&claims.license_id)
-    .bind(&token)
-    .bind(&stamp)
-    .bind(APP_IDENTITY_ID)
-    .bind(&identity.shop_id)
-    .execute(&pool)
-    .await
-    .map_err(|error| format!("Could not save the licence: {error}"))?;
-    if result.rows_affected() != 1 {
-        return Err("The shop identity changed while activating the licence".into());
-    }
+    save_activated_token(&pool, &identity, &claims, &token).await?;
     drop(pool);
     read_status(app).await
 }
@@ -1063,6 +1163,95 @@ mod tests {
         }
     }
 
+    fn sync_identity(signing: &SigningKey, claims: &LicenseClaims) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::json!({
+            "id": "main", "shopId": claims.shop_id, "shopName": "Test shop",
+            "licenseId": claims.license_id, "identitySignature": token_for(signing, claims),
+            "createdAt": "2026-07-01T12:00:00Z", "updatedAt": "2026-07-19T12:00:00Z"
+        }).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn licence_sync_uses_signed_issue_time_not_mutable_update_time() {
+        let (signing, keys) = test_keys();
+        let mut older_claims = claims();
+        older_claims.license_id = "lic_old".into();
+        let old = sync_identity(&signing, &older_claims);
+        let mut newer_claims = claims();
+        newer_claims.issued_at = "2026-08-01T12:00:00Z".into();
+        let newer = sync_identity(&signing, &newer_claims);
+        let mut misleading_old = old.clone();
+        misleading_old.insert("updatedAt".into(), serde_json::Value::from("2099-01-01T00:00:00Z"));
+        let preserved = merge_shop_license_identity_with_keys(Some(&newer), &misleading_old, &keys).unwrap();
+        assert_eq!(preserved["identitySignature"], newer["identitySignature"]);
+        let renewed = merge_shop_license_identity_with_keys(Some(&misleading_old), &newer, &keys).unwrap();
+        assert_eq!(renewed["identitySignature"], newer["identitySignature"]);
+        // A delayed old upload after a newer renewal has arrived stays harmless.
+        let delayed = merge_shop_license_identity_with_keys(Some(&renewed), &old, &keys).unwrap();
+        assert_eq!(delayed["identitySignature"], newer["identitySignature"]);
+    }
+
+    #[test]
+    fn licence_sync_preserves_valid_tokens_against_unsigned_tampered_or_wrong_shop_rows() {
+        let (signing, keys) = test_keys();
+        let current = sync_identity(&signing, &claims());
+        for token in ["", "LBJ1.tampered.invalid.signature"] {
+            let mut incoming = current.clone();
+            incoming.insert("identitySignature".into(), serde_json::Value::from(token));
+            incoming.insert("licenseId".into(), serde_json::Value::from("fake-id"));
+            let merged = merge_shop_license_identity_with_keys(Some(&current), &incoming, &keys).unwrap();
+            assert_eq!(merged["identitySignature"], current["identitySignature"]);
+            assert_eq!(merged["licenseId"], current["licenseId"]);
+        }
+        let mut wrong_shop = current.clone();
+        wrong_shop.insert("shopId".into(), serde_json::Value::from("shop_other"));
+        assert!(merge_shop_license_identity_with_keys(Some(&current), &wrong_shop, &keys).is_err());
+        assert!(merge_shop_license_identity_with_keys(None, &wrong_shop, &keys).is_err());
+    }
+
+    #[test]
+    fn licence_sync_does_not_reactivate_an_older_longer_licence_after_latest_expiry() {
+        let (signing, keys) = test_keys();
+        let mut old_claims = claims();
+        old_claims.issued_at = "2000-01-01T00:00:00Z".into();
+        old_claims.expires_on = "2099-01-01".into();
+        let older = sync_identity(&signing, &old_claims);
+        let mut revoked_by_expiry = claims();
+        revoked_by_expiry.issued_at = "2001-01-01T00:00:00Z".into();
+        revoked_by_expiry.expires_on = "2001-02-01".into();
+        let latest = sync_identity(&signing, &revoked_by_expiry);
+        let merged = merge_shop_license_identity_with_keys(Some(&older), &latest, &keys).unwrap();
+        assert_eq!(merged["identitySignature"], latest["identitySignature"]);
+        let reverse = merge_shop_license_identity_with_keys(Some(&merged), &older, &keys).unwrap();
+        assert_eq!(reverse["identitySignature"], latest["identitySignature"]);
+    }
+
+    #[test]
+    fn licence_sync_does_not_choose_between_different_claims_with_equal_issue_time() {
+        let (signing, keys) = test_keys();
+        let first = sync_identity(&signing, &claims());
+        let mut conflicting = claims();
+        conflicting.max_tills = 10;
+        let incoming = sync_identity(&signing, &conflicting);
+        let merged = merge_shop_license_identity_with_keys(Some(&first), &incoming, &keys).unwrap();
+        assert_eq!(merged["identitySignature"], first["identitySignature"]);
+    }
+
+    #[test]
+    fn licence_sync_never_resets_the_trial_or_turns_invalid_paid_code_into_a_trial() {
+        let (_, keys) = test_keys();
+        let mut current = serde_json::json!({ "id": "main", "shopId": "shop_test", "identitySignature": "", "createdAt": "2026-01-01T00:00:00Z" }).as_object().unwrap().clone();
+        let mut incoming = current.clone();
+        incoming.insert("createdAt".into(), serde_json::Value::from("2099-01-01T00:00:00Z"));
+        assert_eq!(merge_shop_license_identity_with_keys(Some(&current), &incoming, &keys).unwrap()["createdAt"], current["createdAt"]);
+        current.insert("createdAt".into(), serde_json::Value::from("corrupt-date"));
+        assert_eq!(merge_shop_license_identity_with_keys(Some(&current), &incoming, &keys).unwrap()["createdAt"], "corrupt-date");
+        current.insert("identitySignature".into(), serde_json::Value::from("damaged-paid-code"));
+        assert_eq!(merge_shop_license_identity_with_keys(Some(&current), &incoming, &keys).unwrap()["identitySignature"], "damaged-paid-code");
+        incoming.insert("identitySignature".into(), serde_json::Value::from("forged-code"));
+        assert!(merge_shop_license_identity_with_keys(None, &incoming, &keys).is_err());
+    }
+
     fn utc(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)
             .unwrap()
@@ -1176,6 +1365,69 @@ mod tests {
         assert_eq!(ended.state, "trial_expired");
         assert_eq!(ended.days_remaining, Some(0));
         assert_eq!(ended.access_allowed, !enforcement_enabled());
+    }
+
+    #[test]
+    fn malformed_or_future_trial_dates_do_not_grant_a_new_trial() {
+        for started in ["", "not-a-date", "2026-07-20T10:00:00Z"] {
+            let status = status_for_token(
+                &identity(String::new(), started),
+                1,
+                utc("2026-07-19T10:00:00Z"),
+                &HashMap::new(),
+            );
+            assert_eq!(status.state, "invalid");
+            assert_eq!(status.access_allowed, !enforcement_enabled());
+        }
+        let small_clock_difference = status_for_token(
+            &identity(String::new(), "2026-07-19T10:04:00Z"),
+            1,
+            utc("2026-07-19T10:00:00Z"),
+            &HashMap::new(),
+        );
+        assert_eq!(small_clock_difference.state, "trial");
+        assert_eq!(small_clock_difference.days_remaining, Some(10));
+    }
+
+    async fn identity_test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE app_identity (
+                id TEXT PRIMARY KEY, shopId TEXT, shopName TEXT, licenseId TEXT,
+                identitySignature TEXT, createdAt TEXT, updatedAt TEXT
+            )",
+        ).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO app_identity VALUES ('main', 'shop_12345678-abcd', 'Test Shop', '', '', '', '')")
+            .execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[test]
+    fn trial_initialization_only_migrates_empty_legacy_dates() {
+        tauri::async_runtime::block_on(async {
+            let pool = identity_test_pool().await;
+            let mut local = read_identity(&pool).await.unwrap();
+            ensure_trial_start(&pool, &mut local).await.unwrap();
+            assert!(parse_trial_start(&local.created_at).is_some());
+            let first_start = local.created_at.clone();
+            ensure_trial_start(&pool, &mut local).await.unwrap();
+            assert_eq!(local.created_at, first_start);
+
+            sqlx::query("UPDATE app_identity SET createdAt = 'broken-date'")
+                .execute(&pool).await.unwrap();
+            let mut malformed = read_identity(&pool).await.unwrap();
+            ensure_trial_start(&pool, &mut malformed).await.unwrap();
+            assert_eq!(malformed.created_at, "broken-date");
+            assert_eq!(read_identity(&pool).await.unwrap().created_at, "broken-date");
+
+            // A second, stale initializer adopts the already saved timestamp.
+            let mut stale = identity(String::new(), "");
+            sqlx::query("UPDATE app_identity SET createdAt = ?")
+                .bind(&first_start).execute(&pool).await.unwrap();
+            ensure_trial_start(&pool, &mut stale).await.unwrap();
+            assert_eq!(stale.created_at, first_start);
+        });
     }
 
     #[test]
@@ -1353,7 +1605,32 @@ mod tests {
 
         let mut same_license = older;
         same_license.license_id = installed.license_id.clone();
+        assert!(ensure_not_older_than_installed(&same_license, Some(&installed)).is_err());
+        assert!(ensure_not_older_than_installed(&installed, Some(&installed)).is_ok());
+        same_license.issued_at = installed.issued_at.clone();
+        same_license.max_tills = installed.max_tills + 1;
+        assert!(ensure_not_older_than_installed(&same_license, Some(&installed)).is_err());
+        same_license.issued_at = "2026-07-20T12:00:00Z".into();
         assert!(ensure_not_older_than_installed(&same_license, Some(&installed)).is_ok());
+    }
+
+    #[test]
+    fn concurrent_activation_cannot_overwrite_a_changed_licence_or_shop() {
+        tauri::async_runtime::block_on(async {
+            let pool = identity_test_pool().await;
+            let original = read_identity(&pool).await.unwrap();
+            let claims = claims();
+            save_activated_token(&pool, &original, &claims, "newer-token").await.unwrap();
+            assert!(save_activated_token(&pool, &original, &claims, "stale-token").await.is_err());
+            assert_eq!(read_identity(&pool).await.unwrap().token, "newer-token");
+
+            let current = read_identity(&pool).await.unwrap();
+            save_activated_token(&pool, &current, &claims, "newer-token").await.unwrap();
+            sqlx::query("UPDATE app_identity SET shopId = 'shop_other'")
+                .execute(&pool).await.unwrap();
+            assert!(save_activated_token(&pool, &current, &claims, "replacement").await.is_err());
+            assert_eq!(read_identity(&pool).await.unwrap().token, "newer-token");
+        });
     }
 
     #[test]

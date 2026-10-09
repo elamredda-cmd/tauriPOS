@@ -25,6 +25,7 @@
         readerName: '',
         currency: 'GBP',
         affiliateAppId: '',
+        terminalOwnership: 'dedicated',
         apiKeyConfigured: false,
         affiliateKeyConfigured: false,
         ready: false,
@@ -91,6 +92,7 @@
                 readerName: config.readerName,
                 currency: config.currency,
                 affiliateAppId: config.affiliateAppId,
+                terminalOwnership: config.terminalOwnership,
                 apiKey,
                 affiliateKey,
             });
@@ -174,6 +176,7 @@
             if (dojo?.enabled) {
                 await saveDojoConfig({
                     enabled: false,
+                    terminalOwnership: dojo.terminalOwnership,
                     terminalId: dojo.terminalId,
                     terminalName: dojo.terminalName,
                     currency: dojo.currency,
@@ -234,11 +237,30 @@
             </div>
         </section>
 
-        {#if $connectionState.mode !== 'multi'}
+        <section class="settings-section">
+            <h3 class="settings-section-title">Reader assignment</h3>
+            <div class="field mt-3">
+                <CustomSelect label="How this reader is used" value={config.terminalOwnership || 'shared'}
+                    options={[
+                        { label: 'Dedicated to this till — no MariaDB needed', value: 'dedicated' },
+                        { label: 'Shared between tills — MariaDB required', value: 'shared' },
+                    ]}
+                    on:change={(event) => config = { ...config, terminalOwnership: event.detail }} />
+            </div>
+            <p class="mt-3 text-sm text-text-muted">
+                Dedicated mode saves payments and recovery on this computer. Assign this physical reader to this till only;
+                do not select it on another till. Internet access is still required for SumUp.
+            </p>
+            {#if config.terminalOwnership !== 'dedicated'}
+                <p class="mt-2 text-sm text-text-muted">Switching an existing shared reader needs a one-time MariaDB connection to check for unfinished payments. New dedicated setups do not need MariaDB.</p>
+            {/if}
+        </section>
+
+        {#if config.terminalOwnership !== 'dedicated' && $connectionState.mode !== 'multi'}
             <div class="rounded-md border border-warning/60 bg-warning/10 p-4 text-sm font-semibold text-text-main">
                 Shared-reader protection needs Multi-till mode. Keep SumUp disabled until this till is connected to MariaDB.
             </div>
-        {:else if !$connectionState.mysqlOnline}
+        {:else if config.terminalOwnership !== 'dedicated' && !$connectionState.mysqlOnline}
             <div class="rounded-md border border-danger/60 bg-danger/10 p-4 text-sm font-semibold text-text-main">
                 MariaDB is offline. SumUp checkout will stay blocked so two tills cannot use the same reader together.
             </div>
@@ -283,7 +305,7 @@
             <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                     <h3 class="settings-section-title">Solo reader</h3>
-                    <p class="text-sm text-text-muted">One Solo can be selected on both tills. MariaDB gives it to only one checkout at a time.</p>
+                    <p class="text-sm text-text-muted">In dedicated mode, select a different Solo on each till. Shared mode uses MariaDB to reserve a reader between tills.</p>
                 </div>
                 <button class="btn btn-secondary" disabled={readerBusy || saving} on:click={findReaders}>
                     {readerBusy ? 'Finding...' : 'Find My Readers'}

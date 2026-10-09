@@ -23,6 +23,7 @@
         currency: 'GBP',
         softwareHouseId: 'softwareHouse1',
         resellerId: 'reseller1',
+        terminalOwnership: 'dedicated',
         apiKeyConfigured: false,
         apiEnvironment: 'Unknown',
         apiVersion: '2026-02-27',
@@ -84,6 +85,7 @@
                 currency: config.currency,
                 softwareHouseId: config.softwareHouseId,
                 resellerId: config.resellerId,
+                terminalOwnership: config.terminalOwnership,
                 apiKey,
             });
             apiKey = '';
@@ -142,6 +144,7 @@
             readerName: sumup.readerName,
             currency: sumup.currency,
             affiliateAppId: sumup.affiliateAppId,
+            terminalOwnership: sumup.terminalOwnership,
         });
     }
 
@@ -208,11 +211,30 @@
             </div>
         </section>
 
-        {#if $connectionState.mode !== 'multi'}
+        <section class="settings-section">
+            <h3 class="settings-section-title">Terminal assignment</h3>
+            <div class="field mt-3">
+                <CustomSelect label="How this terminal is used" value={config.terminalOwnership || 'shared'}
+                    options={[
+                        { label: 'Dedicated to this till — no MariaDB needed', value: 'dedicated' },
+                        { label: 'Shared between tills — MariaDB required', value: 'shared' },
+                    ]}
+                    on:change={(event) => config = { ...config, terminalOwnership: event.detail }} />
+            </div>
+            <p class="mt-3 text-sm text-text-muted">
+                Dedicated mode saves payments and recovery on this computer. Assign this physical terminal to this till only;
+                do not select it on another till. Internet access is still required for Dojo.
+            </p>
+            {#if config.terminalOwnership !== 'dedicated'}
+                <p class="mt-2 text-sm text-text-muted">To switch an existing shared terminal, reconnect MariaDB once so the app can check that no earlier payment is unfinished. New dedicated setups do not need MariaDB.</p>
+            {/if}
+        </section>
+
+        {#if config.terminalOwnership !== 'dedicated' && $connectionState.mode !== 'multi'}
             <div class="rounded-md border border-warning/60 bg-warning/10 p-4 text-sm font-semibold text-text-main">
                 Shared-terminal protection needs Multi-till mode. Keep Dojo disabled until this till is connected to MariaDB.
             </div>
-        {:else if !$connectionState.mysqlOnline}
+        {:else if config.terminalOwnership !== 'dedicated' && !$connectionState.mysqlOnline}
             <div class="rounded-md border border-danger/60 bg-danger/10 p-4 text-sm font-semibold text-text-main">
                 MariaDB is offline. Dojo checkout will stay blocked so two tills cannot use the same terminal together.
             </div>

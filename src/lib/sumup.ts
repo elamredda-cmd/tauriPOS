@@ -1,12 +1,8 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { get, writable } from 'svelte/store';
-import { connectionState } from '$lib/stores/connection';
-import {
-    mysqlAcquirePaymentTerminalLock,
-    mysqlRefreshPaymentTerminalLock,
-    mysqlReleasePaymentTerminalLock,
-    type MysqlPaymentTerminalLock,
-} from '$lib/stores/mysql';
+import { connectionState, buildMysqlUri } from '$lib/stores/connection';
+import { acquireTerminalLock, refreshTerminalLock, releaseTerminalLock,
+    type TerminalOwnership, type TerminalLockResult } from '$lib/terminalRecoveryLease';
 import {
     getRecoverablePaymentTerminalAttempts,
     preparePaymentTerminalAttempt,
@@ -17,6 +13,7 @@ import {
 } from '$lib/terminalAttempts';
 
 export interface SumupConfig {
+    terminalOwnership?: TerminalOwnership;
     enabled: boolean;
     merchantCode: string;
     readerId: string;
@@ -29,6 +26,7 @@ export interface SumupConfig {
 }
 
 export interface SumupConfigInput {
+    terminalOwnership?: TerminalOwnership;
     enabled: boolean;
     merchantCode: string;
     readerId: string;
@@ -76,12 +74,10 @@ export type SumupPaymentAttempt = TerminalPaymentAttempt & {
     provider: 'sumup';
 };
 
-export interface SumupLockResult {
-    acquired: boolean;
-    lock: MysqlPaymentTerminalLock | null;
-}
+export type SumupLockResult = TerminalLockResult;
 
 export const defaultSumupConfig: SumupConfig = {
+    terminalOwnership: 'dedicated',
     enabled: false,
     merchantCode: '',
     readerId: '',
@@ -103,13 +99,19 @@ export async function loadSumupConfig(): Promise<SumupConfig> {
 }
 
 export async function saveSumupConfig(config: SumupConfigInput): Promise<SumupConfig> {
-    const saved = await invoke<SumupConfig>('sumup_save_config', { config });
+    const state = get(connectionState);
+    const saved = await invoke<SumupConfig>('sumup_save_config', {
+        config, mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
+    });
     sumupConfig.set(saved);
     return saved;
 }
 
 export async function clearSumupSecrets(): Promise<SumupConfig> {
-    const saved = await invoke<SumupConfig>('sumup_clear_secrets');
+    const state = get(connectionState);
+    const saved = await invoke<SumupConfig>('sumup_clear_secrets', {
+        mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
+    });
     sumupConfig.set(saved);
     return saved;
 }
@@ -146,8 +148,8 @@ export function getSumupTransactionByReference(foreignTransactionId: string): Pr
     return invoke<SumupTransactionStatus>('sumup_transaction_by_reference', { foreignTransactionId });
 }
 
-export function refundSumupTransaction(transactionId: string, amountPence: number): Promise<void> {
-    return invoke<void>('sumup_refund_transaction', { transactionId, amountPence });
+export function refundSumupTransaction(transactionId: string, amountPence: number, attemptId?: string): Promise<void> {
+    return invoke<void>('sumup_refund_transaction', { transactionId, amountPence, attemptId });
 }
 
 export function terminateSumupCheckout(): Promise<void> {
@@ -165,10 +167,11 @@ export async function acquireSumupLock(
     paymentReference: string,
 ): Promise<SumupLockResult> {
     const connection = get(connectionState);
-    if (connection.mode !== 'multi' || !connection.mysqlOnline) {
+    const scope = config.terminalOwnership === 'dedicated' ? 'local' : 'shared';
+    if (scope === 'shared' && (connection.mode !== 'multi' || !connection.mysqlOnline)) {
         throw new Error('The shared SumUp reader requires MariaDB to be online so the tills cannot charge it together');
     }
-    return mysqlAcquirePaymentTerminalLock(
+    return acquireTerminalLock(scope,
         sumupTerminalKey(config),
         tillId,
         tillName,
@@ -181,7 +184,7 @@ export function refreshSumupLock(
     tillId: string,
     paymentReference: string,
 ): Promise<boolean> {
-    return mysqlRefreshPaymentTerminalLock(sumupTerminalKey(config), tillId, paymentReference);
+    return refreshTerminalLock(config.terminalOwnership === 'dedicated' ? 'local' : 'shared', sumupTerminalKey(config), tillId, paymentReference);
 }
 
 export function releaseSumupLock(
@@ -189,11 +192,12 @@ export function releaseSumupLock(
     tillId: string,
     paymentReference: string,
 ): Promise<void> {
-    return mysqlReleasePaymentTerminalLock(sumupTerminalKey(config), tillId, paymentReference);
+    return releaseTerminalLock(config.terminalOwnership === 'dedicated' ? 'local' : 'shared', sumupTerminalKey(config), tillId, paymentReference);
 }
 
 export async function saveSumupAttempt(attempt: SumupPaymentAttempt): Promise<SumupPaymentAttempt> {
-    return preparePaymentTerminalAttempt(attempt);
+    return preparePaymentTerminalAttempt({ ...attempt,
+        journalScope: attempt.journalScope ?? (get(sumupConfig).terminalOwnership === 'dedicated' ? 'local' : 'shared') });
 }
 
 export async function updateSumupAttempt(
@@ -205,11 +209,13 @@ export async function updateSumupAttempt(
 }
 
 export async function getRecoverableSumupAttempts(): Promise<SumupPaymentAttempt[]> {
-    return getRecoverablePaymentTerminalAttempts('sumup') as Promise<SumupPaymentAttempt[]>;
+    return getRecoverablePaymentTerminalAttempts('sumup', {
+        includeShared: get(sumupConfig).terminalOwnership !== 'dedicated',
+    }) as Promise<SumupPaymentAttempt[]>;
 }
 
 export async function pruneSumupAttempts(): Promise<void> {
-    await prunePaymentTerminalAttempts('sumup');
+    await prunePaymentTerminalAttempts('sumup', { includeShared: get(sumupConfig).terminalOwnership !== 'dedicated' });
 }
 
 export function delay(milliseconds: number): Promise<void> {

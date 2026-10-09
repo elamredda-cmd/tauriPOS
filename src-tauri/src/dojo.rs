@@ -6,6 +6,7 @@ use sqlx::{Connection, Row};
 use std::{collections::HashSet, fs, path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager};
 
+use crate::local_terminal::{self, TerminalOwnership};
 use crate::secret_store::{self, DOJO_API_KEY};
 
 const DOJO_API_BASE: &str = "https://api.dojo.tech";
@@ -24,7 +25,7 @@ const PAYMENT_INTENT_STATUSES: [&str; 6] = [
     "Canceled",
 ];
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct DojoStoredConfig {
     enabled: bool,
@@ -33,6 +34,8 @@ struct DojoStoredConfig {
     currency: String,
     software_house_id: String,
     reseller_id: String,
+    #[serde(default)]
+    terminal_ownership: TerminalOwnership,
     #[serde(default, skip_serializing)]
     api_key: String,
 }
@@ -46,6 +49,7 @@ impl Default for DojoStoredConfig {
             currency: "GBP".into(),
             software_house_id: "softwareHouse1".into(),
             reseller_id: "reseller1".into(),
+            terminal_ownership: TerminalOwnership::Dedicated,
             api_key: String::new(),
         }
     }
@@ -60,6 +64,8 @@ pub struct DojoConfigInput {
     currency: String,
     software_house_id: String,
     reseller_id: String,
+    #[serde(default)]
+    terminal_ownership: TerminalOwnership,
     api_key: Option<String>,
 }
 
@@ -72,6 +78,7 @@ pub struct DojoPublicConfig {
     currency: String,
     software_house_id: String,
     reseller_id: String,
+    terminal_ownership: TerminalOwnership,
     api_key_configured: bool,
     api_environment: String,
     api_version: String,
@@ -87,6 +94,7 @@ impl From<&DojoStoredConfig> for DojoPublicConfig {
             currency: value.currency.clone(),
             software_house_id: value.software_house_id.clone(),
             reseller_id: value.reseller_id.clone(),
+            terminal_ownership: value.terminal_ownership,
             api_key_configured: !value.api_key.is_empty(),
             api_environment: if value.api_key.starts_with("sk_prod_") {
                 "Production".into()
@@ -423,10 +431,15 @@ fn refund_explicitly_failed(status: reqwest::StatusCode, body: &[u8]) -> bool {
     if status != reqwest::StatusCode::BAD_REQUEST || body.len() > API_ERROR_MAX_BODY_BYTES {
         return false;
     }
-    serde_json::from_slice::<Value>(body).ok().is_some_and(|value| {
-        value.get("detail").or_else(|| value.get("Detail")).and_then(Value::as_str)
-            == Some("Your refund request was not successful. Status: Failed.")
-    })
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("detail")
+                .or_else(|| value.get("Detail"))
+                .and_then(Value::as_str)
+                == Some("Your refund request was not successful. Status: Failed.")
+        })
 }
 
 async fn api_error(mut response: Response) -> String {
@@ -926,10 +939,12 @@ pub fn dojo_get_config(app: AppHandle) -> Result<DojoPublicConfig, String> {
 }
 
 #[tauri::command]
-pub fn dojo_save_config(
+pub async fn dojo_save_config(
     app: AppHandle,
     config: DojoConfigInput,
+    mysql_uri: Option<String>,
 ) -> Result<DojoPublicConfig, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
     let supplied_key = config.api_key.unwrap_or_default().trim().to_string();
     let terminal_id = clean_identifier(&config.terminal_id, "Terminal ID", 128)?;
     let terminal_name = clean_identifier(&config.terminal_name, "Terminal name", 160)?;
@@ -937,8 +952,39 @@ pub fn dojo_save_config(
     let software_house_id = clean_identifier(&config.software_house_id, "Software-house ID", 128)?;
     let reseller_id = clean_identifier(&config.reseller_id, "Reseller ID", 128)?;
     let path = config_path(&app)?;
+    let previous = load_config(&app)?;
+    let sensitive_change = previous.terminal_id != terminal_id
+        || previous.software_house_id != software_house_id
+        || previous.reseller_id != reseller_id
+        || previous.currency != currency
+        || previous.terminal_ownership != config.terminal_ownership
+        || (!supplied_key.is_empty() && previous.api_key != supplied_key);
+    if sensitive_change {
+        let old_key = if previous.terminal_id.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "dojo:{}:{}",
+                previous.software_house_id, previous.terminal_id
+            )
+        };
+        local_terminal::guard_configuration_change(
+            &app,
+            "dojo",
+            &old_key,
+            previous.terminal_ownership,
+            mysql_uri.as_deref(),
+        )
+        .await?;
+    }
     let next = secret_store::mutate_related_config(&app, &[DOJO_API_KEY], |secrets| {
         let legacy = read_config_file(&path)?.unwrap_or_default();
+        if legacy.terminal_id != previous.terminal_id
+            || legacy.software_house_id != previous.software_house_id
+            || legacy.terminal_ownership != previous.terminal_ownership
+        {
+            return Err("Dojo registration changed while it was being checked. Reload settings and try again.".into());
+        }
         let current_api_key = secrets
             .first()
             .filter(|value| !value.is_empty())
@@ -951,6 +997,7 @@ pub fn dojo_save_config(
             currency,
             software_house_id,
             reseller_id,
+            terminal_ownership: config.terminal_ownership,
             api_key: if supplied_key.is_empty() {
                 current_api_key
             } else {
@@ -977,7 +1024,28 @@ pub fn dojo_save_config(
 }
 
 #[tauri::command]
-pub fn dojo_clear_secret(app: AppHandle) -> Result<DojoPublicConfig, String> {
+pub async fn dojo_clear_secret(
+    app: AppHandle,
+    mysql_uri: Option<String>,
+) -> Result<DojoPublicConfig, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
+    let previous = load_config(&app)?;
+    let old_key = if previous.terminal_id.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "dojo:{}:{}",
+            previous.software_house_id, previous.terminal_id
+        )
+    };
+    local_terminal::guard_configuration_change(
+        &app,
+        "dojo",
+        &old_key,
+        previous.terminal_ownership,
+        mysql_uri.as_deref(),
+    )
+    .await?;
     let path = config_path(&app)?;
     let config = secret_store::mutate_related_config(&app, &[DOJO_API_KEY], |_| {
         let mut config = read_config_file(&path)?.unwrap_or_default();
@@ -990,6 +1058,22 @@ pub fn dojo_clear_secret(app: AppHandle) -> Result<DojoPublicConfig, String> {
         })
     })?;
     Ok(DojoPublicConfig::from(&config))
+}
+
+pub(crate) fn validate_local_registration(
+    app: &AppHandle,
+    terminal_key: &str,
+    currency: &str,
+) -> Result<(), String> {
+    let config = require_api_config(app, true)?;
+    if !config.enabled
+        || config.terminal_ownership != TerminalOwnership::Dedicated
+        || terminal_key != format!("dojo:{}:{}", config.software_house_id, config.terminal_id)
+        || currency != config.currency
+    {
+        return Err("Dojo registration changed. Reload this till's payment settings before preparing a new payment.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1045,6 +1129,9 @@ pub async fn dojo_create_payment(
     reference: String,
     description: String,
 ) -> Result<DojoPaymentResult, String> {
+    // Reject new charges natively before contacting the provider. Status,
+    // cancellation and signature completion remain available for recovery.
+    crate::licensing::require_sale_access(&app).await?;
     let config = require_api_config(&app, true)?;
     if !config.enabled || !config_is_ready(&config) {
         return Err("Dojo is not enabled and fully configured on this till".into());
@@ -1056,6 +1143,18 @@ pub async fn dojo_create_payment(
     if reference.is_empty() {
         return Err("A unique payment reference is required".into());
     }
+    local_terminal::reserve_dispatch(
+        &app,
+        "dojo",
+        &reference,
+        &format!("dojo:{}:{}", config.software_house_id, config.terminal_id),
+        amount_pence,
+        &config.currency,
+        config.terminal_ownership,
+        "create",
+        None,
+    )
+    .await?;
     let description: String = description.trim().chars().take(4096).collect();
     let client = api_client()?;
     let response = api_request(
@@ -1238,6 +1337,7 @@ pub async fn dojo_retry_payment(
     attempt_id: String,
     terminal_session_id: String,
 ) -> Result<DojoPaymentResult, String> {
+    crate::licensing::require_sale_access(&app).await?;
     static RETRY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = RETRY
         .try_lock()
@@ -1257,6 +1357,18 @@ pub async fn dojo_retry_payment(
     if read_sandbox_cancellation_proof(&app, &attempt_id).await? != proof {
         return Err("The Dojo journal changed. No retry was sent.".into());
     }
+    local_terminal::reserve_dispatch(
+        &app,
+        "dojo",
+        &attempt_id,
+        &proof.terminal_key,
+        proof.amount,
+        &proof.currency,
+        config.terminal_ownership,
+        &format!("retry:{}", session.id),
+        Some(&proof.payment_intent_id),
+    )
+    .await?;
     let response = api_request(&client, reqwest::Method::POST,
         format!("{DOJO_API_BASE}/terminal-sessions"), &config, true)
         .json(&json!({"terminalId": config.terminal_id,
@@ -1415,6 +1527,18 @@ pub async fn dojo_refund_payment_intent(
     if payment_intent_id.is_empty() || idempotency_key.is_empty() {
         return Err("The original Dojo payment and refund reference are required".into());
     }
+    local_terminal::reserve_dispatch(
+        &app,
+        "dojo",
+        &idempotency_key,
+        &format!("dojo:{}:{}", config.software_house_id, config.terminal_id),
+        amount_pence,
+        &config.currency,
+        config.terminal_ownership,
+        "refund",
+        Some(&payment_intent_id),
+    )
+    .await?;
     let response = api_request(
         &api_client()?,
         reqwest::Method::POST,
@@ -1434,14 +1558,22 @@ pub async fn dojo_refund_payment_intent(
         let status = response.status();
         let mut response = response;
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "Could not read Dojo refund result; check the original refund")? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Could not read Dojo refund result; check the original refund")?
+        {
             if chunk.len() > API_ERROR_MAX_BODY_BYTES.saturating_sub(body.len()) {
                 return Err(readable_api_error(status, &[]));
             }
             body.extend_from_slice(&chunk);
         }
         if refund_explicitly_failed(status, &body) {
-            return Ok(DojoRefundResult { refund_id: String::new(), payment_intent_id, rejected: true });
+            return Ok(DojoRefundResult {
+                refund_id: String::new(),
+                payment_intent_id,
+                rejected: true,
+            });
         }
         return Err(readable_api_error(status, &body));
     }
@@ -1518,7 +1650,7 @@ fn mysql_text(row: &sqlx::mysql::MySqlRow, column: &str) -> Result<String, Strin
 #[tauri::command]
 pub async fn dojo_review_expired_payment(
     app: AppHandle,
-    mysql_uri: String,
+    mysql_uri: Option<String>,
     employee_id: String,
     pin: String,
     till_id: String,
@@ -1541,6 +1673,26 @@ pub async fn dojo_review_expired_payment(
         .strip_prefix(&format!("dojo:{}:", config.software_house_id))
         .filter(|id| !id.is_empty())
         .ok_or("The Dojo account does not match this payment")?;
+    let scope = local_terminal::attempt_scope(&app, &proof.attempt_id).await?;
+    if scope == "local" {
+        return review_local_expired_payment(
+            &app,
+            &config,
+            &proof,
+            terminal,
+            &employee_id,
+            &pin,
+            &till_id,
+            &lease_reference,
+            &review,
+        )
+        .await;
+    }
+    if scope != "shared" {
+        return Err("Unknown payment journal ownership; no review was recorded.".into());
+    }
+    let mysql_uri = mysql_uri.filter(|uri| !uri.trim().is_empty())
+        .ok_or("This older shared payment must be reviewed while connected to its original MariaDB journal.")?;
     let mut conn = sqlx::MySqlConnection::connect(&mysql_uri)
         .await
         .map_err(|_| "Could not connect to the shared payment journal".to_string())?;
@@ -1610,58 +1762,16 @@ pub async fn dojo_review_expired_payment(
                 .into(),
         );
     }
-    let client = api_client()?;
-    let payment = fetch_payment_intent(&client, &config, &proof.payment_intent_id).await?;
-    if payment.terminal_history_error.is_some() {
-        return Err("Dojo session history could not be verified.".into());
-    }
-    let session_id = payment
-        .latest_terminal_session_id
-        .as_deref()
-        .unwrap_or(&proof.terminal_session_id);
-    let session = dojo_terminal_session_status(app.clone(), session_id.into()).await?;
-    if session.status != "Expired"
-        || session.terminal_id != terminal
-        || session.payment_intent_id != proof.payment_intent_id
-    {
-        return Err("Dojo has not confirmed an expired session for this payment. Run Check payment results.".into());
-    }
-    let fresh = fetch_payment_intent(&client, &config, &proof.payment_intent_id).await?;
-    validate_sandbox_cancellation_payment(&proof, &fresh, "Created")?;
-    if fresh.terminal_history_error.is_some()
-        || fresh
-            .latest_terminal_session_id
-            .as_deref()
-            .unwrap_or(&proof.terminal_session_id)
-            != session_id
-    {
-        return Err("The Dojo session changed during review. Run Check payment results.".into());
-    }
-    if review.decision == "not_paid" {
-        // Retire the unused intent before releasing the journal. A racing
-        // capture must win and be recovered, never erased by this decision.
-        let response = payment_intent_cancel_request(
-            &client,
-            DOJO_API_BASE,
-            &config,
-            &proof.payment_intent_id,
-        )
-        .send()
-        .await
-        .map_err(|_| "Cancellation could not be confirmed. Keep the payment unresolved.")?;
-        if !response.status().is_success() {
-            return Err(api_error(response).await);
-        }
-        let canceled = fetch_payment_intent(&client, &config, &proof.payment_intent_id).await?;
-        validate_sandbox_cancellation_payment(&proof, &canceled, "Canceled")?;
-    }
+    let session_id = confirm_expired_review(&app, &config, &proof, terminal, &review).await?;
     let stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let resolution = json!({"version":1, "attemptId":proof.attempt_id,
-        "paymentIntentId":proof.payment_intent_id,"terminalSessionId":session_id,
-        "decision":review.decision,"amount":proof.amount,"currency":proof.currency,
-        "receiptReference":review.receipt_reference.trim(),"note":review.note.trim(),
-        "tipsAmount":review.tips_amount,"serviceChargeAmount":review.service_charge_amount,
-        "cashbackAmount":review.cashback_amount,"employeeId":employee_id,"employeeName":employee_name,"createdAt":stamp});
+    let resolution = expiry_resolution(
+        &proof,
+        &session_id,
+        &review,
+        &employee_id,
+        &employee_name,
+        &stamp,
+    );
     let encoded = resolution.to_string();
     sqlx::query("UPDATE payment_terminal_attempts SET operatorResolution = ?, status = 'uncertain', updatedAt = ?, error = 'Administrator recorded the terminal receipt result; ledger recovery pending' WHERE id = ? AND provider = 'dojo'")
         .bind(&encoded).bind(&stamp).bind(&proof.attempt_id).execute(&mut conn).await.map_err(|e| e.to_string())?;
@@ -1682,6 +1792,175 @@ pub async fn dojo_review_expired_payment(
     Ok(())
 }
 
+async fn confirm_expired_review(
+    app: &AppHandle,
+    config: &DojoStoredConfig,
+    proof: &SandboxCancellationProof,
+    terminal: &str,
+    review: &DojoExpiryReview,
+) -> Result<String, String> {
+    let client = api_client()?;
+    let payment = fetch_payment_intent(&client, config, &proof.payment_intent_id).await?;
+    if payment.terminal_history_error.is_some() {
+        return Err("Dojo session history could not be verified.".into());
+    }
+    let session_id = payment
+        .latest_terminal_session_id
+        .as_deref()
+        .unwrap_or(&proof.terminal_session_id);
+    let session = dojo_terminal_session_status(app.clone(), session_id.into()).await?;
+    if session.status != "Expired"
+        || session.terminal_id != terminal
+        || session.payment_intent_id != proof.payment_intent_id
+    {
+        return Err("Dojo has not confirmed an expired session for this payment. Run Check payment results.".into());
+    }
+    let fresh = fetch_payment_intent(&client, config, &proof.payment_intent_id).await?;
+    validate_sandbox_cancellation_payment(proof, &fresh, "Created")?;
+    if fresh.terminal_history_error.is_some()
+        || fresh
+            .latest_terminal_session_id
+            .as_deref()
+            .unwrap_or(&proof.terminal_session_id)
+            != session_id
+    {
+        return Err("The Dojo session changed during review. Run Check payment results.".into());
+    }
+    if review.decision == "not_paid" {
+        // Retire the unused intent before releasing the journal. A racing
+        // capture must win and be recovered, never erased by this decision.
+        let response =
+            payment_intent_cancel_request(&client, DOJO_API_BASE, config, &proof.payment_intent_id)
+                .send()
+                .await
+                .map_err(|_| "Cancellation could not be confirmed. Keep the payment unresolved.")?;
+        if !response.status().is_success() {
+            return Err(api_error(response).await);
+        }
+        let canceled = fetch_payment_intent(&client, config, &proof.payment_intent_id).await?;
+        validate_sandbox_cancellation_payment(proof, &canceled, "Canceled")?;
+    }
+    Ok(session_id.into())
+}
+
+fn expiry_resolution(
+    proof: &SandboxCancellationProof,
+    session_id: &str,
+    review: &DojoExpiryReview,
+    employee_id: &str,
+    employee_name: &str,
+    stamp: &str,
+) -> Value {
+    json!({"version":1, "attemptId":proof.attempt_id,
+        "paymentIntentId":proof.payment_intent_id,"terminalSessionId":session_id,
+        "decision":review.decision,"amount":proof.amount,"currency":proof.currency,
+        "receiptReference":review.receipt_reference.trim(),"note":review.note.trim(),
+        "tipsAmount":review.tips_amount,"serviceChargeAmount":review.service_charge_amount,
+        "cashbackAmount":review.cashback_amount,"employeeId":employee_id,"employeeName":employee_name,"createdAt":stamp})
+}
+
+async fn validate_local_expiry_row(
+    conn: &mut sqlx::SqliteConnection,
+    proof: &SandboxCancellationProof,
+    till_id: &str,
+    lease_reference: &str,
+) -> Result<(), String> {
+    local_terminal::assert_local_write_allowed(conn).await?;
+    local_terminal::require_lease(conn, &proof.terminal_key, till_id, lease_reference).await?;
+    let row = sqlx::query("SELECT * FROM payment_terminal_attempts WHERE id=? AND provider='dojo' AND journalScope='local'")
+        .bind(&proof.attempt_id).fetch_optional(conn).await.map_err(|e| e.to_string())?
+        .ok_or("The original local payment journal is missing.")?;
+    for (column, expected) in [
+        ("terminalKey", &proof.terminal_key),
+        ("clientTransactionId", &proof.payment_intent_id),
+        ("terminalSessionId", &proof.terminal_session_id),
+        ("operationKind", &proof.operation_kind),
+        ("currency", &proof.currency),
+        ("status", &proof.status),
+    ] {
+        if row
+            .try_get::<String, _>(column)
+            .map_err(|e| e.to_string())?
+            != *expected
+        {
+            return Err("The local payment changed; refresh payment recovery.".into());
+        }
+    }
+    if row.try_get::<i64, _>("amount").map_err(|e| e.to_string())? != proof.amount
+        || row
+            .try_get::<String, _>("tillId")
+            .map_err(|e| e.to_string())?
+            != till_id
+        || !row
+            .try_get::<String, _>("operatorResolution")
+            .map_err(|e| e.to_string())?
+            .is_empty()
+    {
+        return Err("The local payment changed or already has an administrator review.".into());
+    }
+    Ok(())
+}
+
+async fn review_local_expired_payment(
+    app: &AppHandle,
+    config: &DojoStoredConfig,
+    proof: &SandboxCancellationProof,
+    terminal: &str,
+    employee_id: &str,
+    pin: &str,
+    till_id: &str,
+    lease_reference: &str,
+    review: &DojoExpiryReview,
+) -> Result<(), String> {
+    let mut conn = local_terminal::connect(app).await?;
+    local_terminal::ensure_schema(&mut conn).await?;
+    let (mut conn, _) =
+        crate::cash_control::authenticate_local_payment_administrator(conn, employee_id, pin)
+            .await?;
+    validate_local_expiry_row(&mut conn, proof, till_id, lease_reference).await?;
+    conn.close().await.map_err(|e| e.to_string())?;
+    // Do not hold SQLite's whole-database write lock across provider HTTP.
+    // Reauthenticate and compare the complete proof inside the final short
+    // transaction so a concurrent recovery or staff revocation wins safely.
+    let session_id = confirm_expired_review(app, config, proof, terminal, review).await?;
+    let mut conn = local_terminal::connect(app).await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    let (mut conn, employee_name) =
+        crate::cash_control::authenticate_local_payment_administrator(conn, employee_id, pin)
+            .await?;
+    validate_local_expiry_row(&mut conn, proof, till_id, lease_reference).await?;
+    let stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let encoded = expiry_resolution(
+        proof,
+        &session_id,
+        review,
+        employee_id,
+        &employee_name,
+        &stamp,
+    )
+    .to_string();
+    sqlx::query("UPDATE payment_terminal_attempts SET operatorResolution = ?, status = 'uncertain', updatedAt = ?, error = 'Administrator recorded the terminal receipt result; ledger recovery pending' WHERE id = ? AND provider = 'dojo' AND journalScope='local'")
+        .bind(&encoded).bind(&stamp).bind(&proof.attempt_id).execute(&mut conn).await.map_err(|e| e.to_string())?;
+    let audit_id = rand::random::<[u8; 16]>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    sqlx::query("INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt) VALUES (?, ?, 'dojo_expired_payment_review', 'payment_terminal_attempt', ?, '{}', ?, ?, ?)")
+        .bind(audit_id).bind(employee_id).bind(&proof.attempt_id).bind(encoded).bind(&stamp).bind(&stamp)
+        .execute(&mut conn).await.map_err(|e| e.to_string())?;
+    sqlx::query("COMMIT")
+        .execute(&mut conn)
+        .await
+        .map_err(|_| {
+            "The review save could not be confirmed. Refresh payment checks before repeating it."
+                .to_string()
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1690,6 +1969,18 @@ mod tests {
         net::TcpListener,
         thread,
     };
+
+    #[test]
+    fn new_registration_is_dedicated_but_legacy_registration_remains_shared() {
+        assert_eq!(
+            DojoStoredConfig::default().terminal_ownership,
+            TerminalOwnership::Dedicated
+        );
+        let mut legacy = serde_json::to_value(DojoStoredConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("terminalOwnership");
+        let decoded: DojoStoredConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.terminal_ownership, TerminalOwnership::Shared);
+    }
 
     // These tests use dummy credentials and a loopback HTTP server only. They
     // exercise the production request builders without contacting Dojo.
@@ -1834,11 +2125,24 @@ mod tests {
 
     #[test]
     fn refund_rejection_requires_exact_final_provider_result() {
-        let body = br#"{"Status":400,"Detail":"Your refund request was not successful. Status: Failed."}"#;
-        assert!(refund_explicitly_failed(reqwest::StatusCode::BAD_REQUEST, body));
-        assert!(!refund_explicitly_failed(reqwest::StatusCode::INTERNAL_SERVER_ERROR, body));
-        assert!(!refund_explicitly_failed(reqwest::StatusCode::BAD_REQUEST, br#"{"Detail":"Pending"}"#));
-        assert!(!refund_explicitly_failed(reqwest::StatusCode::BAD_REQUEST, b"gateway error"));
+        let body =
+            br#"{"Status":400,"Detail":"Your refund request was not successful. Status: Failed."}"#;
+        assert!(refund_explicitly_failed(
+            reqwest::StatusCode::BAD_REQUEST,
+            body
+        ));
+        assert!(!refund_explicitly_failed(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body
+        ));
+        assert!(!refund_explicitly_failed(
+            reqwest::StatusCode::BAD_REQUEST,
+            br#"{"Detail":"Pending"}"#
+        ));
+        assert!(!refund_explicitly_failed(
+            reqwest::StatusCode::BAD_REQUEST,
+            b"gateway error"
+        ));
     }
 
     #[test]

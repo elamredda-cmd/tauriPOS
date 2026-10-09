@@ -8,7 +8,7 @@ use sqlx::{
 };
 use std::{collections::HashMap, time::Duration};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mutation {
     table: String,
@@ -164,7 +164,26 @@ pub async fn apply(conn: &mut SqliteConnection, mutations: &[Mutation]) -> Resul
         {
             return Err("This operation requires its dedicated online command".into());
         }
-        if mutation.protect_pending {
+        let protected_identity;
+        let mutation = if table == "app_identity" {
+            if !matches!(mutation.kind.as_str(), "upsert" | "insert") {
+                return Err("Shop identity requires its protected merge operation".into());
+            }
+            let existing = sqlx::query("SELECT * FROM app_identity WHERE id = ? LIMIT 1")
+                .bind(id).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?
+                .map(|row| row_json(&row)).transpose().map_err(|e| e.to_string())?;
+            let merged = crate::licensing::merge_shop_license_identity(existing.as_ref(), &mutation.data)?;
+            if existing.as_ref() == Some(&merged) && mutation.queue_id.is_none() {
+                continue;
+            }
+            protected_identity = Mutation { data: merged, ..mutation.clone() };
+            &protected_identity
+        } else {
+            mutation
+        };
+        // Signed issue time resolves pending licence renewals; an old queued
+        // renewal must not hide a still newer licence downloaded from the shop.
+        if mutation.protect_pending && table != "app_identity" {
             if matches!(table.as_str(), "orders" | "order_lines") {
                 let pending_holds: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _offline_queue WHERE operation = 'heldOrderBundle'")
                     .fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
@@ -402,6 +421,40 @@ mod tests {
                 serde_json::json!({"table":"products","data":{"id":"p","name":"Old","price":50},"protectPending":true}),
             );
             assert_eq!(apply(&mut db, &[remote]).await.unwrap(), 0);
+        });
+    }
+    #[test]
+    fn licence_download_keeps_local_paid_token_even_without_a_successful_upload_queue() {
+        tauri::async_runtime::block_on(async {
+            let mut db = database().await;
+            sqlx::query("CREATE TABLE app_identity (id TEXT PRIMARY KEY, shopId TEXT, shopName TEXT, licenseId TEXT, identitySignature TEXT, createdAt TEXT, updatedAt TEXT)")
+                .execute(&mut db).await.unwrap();
+            // Existing public interoperability fixture; no private signing key
+            // or real shop record is used in this isolated in-memory database.
+            let token = "LBJ1.lbj-cloud-2026-07.eyJ2IjoxLCJsaWNlbnNlSWQiOiJsaWNfY2xvdWRfZml4dHVyZV8wMDEiLCJzaG9wSWQiOiJzaG9wX2Nsb3VkZml4dHVyZSIsImN1c3RvbWVyTmFtZSI6IkNsb3VkIEZpeHR1cmUgU2hvcCIsImlzc3VlZEF0IjoiMjAyNi0wNy0yMFQxMjowMDowMC4wMDBaIiwiZXhwaXJlc09uIjoiMjA5OS0xMi0zMSIsIm1heFRpbGxzIjoyLCJmZWF0dXJlcyI6WyJwb3MiXX0.SB54piDCwRkLtruLbFjNoYjOg0GBrr18v8bKEaT6P6GUMpJLbtuT20ElT7WKtnVvVXqIjbyrzuAa7seUCd3IAg";
+            let paid = serde_json::json!({"id":"main","shopId":"shop_cloudfixture","shopName":"Fixture", "licenseId":"lic_cloud_fixture_001","identitySignature":token,"createdAt":"2026-07-01T00:00:00Z","updatedAt":"2026-07-20T00:00:00Z"});
+            apply(&mut db, &[mutation(serde_json::json!({"table":"app_identity","data":paid}))]).await.unwrap();
+            let mut older_remote = paid.clone();
+            older_remote["identitySignature"] = Value::from("");
+            older_remote["licenseId"] = Value::from("");
+            older_remote["updatedAt"] = Value::from("2099-01-01T00:00:00Z");
+            older_remote["createdAt"] = Value::from("2099-01-01T00:00:00Z");
+            apply(&mut db, &[mutation(serde_json::json!({"table":"app_identity","data":older_remote,"protectPending":true}))]).await.unwrap();
+            let stored: (String, String) = sqlx::query_as("SELECT identitySignature, createdAt FROM app_identity")
+                .fetch_one(&mut db).await.unwrap();
+            assert_eq!(stored, (token.to_string(), "2026-07-01T00:00:00Z".to_string()));
+
+            // Even a queued stale upload cannot prevent a verified downloaded
+            // code from repairing the cache; the upload merge also checks it.
+            sqlx::query("UPDATE app_identity SET identitySignature = '', licenseId = ''")
+                .execute(&mut db).await.unwrap();
+            sqlx::query("INSERT INTO _offline_queue VALUES ('q-licence', 'app_identity', 'upsert', ?, 'id', '')")
+                .bind(older_remote.to_string()).execute(&mut db).await.unwrap();
+            apply(&mut db, &[mutation(serde_json::json!({"table":"app_identity","data":paid,"protectPending":true}))]).await.unwrap();
+            let restored: String = sqlx::query_scalar("SELECT identitySignature FROM app_identity")
+                .fetch_one(&mut db).await.unwrap();
+            assert_eq!(restored, token);
+            assert!(apply(&mut db, &[mutation(serde_json::json!({"table":"app_identity","kind":"remove","data":{"id":"main"}}))]).await.is_err());
         });
     }
     #[test]

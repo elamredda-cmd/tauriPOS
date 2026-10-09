@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SaleBundle } from '$lib/stores/database';
 import type {
     CustomerAccountPaymentAttemptPayload,
@@ -7,6 +8,9 @@ import type {
 } from '$lib/terminalAttempts';
 
 const mocks = vi.hoisted(() => ({
+    invoke: vi.fn(),
+    connection: { mode: 'multi', mysqlOnline: true },
+    localPreparation: vi.fn(),
     assertWritesAllowed: vi.fn(),
     withCurrentReportEpoch: vi.fn(),
     mysqlPrepare: vi.fn(),
@@ -19,10 +23,12 @@ const mocks = vi.hoisted(() => ({
     localSelect: vi.fn(),
 }));
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
+
 vi.mock('$lib/stores/connection', () => ({
     connectionState: {
         subscribe(run: (value: { mode: string; mysqlOnline: boolean }) => void) {
-            run({ mode: 'multi', mysqlOnline: true });
+            run(mocks.connection);
             return () => undefined;
         },
     },
@@ -31,6 +37,7 @@ vi.mock('$lib/stores/connection', () => ({
 vi.mock('$lib/stores/database', () => ({
     assertMariaDbCommerceWritesAllowed: mocks.assertWritesAllowed,
     withCurrentReportEpoch: mocks.withCurrentReportEpoch,
+    withLocalTerminalPreparation: mocks.localPreparation,
 }));
 
 vi.mock('$lib/stores/mysql', () => ({
@@ -55,6 +62,9 @@ import {
     persistVerifiedDojoPaymentAccounting,
     requirePreparedSaleBundle,
     updatePaymentTerminalAttempt,
+    refreshPaymentTerminalAttempt,
+    getRecoverablePaymentTerminalAttempts,
+    terminalAttemptUsesSharedJournal,
 } from '$lib/terminalAttempts';
 import {
     assertTerminalAccountingEnrichment,
@@ -219,6 +229,110 @@ describe('terminal attempt report-epoch propagation', () => {
         await expect(preparePaymentTerminalAttempt(terminalAttempt(saleBundle()))).rejects.toThrow('MariaDB is offline');
         expect(mocks.mysqlGetOperational).not.toHaveBeenCalled();
     });
+});
+
+describe('dedicated till-local terminal journal', () => {
+    beforeEach(() => {
+        vi.resetAllMocks();
+        mocks.connection.mode = 'multi';
+        mocks.connection.mysqlOnline = false;
+        mocks.localPreparation.mockImplementation(async (work) => work());
+        mocks.withCurrentReportEpoch.mockImplementation(async (bundle) => ({
+            ...bundle, reportEpoch: 'cached-report-epoch', serverDataEpoch: 'cached-dataset',
+        }));
+        mocks.invoke.mockImplementation(async (_command, args) => args.attempt);
+        mocks.localExecute.mockResolvedValue({ rowsAffected: 1 });
+    });
+
+    it('durably prepares a dedicated multi-till payment without any MariaDB access', async () => {
+        const submitted = { ...terminalAttempt(saleBundle()), journalScope: 'local' as const };
+        const prepared = await preparePaymentTerminalAttempt(submitted);
+        expect(prepared.journalScope).toBe('local');
+        expect(requirePreparedSaleBundle(prepared).serverDataEpoch).toBe('cached-dataset');
+        expect(mocks.withCurrentReportEpoch).toHaveBeenCalledWith(submitted.saleBundle, { localOnly: true });
+        expect(mocks.invoke).toHaveBeenCalledWith('terminal_prepare_local_attempt', {
+            attempt: expect.objectContaining({ journalScope: 'local', saleBundle: expect.any(String) }),
+        });
+        expect(mocks.assertWritesAllowed).not.toHaveBeenCalled();
+        expect(mocks.mysqlPrepare).not.toHaveBeenCalled();
+        expect(mocks.localExecute).not.toHaveBeenCalled(); // Native transaction owns journal + lease.
+    });
+
+    it('propagates atomic local preparation failure without silently using the shared server', async () => {
+        mocks.invoke.mockRejectedValueOnce(new Error('An earlier terminal payment needs recovery'));
+        await expect(preparePaymentTerminalAttempt({ ...terminalAttempt(saleBundle()), journalScope: 'local' }))
+            .rejects.toThrow('needs recovery');
+        expect(mocks.mysqlPrepare).not.toHaveBeenCalled();
+    });
+
+    it('blocks a local charge before native preparation when the close fence rejects it', async () => {
+        mocks.localPreparation.mockRejectedValueOnce(new Error('Whole-system close is in progress'));
+        await expect(preparePaymentTerminalAttempt({ ...terminalAttempt(saleBundle()), journalScope: 'local' }))
+            .rejects.toThrow('close');
+        expect(mocks.invoke).not.toHaveBeenCalled();
+    });
+
+    it.each(['refund', 'account', 'redeemed'] as const)('keeps the shared financial preflight for %s', async (kind) => {
+        const bundle = saleBundle();
+        if (kind === 'refund') bundle.order.type = 'return';
+        if (kind === 'account') bundle.accountChanges = [{} as any];
+        if (kind === 'redeemed') bundle.loyaltyChanges = [{ reason: 'redeemed', pointsChange: -10 } as any];
+        const attempt = { ...terminalAttempt(bundle), journalScope: 'local' as const,
+            operationKind: kind === 'refund' ? 'refund' as const : 'sale' as const };
+        mocks.assertWritesAllowed.mockRejectedValueOnce(new Error('MariaDB unavailable for shared balances'));
+        await expect(preparePaymentTerminalAttempt(attempt)).rejects.toThrow('shared balances');
+        expect(mocks.invoke).not.toHaveBeenCalled();
+    });
+
+    it('completes a dedicated payment locally without shared completion acknowledgement', async () => {
+        const attempt = { ...terminalAttempt(saleBundle()), journalScope: 'local', status: 'approved' };
+        mocks.localSelect.mockResolvedValueOnce([attempt]).mockResolvedValueOnce([{ ...attempt, status: 'completed' }]);
+        expect((await updatePaymentTerminalAttempt('sumup', attempt.id, 'completed')).status).toBe('completed');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+        expect(mocks.localExecute.mock.calls[0][1][0]).toBe('completed');
+    });
+
+    it('refreshes local evidence while offline and refuses to reinterpret legacy shared evidence', async () => {
+        const local = { ...terminalAttempt(saleBundle()), journalScope: 'local' };
+        mocks.localSelect.mockResolvedValueOnce([local]).mockResolvedValueOnce([{ ...local, journalScope: 'shared' }]);
+        await expect(refreshPaymentTerminalAttempt('sumup', local.id)).resolves.toMatchObject({ journalScope: 'local' });
+        await expect(refreshPaymentTerminalAttempt('sumup', local.id)).rejects.toThrow('MariaDB must be online');
+        expect(terminalAttemptUsesSharedJournal({})).toBe(true);
+        expect(mocks.mysqlGetAttempt).not.toHaveBeenCalled();
+    });
+
+    it('lists cached legacy shared blockers without fetching unrelated remote attempts in dedicated mode', async () => {
+        mocks.connection.mysqlOnline = true;
+        const legacy = terminalAttempt(saleBundle());
+        mocks.localSelect.mockResolvedValueOnce([legacy]);
+        expect(await getRecoverablePaymentTerminalAttempts('sumup', { includeShared: false }))
+            .toEqual([expect.objectContaining({ id: legacy.id, journalScope: 'shared' })]);
+        expect(mocks.mysqlGetOperational).not.toHaveBeenCalled();
+    });
+
+    it('never lets a colliding shared snapshot complete a dedicated local payment', async () => {
+        mocks.connection.mysqlOnline = true;
+        const local = { ...terminalAttempt(saleBundle()), journalScope: 'local', status: 'uncertain' };
+        mocks.mysqlGetOperational.mockResolvedValueOnce([{ ...local, journalScope: undefined, status: 'completed', saleBundle: JSON.stringify(local.saleBundle) }]);
+        mocks.localSelect.mockResolvedValueOnce([local]);
+        await expect(getRecoverablePaymentTerminalAttempts('sumup')).rejects.toThrow('conflicts with a dedicated local payment');
+        expect(mocks.localExecute).not.toHaveBeenCalled();
+    });
+
+    it.each(['provider', 'terminalKey', 'operationKind', 'amount', 'expectedProviderAmount', 'currency'] as const)(
+        'rejects a shared cache merge with conflicting immutable %s', async (field) => {
+            mocks.connection.mysqlOnline = true;
+            const local = { ...terminalAttempt(saleBundle()), journalScope: 'shared', status: 'uncertain' };
+            const remote = { ...local, [field]: ['amount', 'expectedProviderAmount'].includes(field) ? 4_000 : 'other', saleBundle: JSON.stringify(local.saleBundle) };
+            // The operation-kind normalizer deliberately repairs unknown legacy values;
+            // use a supported conflicting operation to test the immutable comparison.
+            if (field === 'operationKind') remote.operationKind = 'refund';
+            mocks.mysqlGetOperational.mockResolvedValueOnce([remote]);
+            mocks.localSelect.mockResolvedValueOnce([local]);
+            await expect(getRecoverablePaymentTerminalAttempts('sumup')).rejects.toThrow('conflicting payment identity');
+            expect(mocks.localExecute).not.toHaveBeenCalled();
+        },
+    );
 });
 
 describe('shared terminal approval acknowledgement', () => {
@@ -494,6 +608,49 @@ describe('shared terminal approval acknowledgement', () => {
         }, async () => undefined)).rejects.toThrow('completed shared payment has different extra amounts');
         expect(mocks.mysqlEnrich).not.toHaveBeenCalled();
         expect(mocks.localExecute).not.toHaveBeenCalled();
+    });
+});
+
+describe('atomic shared cache merge boundaries (isolated SQLite)', () => {
+    let db: DatabaseSync;
+    beforeEach(() => {
+        vi.resetAllMocks();
+        mocks.connection.mode = 'multi'; mocks.connection.mysqlOnline = true;
+        db = new DatabaseSync(':memory:');
+        db.exec(`CREATE TABLE payment_terminal_attempts (
+            id TEXT PRIMARY KEY, provider TEXT, terminalKey TEXT, clientTransactionId TEXT,
+            terminalSessionId TEXT, operationKind TEXT, amount INTEGER, expectedProviderAmount INTEGER,
+            currency TEXT, status TEXT, saleBundle TEXT, providerReference TEXT, error TEXT,
+            tillId TEXT, createdAt TEXT, updatedAt TEXT, operatorResolution TEXT DEFAULT '',
+            journalScope TEXT NOT NULL DEFAULT 'shared')`);
+        mocks.localSelect.mockImplementation(async (sql, params = []) => db.prepare(sql).all(...params));
+        mocks.localExecute.mockImplementation(async (sql, params = []) => ({ rowsAffected: Number(db.prepare(sql).run(...params).changes) }));
+    });
+    afterEach(() => db.close());
+
+    it('merges valid shared provider evidence using the real SQLite UPSERT', async () => {
+        const remote = { ...terminalAttempt(saleBundle()), status: 'approved', saleBundle: JSON.stringify(saleBundle()) };
+        mocks.mysqlGetOperational.mockResolvedValue([remote]);
+        const attempts = await getRecoverablePaymentTerminalAttempts('sumup');
+        expect(attempts).toHaveLength(1);
+        expect(attempts[0]).toMatchObject({ journalScope: 'shared', status: 'approved' });
+        await getRecoverablePaymentTerminalAttempts('sumup');
+        expect(db.prepare('SELECT COUNT(*) AS count FROM payment_terminal_attempts').get()?.count).toBe(1);
+    });
+
+    it('atomically rejects a dedicated row inserted after the pre-read but before remote merge', async () => {
+        const remote = { ...terminalAttempt(saleBundle()), status: 'approved', saleBundle: JSON.stringify(saleBundle()) };
+        mocks.mysqlGetOperational.mockResolvedValue([remote]);
+        mocks.localExecute.mockImplementationOnce(async (sql, params = []) => {
+            const local = { ...remote, status: 'uncertain', journalScope: 'local' };
+            const keys = Object.keys(local);
+            db.prepare(`INSERT INTO payment_terminal_attempts (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`)
+                .run(...Object.values(local));
+            return { rowsAffected: Number(db.prepare(sql).run(...params).changes) };
+        });
+        await expect(getRecoverablePaymentTerminalAttempts('sumup')).rejects.toThrow('changed while merging');
+        expect(db.prepare('SELECT status, journalScope FROM payment_terminal_attempts').get())
+            .toMatchObject({ status: 'uncertain', journalScope: 'local' });
     });
 });
 

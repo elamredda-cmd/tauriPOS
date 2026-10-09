@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     canCancelExpiredTestPayment, isReportPaymentBlocker, readableReportPaymentBlocker,
     reportPaymentAmount, reportPaymentRecoveryReason, reportPaymentStatus,
-    REPORT_PAYMENT_FINALITY_WAIT_MS, verifyCancelledReportPayment,
+    REPORT_PAYMENT_FINALITY_WAIT_MS, verifyCancelledReportPayment, canCoordinateReportPayment, loadReportPaymentAttempts,
 } from './reportPaymentRecovery';
 
 const pending = {
@@ -12,6 +12,32 @@ const pending = {
 const sandbox = { apiKeyConfigured: true, apiEnvironment: 'Sandbox' };
 
 describe('report payment recovery guidance', () => {
+    it('retains local attempts with an explicit incomplete-shared result when a shared query fails', async () => {
+        const local = { ...pending, id: 'local-dojo', journalScope: 'local' as const } as any;
+        const load = vi.fn().mockRejectedValueOnce(new Error('MariaDB unavailable')).mockResolvedValueOnce([local]);
+        expect(await loadReportPaymentAttempts(load, true)).toEqual({ attempts: [local], localVerified: true, sharedIncomplete: true });
+        expect(load.mock.calls).toEqual([[true], [false]]);
+    });
+
+    it('does not turn a failed local journal read into a verified empty payment list', async () => {
+        const load = vi.fn().mockRejectedValue(new Error('Local database cannot be read'));
+        expect(await loadReportPaymentAttempts(load, false)).toEqual({ attempts: [], localVerified: false, sharedIncomplete: false });
+        expect(load).toHaveBeenCalledOnce();
+    });
+
+    it('loads dedicated journals directly without any shared request', async () => {
+        const load = vi.fn().mockResolvedValue([]);
+        expect(await loadReportPaymentAttempts(load, false)).toEqual({ attempts: [], localVerified: true, sharedIncomplete: false });
+        expect(load).toHaveBeenCalledExactlyOnceWith(false);
+    });
+
+    it('uses saved journal ownership for recovery controls, not current terminal registration', () => {
+        expect(canCoordinateReportPayment({ journalScope: 'local' }, false)).toBe(true);
+        expect(canCoordinateReportPayment({ journalScope: 'shared' }, false)).toBe(false);
+        expect(canCoordinateReportPayment({}, false)).toBe(false);
+        expect(canCoordinateReportPayment({ journalScope: 'shared' }, true)).toBe(true);
+        expect(canCoordinateReportPayment(null, true)).toBe(false);
+    });
     it('explains pending payments without calling them an open terminal window', () => {
         expect(isReportPaymentBlocker('MariaDB has 1 terminal payment attempt(s) to recover')).toBe(true);
         expect(readableReportPaymentBlocker('MariaDB has 1 terminal payment attempt(s) to recover'))

@@ -4,6 +4,7 @@ mod customer_media;
 mod dojo;
 mod licensing;
 mod local_batch;
+mod local_terminal;
 mod mysql_session;
 mod printer_modules;
 mod secret_store;
@@ -1475,6 +1476,10 @@ pub fn run() {
             secret_store::owner_cloud_store_reporter_secret,
             secret_store::owner_cloud_clear_reporter_secret,
             dojo::dojo_get_config,
+            local_terminal::terminal_acquire_local_lock,
+            local_terminal::terminal_refresh_local_lock,
+            local_terminal::terminal_release_local_lock,
+            local_terminal::terminal_prepare_local_attempt,
             dojo::dojo_save_config,
             dojo::dojo_clear_secret,
             dojo::dojo_list_terminals,

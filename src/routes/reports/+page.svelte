@@ -14,7 +14,8 @@
     import { getReceiptPrinterConfig, printEscposTextReport } from '$lib/printers';
     import { paymentExtraReportRows, cashbackRecoveryMessage } from '$lib/paymentExtraPresentation';
     import { loadDojoConfig, type DojoConfig } from '$lib/dojo';
-    import { getRecoverablePaymentTerminalAttempts, type TerminalPaymentAttempt } from '$lib/terminalAttempts';
+    import { loadSumupConfig } from '$lib/sumup';
+    import { getRecoverablePaymentTerminalAttempts, terminalAttemptUsesSharedJournal, type TerminalPaymentAttempt } from '$lib/terminalAttempts';
     import { runTerminalRecovery, cancelExpiredSandboxDojoPayment, type TerminalRecoveryResult } from '$lib/terminalRecovery';
     import DojoExpiryReview from '$lib/components/DojoExpiryReview.svelte';
     let showDojoExpiryReview = false;
@@ -22,11 +23,12 @@
     import {
         isReportPaymentBlocker, readableReportPaymentBlocker, reportPaymentAmount,
         reportPaymentStatus, reportPaymentRecoveryReason, canCancelExpiredTestPayment,
-        verifyCancelledReportPayment,
+        verifyCancelledReportPayment, canCoordinateReportPayment, loadReportPaymentAttempts,
     } from '$lib/reportPaymentRecovery';
     import {
         getReportSnapshot,
         assertMariaDbCommerceWritesAllowed,
+        withLocalTerminalPreparation,
         getReportComparisonTotals,
         type ReportComparisonTotals,
         type ReportSnapshot,
@@ -208,6 +210,7 @@
     let paymentRecoveryLoading = false;
     let paymentRecoveryNotice = '';
     let paymentRecoveryLoadError = '';
+    let paymentRecoveryVerifiedProviders = new Set<string>();
     let paymentRecoveryDisposed = false;
     let showPaymentRecovery = false;
     let paymentResultsCheckedAt = 0;
@@ -216,22 +219,24 @@
     let cancelTestPayment: TerminalPaymentAttempt | null = null;
     let paymentCancellationController: AbortController | null = null;
     let paymentCancellationEmployeeId = '';
+    let activeCancellationAttempt: TerminalPaymentAttempt | null = null;
     $: canOpenReports = hasPermission($currentEmployee, 'open_reports', $settingsDB);
     $: canEndDay = hasPermission($currentEmployee, 'end_day_close', $settingsDB);
     $: periodReportWaitingOffline = periodReportAction === 'close-system'
         && /\boffline\b/i.test(periodReportStatus);
     $: activeRecoveryAdministrator = $currentEmployee?.role === 'admin' && $currentEmployee?.isActive === true
         && !isSupportEmployee($currentEmployee) && !$currentEmployee?.roleNeedsRepair && !$currentEmployee?.pinNeedsReset;
-    $: sandboxCancellationConnectionReady = $connectionState.mode === 'multi'
+    $: sharedRecoveryConnectionReady = $connectionState.mode === 'multi'
         && $connectionState.mysqlOnline && $connectionState.mysqlReady;
     $: paymentRecoveryBlocked = periodReportBusy || showTillReport || closeReportSaving || Boolean(wholeSystemCloseSession)
         || paymentRecoveryBusy || paymentRecoveryLoading;
-    $: if (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady) showDojoExpiryReview = false;
-    $: if (showCancelTestPayment && (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady)) {
+    $: if (!activeRecoveryAdministrator || !canCoordinateReportPayment(dojoExpiryAttempt, sharedRecoveryConnectionReady)
+        || (dojoExpiryAttempt && !paymentRecoveryVerifiedProviders.has(dojoExpiryAttempt.provider))) showDojoExpiryReview = false;
+    $: if (showCancelTestPayment && (!activeRecoveryAdministrator || !canCoordinateReportPayment(cancelTestPayment, sharedRecoveryConnectionReady))) {
         showCancelTestPayment = false;
         cancelTestPayment = null;
     }
-    $: if (paymentCancellationController && (!activeRecoveryAdministrator || !sandboxCancellationConnectionReady
+    $: if (paymentCancellationController && (!activeRecoveryAdministrator || !canCoordinateReportPayment(activeCancellationAttempt, sharedRecoveryConnectionReady)
         || $currentEmployee?.id !== paymentCancellationEmployeeId
         || periodReportBusy || showTillReport || closeReportSaving || wholeSystemCloseSession)) {
         paymentCancellationController.abort();
@@ -241,19 +246,33 @@
         if (!isTauri() || paymentRecoveryDisposed || paymentRecoveryLoading) return;
         paymentRecoveryLoading = true;
         try {
-            const [sumup, dojo, config] = await Promise.all([
-                getRecoverablePaymentTerminalAttempts('sumup'),
-                getRecoverablePaymentTerminalAttempts('dojo'),
+            const [sumupConfig, config] = await Promise.all([
+                loadSumupConfig().catch(() => null),
                 loadDojoConfig().catch(() => null),
             ]);
+            const [sumup, dojo] = await Promise.all([
+                loadReportPaymentAttempts(includeShared => getRecoverablePaymentTerminalAttempts('sumup', { includeShared }), sumupConfig?.terminalOwnership !== 'dedicated'),
+                loadReportPaymentAttempts(includeShared => getRecoverablePaymentTerminalAttempts('dojo', { includeShared }), config?.terminalOwnership !== 'dedicated'),
+            ]);
             if (paymentRecoveryDisposed) return;
-            pendingReportPayments = [...sumup, ...dojo].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+            pendingReportPayments = [
+                ...(sumup.localVerified ? sumup.attempts : pendingReportPayments.filter(attempt => attempt.provider === 'sumup')),
+                ...(dojo.localVerified ? dojo.attempts : pendingReportPayments.filter(attempt => attempt.provider === 'dojo')),
+            ].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+            paymentRecoveryVerifiedProviders = new Set([
+                ...(sumup.localVerified ? ['sumup'] : []), ...(dojo.localVerified ? ['dojo'] : []),
+            ]);
             recoveryDojoConfig = config;
-            paymentRecoveryLoadError = '';
+            paymentRecoveryLoadError = !sumup.localVerified || !dojo.localVerified
+                ? 'Some local payment records could not be read. Other verified payments remain available below. Do not assume the missing list is empty or retry the card.'
+                : sumup.sharedIncomplete || dojo.sharedIncomplete
+                    ? 'Shared payment verification is incomplete because MariaDB could not be checked. Local payment records are shown below; dedicated payments can still be recovered. Reconnect before treating shared payments as resolved.'
+                    : '';
         } catch {
             if (!paymentRecoveryDisposed) {
-                paymentRecoveryLoadError = 'Pending payment records could not be verified. Reconnect MariaDB and check again; do not retry the card.';
+                paymentRecoveryLoadError = 'Pending payment records could not be verified. Check this till’s payment settings and connection; legacy shared payments also need MariaDB. Do not retry the card.';
                 paymentResultsCheckedAt = 0;
+                paymentRecoveryVerifiedProviders = new Set();
                 recoveryDojoConfig = null;
             }
         } finally {
@@ -274,29 +293,29 @@
         paymentRecoveryNotice = 'Checking the saved payments with their providers…';
         showPaymentRecovery = true;
         try {
-            // A failed close may have lost its UI token. Confirm the shared
-            // barrier is really idle before recovery can write any ledger rows.
-            if (isMultiMode()) await assertMariaDbCommerceWritesAllowed();
+            // Each attempt retains its own lease and close-fence checks.
+            // A dedicated till can recover while shop synchronization is offline.
             const result = await runTerminalRecovery();
             announceRecoveryCashback(result);
             if (paymentRecoveryDisposed) return;
             await refreshReportPayments();
             if (paymentRecoveryDisposed) return;
-            if (!paymentRecoveryLoadError) paymentResultsCheckedAt = Date.now();
-            paymentRecoveryNotice = result.errors.length > 0
+            if (paymentRecoveryVerifiedProviders.size > 0) paymentResultsCheckedAt = Date.now();
+            paymentRecoveryNotice = result.errors.length > 0 || paymentRecoveryLoadError
                 ? 'Some results could not be verified. Check the payment connection and try again. The Z-report safety check remains active.'
                 : result.stillUncertain > 0 || pendingReportPayments.length > 0
                     ? 'Some payments still need confirmation. Review the entries below; do not charge the customer again.'
                     : 'No unresolved payments were found. Generate a fresh Z report to check every till and close the period.';
         } catch {
-            if (!paymentRecoveryDisposed) paymentRecoveryNotice = 'Payment recovery could not run safely. Release any report close and reconnect MariaDB, then check again. No payment record was cleared.';
+            if (!paymentRecoveryDisposed) paymentRecoveryNotice = 'Payment recovery could not run safely. Release any report close and check the payment connection. Legacy shared payments also require MariaDB. No payment record was cleared.';
         } finally {
             if (!paymentRecoveryDisposed) paymentRecoveryBusy = false;
         }
     }
 
     function requestCancelTestPayment(attempt: TerminalPaymentAttempt) {
-        if (paymentRecoveryBlocked || !sandboxCancellationConnectionReady
+        if (paymentRecoveryBlocked || !paymentRecoveryVerifiedProviders.has(attempt.provider)
+            || !canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady)
             || !canCancelExpiredTestPayment(attempt, recoveryDojoConfig, activeRecoveryAdministrator)) return;
         if (!paymentResultsCheckedAt || Date.now() - paymentResultsCheckedAt > 90_000) {
             paymentRecoveryNotice = 'Press Check payment results first, then review the refreshed test payment before cancelling it.';
@@ -309,7 +328,8 @@
     async function confirmCancelTestPayment() {
         const attempt = cancelTestPayment;
         cancelTestPayment = null;
-        if (!attempt || paymentRecoveryBlocked || !sandboxCancellationConnectionReady || !activeRecoveryAdministrator || !isTauri()) return;
+        if (!attempt || paymentRecoveryBlocked || !paymentRecoveryVerifiedProviders.has(attempt.provider)
+            || !canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady) || !activeRecoveryAdministrator || !isTauri()) return;
         if (!paymentResultsCheckedAt || Date.now() - paymentResultsCheckedAt > 90_000) {
             paymentRecoveryNotice = 'The result check is no longer fresh. Check payment results again before cancelling.';
             return;
@@ -322,13 +342,16 @@
         const employeeId = $currentEmployee?.id;
         const employeeVersion = $currentEmployee?.updatedAt;
         paymentCancellationEmployeeId = employeeId || '';
+        activeCancellationAttempt = attempt;
         paymentCancellationController = controller;
         const canContinue = () => !paymentRecoveryDisposed && !controller.signal.aborted
             && $currentEmployee?.id === employeeId && $currentEmployee?.updatedAt === employeeVersion
-            && activeRecoveryAdministrator && sandboxCancellationConnectionReady
+            && activeRecoveryAdministrator && canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady)
+            && paymentRecoveryVerifiedProviders.has(attempt.provider)
             && !periodReportBusy && !showTillReport && !closeReportSaving && !wholeSystemCloseSession;
         const assertSafe = async () => {
-            await assertMariaDbCommerceWritesAllowed();
+            if (terminalAttemptUsesSharedJournal(attempt)) await assertMariaDbCommerceWritesAllowed();
+            else await withLocalTerminalPreparation(async () => undefined);
             const config = await loadDojoConfig();
             if (!config.apiKeyConfigured || config.apiEnvironment.toLowerCase() !== 'sandbox') {
                 throw new Error('Sandbox verification is no longer available');
@@ -336,7 +359,7 @@
         };
         let cancellationConfirmed = false;
         try {
-            await assertMariaDbCommerceWritesAllowed();
+            await assertSafe();
             const config = await loadDojoConfig();
             if (!canContinue() || !canCancelExpiredTestPayment(attempt, config, activeRecoveryAdministrator)) {
                 throw new Error('Sandbox cancellation is no longer available');
@@ -353,7 +376,7 @@
                 },
                 refreshResolved: async () => {
                     await refreshReportPayments();
-                    return !paymentRecoveryLoadError
+                    return paymentRecoveryVerifiedProviders.has('dojo')
                         && !pendingReportPayments.some(payment => payment.provider === 'dojo' && payment.id === attempt.id);
                 },
                 onSettling: () => {
@@ -361,9 +384,11 @@
                 },
             });
             if (!paymentRecoveryDisposed) {
-                if (outcome !== 'stopped' && !paymentRecoveryLoadError) paymentResultsCheckedAt = Date.now();
+                if (outcome !== 'stopped' && paymentRecoveryVerifiedProviders.has('dojo')) paymentResultsCheckedAt = Date.now();
                 paymentRecoveryNotice = outcome === 'resolved'
-                    ? pendingReportPayments.length > 0
+                    ? paymentRecoveryLoadError
+                        ? 'This test payment is resolved. Other payment checks remain incomplete; review the warning below before closing the period.'
+                        : pendingReportPayments.length > 0
                         ? 'This test payment is resolved. Other payments still need confirmation; review the remaining entries below.'
                         : 'Payment verification finished. No unresolved payments remain on this till. Generate a fresh Z report to check every till and close the period.'
                     : outcome === 'stopped'
@@ -393,6 +418,7 @@
             if (!paymentRecoveryDisposed) {
                 paymentCancellationController = null;
                 paymentCancellationEmployeeId = '';
+                activeCancellationAttempt = null;
                 paymentRecoveryBusy = false;
             }
         }
@@ -1712,14 +1738,17 @@
                                     · {allTills.find(till => till.id === attempt.tillId)?.name || (attempt.tillId === tillId ? tillName : 'Another / unassigned till')}
                                 </p>
                                 <p class="m-0 mt-2 text-xs leading-relaxed">{reportPaymentRecoveryReason(attempt)}</p>
-                                {#if activeRecoveryAdministrator && sandboxCancellationConnectionReady && attempt.provider === 'dojo'
+                                {#if !canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady)}
+                                    <p class="m-0 mt-2 text-xs text-warning">This payment was started using shared-terminal coordination. Reconnect MariaDB to recover it; changing terminal registration does not change an existing payment.</p>
+                                {/if}
+                                {#if activeRecoveryAdministrator && canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady) && attempt.provider === 'dojo'
                                     && ['started', 'uncertain'].includes(attempt.status) && attempt.clientTransactionId && attempt.terminalSessionId && attempt.operationKind !== 'refund' && !attempt.operatorResolution}
-                                    <button type="button" class="btn btn-secondary mt-3" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt}
+                                    <button type="button" class="btn btn-secondary mt-3" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt || !paymentRecoveryVerifiedProviders.has(attempt.provider)}
                                         on:click={() => { dojoExpiryAttempt = attempt; showDojoExpiryReview = true; }}>Review expired payment</button>
                                 {/if}
-                                {#if sandboxCancellationConnectionReady && canCancelExpiredTestPayment(attempt, recoveryDojoConfig, activeRecoveryAdministrator)}
+                                {#if canCoordinateReportPayment(attempt, sharedRecoveryConnectionReady) && canCancelExpiredTestPayment(attempt, recoveryDojoConfig, activeRecoveryAdministrator)}
                                     <div class="mt-3 flex flex-wrap items-center gap-2">
-                                        <button type="button" class="btn btn-secondary" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt} on:click={() => requestCancelTestPayment(attempt)}>
+                                        <button type="button" class="btn btn-secondary" disabled={paymentRecoveryBlocked || !paymentResultsCheckedAt || !paymentRecoveryVerifiedProviders.has(attempt.provider)} on:click={() => requestCancelTestPayment(attempt)}>
                                             Cancel expired test payment
                                         </button>
                                         <span class="text-xs text-text-muted">Sandbox only. Check results first.</span>

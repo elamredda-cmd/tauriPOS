@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
 use tauri::{AppHandle, Manager};
 
+use crate::local_terminal::{self, TerminalOwnership};
 use crate::secret_store::{self, SUMUP_AFFILIATE_KEY, SUMUP_API_KEY};
 
 const SUMUP_API_BASE: &str = "https://api.sumup.com";
@@ -18,6 +19,8 @@ struct SumupStoredConfig {
     reader_name: String,
     currency: String,
     affiliate_app_id: String,
+    #[serde(default)]
+    terminal_ownership: TerminalOwnership,
     #[serde(default, skip_serializing)]
     api_key: String,
     #[serde(default, skip_serializing)]
@@ -33,6 +36,7 @@ impl Default for SumupStoredConfig {
             reader_name: String::new(),
             currency: "GBP".into(),
             affiliate_app_id: String::new(),
+            terminal_ownership: TerminalOwnership::Dedicated,
             api_key: String::new(),
             affiliate_key: String::new(),
         }
@@ -48,6 +52,8 @@ pub struct SumupConfigInput {
     reader_name: String,
     currency: String,
     affiliate_app_id: String,
+    #[serde(default)]
+    terminal_ownership: TerminalOwnership,
     api_key: Option<String>,
     affiliate_key: Option<String>,
 }
@@ -61,6 +67,7 @@ pub struct SumupPublicConfig {
     reader_name: String,
     currency: String,
     affiliate_app_id: String,
+    terminal_ownership: TerminalOwnership,
     api_key_configured: bool,
     affiliate_key_configured: bool,
     ready: bool,
@@ -75,6 +82,7 @@ impl From<&SumupStoredConfig> for SumupPublicConfig {
             reader_name: value.reader_name.clone(),
             currency: value.currency.clone(),
             affiliate_app_id: value.affiliate_app_id.clone(),
+            terminal_ownership: value.terminal_ownership,
             api_key_configured: !value.api_key.is_empty(),
             affiliate_key_configured: !value.affiliate_key.is_empty(),
             ready: config_is_ready(value),
@@ -405,10 +413,12 @@ pub fn sumup_get_config(app: AppHandle) -> Result<SumupPublicConfig, String> {
 }
 
 #[tauri::command]
-pub fn sumup_save_config(
+pub async fn sumup_save_config(
     app: AppHandle,
     config: SumupConfigInput,
+    mysql_uri: Option<String>,
 ) -> Result<SumupPublicConfig, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
     let api_key = config.api_key.unwrap_or_default().trim().to_string();
     let affiliate_key = config.affiliate_key.unwrap_or_default().trim().to_string();
     let merchant_code = clean_identifier(&config.merchant_code, "Merchant code", 64)?;
@@ -417,6 +427,29 @@ pub fn sumup_save_config(
     let currency = normalize_currency(&config.currency)?;
     let affiliate_app_id = clean_identifier(&config.affiliate_app_id, "Affiliate App ID", 255)?;
     let path = config_path(&app)?;
+    let previous = load_config(&app)?;
+    let sensitive_change = previous.merchant_code != merchant_code
+        || previous.reader_id != reader_id
+        || previous.currency != currency
+        || previous.affiliate_app_id != affiliate_app_id
+        || previous.terminal_ownership != config.terminal_ownership
+        || (!api_key.is_empty() && previous.api_key != api_key)
+        || (!affiliate_key.is_empty() && previous.affiliate_key != affiliate_key);
+    if sensitive_change {
+        let old_key = if previous.reader_id.is_empty() {
+            String::new()
+        } else {
+            format!("sumup:{}:{}", previous.merchant_code, previous.reader_id)
+        };
+        local_terminal::guard_configuration_change(
+            &app,
+            "sumup",
+            &old_key,
+            previous.terminal_ownership,
+            mysql_uri.as_deref(),
+        )
+        .await?;
+    }
     let next = secret_store::mutate_related_config(
         &app,
         &[SUMUP_API_KEY, SUMUP_AFFILIATE_KEY],
@@ -439,6 +472,7 @@ pub fn sumup_save_config(
                 reader_name,
                 currency,
                 affiliate_app_id,
+                terminal_ownership: config.terminal_ownership,
                 api_key: if api_key.is_empty() {
                     current_api_key
                 } else {
@@ -470,7 +504,25 @@ pub fn sumup_save_config(
 }
 
 #[tauri::command]
-pub fn sumup_clear_secrets(app: AppHandle) -> Result<SumupPublicConfig, String> {
+pub async fn sumup_clear_secrets(
+    app: AppHandle,
+    mysql_uri: Option<String>,
+) -> Result<SumupPublicConfig, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
+    let previous = load_config(&app)?;
+    let old_key = if previous.reader_id.is_empty() {
+        String::new()
+    } else {
+        format!("sumup:{}:{}", previous.merchant_code, previous.reader_id)
+    };
+    local_terminal::guard_configuration_change(
+        &app,
+        "sumup",
+        &old_key,
+        previous.terminal_ownership,
+        mysql_uri.as_deref(),
+    )
+    .await?;
     let path = config_path(&app)?;
     let config =
         secret_store::mutate_related_config(&app, &[SUMUP_API_KEY, SUMUP_AFFILIATE_KEY], |_| {
@@ -488,6 +540,22 @@ pub fn sumup_clear_secrets(app: AppHandle) -> Result<SumupPublicConfig, String> 
             })
         })?;
     Ok(SumupPublicConfig::from(&config))
+}
+
+pub(crate) fn validate_local_registration(
+    app: &AppHandle,
+    terminal_key: &str,
+    currency: &str,
+) -> Result<(), String> {
+    let config = require_api_config(app, true)?;
+    if !config.enabled
+        || config.terminal_ownership != TerminalOwnership::Dedicated
+        || terminal_key != format!("sumup:{}:{}", config.merchant_code, config.reader_id)
+        || currency != config.currency
+    {
+        return Err("SumUp registration changed. Reload this till's payment settings before preparing a new payment.".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -605,6 +673,9 @@ pub async fn sumup_create_checkout(
     foreign_transaction_id: String,
     description: String,
 ) -> Result<SumupCheckoutResult, String> {
+    // Keep the same licence boundary as the native sale commit, before any
+    // new card charge. Reading or terminating an existing checkout is ungated.
+    crate::licensing::require_sale_access(&app).await?;
     let config = require_api_config(&app, true)?;
     if !config.enabled || !config_is_ready(&config) {
         return Err("SumUp is not enabled and fully configured on this till".into());
@@ -617,6 +688,18 @@ pub async fn sumup_create_checkout(
     if foreign_transaction_id.is_empty() {
         return Err("A unique payment reference is required".into());
     }
+    local_terminal::reserve_dispatch(
+        &app,
+        "sumup",
+        &foreign_transaction_id,
+        &format!("sumup:{}:{}", config.merchant_code, config.reader_id),
+        amount_pence,
+        &config.currency,
+        config.terminal_ownership,
+        "create",
+        None,
+    )
+    .await?;
     let description: String = description.trim().chars().take(255).collect();
     let client = api_client()?;
     let url = format!(
@@ -686,6 +769,7 @@ pub async fn sumup_refund_transaction(
     app: AppHandle,
     transaction_id: String,
     amount_pence: i64,
+    attempt_id: Option<String>,
 ) -> Result<(), String> {
     let config = require_api_config(&app, false)?;
     if !config.enabled || !config_is_ready(&config) {
@@ -697,6 +781,24 @@ pub async fn sumup_refund_transaction(
     let transaction_id = clean_identifier(&transaction_id, "Transaction ID", 255)?;
     if transaction_id.is_empty() {
         return Err("The original SumUp transaction ID is missing".into());
+    }
+    if config.terminal_ownership == TerminalOwnership::Dedicated {
+        let reference = attempt_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("A durable local refund reference is required before contacting SumUp")?;
+        local_terminal::reserve_dispatch(
+            &app,
+            "sumup",
+            reference,
+            &format!("sumup:{}:{}", config.merchant_code, config.reader_id),
+            amount_pence,
+            &config.currency,
+            config.terminal_ownership,
+            "refund",
+            Some(&transaction_id),
+        )
+        .await?;
     }
 
     let client = api_client()?;
@@ -736,6 +838,18 @@ pub async fn sumup_terminate_checkout(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_registration_is_dedicated_but_legacy_registration_remains_shared() {
+        assert_eq!(
+            SumupStoredConfig::default().terminal_ownership,
+            TerminalOwnership::Dedicated
+        );
+        let mut legacy = serde_json::to_value(SumupStoredConfig::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("terminalOwnership");
+        let decoded: SumupStoredConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.terminal_ownership, TerminalOwnership::Shared);
+    }
 
     #[test]
     fn currency_is_normalized() {

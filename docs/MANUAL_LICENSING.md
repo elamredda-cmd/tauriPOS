@@ -2,11 +2,27 @@
 
 ## Purpose
 
-The manual licence is bound to the shop, not to a till name. One signed licence can cover a standalone till or a multi-till shop up to its stated till allowance. It works without a licensing server.
+The signed licence is bound to the shop, not to a till name. One licence can cover a standalone till or a multi-till shop up to its stated till allowance. Activation and licence validation on the POS work offline; licence issuance is available through the Firebase Cloud CRM or the separate local Licence Studio.
 
 Till allowance uses active real register IDs. The obsolete `register-main` and `legacy-till` placeholders created by older builds are ignored; ordinary till records are never deduplicated merely because their display names match.
 
-The POS contains only a public verification key. The matching private issuer key remains on the issuer's trusted machine and is the only thing capable of creating valid licences.
+The POS contains only public verification keys. The Cloud CRM signs using Cloud KMS (`lbj-cloud-2026-07`); the older Licence Studio uses its separate local issuer key (`lbj-2026-07`). Neither private key belongs in a POS build. Do not replace an existing public key ID: that would invalidate codes already issued with it.
+
+## Cloud CRM issuance (normal workflow)
+
+The website is [L&Bj Cloud CRM — Licences](https://lbj-cloud-crm-prod.web.app/licences). Its source lives separately at `~/Desktop/L&Bj Cloud CRM`, not in this POS repository.
+
+1. On the till, open **Settings > Shop Licence > Copy licence request**.
+2. Sign in to the website with an active **owner** account. Ordinary CRM roles cannot issue or export licences. First-owner bootstrap requires a verified email address.
+3. Choose **New licence**, paste/import the request, and validate it. Confirm the exact shop and customer; changing the request requires validation again.
+4. Select the expiry date and a whole-number till allowance at least as large as the request's active till count. The server validates these terms before signing.
+5. Choose **Issue signed licence**. Export the `.lbjlic` file or copy the `LBJ1...` code, then import/paste it in the POS. The QR contains the same signed token.
+
+Website calendar dates use Europe/London. POS access ends at the start of the named expiry date on the till's local calendar; UK tills should use the correct UK time zone and clock. An expiry of 20 July means the last usable day is 19 July.
+
+Renew from the shop's latest licence, even when starting from an older history row. Identical successful issue retries return the stored code, not a newly signed duplicate. Cancelled or superseded records cannot be reused as a fresh activation; obtain a new POS request when required by the website.
+
+**Cancel record** is an administrative history change, not immediate remote revocation. An offline POS with a previously installed, valid signed code can continue until its signed expiry. No licence polling/revocation service is currently enforced by the POS.
 
 ## Trial and renewal notices
 
@@ -86,9 +102,11 @@ npm run license:inspect -- --license ~/Desktop/Example-Shop-2027.lbjlic
 
 Return the `.lbjlic` file to the shop. Open **Settings > Shop Licence** and press **Import licence file**. Pasting the signed `LBJ1...` code is also supported.
 
-For renewal, create a fresh request and issue another licence for the same shop ID with a later issue timestamp and expiry date. Importing it replaces the old signed token. A differently identified licence cannot replace a newer installed entitlement, while importing the same licence again remains safe. Activation does not replace products, settings, orders, receipt numbers, or the SQLite database.
+For renewal, create a fresh request and issue another licence for the same shop ID with a later issue timestamp and expiry date. Importing it replaces the old signed token. Different signed claims cannot replace a newer installed entitlement, even if they reuse its licence ID; importing the identical licence again remains safe. Activation does not replace products, settings, orders, receipt numbers, or the SQLite database.
 
-In multi-till mode, activation is written to the shared shop identity and synchronizes to the other tills. In standalone mode, it remains in that till's `pos.db`.
+In multi-till mode, activation is saved on the current till and then shared through the shop identity. If sharing fails, the licence remains installed locally and the settings page shows a warning with a retry action; confirm the other tills receive it after reconnection. In standalone mode, it remains in that till's `pos.db`.
+
+Licence synchronization compares verified, shop-bound signed issue times, not mutable database update times. A delayed old upload or download cannot replace a newer licence, and a pending old upload cannot hide a newer downloaded renewal. A newer expired entitlement remains authoritative over an older code with a longer expiry. Conflicting claims with an identical issue time keep the installed code; issue a fresh renewal to resolve the conflict. The existing trial start is preserved rather than restarted by synchronization.
 
 ## Registered tills
 
@@ -106,7 +124,9 @@ The till currently running the app cannot retire itself. In multi-till mode, Mar
 
 ## Enforcement modes
 
-Normal builds enforce the 10-day trial and signed licence. The check is in Rust rather than only in the Svelte interface, so hiding or bypassing the dialog cannot commit a native sale after access expires.
+Normal builds enforce the 10-day trial and signed licence. Rust checks new card-payment creation/retry as well as native sale commits. Provider status checks, cancellation and finishing an existing signature interaction remain available after expiry so an in-progress payment can be resolved.
+
+An approved card payment that crosses the licence-expiry boundary can still require renewal before the POS commits its sale. The durable payment journal is retained for recovery: do not charge the card again or delete the journal. Fully automatic completion across expiry needs a native, persisted pre-payment authorisation tied to the exact sale; a renderer-supplied `approved` flag must not bypass licensing.
 
 For temporary development or UI testing only, enforcement can be disabled at compile time:
 
@@ -118,4 +138,4 @@ Never use the disabled setting for a customer build.
 
 ## Offline limitations
 
-Because there is no vendor server, an offline licence cannot be revoked immediately and cannot automatically collect or confirm yearly payment. Marking an issue cancelled in Licence Studio or the CRM is an administrative record; a token already installed at a shop remains valid until its signed expiry date. Expiry relies on the machine's date, so determined clock tampering is not fully preventable. The next commercial stage can add a small vendor API for renewal, revocation, recovery, and bounded offline grace while retaining signed local verification.
+Cloud CRM provides hosted issuance and renewal records, but the POS does not consult it when validating an installed licence. It cannot immediately revoke an offline licence or automatically collect/confirm yearly payment. Marking an issue cancelled in Licence Studio or the CRM is an administrative record; a token already installed at a shop remains valid until its signed expiry date. Invalid or materially future trial dates are rejected, but expiry still relies on the till clock and a machine administrator can tamper with local data. Online revocation, trustworthy time and bounded offline grace require an additional protocol, not merely a website status toggle.

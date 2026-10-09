@@ -66,6 +66,7 @@
         getTillName,
         triggerSync,
         commitSale,
+        commitPreparedTerminalSale,
         ensureOpenShift,
         findOpenShiftForRegister,
         retireOpenShiftsBefore,
@@ -328,6 +329,11 @@
             ? "sumup" as const
             : null;
     $: managedCardEnabled = activeManagedProvider !== null;
+    $: managedTerminalNeedsSharedDatabase = activeManagedProvider === 'dojo'
+        ? $dojoConfigStore.terminalOwnership !== 'dedicated'
+        : activeManagedProvider === 'sumup' && $sumupConfigStore.terminalOwnership !== 'dedicated';
+    $: managedTerminalConnectionBlocked = managedCardEnabled && managedTerminalNeedsSharedDatabase
+        && ($connectionState.mode !== 'multi' || !$connectionState.mysqlOnline);
     $: managedProviderName = activeManagedProvider === "dojo" ? "Dojo" : activeManagedProvider === "sumup" ? "SumUp" : "Card";
     $: managedTerminalName = activeManagedProvider === "dojo"
         ? ($dojoConfigStore.terminalName || "Dojo terminal")
@@ -340,7 +346,7 @@
         isCompletingSale ||
         (paymentMethod === "cash" && paymentInputAmount < paymentDue) ||
         cardCashPartInvalid ||
-        (paymentMethod === "card" && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)) ||
+        (paymentMethod === "card" && managedTerminalConnectionBlocked) ||
         (paymentMethod === "account" && (!accountSaleAvailable || customerAccountBusy));
     $: customerMatches = customerSearch.trim()
         ? $customersDB.filter((customer) => {
@@ -2994,7 +3000,11 @@
                 );
                 managedRefundApproved = "dojo";
             }
-            const committedReversal = await commitSale(reversalBundle);
+            const committedReversal = managedRefundApproved
+                ? await commitPreparedTerminalSale(reversalBundle, {
+                    journalScope: (await refreshPaymentTerminalAttempt(managedRefundApproved, reversalId)).journalScope,
+                })
+                : await commitSale(reversalBundle);
             if (managedRefundApproved === "sumup") {
                 await updateSumupAttempt(reversalId, "completed", { saleBundle: committedReversal });
             } else if (managedRefundApproved === "dojo") {
@@ -3691,7 +3701,7 @@
         let terminalSessionId = "";
         terminalCancelRequested = false;
         terminalPaymentStage = "reserving";
-        terminalPaymentMessage = "Reserving the shared Dojo terminal";
+        terminalPaymentMessage = "Preparing the Dojo terminal";
 
         try {
             const lockResult = await acquireDojoLock(config, tillId, tillName, reference);
@@ -3837,7 +3847,7 @@
         let clientTransactionId = "";
         terminalCancelRequested = false;
         terminalPaymentStage = "reserving";
-        terminalPaymentMessage = "Reserving the shared Solo";
+        terminalPaymentMessage = "Preparing the SumUp Solo";
 
         try {
             const lockResult = await acquireSumupLock(config, tillId, tillName, reference);
@@ -4045,7 +4055,7 @@
             networkStarted = true;
             let requestError: unknown = null;
             try {
-                await refundSumupTransaction(transactionId, refundAmount);
+                await refundSumupTransaction(transactionId, refundAmount, reference);
             } catch (error) {
                 requestError = error;
             }
@@ -4660,7 +4670,11 @@
                 terminalPaymentMessage = "Card approved. Saving the sale";
             }
 
-            const committedSale = await commitSale(saleBundle);
+            const committedSale = approvedManagedProvider
+                ? await commitPreparedTerminalSale(saleBundle, {
+                    journalScope: (await refreshPaymentTerminalAttempt(approvedManagedProvider, saleBundle.order.id)).journalScope,
+                })
+                : await commitSale(saleBundle);
             const completedAccountCustomerName = selectedCustomer?.name || 'Customer';
             if (approvedManagedBundle && approvedManagedProvider) {
                 if (approvedManagedProvider === "dojo") {
@@ -6325,7 +6339,7 @@
                             <div class="payment-terminal-copy">
                                 <strong>{managedTerminalName}</strong>
                                 <span role="status">{managedCardEnabled
-                                    ? terminalPaymentMessage || ($connectionState.mode !== 'multi' || !$connectionState.mysqlOnline ? 'Waiting for the shared database connection' : `Ready to send to ${managedProviderName}`)
+                                    ? terminalPaymentMessage || (managedTerminalConnectionBlocked ? 'Waiting for the shared database connection' : `Ready to send to ${managedProviderName}`)
                                     : 'Take payment on your card terminal, then confirm below.'}</span>
                             </div>
                             {#if managedCardEnabled && isCompletingSale && !['approved', 'saving'].includes(terminalPaymentStage)}
@@ -6376,7 +6390,7 @@
                     >
                         {terminalPaymentMessage || `Connecting to ${managedProviderName}`}
                     </div>
-                {:else if paymentMethod === 'card' && managedCardEnabled && ($connectionState.mode !== "multi" || !$connectionState.mysqlOnline)}
+                {:else if paymentMethod === 'card' && managedTerminalConnectionBlocked}
                     <div
                         class="payment-footer-message is-error" role="status"
                     >

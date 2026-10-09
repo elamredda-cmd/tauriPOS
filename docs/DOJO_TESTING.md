@@ -1,10 +1,34 @@
 # Dojo sandbox verification
 
-Updated 28 September 2026. This is a test checklist, not a production certification.
+Updated 8 October 2026. This is a test checklist, not a production certification.
 
 See [the current UAT readiness record](DOJO_UAT_READINESS.md) for this build's fixes,
 new native tests, release gates and unverified items. The September 23 evidence below
 is historical and is not a claim that every scenario has been repeated on this build.
+
+## Dedicated terminal / no MariaDB setup
+
+In **Settings → Payments → Dojo**, choose **Dedicated to this till — no MariaDB needed** and register the terminal for that computer. New configurations default to this option. Do not assign the same physical terminal to two dedicated tills. Internet is still required for Dojo; this is not offline card acceptance.
+
+An older saved registration remains shared until explicitly switched. Finish/recover its pending payments and connect its original MariaDB once so the app can verify that another till has no unfinished work. Do not delete its journal or credentials to bypass this handover. Fresh standalone registrations do not need MariaDB. This change does not remove MariaDB from multi-till business-data synchronization or shared customer-balance/refund checks.
+
+For acceptance testing, use sandbox credentials only:
+
+1. On a standalone till, register a dedicated virtual terminal without configuring MariaDB. Confirm **Test Terminal** can obtain its status.
+2. Complete an ordinary card sale and compare the POS receipt/reference to **Test → Payment intents**. There must be exactly one sale and one capture.
+3. Repeat with a declined/canceled simulator; the trolley remains available, and no completed sale is fabricated.
+4. In multi mode after initial shop synchronization, repeat an ordinary dedicated card sale while MariaDB is unavailable but internet is working. It must save locally. Reconnect and confirm the sale appears once in shared reports.
+5. Exercise recovery after approval/local completion interruption. Check that it restores the same allocated receipt without creating a second charge, stock movement, loyalty movement or payment. Never intentionally interrupt a live customer payment for this test.
+6. Verify that pending work blocks terminal reassignment and Z close. Cancellation is a request; unknown provider results must remain protected.
+
+Automated local tests use isolated SQLite or mocked provider boundaries, not live credentials. They do not replace native sandbox or Windows UAT. The historical native results below used shared coordination and are not evidence that this new dedicated mode has passed native provider testing.
+
+### Dedicated-mode verification — 8 October 2026
+
+- Frontend: **960 passed**, two environment-gated tests skipped. Type/Svelte checks: **zero errors and warnings**; command-permission audit and production frontend build passed.
+- Native: **218 passed**; seven real-MariaDB integration tests excluded. Dedicated tests exercise real isolated SQLite, restart-safe dispatch protection, cross-process registration locking, local receipt recovery, strict financial matching and restore guards. No running shop database was modified for these tests.
+- Independent review feedback fixed checkout/report connection gates, local/shared journal collision handling, interrupted-save receipt recovery, backup-restore protection and authoritative customer-balance caching.
+- Browser UI check confirmed the new dedicated default and shared-mode warning on the payment settings forms. Native sandbox checkout and Windows end-to-end acceptance have **not** been run for this change. Saved keys and terminal registration were left unchanged.
 
 ## Corrected behavior
 

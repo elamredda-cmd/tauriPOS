@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-terminal-prepare-local-attempt"
+description = "Enables the terminal_prepare_local_attempt command without any pre-configured scope."
+commands.allow = ["terminal_prepare_local_attempt"]
+
+[[permission]]
+identifier = "deny-terminal-prepare-local-attempt"
+description = "Denies the terminal_prepare_local_attempt command without any pre-configured scope."
+commands.deny = ["terminal_prepare_local_attempt"]

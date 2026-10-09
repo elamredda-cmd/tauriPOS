@@ -10,11 +10,6 @@ import {
 import { connectionState, buildMysqlUri, type MysqlConfig } from '$lib/stores/connection';
 import { readDojoOperatorResolution } from '$lib/dojoExpiryReview';
 import {
-    mysqlAcquirePaymentTerminalLock,
-    mysqlRefreshPaymentTerminalLock,
-    mysqlReleasePaymentTerminalLock,
-} from '$lib/stores/mysql';
-import {
     acknowledgeApprovedPaymentTerminalAttempt,
     getRecoverablePaymentTerminalAttempts,
     isCustomerAccountPaymentPayload,
@@ -23,6 +18,7 @@ import {
     refreshPaymentTerminalAttempt,
     updatePaymentTerminalAttempt,
     withTerminalPaymentExtras,
+    terminalAttemptUsesSharedJournal,
     type TerminalPaymentAttempt,
     type TerminalProvider,
 } from '$lib/terminalAttempts';
@@ -52,6 +48,9 @@ import {
 } from '$lib/stores/sqlite';
 import {
     runWithTerminalRecoveryLease,
+    acquireTerminalLock,
+    refreshTerminalLock,
+    releaseTerminalLock,
     type AssertTerminalRecoveryLease,
 } from '$lib/terminalRecoveryLease';
 
@@ -467,21 +466,24 @@ export async function reviewExpiredDojoPayment(
     review: { decision: 'paid' | 'not_paid'; receiptReference: string; note: string; tipsAmount: number; serviceChargeAmount: number; cashbackAmount: number },
 ): Promise<void> {
     const state = get(connectionState);
-    if (!isTauri() || !state.mysqlConfig || !state.mysqlOnline || !state.mysqlReady || state.mode !== 'multi') {
+    if (!isTauri()) throw new Error('Card-payment review requires the native POS app.');
+    const attempt = await refreshPaymentTerminalAttempt('dojo', attemptId);
+    const shared = terminalAttemptUsesSharedJournal(attempt);
+    if (shared && (!state.mysqlConfig || !state.mysqlOnline || !state.mysqlReady || state.mode !== 'multi')) {
         throw new Error('Reconnect MariaDB in the native POS before reviewing a card payment.');
     }
-    await assertMariaDbCommerceWritesAllowed();
-    const attempt = await refreshPaymentTerminalAttempt('dojo', attemptId);
+    if (shared) await assertMariaDbCommerceWritesAllowed();
+    const scope = shared ? 'shared' : 'local';
     const tillId = await getOrCreateTillId();
     const leaseReference = `review:${attemptId}:${crypto.randomUUID()}`;
     const result = await runWithTerminalRecoveryLease({
-        acquire: async () => (await mysqlAcquirePaymentTerminalLock(attempt.terminalKey, tillId, 'Administrator payment review', leaseReference, 600)).acquired,
-        refresh: () => mysqlRefreshPaymentTerminalLock(attempt.terminalKey, tillId, leaseReference, 600),
-        release: () => mysqlReleasePaymentTerminalLock(attempt.terminalKey, tillId, leaseReference),
+        acquire: async () => (await acquireTerminalLock(scope, attempt.terminalKey, tillId, 'Administrator payment review', leaseReference, 600)).acquired,
+        refresh: () => refreshTerminalLock(scope, attempt.terminalKey, tillId, leaseReference, 600),
+        release: () => releaseTerminalLock(scope, attempt.terminalKey, tillId, leaseReference),
     }, async assertHeld => {
         await assertHeld();
         await refreshPaymentTerminalAttempt('dojo', attemptId);
-        await invoke('dojo_review_expired_payment', { mysqlUri: buildMysqlUri(state.mysqlConfig!),
+        await invoke('dojo_review_expired_payment', { mysqlUri: shared ? buildMysqlUri(state.mysqlConfig!) : null,
             employeeId, pin, tillId, leaseReference, review: { attemptId, ...review } });
         await assertHeld();
         await refreshPaymentTerminalAttempt('dojo', attemptId);
@@ -493,9 +495,6 @@ export async function reviewExpiredDojoPayment(
 export async function cancelExpiredSandboxDojoPayment(attemptId: string): Promise<void> {
     if (!isTauri()) throw new Error('Sandbox payment recovery requires the native POS app');
     const state = get(connectionState);
-    if (state.mode !== 'multi' || !state.mysqlOnline) {
-        throw new Error('Reconnect the shared database before canceling a sandbox test payment');
-    }
     const config = await loadDojoConfig();
     if (!config.apiKeyConfigured || config.apiEnvironment !== 'Sandbox') {
         throw new Error('This action requires a saved Dojo sandbox key; live payments are not supported');
@@ -510,19 +509,24 @@ export async function cancelExpiredSandboxDojoPayment(attemptId: string): Promis
     };
     const initial = await refreshPaymentTerminalAttempt('dojo', attemptId);
     validate(initial);
-    await assertMariaDbCommerceWritesAllowed();
+    const shared = terminalAttemptUsesSharedJournal(initial);
+    if (shared && (state.mode !== 'multi' || !state.mysqlOnline)) {
+        throw new Error('Reconnect the shared database before canceling this legacy shared sandbox payment');
+    }
+    if (shared) await assertMariaDbCommerceWritesAllowed();
+    const scope = shared ? 'shared' : 'local';
     const tillId = await getOrCreateTillId();
     const reference = `sandbox-cancel:${attemptId}:${crypto.randomUUID()}`;
     const leased = await runWithTerminalRecoveryLease({
-        acquire: async () => (await mysqlAcquirePaymentTerminalLock(initial.terminalKey, tillId, `${await getTillName()} sandbox recovery`.slice(0, 255), reference, 600)).acquired,
-        refresh: () => mysqlRefreshPaymentTerminalLock(initial.terminalKey, tillId, reference, 600),
-        release: () => mysqlReleasePaymentTerminalLock(initial.terminalKey, tillId, reference),
+        acquire: async () => (await acquireTerminalLock(scope, initial.terminalKey, tillId, `${await getTillName()} sandbox recovery`.slice(0, 255), reference, 600)).acquired,
+        refresh: () => refreshTerminalLock(scope, initial.terminalKey, tillId, reference, 600),
+        release: () => releaseTerminalLock(scope, initial.terminalKey, tillId, reference),
     }, async (assertHeld) => {
         await assertHeld();
         const current = await refreshPaymentTerminalAttempt('dojo', attemptId);
         validate(current);
         if (current.terminalKey !== initial.terminalKey) throw new Error('The terminal journal changed; refresh before continuing');
-        await assertMariaDbCommerceWritesAllowed();
+        if (shared) await assertMariaDbCommerceWritesAllowed();
         await assertHeld();
         // Native code reads this refreshed journal itself, verifies the actual
         // saved key/session/payment, sends one DELETE, then requires Canceled.
@@ -628,6 +632,10 @@ async function commitAttemptLedger(
             serviceChargeAmount: payload.serviceChargeAmount,
             cashbackAmount: payload.cashbackAmount,
         });
+    } else if (!terminalAttemptUsesSharedJournal(attempt)) {
+        // The native local transaction commits the sale and its sync outbox
+        // atomically, including when recovering an already committed receipt.
+        attempt.saleBundle = await commitPreparedTerminalSale(attempt.saleBundle, { journalScope: 'local' });
     } else {
         const locallyCommitted = await loadCommittedLocalBundle(attempt.saleBundle);
         if (locallyCommitted) {
@@ -830,13 +838,10 @@ async function recoverAttemptWithLease(
     staleAttempt: TerminalPaymentAttempt,
 ): Promise<'completed' | 'final' | 'uncertain'> {
     const state = get(connectionState);
-    if (state.mode !== 'multi') {
-        const current = await refreshPaymentTerminalAttempt(staleAttempt.provider, staleAttempt.id);
-        return recoverAttempt(current, async () => undefined);
-    }
-    // Never perform provider reconciliation without the shared database: two
-    // tills could otherwise publish contradictory observations independently.
-    if (!state.mysqlOnline) return 'uncertain';
+    const scope = terminalAttemptUsesSharedJournal(staleAttempt) ? 'shared' : 'local';
+    // Legacy shared attempts keep their original coordination requirement;
+    // dedicated attempts always use their own persisted local lease.
+    if (scope === 'shared' && (state.mode !== 'multi' || !state.mysqlOnline)) return 'uncertain';
 
     const tillId = await getOrCreateTillId();
     const tillName = await getTillName();
@@ -845,7 +850,7 @@ async function recoverAttemptWithLease(
     const leased = await runWithTerminalRecoveryLease(
         {
             acquire: async () => (
-                await mysqlAcquirePaymentTerminalLock(
+                await acquireTerminalLock(scope,
                     staleAttempt.terminalKey,
                     tillId,
                     leaseTillName,
@@ -853,13 +858,13 @@ async function recoverAttemptWithLease(
                     600,
                 )
             ).acquired,
-            refresh: () => mysqlRefreshPaymentTerminalLock(
+            refresh: () => refreshTerminalLock(scope,
                 staleAttempt.terminalKey,
                 tillId,
                 paymentReference,
                 600,
             ),
-            release: () => mysqlReleasePaymentTerminalLock(
+            release: () => releaseTerminalLock(scope,
                 staleAttempt.terminalKey,
                 tillId,
                 paymentReference,
@@ -867,6 +872,11 @@ async function recoverAttemptWithLease(
         },
         async (assertHeld) => {
             await assertHeld();
+            if (scope === 'shared') {
+                // Keep the close/restore barrier on each legacy shared attempt,
+                // rather than preventing unrelated dedicated work in the UI.
+                await assertMariaDbCommerceWritesAllowed({ allowPreparing: true });
+            }
             // Another worker may have completed/finalized this stale list item
             // before we acquired the lease. Re-read before any provider call.
             const current = await refreshPaymentTerminalAttempt(
@@ -890,12 +900,16 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
     };
     if (!isTauri()) return result;
 
-    await Promise.allSettled([loadSumupConfig(), loadDojoConfig()]);
+    const [sumupConfigResult, dojoConfigResult] = await Promise.allSettled([loadSumupConfig(), loadDojoConfig()]);
     const providers: TerminalProvider[] = provider ? [provider] : ['sumup', 'dojo'];
     for (const currentProvider of providers) {
         let attempts: TerminalPaymentAttempt[];
         try {
-            attempts = await getRecoverablePaymentTerminalAttempts(currentProvider);
+            const configResult = currentProvider === 'dojo' ? dojoConfigResult : sumupConfigResult;
+            attempts = await getRecoverablePaymentTerminalAttempts(currentProvider, {
+                includeShared: configResult.status !== 'fulfilled'
+                    || configResult.value?.terminalOwnership !== 'dedicated',
+            });
         } catch (error) {
             result.errors.push(`${currentProvider}: ${String(error)}`);
             continue;
@@ -929,7 +943,8 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
             }
         }
     }
-    await prunePaymentTerminalAttempts().catch(() => undefined);
+    // Local payment recovery must not wait for unrelated server maintenance.
+    await prunePaymentTerminalAttempts(undefined, { includeShared: false }).catch(() => undefined);
     if (result.completed > 0) {
         await hydrateSvelteStores([
             'orders',

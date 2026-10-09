@@ -103,6 +103,7 @@ const serverEpochResetMutex = new AsyncMutex();
 // prepared ack can never overtake an already-started local sale, and a sale
 // queued behind that ack must re-read MariaDB state before touching SQLite.
 const wholeSystemCloseLocalMutex = new AsyncMutex();
+const LOCAL_TERMINAL_CLOSE_BARRIER_KEY = 'local_terminal_close_barrier';
 const WHOLE_SYSTEM_CLOSE_LOCAL_GUARDED_TABLES = new Set([
     'orders', 'order_lines', 'payments', 'products', 'inventory_logs', 'customers',
     'loyalty_logs', 'customer_accounts', 'customer_account_entries', 'shifts',
@@ -1591,6 +1592,7 @@ async function tryMysql(): Promise<boolean> {
 // These keys identify or configure a single machine. Syncing them would give
 // every till the same till_id, leak DB credentials, and clobber sync state.
 const LOCAL_ONLY_SETTING_KEYS = new Set([
+    LOCAL_TERMINAL_CLOSE_BARRIER_KEY,
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_name_manual', 'till_seq',
     'device_operating_mode', 'held_order_recovery_v1',
     RECEIPT_HIGH_WATER_KEY,
@@ -1704,12 +1706,18 @@ async function getRemoteAppIdentity(): Promise<AppIdentity | null> {
     return normalizeIdentity(rows[0] || null);
 }
 
-async function saveLocalAppIdentity(identity: AppIdentity): Promise<void> {
-    await sqlite.upsert('app_identity', identity, 'id');
+async function saveLocalAppIdentity(identity: AppIdentity, allowShopIdentityAdoption = false): Promise<void> {
+    const existing = allowShopIdentityAdoption ? await getLocalAppIdentity() : null;
+    await sqlite.upsert('app_identity', identity, 'id', Boolean(
+        allowShopIdentityAdoption && existing && existing.shopId !== identity.shopId,
+    ));
 }
 
-async function saveRemoteAppIdentity(identity: AppIdentity): Promise<void> {
-    await mysql.mysqlUpsert('app_identity', identity, 'id');
+async function saveRemoteAppIdentity(identity: AppIdentity, allowShopIdentityAdoption = false): Promise<void> {
+    const existing = allowShopIdentityAdoption ? await getRemoteAppIdentity() : null;
+    await mysql.mysqlUpsert('app_identity', identity, 'id', Boolean(
+        allowShopIdentityAdoption && existing && existing.shopId !== identity.shopId,
+    ));
 }
 
 async function claimRemoteAppIdentity(remote: any, candidate: AppIdentity): Promise<AppIdentity> {
@@ -1955,12 +1963,53 @@ export async function assertMariaDbCommerceWritesAllowed(
     if (!remote) throw new Error('MariaDB is unavailable');
     await assertMariaDbNotInRestoreMaintenance(remote);
     const closeBarrier = await mysql.mysqlGetWholeSystemCloseBarrier();
+    await rememberLocalTerminalCloseBarrier(closeBarrier);
     if (closeBarrier.state === 'frozen'
         || (closeBarrier.state === 'preparing' && !options.allowPreparing)) {
         throw new Error(
             `WHOLE_SYSTEM_CLOSE_IN_PROGRESS: Financial activity is paused while the whole-system report is closing.`,
         );
     }
+}
+
+async function rememberLocalTerminalCloseBarrier(barrier: { state: string; token: string }): Promise<void> {
+    const db = await sqlite.getDb();
+    await db.execute(
+        'INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt',
+        [LOCAL_TERMINAL_CLOSE_BARRIER_KEY, JSON.stringify({ state: barrier.state, token: barrier.token }), new Date().toISOString()],
+    );
+}
+
+/** A remembered close/restore cannot be bypassed by disconnecting MariaDB. */
+async function assertLocalTerminalWritesAllowed(options: { allowPreparing?: boolean } = {}): Promise<void> {
+    const db = await sqlite.getDb();
+    const rows = await db.select<any[]>(
+        'SELECT key, value FROM settings WHERE key IN (?, ?, ?)',
+        [LOCAL_TERMINAL_CLOSE_BARRIER_KEY, RESTORE_PENDING_MARIADB_REPLACE_KEY, MARIADB_RESTORE_MAINTENANCE_KEY],
+    );
+    if (rows.some(row => row.key !== LOCAL_TERMINAL_CLOSE_BARRIER_KEY
+        && !['', '0'].includes(String(row.value || '').trim()))) {
+        throw new Error('Finish the pending database restore before starting or saving a terminal payment.');
+    }
+    const raw = rows.find(row => row.key === LOCAL_TERMINAL_CLOSE_BARRIER_KEY)?.value;
+    if (!raw) return;
+    let barrier: { state?: string };
+    try { barrier = JSON.parse(String(raw)); }
+    catch { throw new Error('The saved report-close barrier is invalid. Reconnect shop sync before taking payment.'); }
+    if (!barrier || !['idle', 'preparing', 'frozen'].includes(String(barrier.state))) {
+        throw new Error('The saved report-close barrier is invalid. Reconnect shop sync before taking payment.');
+    }
+    if (barrier.state === 'frozen' || (barrier.state === 'preparing' && !options.allowPreparing)) {
+        throw new Error('WHOLE_SYSTEM_CLOSE_IN_PROGRESS: Financial activity is paused for the whole-system report. Reconnect shop sync to confirm the close has finished.');
+    }
+}
+
+/** Share the presence/close mutex before a dedicated terminal becomes busy. */
+export async function withLocalTerminalPreparation<T>(work: () => Promise<T>): Promise<T> {
+    return wholeSystemCloseLocalMutex.runExclusive(async () => {
+        await assertLocalTerminalWritesAllowed();
+        return work();
+    });
 }
 
 async function readLocalTillIdWithoutCreating(): Promise<string> {
@@ -2092,7 +2141,7 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
     if (localIdentity && remoteIdentity) {
         if (localIdentity.shopId !== remoteIdentity.shopId) {
             if (!localHasBusinessData) {
-                await saveLocalAppIdentity(remoteIdentity);
+                await saveLocalAppIdentity(remoteIdentity, true);
                 return remoteIdentity;
             }
             if (!await remoteHasShopData() || await remoteLooksLikeIncompleteLocalUpload()) {
@@ -2101,7 +2150,7 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
                     shopName: localIdentity.shopName || localName || remoteName,
                     updatedAt: new Date().toISOString(),
                 };
-                await saveRemoteAppIdentity(identity);
+                await saveRemoteAppIdentity(identity, true);
                 if (identity.shopName !== localIdentity.shopName) await saveLocalAppIdentity(identity);
                 return identity;
             }
@@ -2131,7 +2180,7 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
         if (!await remoteHasShopData() || await remoteLooksLikeIncompleteLocalUpload()) {
             const identity = makeIdentity(localName || remoteIdentity.shopName || remoteName);
             await saveLocalAppIdentity(identity);
-            await saveRemoteAppIdentity(identity);
+            await saveRemoteAppIdentity(identity, true);
             return identity;
         }
         if (namesConflict(localName, remoteIdentity.shopName || remoteName)) {
@@ -2150,7 +2199,7 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
                 updatedAt: new Date().toISOString(),
             };
             const identity = await claimRemoteAppIdentity(remoteDb, candidate);
-            await saveLocalAppIdentity(identity);
+            await saveLocalAppIdentity(identity, true);
             return identity;
         }
         if (remoteHasBusinessData) {
@@ -2176,7 +2225,7 @@ export async function ensureDatabaseIdentityForSync(): Promise<AppIdentity | nul
             remoteDb,
             makeIdentity(remoteName || localName),
         );
-        await saveLocalAppIdentity(identity);
+        await saveLocalAppIdentity(identity, true);
         return identity;
     }
 
@@ -2346,7 +2395,7 @@ async function recordTombstone(
  */
 async function applyTombstoneRows(rows: any[]): Promise<number> {
     const d = await sqlite.getDb();
-    const allowedTables = new Set([...ALL_SYNC_TABLES, 'tombstones']);
+    const allowedTables = new Set([...ALL_SYNC_TABLES.filter(table => table !== 'app_identity'), 'tombstones']);
     const mutations: sqlite.LocalMutation[] = [];
     const recreated = new Set<string>();
     for (const table of PROMOTION_SYNC_TABLES) {
@@ -5507,12 +5556,20 @@ export async function withCurrentReportEpoch<T extends {
     serverDataEpoch?: string;
 }>(
     bundle: T,
-    options: { requireLiveServerDataEpoch?: boolean } = {},
+    options: { requireLiveServerDataEpoch?: boolean; localOnly?: boolean } = {},
 ): Promise<T> {
+    if (options.localOnly && options.requireLiveServerDataEpoch) {
+        throw new Error('A transaction cannot require both local-only and live server preparation');
+    }
     if (!isMultiMode()) return bundle;
     if (!options.requireLiveServerDataEpoch
         && bundle.reportEpoch !== undefined
-        && bundle.serverDataEpoch !== undefined) return bundle;
+        && bundle.serverDataEpoch !== undefined) {
+        if (options.localOnly && !bundle.serverDataEpoch.trim()) {
+            throw new Error('This dedicated payment has no prepared shop database identity. Review the saved payment; do not charge again.');
+        }
+        return bundle;
+    }
 
     const local = await sqlite.getDb();
     const [cachedRows, localWholeSystemMarker] = await Promise.all([
@@ -5530,7 +5587,7 @@ export async function withCurrentReportEpoch<T extends {
     ).trim();
     let marker = newestCanonicalReportEpoch(cachedMarker, localWholeSystemMarker);
     let liveEpochsRead = false;
-    if (get(connectionState).mysqlOnline || options.requireLiveServerDataEpoch) {
+    if (!options.localOnly && (get(connectionState).mysqlOnline || options.requireLiveServerDataEpoch)) {
         try {
             const remote = await getMysqlDb();
             if (remote) {
@@ -5561,6 +5618,9 @@ export async function withCurrentReportEpoch<T extends {
     }
     if (options.requireLiveServerDataEpoch && !liveEpochsRead) {
         throw new Error('MariaDB did not return its current transaction epoch');
+    }
+    if (options.localOnly && !String(bundle.serverDataEpoch ?? serverDataEpoch).trim()) {
+        throw new Error('This multi-till installation has not recorded its shop database identity yet. Complete its first sync before taking a card payment, or configure a standalone till.');
     }
     if (marker && marker !== canonicalReportEpoch(cachedMarker)) {
         try {
@@ -5781,7 +5841,7 @@ function commitBrowserPreviewSale(bundle: SaleBundle): SaleBundle {
  */
 async function commitSaleAfterClosePreflight(
     bundle: SaleBundle,
-    options: { allowPreparing?: boolean } = {},
+    options: { allowPreparing?: boolean; localTerminal?: boolean } = {},
 ): Promise<SaleBundle> {
     if (!isTauri()) {
         const committed = commitBrowserPreviewSale(bundle);
@@ -5848,13 +5908,13 @@ async function commitSaleAfterClosePreflight(
         }
     }
 
-    bundle = await withCurrentReportEpoch(bundle);
+    bundle = await withCurrentReportEpoch(bundle, { localOnly: options.localTerminal });
     const multiMode = isMultiMode();
-    const outboxId = multiMode ? crypto.randomUUID() : null;
+    const outboxId = multiMode ? options.localTerminal ? `terminal-sale:${bundle.order.id}` : crypto.randomUUID() : null;
     const committed = await invoke<CommitSaleResult>('commit_local_sale', { bundle, outboxId });
     bundle = committed.bundle;
 
-    if (multiMode) {
+    if (multiMode && get(connectionState).mysqlOnline && !options.localTerminal) {
         void flushOfflineQueue()
             .catch((e) => {
                 console.warn('database: sale outbox flush failed:', e);
@@ -5895,7 +5955,22 @@ export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
  * before a whole-system close entered its preparing phase. Frozen remains a
  * hard stop, and legacy journals without a captured epoch wait until idle.
  */
-export async function commitPreparedTerminalSale(bundle: SaleBundle): Promise<SaleBundle> {
+export async function commitPreparedTerminalSale(
+    bundle: SaleBundle,
+    options: { journalScope?: 'local' | 'shared' } = {},
+): Promise<SaleBundle> {
+    if (options.journalScope === 'shared' && !isMultiMode()) {
+        throw new Error('This payment belongs to the shared terminal journal. Reconnect its original multi-till database before recovery.');
+    }
+    if (options.journalScope === 'local') {
+        return wholeSystemCloseLocalMutex.runExclusive(async () => {
+            await assertLocalTerminalWritesAllowed({ allowPreparing: true });
+            if (isMultiMode() && (bundle.reportEpoch === undefined || bundle.serverDataEpoch === undefined)) {
+                throw new Error('The dedicated terminal payment has no prepared shop/report epoch. Review the saved payment; do not charge again.');
+            }
+            return commitSaleAfterClosePreflight(bundle, { allowPreparing: true, localTerminal: true });
+        });
+    }
     if (!isTauri() || !isMultiMode()) return commitSale(bundle);
     if (bundle.reportEpoch === undefined) {
         throw new Error(
@@ -7396,6 +7471,9 @@ export async function saveReportMarker(
     }
     if (!isMultiMode()) {
         return wholeSystemCloseLocalMutex.runExclusive(async () => {
+            if (await pendingTerminalRecoveryCount(tillNumber) > 0) {
+                throw new Error('Complete or recover the active card payment before closing this report');
+            }
             assertCurrentReportPeriod(await sqlite.getLastReportMarker(tillNumber), periodStart, periodEnd);
             return saveReportMarkerAfterClosePreflight(tillNumber, periodStart, periodEnd, extra);
         });
@@ -9952,6 +10030,7 @@ async function publishTillPresence(force = false): Promise<void> {
             // phase changes underneath this pass, repeat before acknowledging.
             for (let pass = 0; pass < 3; pass += 1) {
                 const observed = await mysql.mysqlGetWholeSystemCloseBarrier();
+                await rememberLocalTerminalCloseBarrier(observed);
                 if (observed.state === 'preparing') {
                     try {
                         await flushOfflineQueue();
@@ -9967,6 +10046,7 @@ async function publishTillPresence(force = false): Promise<void> {
                 ]);
                 const outboxCount = queuedOutboxCount + onlineIntentCount;
                 const barrier = await mysql.mysqlGetWholeSystemCloseBarrier();
+                await rememberLocalTerminalCloseBarrier(barrier);
                 if (barrier.state !== observed.state || barrier.token !== observed.token) continue;
                 await mysql.mysqlTouchTillPresence(tillId, tillName, {
                     protocolVersion: WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION,
@@ -10274,6 +10354,12 @@ async function applyRemoteSyncRows(
     idKey: string,
     allowPromotionPrune = false,
 ): Promise<number> {
+    if (table === 'app_identity') {
+        // Never hide a newer signed renewal behind an older pending upload or
+        // mutable row timestamp. The native singleton merge preserves both the
+        // newest verified token and the original trial start atomically.
+        return sqlite.bulkUpsert(table, remoteRows, idKey, false);
+    }
     let visibleRows = table === 'settings'
         ? remoteRows.filter((row: any) => isSyncableSetting(row.key))
         : remoteRows;

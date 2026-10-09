@@ -11,7 +11,7 @@ This document describes the system that exists in the source code today. It is t
 
 L&Bj POS is an offline-capable retail point-of-sale system. Each desktop till is a Tauri application with a Svelte user interface, a Rust native layer, and a local SQLite database. A shop can run one till entirely from SQLite, or multiple tills can synchronize through a shared MariaDB database on the shop network.
 
-The important architectural rule is that MariaDB is not an application server. Desktop tills and the Sunmi companion connect to it directly. Desktop sales are committed to local SQLite first and then copied to MariaDB through a durable outbox. Normal catalogue edits use eventual synchronization. Operations that must be globally exclusive or must validate shared financial history, such as managed-terminal refunds, shared hold claims, system end-of-day, and payment-terminal leases, require MariaDB to be online.
+The important architectural rule is that MariaDB is not an application server. Desktop tills and the Sunmi companion connect to it directly. Desktop sales are committed to local SQLite first and then copied to MariaDB through a durable outbox. Normal catalogue edits use eventual synchronization. Dedicated Dojo/SumUp terminals use local SQLite leases and recovery and do not require MariaDB for ordinary card sales. Operations that must be globally exclusive or validate shared financial history, such as multi-till refunds, shared hold claims, system end-of-day, and explicitly shared-terminal leases, still require MariaDB online.
 
 Money is stored as integer pence. A completed sale is an atomic bundle containing the order, lines, payment, stock movement, loyalty movement, and audit event. The native Rust layer owns the most sensitive local transactions and physical-device I/O. Printer, scale, CCTV, customer-display, SumUp, and Dojo settings are local to each till so one till cannot silently replace another till's hardware configuration.
 
@@ -33,7 +33,7 @@ The separate Sunmi/Android application is an administrative catalogue client. It
 ### 2.2 Current non-goals
 
 - There is no hosted application backend or REST API between clients and MariaDB.
-- There is no hosted licensing service, online revocation, payment/subscription collection, or automatic renewal. Signed offline annual shop licences are enforced locally.
+- The separate Firebase Cloud CRM provides hosted licence issuance and renewal records. POS validation remains offline: there is no enforced online revocation, payment/subscription collection, or automatic renewal.
 - There is no runtime printer-plugin loader. Printer protocols and payment providers are compiled into the application.
 - There is no cloud account, cross-shop cloud replication, or remote shop management service.
 - The Sunmi companion is not a checkout, order, refund, or cash-management client.
@@ -124,7 +124,7 @@ flowchart TB
 - Reads and writes are local.
 - Network-dependent shared-till coordination does not apply.
 - Manual and automatic backups snapshot the local database.
-- SumUp and Dojo still require internet access, but shared terminal leasing through MariaDB is unavailable.
+- Dedicated SumUp and Dojo terminals work with local payment journals and leases; internet access to the provider is still required. Shared-terminal leasing is unavailable.
 
 ### 4.2 Multi-till mode
 
@@ -328,7 +328,8 @@ Settings are divided into themes, fonts, layout, printers, receipt design, label
 | Employees, roles, permissions | SQLite | MariaDB shared state | Session remains local to the running app. |
 | Till printer, scale, CCTV, feedback, terminal credentials | SQLite or provider JSON | Local till only | Never pulled from another till. |
 | Outbox and sync conflicts | SQLite | Local till only | Durable recovery and operator intervention state. |
-| Till presence and terminal leases | Not required | MariaDB only | Ephemeral coordination, excluded from normal business backup. |
+| Till presence and shared terminal leases | Not required | MariaDB only | Shared coordination, excluded from normal business backup. |
+| Dedicated terminal leases and request dispatches | SQLite | Local till only | Prevent concurrent work and duplicate provider dispatch on this till. |
 | Companion cache and credentials | Companion SQLite/preferences | MariaDB is shared authority | Used for mobile responsiveness and offline product changes. |
 
 ### 9.2 Core commerce model
@@ -449,6 +450,7 @@ erDiagram
 | `_offline_queue` | Durable local write outbox. | SQLite only |
 | `_sync_conflicts` | Quarantined non-retryable writes. | SQLite only |
 | `payment_terminal_attempts` | Local managed-payment recovery journal. | SQLite only |
+| `local_payment_terminal_locks`, `local_payment_terminal_dispatches` | Dedicated-terminal lease and durable provider-request deduplication. | SQLite only |
 | `product_search_fts` | SQLite FTS5 item-search index. | SQLite only |
 | `sync_change_log` | Trigger-fed sequence of changed shared tables. | MariaDB only |
 | `till_presence` | Heartbeat and till-name presence data. | MariaDB only |
@@ -557,7 +559,8 @@ This is eventual consistency, not general multi-master conflict merging. Simulta
 | Scan, cart, ordinary sale | Allowed | Sale commits locally and queues an idempotent bundle. |
 | Product/customer edit | Allowed | Safe upsert is queued, subject to later conflict checks. |
 | Shared held-cart retrieval | Blocked | Requires an atomic global claim. |
-| Managed terminal payment | Blocked or unavailable | Requires provider network and a shared terminal lease. |
+| Dedicated managed terminal, ordinary card sale | Allowed after initial shop sync | Uses local journal/lease and atomic sale outbox; provider internet required. Known close/restore fences remain enforced. Standalone mode needs no shop sync. |
+| Explicitly shared managed terminal | Blocked | Requires the shared MariaDB terminal lease. |
 | Full/partial refund or void | Blocked | Must validate globally remaining refundable amounts and financial state. |
 | Live system end-of-day | Blocked | Requires complete shared history and no pending/conflicting transactions. |
 | Local receipt reprint | Allowed | Uses locally stored order data and till-local printer configuration. |
@@ -578,7 +581,7 @@ sequenceDiagram
     participant POS as POS UI
     participant Rules as Pricing and discount engine
     participant Provider as SumUp or Dojo
-    participant Lease as MariaDB terminal lease
+    participant Lease as Local or shared terminal lease
     participant Native as Rust commerce command
     participant SQLite as SQLite
     participant Queue as Outbox
@@ -634,7 +637,7 @@ The checkout supports cash, manual card, split tender, loyalty redemption, and m
 flowchart LR
     Checkout["Checkout UI"]
     Journal[("Local payment_terminal_attempts")]
-    Lock[("MariaDB payment_terminal_locks")]
+    Lock[("SQLite dedicated lease /<br/>MariaDB shared lease")]
     Rust["Rust provider client"]
     SumUp["SumUp Cloud API<br/>supported reader"]
     Dojo["Dojo Pay at Counter API"]
@@ -673,6 +676,10 @@ The recovery journal is inspected during startup and POS entry. An approved prov
 ### 12.3 Till-local configuration
 
 SumUp and Dojo credentials, reader/terminal selection, and provider behavior are local to the till. They are not synchronized through the settings table. Provider configuration files are atomically written in the platform application configuration directory. Unix permissions are restricted to `0600`; the values are not encrypted at rest and should be protected by the operating-system user account.
+
+New registrations default to **Dedicated to this till**. A physical terminal must not be registered as dedicated on another till. This is explicit ownership, not an automatic fallback when a shared database goes down. Attempt `journalScope` is immutable: existing shared attempts remain shared and cannot be recovered as local work. Native configuration changes reject unresolved work. A pre-upgrade saved shared registration needs a one-time MariaDB check before switching to dedicated, including a check for remote-only unresolved payments. Subsequent dedicated payments, status checks and cancellation use local recovery without MariaDB.
+
+Dedicated preparation atomically saves the recovery journal and lease before any provider charge. Native dispatch records prevent replaying an already-sent charge/refund after an uncertain response. Local completion writes the sale and, in multi mode, a stable `terminal-sale:<orderId>` outbox entry in one SQLite transaction. Startup recovery verifies the existing sale before reusing its allocated receipt. Multi-till account balances, loyalty redemption and refunds continue to require shared financial authority; standalone equivalents remain local. A remembered system-close/restore fence fails closed rather than disappearing during an outage.
 
 ## 13. Refunds, Partial Refunds, and Voids
 
@@ -1025,15 +1032,17 @@ This design is suitable for a trusted shop LAN. It should not be treated as a ze
 
 ## 24. Licensing Readiness
 
-The desktop app now has a serverless manual licensing foundation. Settings > Shop Licence creates an `LBJREQ1` request from the stable shop identity. The private issuer tool converts that request into an Ed25519-signed `LBJ1` entitlement containing the shop ID, customer, issue date, expiry date, till allowance, and enabled features. Rust verifies the signature, shop binding, expiry, and active-till allowance before storing the token in `app_identity`.
+Settings > Shop Licence creates an `LBJREQ1` request from the stable shop identity. The separate Firebase Cloud CRM signs it using Cloud KMS, or the private local Licence Studio signs it using its own issuer key. Both produce an Ed25519-signed `LBJ1` entitlement containing the shop ID, customer, issue date, expiry date, till allowance, and enabled features. Rust verifies the signature, shop binding, expiry, and active-till allowance before storing the token in `app_identity`.
 
 The public verification key is compiled into the application. The private signing key is kept outside the repository and must never be shipped to a till. In multi-till mode, the verified token uses the shared `app_identity` row and synchronizes through MariaDB. A standalone till stores it only in local SQLite. A till rename does not change the shop ID or invalidate the licence.
 
 Normal builds enforce the 10-day trial and signed licence by default. Native sale and online reversal entry points reject unlicensed, expired, wrong-shop, over-limit, or non-POS entitlements. Managed terminal payment and refund flows also perform a native preflight before contacting the provider, while the final native commit remains authoritative. Enforcement can only be compiled out deliberately with `LBJ_LICENSE_ENFORCEMENT=off` (or `preview`, `disabled`, or `0`) for development. Existing queued sales remain syncable so enforcement cannot strand transactions already accepted offline.
 
-The Licence page can soft-retire an unused register without deleting its history. The current register cannot retire itself, connected multi-till registers cannot be retired, and reopening a retired till automatically makes it active again. A newly imported licence with a different ID must have a later issue timestamp than the installed verified entitlement.
+The Licence page can soft-retire an unused register without deleting its history. The current register cannot retire itself, connected multi-till registers cannot be retired, and reopening a retired till automatically makes it active again. Different signed claims must have a later issue timestamp than the installed verified entitlement, even when they reuse the licence ID. Native SQLite and MariaDB synchronization merges verify the shop-bound token and signed issue time under transaction locks, protecting renewals from delayed old uploads/downloads regardless of mutable row timestamps.
 
-This offline design does not provide immediate revocation, automatic billing, remote device removal, or reliable clock-tamper protection. A future vendor service can retain the signed local entitlement while adding renewal, revocation, a bounded offline grace period, and activation history. Operational commands are documented in `docs/MANUAL_LICENSING.md`.
+New Dojo/SumUp payment creation checks licence access natively. Status, cancellation and signature-resolution calls remain available after expiry. If a payment is approved across the expiry boundary, final sale commit can still require renewal; its durable payment journal must be retained and recovered without charging again. Fully automatic completion needs persisted native pre-payment authorization bound to the exact sale, not a renderer-supplied approval flag.
+
+This offline validation design does not provide immediate revocation, automatic billing, remote device removal, or reliable clock-tamper protection. Cancelling a CRM record does not revoke an installed offline code. Future online validation can add revocation and bounded offline grace around the existing hosted issuance records. Operational commands are documented in `docs/MANUAL_LICENSING.md`.
 
 ## 25. Build, Packaging, and Installation
 
@@ -1168,7 +1177,7 @@ There is no broad TypeScript unit-test suite or complete automated end-to-end ha
 ### Phase 3: Commercial platform
 
 - Introduce a local shop gateway or vendor backend to remove direct database credentials from general clients.
-- Add hosted renewal, revocation, device recovery, and subscription management around the signed offline licence foundation.
+- Extend hosted issuance with online revocation, device recovery, and subscription management around the signed offline licence foundation.
 - Add a signed auto-update channel with staged rollout and rollback.
 - Define a provider adapter interface before adding more payment-terminal companies.
 - Define a versioned printer-driver/provider extension boundary; do not load unsigned arbitrary runtime code.

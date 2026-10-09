@@ -1,8 +1,10 @@
 import { get } from 'svelte/store';
+import { invoke } from '@tauri-apps/api/core';
 import type { SaleBundle } from '$lib/stores/database';
 import {
     assertMariaDbCommerceWritesAllowed,
     withCurrentReportEpoch,
+    withLocalTerminalPreparation,
 } from '$lib/stores/database';
 import { connectionState } from '$lib/stores/connection';
 import {
@@ -25,6 +27,7 @@ import {
     type TerminalPaymentExtras,
     type TerminalAttemptState,
 } from '$lib/terminalAttemptState';
+import type { TerminalJournalScope } from '$lib/terminalRecoveryLease';
 
 export type TerminalProvider = 'sumup' | 'dojo';
 
@@ -55,6 +58,8 @@ export interface CustomerAccountPaymentAttemptPayload {
 export type TerminalAttemptPayload = SaleBundle | CustomerAccountPaymentAttemptPayload;
 
 export interface TerminalPaymentAttempt {
+    /** Missing legacy values are shared; connectivity must never reclassify a payment. */
+    journalScope?: TerminalJournalScope;
     id: string;
     provider: TerminalProvider;
     terminalKey: string;
@@ -118,6 +123,10 @@ function isMultiMode(): boolean {
     return get(connectionState).mode === 'multi';
 }
 
+export function terminalAttemptUsesSharedJournal(attempt: Pick<TerminalPaymentAttempt, 'journalScope'>): boolean {
+    return attempt.journalScope !== 'local';
+}
+
 /**
  * Extract the exact sale bundle returned by durable terminal preparation.
  * In multi-till mode that payload must already contain the close/report epoch;
@@ -167,6 +176,7 @@ function normalizeAttempt(row: any): TerminalPaymentAttempt {
     const storedKind = String(row.operationKind || '') as TerminalOperationKind;
     const amount = Number(row.amount || 0);
     return {
+        journalScope: row.journalScope === 'local' ? 'local' : 'shared',
         id: String(row.id || ''),
         provider: String(row.provider || '') as TerminalProvider,
         terminalKey: String(row.terminalKey || ''),
@@ -197,8 +207,8 @@ async function insertLocalAttempt(attempt: TerminalPaymentAttempt): Promise<void
         `INSERT INTO payment_terminal_attempts
             (id, provider, terminalKey, clientTransactionId, terminalSessionId,
              operationKind, amount, expectedProviderAmount, currency, status,
-             saleBundle, providerReference, error, tillId, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             saleBundle, providerReference, error, tillId, createdAt, updatedAt, journalScope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             attempt.id,
             attempt.provider,
@@ -216,6 +226,7 @@ async function insertLocalAttempt(attempt: TerminalPaymentAttempt): Promise<void
             attempt.tillId,
             attempt.createdAt,
             attempt.updatedAt,
+            attempt.journalScope ?? 'shared',
         ],
     );
 }
@@ -279,9 +290,34 @@ export async function preparePaymentTerminalAttempt<T extends TerminalPaymentAtt
     attempt: T,
 ): Promise<T> {
     validateAttempt(attempt);
+    if (!terminalAttemptUsesSharedJournal(attempt)) {
+        return withLocalTerminalPreparation(async () => {
+            // Shared customer balances and refund ceilings still need a live
+            // financial preflight before a terminal can collect/refund money.
+            const needsSharedFinancialState = isMultiMode()
+                && (attempt.operationKind !== 'sale'
+                    || (!isCustomerAccountPaymentPayload(attempt.saleBundle)
+                        && (Boolean(attempt.saleBundle.accountChanges?.length)
+                            || Boolean(attempt.saleBundle.loyaltyChanges?.some(
+                                (change) => change.reason === 'redeemed' && change.pointsChange < 0,
+                            )))));
+            if (needsSharedFinancialState) await assertMariaDbCommerceWritesAllowed();
+            const durableAttempt = {
+                ...attempt,
+                journalScope: 'local' as const,
+                saleBundle: await withCurrentReportEpoch(attempt.saleBundle,
+                    needsSharedFinancialState ? { requireLiveServerDataEpoch: true } : { localOnly: true }),
+            };
+            const prepared = await invoke<MysqlPaymentTerminalAttempt>('terminal_prepare_local_attempt', {
+                attempt: serializeAttempt(durableAttempt),
+            });
+            return normalizeAttempt(prepared) as T;
+        });
+    }
     let remotePrepared = false;
     let localAttempt: TerminalPaymentAttempt = attempt;
-    if (isMultiMode()) {
+    if (terminalAttemptUsesSharedJournal(attempt)) {
+        if (!isMultiMode()) throw new Error('This shared terminal requires MariaDB. Register it as dedicated to this till to use local payments.');
         await assertMariaDbCommerceWritesAllowed();
         // Persist both the report cutoff and MariaDB dataset identity before
         // any irreversible provider call. Recovery must commit this exact
@@ -342,7 +378,7 @@ export async function assertPaymentTerminalAttemptReady(
 ): Promise<void> {
     const db = await getSqliteDb();
     const rows = await db.select<any[]>(
-        `SELECT id, terminalKey, amount, status FROM payment_terminal_attempts
+        `SELECT * FROM payment_terminal_attempts
          WHERE id = ? AND provider = ? LIMIT 1`,
         [id, provider],
     );
@@ -350,7 +386,10 @@ export async function assertPaymentTerminalAttemptReady(
     if (!local || !['prepared', 'started'].includes(String(local.status || ''))) {
         throw new Error(`The ${provider} request is not in a safe prepared state`);
     }
-    if (!isMultiMode()) return;
+    if (!terminalAttemptUsesSharedJournal(local)) {
+        await withLocalTerminalPreparation(async () => undefined);
+        return;
+    }
     await assertMariaDbCommerceWritesAllowed();
     const remote = await mysqlGetPaymentTerminalAttempt(id, provider);
     if (!remote
@@ -367,6 +406,12 @@ export async function updatePaymentTerminalAttempt(
     status: TerminalAttemptStatus,
     values: TerminalAttemptUpdate = {},
 ): Promise<TerminalPaymentAttempt> {
+    const db = await getSqliteDb();
+    const rows = await db.select<any[]>(
+        `SELECT * FROM payment_terminal_attempts WHERE id = ? AND provider = ? LIMIT 1`, [id, provider],
+    );
+    if (!rows[0]) throw new Error(`Local ${provider} recovery attempt ${id} is missing`);
+    const shared = terminalAttemptUsesSharedJournal(rows[0]);
     const remoteValues: MysqlPaymentTerminalAttemptUpdate = {
         ...(values.clientTransactionId !== undefined ? { clientTransactionId: values.clientTransactionId } : {}),
         ...(values.terminalSessionId !== undefined ? { terminalSessionId: values.terminalSessionId } : {}),
@@ -374,7 +419,7 @@ export async function updatePaymentTerminalAttempt(
         ...(values.error !== undefined ? { error: values.error } : {}),
         ...(values.saleBundle !== undefined ? { saleBundle: JSON.stringify(values.saleBundle) } : {}),
     };
-    if (status === 'completed' && isMultiMode()) {
+    if (status === 'completed' && shared) {
         // The ledger has already committed. Keep the local row operational
         // until MariaDB acknowledges completion so a crash cannot strand an
         // invisible shared blocker.
@@ -411,7 +456,7 @@ export async function updatePaymentTerminalAttempt(
     }
 
     const local = await updateLocalAttempt(provider, id, status, values);
-    if (!isMultiMode()) return local.attempt;
+    if (!shared) return local.attempt;
     const remote = await mysqlUpdatePaymentTerminalAttempt(
         id,
         provider,
@@ -472,7 +517,7 @@ export async function acknowledgeApprovedPaymentTerminalAttempt(
     if (!['approved', 'commit_failed', 'completion_pending', 'completed'].includes(attempt.status)) {
         throw new Error('Only durable approved terminal work can acknowledge shared approval');
     }
-    if (!isMultiMode()) return attempt;
+    if (!terminalAttemptUsesSharedJournal(attempt)) return attempt;
     await assertLeaseHeld();
     let remote = await mysqlGetPaymentTerminalAttempt(attempt.id, attempt.provider);
     if (!remote) throw new Error(`Shared ${attempt.provider} recovery attempt ${attempt.id} is missing`);
@@ -560,7 +605,7 @@ export async function persistVerifiedDojoPaymentAccounting(
         throw new Error('Local terminal accounting changed during reconciliation; recovery remains pending');
     }
     assertTerminalAccountingEnrichment(String(local.saleBundle), enrichedJson);
-    if (isMultiMode()) {
+    if (terminalAttemptUsesSharedJournal(attempt)) {
         await assertLeaseHeld();
         const remote = await mysqlGetPaymentTerminalAttempt(attempt.id, 'dojo');
         if (!remote) throw new Error('The shared Dojo recovery journal is missing');
@@ -610,15 +655,33 @@ function sqliteTerminalAttemptStrength(column: string): string {
 
 async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<TerminalPaymentAttempt> {
     const db = await getSqliteDb();
+    const assertMergeIdentity = (row: any) => {
+        const local = normalizeAttempt(row);
+        if (!terminalAttemptUsesSharedJournal(local)) {
+            throw new Error('A shared terminal record conflicts with a dedicated local payment. Administrator review is required; neither payment was cleared.');
+        }
+        const incoming = normalizeAttempt(remote);
+        if (local.provider !== incoming.provider || local.terminalKey !== incoming.terminalKey
+            || local.operationKind !== incoming.operationKind || local.amount !== incoming.amount
+            || local.expectedProviderAmount !== incoming.expectedProviderAmount
+            || local.currency.toUpperCase() !== incoming.currency.toUpperCase()
+            || (['clientTransactionId', 'terminalSessionId', 'providerReference'] as const).some(
+                (key) => local[key] && incoming[key] && local[key] !== incoming[key],
+            )) {
+            throw new Error('The shared terminal record has conflicting payment identity. Administrator review is required; neither payment was cleared.');
+        }
+    };
+    const existing = await db.select<any[]>('SELECT * FROM payment_terminal_attempts WHERE id = ? LIMIT 1', [remote.id]);
+    if (existing[0]) assertMergeIdentity(existing[0]);
     const currentStrength = sqliteTerminalAttemptStrength('payment_terminal_attempts.status');
     const remoteStrength = sqliteTerminalAttemptStrength('excluded.status');
     const preferRemote = `${remoteStrength} > ${currentStrength}`;
-    await db.execute(
+    const merged = await db.execute(
         `INSERT INTO payment_terminal_attempts
             (id, provider, terminalKey, clientTransactionId, terminalSessionId,
              operationKind, amount, expectedProviderAmount, currency, status,
-             saleBundle, providerReference, error, tillId, createdAt, updatedAt, operatorResolution)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             saleBundle, providerReference, error, tillId, createdAt, updatedAt, operatorResolution, journalScope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'shared')
          ON CONFLICT(id) DO UPDATE SET
             clientTransactionId = CASE
                 WHEN ${preferRemote} AND excluded.clientTransactionId <> '' THEN excluded.clientTransactionId
@@ -643,7 +706,18 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
             -- Remote timestamps are generated by MariaDB and deliberately win
             -- even when a till's local wall clock is far in the future.
             createdAt = excluded.createdAt,
-            updatedAt = excluded.updatedAt`,
+            updatedAt = excluded.updatedAt
+         WHERE COALESCE(payment_terminal_attempts.journalScope, 'shared') = 'shared'
+           AND payment_terminal_attempts.provider = excluded.provider
+           AND payment_terminal_attempts.terminalKey = excluded.terminalKey
+           AND payment_terminal_attempts.operationKind = excluded.operationKind
+           AND payment_terminal_attempts.amount = excluded.amount
+           AND COALESCE(NULLIF(payment_terminal_attempts.expectedProviderAmount, 0), payment_terminal_attempts.amount)
+               = COALESCE(NULLIF(excluded.expectedProviderAmount, 0), excluded.amount)
+           AND UPPER(payment_terminal_attempts.currency) = UPPER(excluded.currency)
+           AND (payment_terminal_attempts.clientTransactionId = '' OR excluded.clientTransactionId = '' OR payment_terminal_attempts.clientTransactionId = excluded.clientTransactionId)
+           AND (payment_terminal_attempts.terminalSessionId = '' OR excluded.terminalSessionId = '' OR payment_terminal_attempts.terminalSessionId = excluded.terminalSessionId)
+           AND (payment_terminal_attempts.providerReference = '' OR excluded.providerReference = '' OR payment_terminal_attempts.providerReference = excluded.providerReference)`,
         [
             remote.id,
             remote.provider,
@@ -664,11 +738,15 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
             remote.operatorResolution || '',
         ],
     );
+    if (Number(merged.rowsAffected) !== 1) {
+        throw new Error('The local terminal record changed while merging shared evidence. Administrator review is required.');
+    }
     const rows = await db.select<any[]>(
         `SELECT * FROM payment_terminal_attempts WHERE id = ? AND provider = ? LIMIT 1`,
         [remote.id, remote.provider],
     );
     if (!rows[0]) throw new Error(`Local ${remote.provider} recovery attempt ${remote.id} is missing after merge`);
+    assertMergeIdentity(rows[0]);
     return normalizeAttempt(rows[0]);
 }
 
@@ -687,7 +765,7 @@ export async function refreshPaymentTerminalAttempt(
         [id, provider],
     );
     if (!rows[0]) throw new Error(`Local ${provider} recovery attempt ${id} is missing`);
-    if (!isMultiMode()) return normalizeAttempt(rows[0]);
+    if (!terminalAttemptUsesSharedJournal(rows[0])) return normalizeAttempt(rows[0]);
     if (!get(connectionState).mysqlOnline) {
         throw new Error('MariaDB must be online to coordinate shared terminal recovery');
     }
@@ -698,10 +776,11 @@ export async function refreshPaymentTerminalAttempt(
 
 export async function getRecoverablePaymentTerminalAttempts(
     provider: TerminalProvider,
+    options: { includeShared?: boolean } = {},
 ): Promise<TerminalPaymentAttempt[]> {
     const db = await getSqliteDb();
     let remoteIds = new Set<string>();
-    if (isMultiMode() && get(connectionState).mysqlOnline) {
+    if (options.includeShared !== false && isMultiMode() && get(connectionState).mysqlOnline) {
         const remotes = await mysqlGetOperationalPaymentTerminalAttempts(provider);
         remoteIds = new Set(remotes.map((attempt) => attempt.id));
         for (const remote of remotes) await cacheRemoteAttempt(remote);
@@ -717,7 +796,7 @@ export async function getRecoverablePaymentTerminalAttempts(
     return rows.map((row) => normalizeAttempt(row));
 }
 
-export async function prunePaymentTerminalAttempts(provider?: TerminalProvider): Promise<void> {
+export async function prunePaymentTerminalAttempts(provider?: TerminalProvider, options: { includeShared?: boolean } = {}): Promise<void> {
     const db = await getSqliteDb();
     await db.execute(
         `DELETE FROM payment_terminal_attempts
@@ -726,7 +805,7 @@ export async function prunePaymentTerminalAttempts(provider?: TerminalProvider):
            AND julianday(updatedAt) < julianday('now', '-30 days')`,
         provider ? [provider] : [],
     );
-    if (isMultiMode() && get(connectionState).mysqlOnline) {
+    if (options.includeShared !== false && isMultiMode() && get(connectionState).mysqlOnline) {
         await mysqlPrunePaymentTerminalAttempts();
     }
 }

@@ -1,6 +1,30 @@
 import type { DojoConfig } from './dojo';
 import type { TerminalPaymentAttempt } from './terminalAttempts';
 
+/** Saved attempt ownership, not today's registration, determines recovery coordination. */
+export function canCoordinateReportPayment(
+    attempt: Pick<TerminalPaymentAttempt, 'journalScope'> | null,
+    sharedConnectionReady: boolean,
+): boolean {
+    return Boolean(attempt && (attempt.journalScope === 'local' || sharedConnectionReady));
+}
+
+/** One unavailable shared provider must not hide another provider's local recovery. */
+export async function loadReportPaymentAttempts(
+    load: (includeShared: boolean) => Promise<TerminalPaymentAttempt[]>,
+    includeShared: boolean,
+): Promise<{ attempts: TerminalPaymentAttempt[]; localVerified: boolean; sharedIncomplete: boolean }> {
+    try {
+        return { attempts: await load(includeShared), localVerified: true, sharedIncomplete: false };
+    } catch {
+        if (includeShared) {
+            try { return { attempts: await load(false), localVerified: true, sharedIncomplete: true }; }
+            catch { /* A failed local read must never count as an empty journal. */ }
+        }
+        return { attempts: [], localVerified: false, sharedIncomplete: includeShared };
+    }
+}
+
 export function isReportPaymentBlocker(value: string): boolean {
     return /TERMINAL_RECOVERY_PENDING|terminal payment attempt|card payment attempt|unresolved card payment/i.test(value);
 }

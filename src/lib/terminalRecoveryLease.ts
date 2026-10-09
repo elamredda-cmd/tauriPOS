@@ -34,3 +34,45 @@ export async function runWithTerminalRecoveryLease<T>(
         await backend.release().catch(() => undefined);
     }
 }
+import { invoke } from '@tauri-apps/api/core';
+import {
+    mysqlAcquirePaymentTerminalLock,
+    mysqlRefreshPaymentTerminalLock,
+    mysqlReleasePaymentTerminalLock,
+    type MysqlPaymentTerminalLock,
+} from '$lib/stores/mysql';
+
+export type TerminalJournalScope = 'local' | 'shared';
+export type TerminalOwnership = 'dedicated' | 'shared';
+export type TerminalLock = Omit<MysqlPaymentTerminalLock, 'acquiredAt'> & {
+    acquiredAt?: string;
+    updatedAt?: string;
+};
+export interface TerminalLockResult { acquired: boolean; lock: TerminalLock | null }
+
+/** Scope is persisted with each attempt; a database outage never changes it. */
+export function acquireTerminalLock(
+    scope: TerminalJournalScope, terminalKey: string, tillId: string,
+    tillName: string, paymentReference: string, leaseSeconds = 180,
+): Promise<TerminalLockResult> {
+    return scope === 'local'
+        ? invoke('terminal_acquire_local_lock', { terminalKey, tillId, tillName, paymentReference, leaseSeconds })
+        : mysqlAcquirePaymentTerminalLock(terminalKey, tillId, tillName, paymentReference, leaseSeconds);
+}
+
+export function refreshTerminalLock(
+    scope: TerminalJournalScope, terminalKey: string, tillId: string,
+    paymentReference: string, leaseSeconds = 180,
+): Promise<boolean> {
+    return scope === 'local'
+        ? invoke('terminal_refresh_local_lock', { terminalKey, tillId, paymentReference, leaseSeconds })
+        : mysqlRefreshPaymentTerminalLock(terminalKey, tillId, paymentReference, leaseSeconds);
+}
+
+export function releaseTerminalLock(
+    scope: TerminalJournalScope, terminalKey: string, tillId: string, paymentReference: string,
+): Promise<void> {
+    return scope === 'local'
+        ? invoke('terminal_release_local_lock', { terminalKey, tillId, paymentReference })
+        : mysqlReleasePaymentTerminalLock(terminalKey, tillId, paymentReference);
+}

@@ -1,12 +1,8 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { get, writable } from 'svelte/store';
-import { connectionState } from '$lib/stores/connection';
-import {
-    mysqlAcquirePaymentTerminalLock,
-    mysqlRefreshPaymentTerminalLock,
-    mysqlReleasePaymentTerminalLock,
-    type MysqlPaymentTerminalLock,
-} from '$lib/stores/mysql';
+import { connectionState, buildMysqlUri } from '$lib/stores/connection';
+import { acquireTerminalLock, refreshTerminalLock, releaseTerminalLock,
+    type TerminalOwnership, type TerminalLockResult } from '$lib/terminalRecoveryLease';
 import {
     getRecoverablePaymentTerminalAttempts,
     assertPaymentTerminalAttemptReady,
@@ -18,6 +14,7 @@ import {
 } from '$lib/terminalAttempts';
 
 export interface DojoConfig {
+    terminalOwnership?: TerminalOwnership;
     enabled: boolean;
     terminalId: string;
     terminalName: string;
@@ -31,6 +28,7 @@ export interface DojoConfig {
 }
 
 export interface DojoConfigInput {
+    terminalOwnership?: TerminalOwnership;
     enabled: boolean;
     terminalId: string;
     terminalName: string;
@@ -100,12 +98,10 @@ export type DojoPaymentAttempt = TerminalPaymentAttempt & {
     provider: 'dojo';
 };
 
-export interface DojoLockResult {
-    acquired: boolean;
-    lock: MysqlPaymentTerminalLock | null;
-}
+export type DojoLockResult = TerminalLockResult;
 
 export const defaultDojoConfig: DojoConfig = {
+    terminalOwnership: 'dedicated',
     enabled: false,
     terminalId: '',
     terminalName: '',
@@ -128,13 +124,19 @@ export async function loadDojoConfig(): Promise<DojoConfig> {
 }
 
 export async function saveDojoConfig(config: DojoConfigInput): Promise<DojoConfig> {
-    const saved = await invoke<DojoConfig>('dojo_save_config', { config });
+    const state = get(connectionState);
+    const saved = await invoke<DojoConfig>('dojo_save_config', {
+        config, mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
+    });
     dojoConfig.set(saved);
     return saved;
 }
 
 export async function clearDojoSecret(): Promise<DojoConfig> {
-    const saved = await invoke<DojoConfig>('dojo_clear_secret');
+    const state = get(connectionState);
+    const saved = await invoke<DojoConfig>('dojo_clear_secret', {
+        mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
+    });
     dojoConfig.set(saved);
     return saved;
 }
@@ -218,10 +220,11 @@ export async function acquireDojoLock(
     paymentReference: string,
 ): Promise<DojoLockResult> {
     const connection = get(connectionState);
-    if (connection.mode !== 'multi' || !connection.mysqlOnline) {
+    const scope = config.terminalOwnership === 'dedicated' ? 'local' : 'shared';
+    if (scope === 'shared' && (connection.mode !== 'multi' || !connection.mysqlOnline)) {
         throw new Error('The shared Dojo terminal requires MariaDB to be online so the tills cannot charge it together');
     }
-    return mysqlAcquirePaymentTerminalLock(
+    return acquireTerminalLock(scope,
         dojoTerminalKey(config),
         tillId,
         tillName,
@@ -234,7 +237,7 @@ export function refreshDojoLock(
     tillId: string,
     paymentReference: string,
 ): Promise<boolean> {
-    return mysqlRefreshPaymentTerminalLock(dojoTerminalKey(config), tillId, paymentReference);
+    return refreshTerminalLock(config.terminalOwnership === 'dedicated' ? 'local' : 'shared', dojoTerminalKey(config), tillId, paymentReference);
 }
 
 export function releaseDojoLock(
@@ -242,11 +245,12 @@ export function releaseDojoLock(
     tillId: string,
     paymentReference: string,
 ): Promise<void> {
-    return mysqlReleasePaymentTerminalLock(dojoTerminalKey(config), tillId, paymentReference);
+    return releaseTerminalLock(config.terminalOwnership === 'dedicated' ? 'local' : 'shared', dojoTerminalKey(config), tillId, paymentReference);
 }
 
 export async function saveDojoAttempt(attempt: DojoPaymentAttempt): Promise<DojoPaymentAttempt> {
-    return preparePaymentTerminalAttempt(attempt);
+    return preparePaymentTerminalAttempt({ ...attempt,
+        journalScope: attempt.journalScope ?? (get(dojoConfig).terminalOwnership === 'dedicated' ? 'local' : 'shared') });
 }
 
 export async function updateDojoAttempt(
@@ -258,9 +262,11 @@ export async function updateDojoAttempt(
 }
 
 export async function getRecoverableDojoAttempts(): Promise<DojoPaymentAttempt[]> {
-    return getRecoverablePaymentTerminalAttempts('dojo') as Promise<DojoPaymentAttempt[]>;
+    return getRecoverablePaymentTerminalAttempts('dojo', {
+        includeShared: get(dojoConfig).terminalOwnership !== 'dedicated',
+    }) as Promise<DojoPaymentAttempt[]>;
 }
 
 export async function pruneDojoAttempts(): Promise<void> {
-    await prunePaymentTerminalAttempts('dojo');
+    await prunePaymentTerminalAttempts('dojo', { includeShared: get(dojoConfig).terminalOwnership !== 'dedicated' });
 }

@@ -46,6 +46,7 @@ export interface ManualLicenseRequest {
 }
 
 export const manualLicenseStatus = writable<ManualLicenseStatus | null>(null);
+export const manualLicenseSyncWarning = writable('');
 
 function browserPreviewStatus(): ManualLicenseStatus {
     return {
@@ -103,8 +104,23 @@ export async function createManualLicenseRequest(): Promise<ManualLicenseRequest
 
 async function finishActivation(status: ManualLicenseStatus): Promise<ManualLicenseStatus> {
     manualLicenseStatus.set(status);
-    await syncManualLicenseIdentity();
+    // Native activation is already durable at this point. A sharing/outbox
+    // failure must not tell the operator their valid local code was rejected.
+    await retryManualLicenseSync();
     return status;
+}
+
+export async function retryManualLicenseSync(): Promise<boolean> {
+    try {
+        await syncManualLicenseIdentity();
+        manualLicenseSyncWarning.set('');
+        return true;
+    } catch {
+        manualLicenseSyncWarning.set(
+            'The licence is installed on this till, but sharing it with the other tills could not be saved. Check the shop database connection, then retry sharing.',
+        );
+        return false;
+    }
 }
 
 export async function activateManualLicense(token: string): Promise<ManualLicenseStatus> {

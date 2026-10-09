@@ -220,10 +220,28 @@ pub(crate) async fn authenticate_payment_administrator(
     pin: &str,
 ) -> Result<(MySqlConnection, String), String> {
     let mut store = Store::Shared(connection);
-    let name = store.authenticate(employee_id, pin).await
-        .map_err(|_| "Payment review requires an active administrator and the correct PIN.".to_string())?;
+    let name = store.authenticate(employee_id, pin).await.map_err(|_| {
+        "Payment review requires an active administrator and the correct PIN.".to_string()
+    })?;
     match store {
         Store::Shared(connection) => Ok((connection, name)),
+        _ => unreachable!(),
+    }
+}
+
+/// Dedicated-terminal recovery authenticates against this till's staff store.
+/// It retains the same native PIN hashing, active-admin check and throttle.
+pub(crate) async fn authenticate_local_payment_administrator(
+    connection: SqliteConnection,
+    employee_id: &str,
+    pin: &str,
+) -> Result<(SqliteConnection, String), String> {
+    let mut store = Store::Local(connection);
+    let name = store.authenticate(employee_id, pin).await.map_err(|_| {
+        "Payment review requires an active administrator and the correct PIN.".to_string()
+    })?;
+    match store {
+        Store::Local(connection) => Ok((connection, name)),
         _ => unreachable!(),
     }
 }

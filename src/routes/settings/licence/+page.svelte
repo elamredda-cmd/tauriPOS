@@ -11,7 +11,9 @@
         activateManualLicense,
         activateManualLicenseFile,
         createManualLicenseRequest,
+        manualLicenseSyncWarning,
         refreshManualLicenseStatus,
+        retryManualLicenseSync,
         type ManualLicenseRequest,
         type ManualLicenseState,
         type ManualLicenseStatus,
@@ -29,6 +31,7 @@
     let licenceCode = '';
     let loading = true;
     let activating = false;
+    let sharing = false;
     let errorMessage = '';
     let nativeRuntime = false;
     let registeredTills: RegisteredLicenseTill[] = [];
@@ -166,6 +169,16 @@
         }
     }
 
+    async function retrySharing() {
+        if (sharing) return;
+        sharing = true;
+        try {
+            if (await retryManualLicenseSync()) toast('Licence sharing saved');
+        } finally {
+            sharing = false;
+        }
+    }
+
     function shortTillId(id: string): string {
         return id.length > 8 ? id.slice(-8).toUpperCase() : id.toUpperCase();
     }
@@ -219,6 +232,16 @@
                     <div class="rounded-md border border-danger/50 bg-danger/10 p-4 text-danger" role="alert">
                         <strong class="block">Licence action could not be completed</strong>
                         <span class="mt-1 block break-words text-sm">{errorMessage}</span>
+                    </div>
+                {/if}
+
+                {#if $manualLicenseSyncWarning}
+                    <div class="rounded-md border border-warning/50 bg-warning/10 p-4 text-text-main" role="status">
+                        <strong class="block">Activated here — sharing needs attention</strong>
+                        <p class="mt-1 text-sm">{$manualLicenseSyncWarning}</p>
+                        <button class="btn btn-secondary mt-3" disabled={sharing || activating} on:click={retrySharing}>
+                            {sharing ? 'Retrying sharing...' : 'Retry sharing with other tills'}
+                        </button>
                     </div>
                 {/if}
 

@@ -7,6 +7,7 @@
     import {
         activateManualLicense,
         manualLicenseStatus,
+        manualLicenseSyncWarning,
         refreshManualLicenseStatus,
         type ManualLicenseStatus,
     } from '$lib/licensing';
@@ -138,7 +139,11 @@
             activationCode = '';
             if (nextStatus.accessAllowed) {
                 dismissedNotice = noticeKey(nextStatus);
-                toast('Shop licence activated');
+                if ($manualLicenseSyncWarning) {
+                    toast('Licence activated on this till. Open Settings > Shop licence to retry sharing with other tills.', 'info');
+                } else {
+                    toast('Shop licence activated');
+                }
             }
         } catch (error) {
             activationError = cleanError(error);

@@ -3,6 +3,7 @@ import type { TerminalPaymentAttempt } from './terminalAttempts';
 import type { DojoPaymentIntentStatus } from './dojo';
 
 const mocks = vi.hoisted(() => ({
+    connection: { mode: 'multi', mysqlOnline: true },
     invoke: vi.fn(), list: vi.fn(), refresh: vi.fn(), update: vi.fn(), acknowledge: vi.fn(), enrich: vi.fn(),
     commit: vi.fn(), postAccount: vi.fn(), hydrate: vi.fn(), assertWrites: vi.fn(),
     acquire: vi.fn(), refreshLease: vi.fn(), release: vi.fn(), prune: vi.fn(),
@@ -13,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true, invoke: mocks.invoke }));
 vi.mock('$lib/stores/connection', () => ({
     connectionState: { subscribe(run: (value: unknown) => void) {
-        run({ mode: 'multi', mysqlOnline: true, mysqlConfig: { host: 'test.invalid', port: 3306, user: 'fixture', password: '', database: 'fixture' } });
+        run({ ...mocks.connection, mysqlConfig: { host: 'test.invalid', port: 3306, user: 'fixture', password: '', database: 'fixture' } });
         return () => undefined;
     } },
 }));
@@ -29,6 +30,7 @@ vi.mock('$lib/stores/mysql', () => ({
     mysqlReleasePaymentTerminalLock: mocks.release,
 }));
 vi.mock('$lib/terminalAttempts', () => ({
+    terminalAttemptUsesSharedJournal: (attempt: TerminalPaymentAttempt) => attempt.journalScope !== 'local',
     acknowledgeApprovedPaymentTerminalAttempt: mocks.acknowledge,
     getRecoverablePaymentTerminalAttempts: mocks.list,
     refreshPaymentTerminalAttempt: mocks.refresh,
@@ -66,6 +68,8 @@ describe('managed Dojo recovery orchestration (mocked native/provider boundaries
         vi.restoreAllMocks();
         vi.resetAllMocks();
         steps = [];
+        mocks.connection.mode = 'multi';
+        mocks.connection.mysqlOnline = true;
         current = {
             id: 'sale-1', provider: 'dojo', terminalKey: 'dojo:fixture:terminal',
             clientTransactionId: 'pi-1', terminalSessionId: 'ts-1', operationKind: 'sale',
@@ -112,6 +116,65 @@ describe('managed Dojo recovery orchestration (mocked native/provider boundaries
         return { id: 'pi-1', reference: 'sale-1', status: 'Captured', amount: 600, currency: 'GBP',
             tipsAmount: { value: 100, currencyCode: 'GBP' }, totalAmount: { value: 700, currencyCode: 'GBP' } };
     }
+
+    function installLocalLease() {
+        current.journalScope = 'local';
+        mocks.connection.mysqlOnline = false;
+        mocks.loadDojo.mockResolvedValue({ apiKeyConfigured: true, apiEnvironment: 'Sandbox', terminalOwnership: 'dedicated' });
+        mocks.invoke.mockImplementation(async (command) => {
+            if (command === 'terminal_acquire_local_lock') return { acquired: true, lock: null };
+            if (command === 'terminal_refresh_local_lock') return true;
+        });
+    }
+
+    it.each(['single', 'multi'])('recovers a dedicated approved sale in %s mode with MariaDB offline', async (mode) => {
+        installLocalLease();
+        mocks.connection.mode = mode;
+        expect((await runTerminalRecovery('dojo')).completed).toBe(1);
+        expect(current.status).toBe('completed');
+        expect(mocks.commit).toHaveBeenCalledWith(expect.objectContaining({
+            payment: expect.objectContaining({ reference: expect.stringContaining('Dojo'), tipsAmount: 100 }),
+        }), { journalScope: 'local' });
+        expect(mocks.assertWrites).not.toHaveBeenCalled();
+        expect(mocks.acquire).not.toHaveBeenCalled();
+        expect(mocks.invoke.mock.calls.some(([command]) => command === 'commit_mysql_sale')).toBe(false);
+        expect(mocks.list).toHaveBeenCalledWith('dojo', { includeShared: false });
+        await runTerminalRecovery('dojo');
+        expect(mocks.commit).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a legacy shared attempt unresolved offline even after dedicated registration', async () => {
+        installLocalLease();
+        delete current.journalScope;
+        expect((await runTerminalRecovery('dojo')).stillUncertain).toBe(1);
+        expect(mocks.getPayment).not.toHaveBeenCalled();
+        expect(mocks.commit).not.toHaveBeenCalled();
+        expect(mocks.invoke).not.toHaveBeenCalled();
+    });
+
+    it('does not publish provider evidence or commit after losing its local recovery lease', async () => {
+        installLocalLease();
+        mocks.invoke.mockImplementation(async (command) => {
+            if (command === 'terminal_acquire_local_lock') return { acquired: true, lock: null };
+            if (command === 'terminal_refresh_local_lock') return false;
+        });
+        const result = await runTerminalRecovery('dojo');
+        expect(result.stillUncertain).toBe(1);
+        expect(result.errors.join(' ')).toContain('lease was lost');
+        expect(mocks.getPayment).not.toHaveBeenCalled();
+        expect(mocks.update).not.toHaveBeenCalled();
+        expect(mocks.commit).not.toHaveBeenCalled();
+    });
+
+    it('allows local sandbox cancellation under a local lease without changing journal finality', async () => {
+        installLocalLease();
+        await cancelExpiredSandboxDojoPayment(current.id);
+        expect(mocks.cancelNative).toHaveBeenCalledExactlyOnceWith(current.id);
+        expect(mocks.assertWrites).not.toHaveBeenCalled();
+        expect(mocks.acquire).not.toHaveBeenCalled();
+        expect(mocks.update).not.toHaveBeenCalled();
+        expect(current.status).toBe('uncertain');
+    });
 
     it('follows the latest session after a declined retry, keeping the original journal reference', async () => {
         mocks.getPayment.mockResolvedValue({ ...captured(), latestTerminalSessionId: 'ts-retry' });
