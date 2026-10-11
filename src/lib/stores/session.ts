@@ -7,7 +7,7 @@ import {
     type Employee,
     type EmployeeRole,
 } from './db';
-import { connectionState, type PosConnectionState } from './connection';
+import { connectionState, pingMysql, type PosConnectionState } from './connection';
 import { toast } from './toast';
 import type { SupportSessionGrant } from '$lib/supportAccess';
 
@@ -608,10 +608,56 @@ async function finishAuthentication(employee: Employee | null, pin: string, upgr
     return employee;
 }
 
+function isStaffConnectionLoss(error: unknown): boolean {
+    const message = String(error).toLowerCase();
+    return [
+        'connection refused', 'connection reset', 'connection closed',
+        'connection is closed', 'connection lost', 'lost connection',
+        'server has gone away', 'broken pipe', 'network is unreachable',
+        'error communicating with database', 'connection timed out',
+        'connect timeout', 'authoritative staff check timed out',
+        'econnrefused', 'econnreset', 'etimedout',
+    ].some((fragment) => message.includes(fragment));
+}
+
+/** Keep only the session already authenticated before a confirmed outage. */
+async function canKeepStaffSessionDuringOutage(
+    sessionEmployee: Employee,
+    initialState: PosConnectionState,
+    error: unknown,
+): Promise<boolean> {
+    if (initialState.mode !== 'multi' || !isStaffConnectionLoss(error)) return false;
+    const state = get(connectionState);
+    if (
+        state.mode !== 'multi'
+        || state.mysqlConfig !== initialState.mysqlConfig
+        || state.mysqlStatus === 'blocked'
+        || !authenticatedEmployeeUpdatedAt
+    ) return false;
+
+    // A transport error in one query is not enough to enable cached access.
+    // Confirm the outage through the connection manager, which marks the till
+    // offline and drops its failed connection. A reachable server still has
+    // to verify this employee successfully.
+    if (await pingMysql()) return false;
+    const offlineState = get(connectionState);
+    const cached = cachedRuntimeEmployee(sessionEmployee.id);
+    return get(currentEmployee) === sessionEmployee
+        && offlineState.mode === 'multi'
+        && offlineState.mysqlConfig === initialState.mysqlConfig
+        && offlineState.mysqlStatus === 'offline'
+        && !offlineState.mysqlOnline
+        && Boolean(cached?.isActive)
+        && String(cached?.updatedAt || '') === authenticatedEmployeeUpdatedAt
+        && String(sessionEmployee.updatedAt || '') === authenticatedEmployeeUpdatedAt
+        && cached?.role === sessionEmployee.role;
+}
+
 /** Re-check an existing session after MariaDB reconnects. */
 export async function revalidateCurrentEmployeeSession(): Promise<Employee | null> {
     const sessionEmployee = get(currentEmployee);
     if (!sessionEmployee || isSupportEmployee(sessionEmployee)) return sessionEmployee;
+    const initialState = get(connectionState);
     try {
         const authoritative = await resolveEmployeeForAuthentication(sessionEmployee.id);
         // Signing out or switching user while the live query is in flight must
@@ -631,8 +677,14 @@ export async function revalidateCurrentEmployeeSession(): Promise<Employee | nul
         currentEmployee.set(authoritative);
         return authoritative;
     } catch (error) {
-        // A till which claims MariaDB is ready must never retain stale admin or
-        // checkout rights after the authoritative verification itself fails.
+        // An outage must not erase the already authenticated cashier's local
+        // shift. New sign-ins still use the strict authority check above, and
+        // reconnect revalidates the saved profile before continuing online.
+        if (get(currentEmployee) !== sessionEmployee) return get(currentEmployee);
+        if (await canKeepStaffSessionDuringOutage(sessionEmployee, initialState, error)) {
+            return sessionEmployee;
+        }
+        if (get(currentEmployee) !== sessionEmployee) return get(currentEmployee);
         if (get(currentEmployee) === sessionEmployee) logout();
         throw error;
     }

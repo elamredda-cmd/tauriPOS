@@ -12,6 +12,7 @@
  */
 
 import Database from '@tauri-apps/plugin-sql';
+import { invoke } from '@tauri-apps/api/core';
 import { readPaymentExtraTotalsByTill, reportPaymentExtraTotals } from '../paymentExtras';
 import { connectionState, type MysqlConfig } from './connection';
 import { get } from 'svelte/store';
@@ -3787,7 +3788,18 @@ export async function mysqlSaveClosedEmployeeAttendance(
 /**
  * Generic upsert using MariaDB's `INSERT … ON DUPLICATE KEY UPDATE` syntax.
  */
-export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id', allowShopIdentityAdoption = false): Promise<void> {
+    if (table === 'app_identity' && !allowShopIdentityAdoption) {
+        const d = await getDb();
+        const config = get(connectionState).mysqlConfig;
+        if (!config) throw new Error('MariaDB configuration is unavailable');
+        const epochs: any[] = await d.select("SELECT value FROM settings WHERE `key` = 'server_data_epoch' LIMIT 1");
+        await invoke('commit_mysql_outbox_operation', {
+            mysqlUri: buildMysqlUri(config), tableName: table, operation: 'upsert', data: obj,
+            idKey, serverDataEpoch: String(epochs[0]?.value || ''),
+        });
+        return;
+    }
     if (table === 'products') {
         await mysqlSaveProductStrict(obj);
         return;
@@ -3833,6 +3845,7 @@ export async function mysqlUpsert(table: string, obj: any, idKey: string = 'id')
 
 /** Refuse to replay an offline row over a newer server edit. */
 export async function mysqlSafeOfflineUpsert(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    if (table === 'app_identity') return mysqlUpsert(table, obj, idKey);
     const d = await getDb();
     const validCols = await getTableColumns(table);
     if (obj.updatedAt && validCols.includes('updatedAt')) {

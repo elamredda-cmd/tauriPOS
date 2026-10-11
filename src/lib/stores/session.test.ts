@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const sessionMocks = vi.hoisted(() => ({
     isTauri: vi.fn(() => false),
     getAuthoritativeEmployeeForSession: vi.fn(),
+    pingMysql: vi.fn(async () => true),
     saveEmployeeProfile: vi.fn(),
     upgradeEmployeeLegacyPin: vi.fn(),
     recordAuditEvent: vi.fn(async () => undefined),
@@ -18,6 +19,11 @@ vi.mock('./database', () => ({
     saveEmployeeProfile: sessionMocks.saveEmployeeProfile,
     upgradeEmployeeLegacyPin: sessionMocks.upgradeEmployeeLegacyPin,
     recordAuditEvent: sessionMocks.recordAuditEvent,
+}));
+
+vi.mock('./connection', async (importOriginal) => ({
+    ...await importOriginal<typeof import('./connection')>(),
+    pingMysql: sessionMocks.pingMysql,
 }));
 
 import { ATTENDANCE_ONLY_PIN_HASH_PREFIX, employeesDB, type Employee } from './db';
@@ -87,6 +93,7 @@ function installWebStorage(): Storage {
 beforeEach(() => {
     sessionMocks.isTauri.mockReturnValue(false);
     sessionMocks.getAuthoritativeEmployeeForSession.mockReset();
+    sessionMocks.pingMysql.mockReset().mockResolvedValue(true);
     sessionMocks.saveEmployeeProfile.mockReset();
     sessionMocks.upgradeEmployeeLegacyPin.mockReset();
     sessionMocks.recordAuditEvent.mockClear();
@@ -99,8 +106,9 @@ beforeEach(() => {
     });
 });
 
-afterEach(() => {
+afterEach(async () => {
     logout();
+    await vi.dynamicImportSettled();
     employeesDB.set([]);
     vi.unstubAllGlobals();
 });
@@ -157,6 +165,7 @@ describe('employee PIN security', () => {
 
         await expect(authenticateEmployeePin(cached.id, '1111')).rejects.toThrow('connection lost');
         expect(get(currentEmployee)).toBeNull();
+        expect(sessionMocks.pingMysql).not.toHaveBeenCalled();
     });
 
     it('defers cached login while the first MariaDB connection outcome is still pending', async () => {
@@ -338,6 +347,153 @@ describe('employee PIN security', () => {
 
         await expect(revalidation).resolves.toBeNull();
         expect(get(currentEmployee)).toBeNull();
+    });
+
+    async function signInBeforeDatabaseOutage() {
+        const storage = installWebStorage();
+        const staff = employee('existing-offline-cashier', await hashPin('1357'));
+        employeesDB.set([staff]);
+        await authenticateEmployeePin(staff.id, '1357');
+        await vi.dynamicImportSettled();
+        currentShiftId.set('existing-local-shift');
+        connectionState.set({
+            mode: 'multi',
+            mysqlConfig: { host: 'localhost', port: 3306, user: 'fixture', password: '', database: 'fixture' },
+            mysqlOnline: true,
+            mysqlReady: true,
+            mysqlStatus: 'online',
+            syncError: null,
+        });
+        return { staff: get(currentEmployee)!, storage };
+    }
+
+    function confirmDatabaseOutage() {
+        sessionMocks.pingMysql.mockImplementation(async () => {
+            connectionState.update((state) => ({
+                ...state, mysqlOnline: false, mysqlStatus: 'offline',
+            }));
+            return false;
+        });
+    }
+
+    it.each([
+        'error communicating with database: Broken pipe (os error 32)',
+        'Connection refused (os error 61)',
+        'Authoritative staff check timed out',
+    ])('preserves the authenticated cashier and shift after a confirmed outage: %s', async (message) => {
+        const { staff, storage } = await signInBeforeDatabaseOutage();
+        const remembered = storage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY);
+        sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error(message));
+        confirmDatabaseOutage();
+
+        await expect(revalidateCurrentEmployeeSession()).resolves.toBe(staff);
+
+        expect(sessionMocks.pingMysql).toHaveBeenCalledOnce();
+        expect(get(currentEmployee)).toBe(staff);
+        expect(get(currentShiftId)).toBe('existing-local-shift');
+        expect(currentEmployeeAuthorizationVersion()).toBe(staff.updatedAt);
+        expect(storage.getItem(REMEMBERED_EMPLOYEE_SESSION_KEY)).toBe(remembered);
+        expect(get(connectionState)).toMatchObject({ mysqlOnline: false, mysqlStatus: 'offline' });
+
+        // Once the server comes back its current staff record is authoritative.
+        connectionState.update((state) => ({ ...state, mysqlOnline: true, mysqlStatus: 'online' }));
+        sessionMocks.getAuthoritativeEmployeeForSession.mockResolvedValue({ ...staff, isActive: false });
+        await expect(revalidateCurrentEmployeeSession()).resolves.toBeNull();
+        expect(get(currentShiftId)).toBe('');
+    });
+
+    it('requires staff verification when the server is still reachable after a query timeout', async () => {
+        await signInBeforeDatabaseOutage();
+        sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error('Authoritative staff check timed out'));
+
+        await expect(revalidateCurrentEmployeeSession()).rejects.toThrow('timed out');
+
+        expect(sessionMocks.pingMysql).toHaveBeenCalledOnce();
+        expect(get(currentEmployee)).toBeNull();
+        expect(get(currentShiftId)).toBe('');
+    });
+
+    it.each(['SELECT command denied', 'Unknown column employees.role', 'error occurred while decoding column role'])(
+        'does not treat an authority or schema failure as an offline session: %s', async (message) => {
+            await signInBeforeDatabaseOutage();
+            sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error(message));
+            confirmDatabaseOutage();
+
+            await expect(revalidateCurrentEmployeeSession()).rejects.toThrow(message);
+
+            expect(sessionMocks.pingMysql).not.toHaveBeenCalled();
+            expect(get(currentEmployee)).toBeNull();
+            expect(get(currentShiftId)).toBe('');
+        },
+    );
+
+    it.each([
+        { updatedAt: '2026-10-11T22:00:00.000Z' },
+        { isActive: false },
+        { role: 'manager' as const },
+    ])('does not preserve a profile changed locally while checking the outage: %j', async (change) => {
+        const { staff } = await signInBeforeDatabaseOutage();
+        sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error('connection refused'));
+        confirmDatabaseOutage();
+        employeesDB.set([{ ...staff, ...change }]);
+
+        await expect(revalidateCurrentEmployeeSession()).rejects.toThrow('connection refused');
+        expect(get(currentEmployee)).toBeNull();
+        expect(get(currentShiftId)).toBe('');
+    });
+
+    it('does not sign out a newer cashier when the old cashier verification fails', async () => {
+        await signInBeforeDatabaseOutage();
+        let rejectAuthority!: (error: Error) => void;
+        const pending = new Promise<Employee>((_resolve, reject) => { rejectAuthority = reject; });
+        sessionMocks.getAuthoritativeEmployeeForSession.mockReturnValue(pending);
+        const checking = revalidateCurrentEmployeeSession();
+        await vi.waitFor(() => expect(sessionMocks.getAuthoritativeEmployeeForSession).toHaveBeenCalledOnce());
+        const replacement = employee('replacement-cashier', '', 'cashier');
+        currentEmployee.set(replacement);
+        currentShiftId.set('replacement-shift');
+        rejectAuthority(new Error('connection refused'));
+
+        await expect(checking).resolves.toBe(replacement);
+        expect(get(currentEmployee)).toBe(replacement);
+        expect(get(currentShiftId)).toBe('replacement-shift');
+        expect(sessionMocks.pingMysql).not.toHaveBeenCalled();
+    });
+
+    it('does not sign out a newer cashier when the outage probe finishes late', async () => {
+        await signInBeforeDatabaseOutage();
+        sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error('connection refused'));
+        let finishProbe!: (reachable: boolean) => void;
+        sessionMocks.pingMysql.mockReturnValue(new Promise((resolve) => { finishProbe = resolve; }));
+        const checking = revalidateCurrentEmployeeSession();
+        await vi.waitFor(() => expect(sessionMocks.pingMysql).toHaveBeenCalledOnce());
+        const replacement = employee('replacement-during-probe', '', 'cashier');
+        currentEmployee.set(replacement);
+        currentShiftId.set('replacement-shift');
+        connectionState.update((state) => ({ ...state, mysqlOnline: false, mysqlStatus: 'offline' }));
+        finishProbe(false);
+
+        await expect(checking).resolves.toBe(replacement);
+        expect(get(currentEmployee)).toBe(replacement);
+        expect(get(currentShiftId)).toBe('replacement-shift');
+    });
+
+    it('does not carry the existing session into a different shop connection during the outage probe', async () => {
+        await signInBeforeDatabaseOutage();
+        sessionMocks.getAuthoritativeEmployeeForSession.mockRejectedValue(new Error('connection refused'));
+        sessionMocks.pingMysql.mockImplementation(async () => {
+            connectionState.update((state) => ({
+                ...state,
+                mysqlOnline: false,
+                mysqlStatus: 'offline',
+                mysqlConfig: { ...state.mysqlConfig!, database: 'different-shop' },
+            }));
+            return false;
+        });
+
+        await expect(revalidateCurrentEmployeeSession()).rejects.toThrow('connection refused');
+        expect(get(currentEmployee)).toBeNull();
+        expect(get(currentShiftId)).toBe('');
     });
 
     it('locks an employee login after five incorrect attempts', async () => {

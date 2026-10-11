@@ -9006,7 +9006,10 @@ export async function getSyncRuntimeDiagnostics(): Promise<SyncRuntimeDiagnostic
         const remote = await getMysqlDb();
         if (!remote) throw new Error('MariaDB connection is unavailable');
         await remote.select('SELECT 1 AS reachable');
-        const syncReady = state.mysqlOnline && !state.syncError;
+        // Opening/probing the connection can change its state while we await it.
+        // A responding server is not ready until startup recovery has finished.
+        const latestState = get(connectionState);
+        const syncReady = latestState.mysqlOnline && latestState.mysqlReady && !latestState.syncError;
         return {
             browserPreview: false,
             syncApplicable: true,
@@ -9015,16 +9018,17 @@ export async function getSyncRuntimeDiagnostics(): Promise<SyncRuntimeDiagnostic
             reachabilityError: '',
             syncBlockReason: syncReady
                 ? ''
-                : state.syncError || 'MariaDB answered, but sync startup has not completed.',
+                : latestState.syncError || 'MariaDB answered, but sync startup has not completed.',
         };
     } catch (error) {
+        const latestState = get(connectionState);
         return {
             browserPreview: false,
             syncApplicable: true,
             mariaDbReachable: false,
             syncReady: false,
             reachabilityError: databaseErrorMessage(error),
-            syncBlockReason: state.syncError || 'MariaDB is unreachable.',
+            syncBlockReason: latestState.syncError || 'MariaDB is unreachable.',
         };
     }
 }
@@ -9038,8 +9042,8 @@ export async function validateDatabaseSchemas(): Promise<SchemaValidationResult>
         const local = await sqlite.getDb();
         const versionRows: any[] = await local.select(`PRAGMA user_version`);
         const localSchemaVersion = Number(versionRows[0]?.user_version || 0);
-        if (localSchemaVersion !== 2) {
-            issues.push(`SQLite: schema version is ${localSchemaVersion}; expected 2`);
+        if (localSchemaVersion !== sqlite.LOCAL_SCHEMA_VERSION) {
+            issues.push(`SQLite: schema version is ${localSchemaVersion}; expected ${sqlite.LOCAL_SCHEMA_VERSION}`);
         }
         for (const [table, expected] of Object.entries({
             ...CRITICAL_SCHEMA,

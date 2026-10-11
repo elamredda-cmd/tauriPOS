@@ -1,6 +1,6 @@
 # Dojo sandbox verification
 
-Updated 8 October 2026. This is a test checklist, not a production certification.
+Updated 11 October 2026. This is a test checklist, not a production certification.
 
 See [the current UAT readiness record](DOJO_UAT_READINESS.md) for this build's fixes,
 new native tests, release gates and unverified items. The September 23 evidence below
@@ -21,7 +21,40 @@ For acceptance testing, use sandbox credentials only:
 5. Exercise recovery after approval/local completion interruption. Check that it restores the same allocated receipt without creating a second charge, stock movement, loyalty movement or payment. Never intentionally interrupt a live customer payment for this test.
 6. Verify that pending work blocks terminal reassignment and Z close. Cancellation is a request; unknown provider results must remain protected.
 
-Automated local tests use isolated SQLite or mocked provider boundaries, not live credentials. They do not replace native sandbox or Windows UAT. The historical native results below used shared coordination and are not evidence that this new dedicated mode has passed native provider testing.
+Automated local tests use isolated SQLite or mocked provider boundaries, not live credentials. They do not replace native sandbox or Windows UAT. The October 11 results below cover dedicated-mode native testing; the September results used shared coordination.
+
+### Native dedicated-mode verification — 11 October 2026
+
+Tested the current-source macOS Tauri debug app bundle, not the built-in browser. The shop stayed in **multi** mode, training was off, and the existing sandbox key was unchanged. Switched the legacy registration to **dedicated** after resolving its older shared timeout through Reports. Then stopped the Homebrew MariaDB service and confirmed no TCP 3306 listener throughout payment and cancellation. Internet remained available.
+
+| Native action with MariaDB stopped | Verified result |
+| --- | --- |
+| `VCMLABJSIP0`, £1.09 normal-goods sale | POS displayed success. Intent `pi_sandbox_ZB8x75pe2EqRWsa04CFJlw` and session `ts_sandbox_6acbf16fa7da208ec03b28fb` were **Captured**. One local receipt **1000079**, one payment of 109 pence, local recovery journal, and one stable `terminal-sale:` outbox entry. |
+| `VCMLABJSIS0`, press **Cancel Terminal** immediately after sending | Session `ts_sandbox_6acbf1fda7da208ec03b28ff` recorded **CancelRequested → Canceled**. Intent `pi_sandbox_N-s1BWc52kyRBNtBkmq2Ag` remained **Created**, with the canceled session in its history. Local attempt `44628d7f-31b5-49db-b2b8-1ad477a97a30` was **cancelled**; no order/payment was saved; the £1.09 trolley remained available. |
+| Earlier cancellation after simulated card entry | The simulator reached signature verification, so cancellation was not confirmed. Rejected the signature through the native dialog; attempt `fcf24c4d-70f6-43d1-b154-43d23e8376cb` finished **failed**, session **Declined**, with no order/payment. This is not counted as a successful cancel-button test. |
+| Restart MariaDB and allow normal reconnect/sync | MariaDB contained exactly one order and one 109-pence payment for the successful attempt `f6754c74-0a3f-4f16-94c8-16b36e2e9e7e`, and zero orders/payments for both non-approved attempts. Native dashboard showed ready, zero pending writes and zero conflicts; the local queue was empty and no terminal attempts were unresolved. |
+
+The older £6 timeout (`69c6344a-6ac2-4ea6-873b-8f8881c23920`) was canceled through **Cancel expired test payment** and the automatic second provider observation, not by deleting or forcing its journal. MariaDB was restarted, the disposable cancellation trolley cleared, and the original `VCMLABJTIP0` selection restored while retaining dedicated ownership. The app remained open. Local completed sale totals increased by exactly one sale / 109 pence.
+
+Observations from this initial run, fixed and retested below: the first send during the online-to-offline transition was blocked by a missing staff shift before contacting Dojo. Signing in again with MariaDB stopped restored the local shift; subsequent payment, admin/settings navigation and cancellation worked without another login. The Sync Dashboard also falsely warned that SQLite schema version 4 should be 2; independent source review confirmed a stale diagnostic comparison, not a failed migration or sync gate. No application source was changed in this initial testing run.
+
+Independent focused regression checks: **96 passed** (terminal ownership, session flow, local terminal safety and report recovery). These macOS sandbox results do not certify Windows, physical-terminal UAT, live credentials, internet-loss handling, refunds, tips/cashback, or every remaining simulator scenario.
+
+### Staff-session and schema fixes: native retest — 11 October 2026
+
+An independent **Sol 6.1 Ultra** agent retested the rebuilt native macOS Tauri debug app after both fixes. The shop remained in multi mode with dedicated terminal ownership, training off, internet available and the existing sandbox key unchanged. MariaDB was stopped at 20:43:02 UTC and restarted at 20:46:44 UTC; no TCP 3306 listener was present during the payment/cancellation tests.
+
+| Check | Result |
+| --- | --- |
+| Existing staff session across server loss | Alan remained signed in through more than 49 seconds offline, Admin/Settings navigation, payment and cancellation. The original shift `95ebefa1-22b0-4f2c-83b1-2defbf9a0705` was retained. The audit contained one initial login and no subsequent logout/re-login. |
+| `VCMLABJSIP0`, £1.09 sale on the first Send | Native success, receipt **1000080**, attempt `f437ab94-f934-4800-87d1-fc4f0ca246e3`. Intent `pi_sandbox_2qOlcJslsUSqSRqMFBow8g` and session `ts_sandbox_6acbf50b3be93414b201942a` were **Captured**. Exactly one local order/payment and one stable sale outbox entry. |
+| `VCMLABJSIS0`, actual on-screen **Cancel Terminal** | Native cancellation confirmed. Attempt `a02ce801-a10b-4ede-a7fb-a28d8970989b` was **cancelled**; session `ts_sandbox_6acbf571a7da208ec03b2919` recorded **CancelRequested → Canceled**. Intent `pi_sandbox_A1CVL6MsTkKa_pKR-eT6vQ` remained **Created** with the canceled session in its history. No order/payment was created; the £1.09 trolley remained available. |
+| Normal reconnect and independent shared-database reconciliation | Exactly one shared order and one 109-pence payment for receipt **1000080**; zero orders/payments for the canceled attempt. Local queue drained to zero; no terminal attempts remained unresolved. |
+| Native Sync Dashboard | **Reachable**, **Ready**, **Pending 0**, **Conflicts 0**, **Schema Good**. The stale schema-version warning was gone. |
+
+The disposable cancellation trolley was cleared normally. MariaDB and the original `VCMLABJTIP0` terminal selection were restored, dedicated ownership and the saved key were retained, and Tauri was left open at an empty checkout with the same cashier signed in and **Synced**.
+
+Focused automated verification: **152 tests passed across 7 files**, covering staff-session security/races, schema diagnostics, sync concurrency and terminal/payment recovery. Svelte/TypeScript checks reported **0 errors and 0 warnings**; the command-permission audit and native debug app build passed. This retest verifies the two fixes and native MariaDB-unavailable payment/cancellation flow; it does not replace Windows or physical-terminal UAT.
 
 ### Dedicated-mode verification — 8 October 2026
 
@@ -32,6 +65,8 @@ Automated local tests use isolated SQLite or mocked provider boundaries, not liv
 
 ## Corrected behavior
 
+- An already authenticated cashier keeps the same local shift if a staff recheck encounters a transport failure and the connection manager confirms MariaDB is offline. The cached staff profile and authorization version must still match. New sign-ins remain strict, and deactivation/profile changes or non-transport verification failures still revoke the session.
+- Sync diagnostics use the SQLite migration's current schema version and read connection readiness after their live probe, including whether startup recovery has finished.
 - A signature decision does not itself complete a sale. The POS continues checking the original payment intent until capture is confirmed.
 - Signature dialogs do not stop polling or terminal-lease renewal. A late or rejected control request is reconciled with the authoritative payment result.
 - A failed cancellation does not shorten the payment observation deadline. An unknown result stays blocked against a duplicate payment.

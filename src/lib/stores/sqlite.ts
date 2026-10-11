@@ -20,7 +20,7 @@ let db: Database | null = null;
 let productSearchIndexReady = false;
 const PRODUCT_SEARCH_COUNT_CAP = 1000;
 const PRODUCT_CONTAINS_SEARCH_MIN_LENGTH = 3;
-const LOCAL_SCHEMA_VERSION = 4;
+export const LOCAL_SCHEMA_VERSION = 4;
 const PRE_SCHEMA_BACKUP_MARKER = `migration_local_pre_schema_backup_v${LOCAL_SCHEMA_VERSION}`;
 
 async function getLocalSchemaVersion(d: Database): Promise<number> {
@@ -246,6 +246,7 @@ export async function initDb() {
             saleBundle TEXT NOT NULL,
             providerReference TEXT DEFAULT '',
             operatorResolution TEXT NOT NULL DEFAULT '',
+            journalScope TEXT NOT NULL DEFAULT 'shared',
             error TEXT DEFAULT '',
             tillId TEXT DEFAULT '',
             createdAt TEXT NOT NULL,
@@ -887,6 +888,9 @@ async function runMigrations() {
     await addColumnIfMissing('payment_terminal_attempts', 'expectedProviderAmount', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing('payment_terminal_attempts', 'providerReference', "TEXT DEFAULT ''");
     await addColumnIfMissing('payment_terminal_attempts', 'operatorResolution', "TEXT NOT NULL DEFAULT ''");
+    // Existing attempts keep their original shared authority; only a new
+    // native dedicated-terminal preparation may create a local journal.
+    await addColumnIfMissing('payment_terminal_attempts', 'journalScope', "TEXT NOT NULL DEFAULT 'shared'");
     await addColumnIfMissing('payment_terminal_attempts', 'tillId', "TEXT DEFAULT ''");
 
     // Experimental builds may already have one or both account tables with an
@@ -1521,7 +1525,11 @@ function normalizeValue(v: any): any {
  * Filters incoming object keys to only those that exist as columns in the table,
  * and converts booleans to 0/1.
  */
-export async function upsert(table: string, obj: any, idKey: string = 'id') {
+export async function upsert(table: string, obj: any, idKey: string = 'id', allowShopIdentityAdoption = false) {
+    if (table === 'app_identity' && !allowShopIdentityAdoption) {
+        await commitBatch([{ table, data: obj, idKey }]);
+        return;
+    }
     const d = await getDb();
     if (table === 'products') obj = normalizeProductIdentifiers(obj);
     if (table === 'customers') obj = normalizeCustomerLoyaltyCode(obj);
