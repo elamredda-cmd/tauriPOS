@@ -419,7 +419,7 @@
                                 <div><dt>Rule</dt><dd>{testParsed.rule.name}</dd></div>
                                 <div><dt>Product PLU</dt><dd>{testParsed.scalePlu}</dd></div>
                                 <div><dt>{testParsed.rule.valueType === 'price' ? 'Total price' : 'Weight'}</dt><dd>{testParsed.rule.valueType === 'price' ? `£${testParsed.value.toFixed(testParsed.rule.decimalPlaces)}` : `${testParsed.value.toFixed(testParsed.rule.decimalPlaces)} kg`}</dd></div>
-                                <div><dt>Check digit</dt><dd>Valid</dd></div>
+                                <div><dt>Check digit</dt><dd>{testParsed.rule.validateCheckDigit ? 'Valid' : 'Not checked'}</dd></div>
                             </dl>
                         </div>
                     {:else if activeRule && testState === 'idle'}

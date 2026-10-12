@@ -1,0 +1,247 @@
+{
+  "schemaVersion": 1,
+  "title": "Supplementary native screenshot review and saved-evidence credential check",
+  "auditDate": "2026-10-12",
+  "reviewedAtUtc": "2026-10-12 09:10:26 UTC",
+  "sourceRoot": "/Users/elamreda/Desktop/Tauri for Svelte POS",
+  "screenshotDirectory": "docs/qa/audit-2026-10-12/screenshots",
+  "provenance": {
+    "method": "Independent read-only inspection of saved native screenshots, source cross-checks and saved native-action JSON",
+    "nativeUiActionsByThisReviewer": 0,
+    "productFilesChangedByThisReviewer": 0,
+    "capturedViewport": "1024 by 768 logical pixels; most PNGs are 2048 by 1536 Retina pixels",
+    "notAClaimOf": "Every button tested, Windows validation, hardware validation, data persistence validation or a security certification"
+  },
+  "supplementaryScreenshots": [
+    {
+      "file": "43-customer-account.png",
+      "state": "Back Office customer account dialog, zero balance, account on hold, empty activity",
+      "layoutResult": "No clipping, overlapping controls or missing visible footer actions observed in this captured state.",
+      "observations": [
+        "Refresh and Close, balance adjustment actions, account settings and activity area fit the dialog.",
+        "The off switch is consistent with Account on hold: it controls Pay Later enablement, not a separate hold flag."
+      ],
+      "sourceCrossCheck": {
+        "file": "src/routes/customers/+page.svelte",
+        "line": 1934,
+        "reason": "Switch label selects Pay Later active when accountEnabledDraft is true and Account on hold when false."
+      }
+    },
+    {
+      "file": "44-new-account-adjustment-failure.png",
+      "state": "Opening balance adjustment with a foreground error dialog",
+      "layoutResult": "Error message and acknowledgement control fit; backing form Cancel and Post Adjustment controls remain visible. No layout defect observed.",
+      "functionalResult": "The screenshot visibly confirms a failed customer account update reporting Customer Pay Later account was not found.",
+      "findingIds": ["FINAL-OBS-01"],
+      "limitations": "The screenshot does not establish why the account is missing, whether any data was partially saved, or what subsequent refresh/retry does."
+    },
+    {
+      "file": "45-loyalty-history.png",
+      "state": "Customer loyalty dialog with zero current points and paired positive/negative manual adjustments",
+      "layoutResult": "History, loyalty identifier and Adjust Points, Refresh and Close controls fit. No clipping or overlapping controls observed.",
+      "limitations": "A displayed zero following two opposite adjustments is not independent proof of persistence, history cleanup protection or multi-till synchronization."
+    },
+    {
+      "file": "46-about.png",
+      "state": "Back Office About page",
+      "layoutResult": "Branding, explanatory text and business contact information fit the visible content area. No genuine content clipping observed.",
+      "limitations": "The partially visible bottom sidebar entry belongs to a scrollable navigation area; this screenshot alone does not prove it is inaccessible."
+    },
+    {
+      "file": "bo-stock-draft.png",
+      "state": "Back Office Stock Receiving with a one-line draft",
+      "layoutResult": "Supplier/reference controls, Add Note, Clear Draft, Add Products, line removal and Receive Stock footer fit the captured viewport. No clipping or overlapping action observed.",
+      "limitations": "This is only a one-line draft. It does not verify a long draft, expanded suggestion list, product picker, receipt posting, validation or persistence."
+    },
+    {
+      "file": "50-age-verification.png",
+      "state": "Checkout age verification dialog",
+      "layoutResult": "Restricted-product text, Do Not Add and ID Checked actions fit; no genuine dialog clipping observed.",
+      "limitations": "The prompt appearing does not prove all restricted item paths are protected."
+    },
+    {
+      "file": "51-age-cached-scan-result.png",
+      "state": "Checkout with one restricted item in trolley after the preceding native test",
+      "layoutResult": "Trolley item, quantity controls, totals and checkout actions fit.",
+      "limitations": "The native-action sequence, not the filename or still image, is required to verify authorization and scan behavior."
+    },
+    {
+      "file": "52-next-scan-after-sale.png",
+      "state": "Checkout with a new one-line trolley and no sale-complete overlay",
+      "layoutResult": "Main screen controls and totals fit without an overlay obscuring checkout.",
+      "limitations": "The still image does not independently establish that a scan dismissed the previous completion dialog. Refer to native-action sequence."
+    },
+    {
+      "file": "53-pay-later-confirm.png",
+      "state": "Checkout Pay Later confirmation with an enabled customer, zero prior balance and projected new balance",
+      "layoutResult": "Customer controls, account amount summary and Confirm Pay Later footer fit. No clipping or overlapping action observed.",
+      "limitations": "Confirmation display does not prove the resulting account charge is posted successfully."
+    },
+    {
+      "file": "54-pay-later-pool-timeout.png",
+      "state": "Checkout Pay Later confirmation still visible",
+      "layoutResult": "Visible layout fits, including Confirm Pay Later footer.",
+      "limitations": "Despite the filename, no pool-timeout message is visible in this PNG. Use native-actions.json as evidence for the recorded failure rather than claiming this image independently demonstrates it."
+    }
+  ],
+  "findings": [
+    {
+      "id": "FINAL-OBS-01",
+      "severity": "P2",
+      "classification": "Observed functional failure, not a screenshot-confirmed UI defect",
+      "title": "New customer opening balance adjustment failed",
+      "evidence": ["44-new-account-adjustment-failure.png"],
+      "actual": "Customer account update was rejected with Customer Pay Later account was not found.",
+      "expected": "An eligible customer's opening balance adjustment should post, or account initialization prerequisites should be explained before submission.",
+      "rootCauseStatus": "Not established by screenshot inspection; correlate native-action sequence and customer account backend path before fixing.",
+      "sourceMessageLocations": [
+        {"file": "src-tauri/src/commerce.rs", "line": 4671},
+        {"file": "src-tauri/src/commerce.rs", "line": 4699}
+      ]
+    }
+  ],
+  "rejectedCandidates": [
+    {
+      "file": "43-customer-account.png",
+      "candidate": "Off switch appears inconsistent with Account on hold",
+      "resolution": "Not a defect: the switch controls account enablement; off correctly displays on hold. Confirmed in customer page source."
+    },
+    {
+      "file": "54-pay-later-pool-timeout.png",
+      "candidate": "Screenshot proves database pool timeout",
+      "resolution": "Not visually established: failure text is absent from this image. Recorded native action is separate evidence."
+    }
+  ],
+  "securityAudit": {
+    "scope": "Point-in-time evidence check of the saved native-action log and 64 named PNG files; not application security certification",
+    "actionLogPath": "docs/qa/audit-2026-10-12/native-actions.json",
+    "actionEntryCountAtScan": 524,
+    "secureFieldLinesExamined": 23,
+    "unsafeSecureFieldValuesFound": 0,
+    "secretPatternCandidatesFound": 0,
+    "patternCategoriesChecked": [
+      "Bearer credentials",
+      "Common live/test API key prefixes",
+      "JWT-shaped tokens",
+      "URL-embedded username/password pairs",
+      "Credential-labelled assignments and high-entropy candidates in the earlier pass"
+    ],
+    "readableStaffPinApiKeyOrPasswordObservedInReviewedPngs": false,
+    "filesRequiringSecretRedaction": [],
+    "screenshotFilesReviewed": [
+      "01-checkout-empty.png",
+      "02-attendance-pin.png",
+      "03-drawer-macos-limitation.png",
+      "04-scale-calculation.png",
+      "05-customer-validation.png",
+      "06-sale-change.png",
+      "07-admin-1024x768.png",
+      "08-items-1024x768.png",
+      "09-add-item-1024x768.png",
+      "10-goods-manager.png",
+      "11-categories.png",
+      "12-stock-draft.png",
+      "13-stock-receipts.png",
+      "14-orders.png",
+      "15-order-detail.png",
+      "16-x-report.png",
+      "17-whole-system-preview.png",
+      "18-cash-up.png",
+      "19-orphan-customer-keyboard.png",
+      "20-permissions-attendance.png",
+      "21-attendance.png",
+      "22-attendance-overlap.png",
+      "23-scale-designer.png",
+      "24-sync.png",
+      "25-audit-detail.png",
+      "26-themes.png",
+      "27-fonts.png",
+      "28-button-layout.png",
+      "29-unchecked-digit-valid.png",
+      "30-scale-setup.png",
+      "31-printer-modules.png",
+      "32-label-designer.png",
+      "33-receipt-designer.png",
+      "34-customer-display-settings.png",
+      "35-feedback.png",
+      "36-dojo-available.png",
+      "37-sumup-setup.png",
+      "38-cctv.png",
+      "39-licence.png",
+      "40-cash-control.png",
+      "41-maintenance-backup.png",
+      "42-backoffice-overview.png",
+      "43-customer-account.png",
+      "44-new-account-adjustment-failure.png",
+      "45-loyalty-history.png",
+      "46-about.png",
+      "47-database-setup.png",
+      "48-quick-label-empty.png",
+      "49-quick-label-selected.png",
+      "50-age-verification.png",
+      "51-age-cached-scan-result.png",
+      "52-next-scan-after-sale.png",
+      "53-pay-later-confirm.png",
+      "54-pay-later-pool-timeout.png",
+      "bo-attendance.png",
+      "bo-audit-log.png",
+      "bo-customers.png",
+      "bo-items.png",
+      "bo-orders.png",
+      "bo-reports.png",
+      "bo-settings.png",
+      "bo-staff.png",
+      "bo-stock-draft.png",
+      "bo-stock-receiving.png"
+    ],
+    "observations": [
+      "Attendance PIN and database password appear as masking dots, not readable values.",
+      "Native-action secure-field values are omitted, masked or explicitly redacted.",
+      "The earlier ten numeric-only keyboard action labels cover each keypad digit in a keyboard test; they are not evidence of a staff PIN being logged.",
+      "Dojo and SumUp screenshots do not reveal a saved secret API key.",
+      "Licence request QR encodes shop identity/till count based on page source, not a secret API credential; the signed licence input is empty."
+    ],
+    "optionalPrivacyRedactionBeforePublicSharing": [
+      {
+        "file": "39-licence.png",
+        "category": "Shop identity, licence/request identifiers and request QR",
+        "requiredForSecretProtection": false
+      },
+      {
+        "file": "46-about.png",
+        "category": "Business contact details",
+        "requiredForSecretProtection": false
+      },
+      {
+        "file": "47-database-setup.png",
+        "category": "Non-secret database host, username and database name",
+        "requiredForSecretProtection": false
+      },
+      {
+        "file": "38-cctv.png",
+        "category": "Local network address and port",
+        "requiredForSecretProtection": false
+      },
+      {
+        "file": "41-maintenance-backup.png",
+        "category": "Local filesystem backup path",
+        "requiredForSecretProtection": false
+      },
+      {
+        "files": "Customer, staff, order, account and report screenshots generally",
+        "category": "Names, loyalty identifiers, receipts and sales values; user described this laptop data as mock",
+        "requiredForSecretProtection": false
+      }
+    ],
+    "limitations": [
+      "Heuristic scans and visual review can miss unusual secret formats; no exposed secret was observed, which is not proof that every possible secret has been excluded.",
+      "No credential values are reproduced in this report.",
+      "Files or native-action entries added after the recorded scan time are outside this point-in-time review and require a fresh check."
+    ]
+  },
+  "overallLimitations": [
+    "This reviewer did not click any native button or change app data; all runtime sequences are owned by the root auditor.",
+    "Screenshots demonstrate only their captured state and viewport, not every responsive size, long content case, connected peripheral or Windows environment.",
+    "No product fixes or credential redactions were performed by this reviewer."
+  ]
+}

@@ -172,9 +172,11 @@
     .receipt-barcode :global(strong) { margin-top: 2px; font-size: .72em; letter-spacing: .12em; }
 
     @media print {
-        :global(body *) { visibility: hidden !important; }
-        :global(.receipt-print-target), :global(.receipt-print-target *) { visibility: visible !important; }
-        :global(.receipt-print-target) {
+        /* Receipt is imported by the root print host, so this stylesheet is
+           present on label pages too. Never hide another document's contents. */
+        :global(body.system-printing *) { visibility: hidden !important; }
+        :global(body.system-printing .receipt-print-target), :global(body.system-printing .receipt-print-target *) { visibility: visible !important; }
+        :global(body.system-printing .receipt-print-target) {
             position: absolute !important;
             left: 0 !important;
             top: 0 !important;

@@ -1,0 +1,209 @@
+{
+  "recordedAtUtc": "2026-10-12T22:18:43Z",
+  "scope": "Device-local ordinary checkout trolley persistence across reloads and application restarts",
+  "status": "PASS",
+  "nativeStatus": "PASS",
+  "automatedStatus": "PASS",
+  "sourceFixSummary": [
+    "Unfinished ordinary checkout drafts are saved to this device's SQLite settings with a synchronous WebView mirror; no MariaDB dependency or cross-till draft sync is introduced.",
+    "Revisioned null tombstones and atomic SQLite compare-and-swap prevent older queued or old-WebView saves from reviving a cleared trolley.",
+    "Cart lines, selected line, customer reference, manual discount reference and recovery identities are retained. Tender, payment modal/method, employee credentials and customer financial balances are excluded.",
+    "Validation rejects malformed snapshots without overwriting them; persistence failures remain visible and retryable.",
+    "Checkout startup and save boundaries check committed sale/hold ownership before allowing recovery or new checkout activity.",
+    "Three startup NULL-normalization migrations now avoid updating already-normalized rows while preserving legacy empty/NULL repair, avoiding unnecessary catalogue/FTS update cascades.",
+    "The isolated QA allow-list now includes the checkout boundary checkpoints used by these scenarios; the refreshed full automated checks and normal non-QA build passed after this harness correction."
+  ],
+  "environment": {
+    "nativeApplication": "L&Bj Native QA",
+    "nativeIdentifier": "com.elamreda.tauri-app.native-qa",
+    "isolatedQaProfile": true,
+    "nativePlatform": "macOS arm64",
+    "persistenceDatabase": "Device-local SQLite",
+    "mariaDbRequiredForDraftRecovery": false,
+    "liveExternalProvidersUsed": false,
+    "originalApplicationChangedByTheseQaChecks": false,
+    "historicallyLostTrolleyReconstructed": false
+  },
+  "automated": {
+    "evidence": "automated-verification.json",
+    "frontendFilesPassed": 104,
+    "frontendTestsPassed": 1402,
+    "frontendFilesSkipped": 3,
+    "frontendTestsSkipped": 56,
+    "focusedJournalTestsPassed": 67,
+    "normalRustTestsPassed": 251,
+    "normalRustExternalFixturesFiltered": 10,
+    "isolatedQaHarnessTestsPassedSeparately": 3,
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "normalBuildStatus": "PASS",
+    "normalBuildEvidence": "normal-build-artifact.json",
+    "normalArtifactQaControlsDisabled": true,
+    "normalArtifactEnabledQaHandlersExcluded": true
+  },
+  "automatedRefreshReason": "Startup migration predicates/tests and the isolated QA checkpoint allow-list/test were added after the first automated snapshot. Final full checks and normal artifact proof were refreshed successfully after the corrected QA build.",
+  "nativeCases": [
+    {
+      "id": "ordinary-reload",
+      "title": "Ordinary trolley survives page reload",
+      "status": "PASS",
+      "expected": "The same unpaid cart lines, quantities, prices and selected line return after a genuine native WebView reload.",
+      "observations": [
+        "Native reload restored exactly two unpaid lines: weighted line 374 pence, quantity 1, note 1500g with quantityLocked/skipStockAdjustment flags; regular line temporary price 225 pence, quantity 3.",
+        "The restored trolley showed 4 total items and 1049 pence total; the same QA customer remained selected."
+      ],
+      "evidence": [
+        "screenshots/01-cart-before-reload.png",
+        "screenshots/02-cart-after-reload.png"
+      ]
+    },
+    {
+      "id": "full-quit-restart",
+      "title": "Ordinary trolley survives full application quit and restart",
+      "status": "PASS",
+      "expected": "Quit the isolated native app, reopen it, complete normal staff authentication and recover the same unfinished trolley without MariaDB.",
+      "observations": [
+        "The native operator genuinely quit the isolated app with Cmd+Q, reopened it and used normal staff PIN authentication.",
+        "The exact same two-line trolley returned with 4 total items and 1049 pence total, without MariaDB."
+      ],
+      "evidence": [
+        "screenshots/04-cart-after-full-restart.png"
+      ]
+    },
+    {
+      "id": "preserved-customer-reset-cash",
+      "title": "Customer is retained; cash tender and payment state reset",
+      "status": "PASS",
+      "expected": "After reload/restart, the customer/discount references remain while payment stays closed and cash tender starts empty/zero instead of resuming a payment.",
+      "observations": [
+        "The same QA customer remained selected after native reload and full application restart.",
+        "The pre-reload partially entered cash tender of 500 pence was reset to 0. Payment was closed and no sale/payment resumed automatically.",
+        "This native case proves the customer/tender behavior; manual discount-reference round-trip is separately covered by the automated journal tests."
+      ],
+      "evidence": [
+        "screenshots/03-restored-customer-reset-tender.png"
+      ]
+    },
+    {
+      "id": "clear-then-reload",
+      "title": "Cleared trolley does not return after reload",
+      "status": "PASS",
+      "expected": "Use the genuine Clear action and confirmation, then reload; the cart remains empty and its null tombstone is preserved.",
+      "observations": [
+        "The native operator used the genuine Clear action and confirmation.",
+        "SQLite contained a revisioned null tombstone; after actual native reload the trolley remained empty."
+      ],
+      "evidence": [
+        "screenshots/05-empty-after-clear-reload.png"
+      ]
+    },
+    {
+      "id": "completed-cash-sale-no-revival",
+      "title": "Completed cash sale is not restored or charged twice",
+      "status": "PASS",
+      "expected": "Complete an isolated mock cash sale, reload and confirm an empty trolley with exactly one saved receipt/payment.",
+      "observations": [
+        "Initial native attempt durably committed an isolated mock cash sale of 169 pence, verified in SQLite, then hit an unknown QA checkpoint error before normal UI cleanup.",
+        "This was a QA-only harness allow-list omission, not an unsupported normal-app checkpoint: normal builds compile checkpoints as no-ops.",
+        "The missing checkout boundary points and an allow-list unit test have been added; the corrected isolated QA build passed.",
+        "On reopening the corrected native app, saved receipt evidence recognized the earlier durably committed sale: the trolley was empty and its stale journal was cleared rather than restored.",
+        "Clean native repeat succeeded with the sale-complete modal: receipt cd36370d-3878-405d-a26f-a2659e966de6 saved a 169-pence cash sale.",
+        "Actual native reload then showed an empty trolley and a null draft tombstone; the completed trolley was not revived."
+      ],
+      "evidence": [
+        "screenshots/06-initial-qa-checkpoint-registration-error.png",
+        "screenshots/07-cash-sale-complete.png",
+        "screenshots/08-empty-after-cash-sale-reload.png"
+      ]
+    },
+    {
+      "id": "hold-retrieve-rehold",
+      "title": "Hold, retrieve and re-hold retain single trolley ownership",
+      "status": "PASS",
+      "expected": "A saved hold does not also revive as an ordinary draft; retrieved hold recovery and re-hold preserve one recoverable copy without loss or duplication.",
+      "observations": [
+        "Created isolated hold 264b4aad-af8d-40eb-a82d-444cbc72033a with status hold and amount 169 pence; the main trolley became empty.",
+        "Actual reload remained empty with exactly one held trolley, not a duplicate ordinary draft; genuine Retrieve restored the exact held trolley.",
+        "After confirmed full Cmd+Q quit and reopen, the real held-claim recovery prompt appeared and did not automatically process a payment.",
+        "Recover saved trolley restored 169 pence. Re-hold created f2390cec-2d62-4fc1-a7c8-f6b7dc427916 while keeping exactly one held trolley.",
+        "A fresh ordinary draft cd29a193-635d-4831-8d13-be96256ef757 had empty pendingHoldId and saleIds, and returned after reload while the one held trolley remained separate."
+      ],
+      "evidence": [
+        "screenshots/11-held-trolley-empty-main.png",
+        "screenshots/12-held-survives-reload-no-duplicate.png",
+        "screenshots/13-retrieved-held-trolley.png",
+        "screenshots/14-held-restart-recovery-guard.png",
+        "screenshots/15-fresh-cart-after-rehold-reload.png"
+      ]
+    },
+    {
+      "id": "forced-after-sale-commit-restart",
+      "title": "Restart after durable sale commit does not revive its stale draft",
+      "status": "PASS",
+      "expected": "At the isolated QA checkpoint after the real sale commit but before UI cleanup, quit/restart and verify committed receipt evidence suppresses stale draft recovery.",
+      "observations": [
+        "Armed the genuine isolated after-sale-commit delay checkpoint. SQLite held exactly one completed receipt 09fb274b-53cf-49dc-aba9-592083e52407 while the nonempty draft still referenced that receipt.",
+        "Normal Cmd+Q was blocked by the active payment-save guard. The native operator validated and terminated only isolated QA process PID 76912 to simulate a crash; the original POS process was not targeted.",
+        "After process termination, durable receipt evidence and the still-nonempty draft were confirmed.",
+        "The first forced-restart launch briefly showed a blank native renderer. A clean quit/relaunch, without editing the database, returned normal staff sign-in.",
+        "After normal authentication the trolley was empty (0 items); the draft was null and the exact committed receipt remained one row. No completed sale trolley was revived."
+      ],
+      "limitations": [
+        "The first launch after forced termination needed one clean relaunch following a blank renderer; its cause was not established and seamless first-launch crash recovery is not claimed."
+      ],
+      "evidence": [
+        "screenshots/09-after-receipt-commit-before-ui-clear.png",
+        "screenshots/10-empty-after-interrupted-commit-restart.png"
+      ]
+    },
+    {
+      "id": "reject-before-hold-restores",
+      "title": "Rejected hold before commit preserves the unpaid trolley",
+      "status": "PASS",
+      "expected": "Reject the isolated pre-commit hold checkpoint; no hold is saved, the draft remains retryable, and the same unpaid trolley returns on reload/restart.",
+      "observations": [
+        "The genuine isolated before-hold-commit Reject checkpoint was entered and rejected, verified by native diagnostic proof.",
+        "The native error left the unpaid 169-pence trolley intact. The pending-hold marker was cleared and the existing held count remained exactly one.",
+        "Actual native reload restored the same one-item 169-pence unpaid ordinary trolley, with the existing held trolley unchanged and no false held tombstone or recovery block."
+      ],
+      "evidence": [
+        "screenshots/16-rejected-hold-keeps-trolley.png",
+        "screenshots/17-rejection-proof-retained-cart.png",
+        "screenshots/18-cart-restored-after-rejected-hold-reload.png"
+      ]
+    }
+  ],
+  "limits": [
+    "The originally disappeared RAM-only trolley has not been reconstructed. This fix protects newly saved unfinished trolleys.",
+    "The original application, original trolley, provider keys, registrations and live business data were not test targets.",
+    "The first cold launch after controlled process termination briefly showed a blank renderer and needed a clean quit/relaunch without database edits. Its cause was not established; seamless first-launch crash recovery is not claimed.",
+    "Manual discount-reference round-trip was automated-only because this native mock profile had no active manual discount.",
+    "Startup repair SQL tests use an SQLite table mirror to prove no-op update/repair behavior; they do not exercise the actual FTS5 tokenizer.",
+    "The native transactions were isolated mock cash/hold records, not real card transactions. No automatic payment resume or live provider calls were used; MariaDB was not needed for draft recovery.",
+    "Windows/WebView2, physical card terminals, printers and drawers remain untested by this macOS mock-data exercise.",
+    "No release or Windows artifact is certified by the normal macOS arm64 debug build. External-fixture test skips and filters are not claimed as passes.",
+    "Final isolated QA state is empty ordinary checkout with one retained mock held trolley and three completed 169-pence mock cash receipts; test records were not removed."
+  ],
+  "nativeCasesPassed": 8,
+  "nativeCasesTotal": 8,
+  "durableNativeEvidence": "native-durable-evidence.json",
+  "finalNativeState": {
+    "qaApplicationLeftOpen": true,
+    "ordinaryTrolleyItems": 0,
+    "ordinaryDraft": {
+      "version": 1,
+      "revision": 1791843436146000,
+      "draft": null
+    },
+    "mockCompletedCashSales": 3,
+    "mockCompletedCashSalePenceEach": 169,
+    "heldTrolleys": 1,
+    "heldTrolleyPence": 169,
+    "pendingOnlineFinancialIntents": 0,
+    "originalApplicationProcessNotRestartedOrUiChanged": true,
+    "evidence": [
+      "screenshots/19-final-empty-checkout.png",
+      "native-durable-evidence.json"
+    ]
+  }
+}

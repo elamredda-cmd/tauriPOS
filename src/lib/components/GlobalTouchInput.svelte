@@ -1,5 +1,7 @@
 <script lang="ts">
     import { onMount, tick } from "svelte";
+    import { afterNavigate } from '$app/navigation';
+    import { isLiveTouchInputTarget } from '$lib/touchInputTarget';
     import TouchKeyboard from "./TouchKeyboard.svelte";
     import TouchDigitPad from "./TouchDigitPad.svelte";
 
@@ -82,6 +84,7 @@
     }
 
     function applyValue() {
+        if (visible && !isLiveTouchInputTarget(target)) { done(false); return; }
         if (!visible || !target || value === lastAppliedValue) return;
         target.value = value;
         lastAppliedValue = value;
@@ -91,16 +94,22 @@
         refocusTarget();
     }
 
-    function done() {
+    function done(commit = true) {
         const finishedTarget = target;
-        if (finishedTarget?.isConnected) applyValue();
-        finishedTarget?.dispatchEvent(new Event("change", { bubbles: true }));
+        if (commit && isLiveTouchInputTarget(finishedTarget)) {
+            applyValue();
+            finishedTarget?.dispatchEvent(new Event("change", { bubbles: true }));
+        }
         visible = false;
         finishedTarget?.classList.remove(...activeInputClasses);
         target = null;
         targetRectStyle = "";
         if (focusTimer) window.clearTimeout(focusTimer);
+        focusTimer = undefined;
     }
+
+    // This component survives route changes. Never retain a previous page's input.
+    afterNavigate(() => done(false));
 
     async function closeFromBackdrop(event?: Event) {
         event?.preventDefault();
@@ -127,12 +136,12 @@
     }
 
     function refocusTarget() {
-        if (!target?.isConnected) return;
+        if (!isLiveTouchInputTarget(target)) return;
         const element = target;
         if (focusTimer) window.clearTimeout(focusTimer);
         focusTimer = window.setTimeout(async () => {
             await tick();
-            if (!element.isConnected || target !== element) return;
+            if (!isLiveTouchInputTarget(element) || target !== element) return;
             updateTargetRect();
             element.focus({ preventScroll: true });
             applySelection();
@@ -163,8 +172,8 @@
     }
 
     function updateTargetRect() {
-        if (!target?.isConnected) {
-            if (visible) done();
+        if (!isLiveTouchInputTarget(target)) {
+            if (visible) done(false);
             targetRectStyle = "";
             return;
         }
@@ -238,7 +247,19 @@
         document.addEventListener("keydown", handleKeydown, true);
         window.addEventListener("resize", updateTargetRect);
         window.addEventListener("scroll", updateTargetRect, true);
+        // Modal removal and hidden/disabled ancestors do not emit focus or resize.
+        // Filter mutations to the target/ancestors rather than recalculating on every render.
+        const observer = new MutationObserver((records) => {
+            if (!visible || !target) return;
+            if (!target.isConnected || records.some(record => record.type === 'attributes'
+                && record.target instanceof Element && (record.target === target || record.target.contains(target)))) {
+                if (!isLiveTouchInputTarget(target)) done(false);
+            }
+        });
+        observer.observe(document.body, { subtree: true, childList: true, attributes: true,
+            attributeFilter: ['hidden', 'inert', 'aria-hidden', 'style', 'class', 'disabled', 'readonly', 'data-touch-keyboard'] });
         return () => {
+            observer.disconnect();
             document.removeEventListener("pointerdown", handlePointer, true);
             document.removeEventListener("focusin", handleFocus, true);
             document.removeEventListener("close-touch-keyboard", handleClose);
@@ -306,7 +327,7 @@
                 <button
                     type="button"
                     class="touch-input-close rounded-[.55rem] border border-border-flat bg-bg-card px-[.8rem] py-[.55rem] font-bold text-text-main"
-                    on:click={done}
+            on:click={() => done()}
                 >Close</button>
             </div>
             <div class="touch-input-numeric-body mx-auto w-full p-[.65rem]">

@@ -1,0 +1,52 @@
+{
+  "scope": "Read-only SQLite observations alongside actual native Tauri interactions; isolated mock-data QA profile only",
+  "profile": "com.elamreda.tauri-app.native-qa",
+  "mode": "single",
+  "operatingMode": "checkout",
+  "finalDraft": { "version": 1, "revision": 1791843436146000, "draft": null },
+  "ordinaryDraftObservedBeforeReload": {
+    "id": "48f8f9d4-eb4a-4dc4-8257-815a74e4ffc8",
+    "lines": [
+      { "pricePence": 374, "quantity": 1, "note": "Manual scale: 1500 g at £2.49/kg", "quantityLocked": true, "skipStockAdjustment": true },
+      { "pricePence": 225, "quantity": 3, "note": "" }
+    ],
+    "totalPence": 1049,
+    "selectedLine": 1,
+    "customerWasSelected": true,
+    "saleIds": [],
+    "pendingHoldId": ""
+  },
+  "mockCashReceipts": [
+    { "id": "cea32f80-a312-4f7a-a773-d6130eaddc30", "status": "completed", "totalPence": 169, "method": "cash", "note": "Initial QA allow-list omission after durable commit; recovered without restoring a chargeable draft after corrected build." },
+    { "id": "cd36370d-3878-405d-a26f-a2659e966de6", "status": "completed", "totalPence": 169, "method": "cash", "note": "Clean corrected-build native success; reload empty." },
+    { "id": "09fb274b-53cf-49dc-aba9-592083e52407", "status": "completed", "totalPence": 169, "method": "cash", "rowCountAfterInterruptedRestart": 1 }
+  ],
+  "interruptedReceiptCommit": {
+    "draftStillNonemptyAfterControlledProcessTermination": true,
+    "draftReferencedCommittedReceipt": "09fb274b-53cf-49dc-aba9-592083e52407",
+    "recoveredTrolleyEmptyAfterRelaunchAndAuthentication": true,
+    "firstRestartBlankRendererRequiredOneCleanRelaunch": true,
+    "databaseEditedToResolveRecovery": false
+  },
+  "heldTrolley": {
+    "initialHold": "264b4aad-af8d-40eb-a82d-444cbc72033a",
+    "reheldOrder": "f2390cec-2d62-4fc1-a7c8-f6b7dc427916",
+    "finalStatus": "hold",
+    "totalPence": 169,
+    "finalHeldCount": 1,
+    "freshOrdinaryDraftAfterRehold": "cd29a193-635d-4831-8d13-be96256ef757",
+    "freshOrdinaryDraftSaleIds": [],
+    "freshOrdinaryDraftPendingHoldId": "",
+    "preCommitRejectedHoldLeftExistingHeldCountUnchanged": true,
+    "preCommitRejectedHoldCartRecoveredAfterReload": true
+  },
+  "finalPendingOnlineFinancialIntents": 0,
+  "originalShopDatabaseOrTrolleyUsedForTestTransactions": false,
+  "liveProviderCalls": false,
+  "limitations": [
+    "These are mock cash/hold transactions, not real card transactions or printer/drawer checks.",
+    "Manual discount round-trip was automated-only: no active manual discount existed in this native mock profile.",
+    "macOS native checks do not certify a Windows/WebView2 build.",
+    "No reconstruction of a historically lost RAM-only trolley is claimed."
+  ]
+}

@@ -1839,7 +1839,7 @@
                     <div class="mt-1 text-xs text-text-muted">{tillReportPeriod}</div>
                 </div>
                 <button class="btn-icon shrink-0" disabled={closeReportSaving} aria-label="Close report preview" title="Close report preview" on:click={closePeriodReportModal}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
+                    <svg width="22" height="22" style="flex:none; color:var(--text-main)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="flex flex-col gap-3 p-3 md:p-4">

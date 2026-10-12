@@ -673,6 +673,27 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
     };
     const existing = await db.select<any[]>('SELECT * FROM payment_terminal_attempts WHERE id = ? LIMIT 1', [remote.id]);
     if (existing[0]) assertMergeIdentity(existing[0]);
+    if (existing[0]?.provider === 'dojo' && existing[0]?.status === 'cancelled') {
+        const receipt = await confirmedSandboxReceipt(remote.id);
+        if (receipt) {
+            const local = normalizeAttempt(existing[0]);
+            assertSandboxReceiptIdentity(receipt, local, remote);
+            if (isOperationalTerminalAttemptStatus(remote.status)) {
+                const acknowledged = await mysqlUpdatePaymentTerminalAttempt(remote.id, 'dojo', 'cancelled', {
+                    clientTransactionId: receipt.paymentIntentId,
+                    terminalSessionId: receipt.terminalSessionId,
+                    error: local.error,
+                });
+                assertSandboxReceiptIdentity(receipt, local, acknowledged.attempt);
+                if (!['cancelled', 'failed'].includes(acknowledged.attempt.status)) {
+                    throw new Error('The shared journal did not acknowledge this verified sandbox cancellation. Keep its recovery record for review.');
+                }
+            }
+            // The native receipt is durable provider proof. An older shared
+            // snapshot cannot turn a confirmed canceled test into open work.
+            return local;
+        }
+    }
     const currentStrength = sqliteTerminalAttemptStrength('payment_terminal_attempts.status');
     const remoteStrength = sqliteTerminalAttemptStrength('excluded.status');
     const preferRemote = `${remoteStrength} > ${currentStrength}`;
@@ -750,6 +771,146 @@ async function cacheRemoteAttempt(remote: MysqlPaymentTerminalAttempt): Promise<
     return normalizeAttempt(rows[0]);
 }
 
+interface SandboxRecoveryReceipt {
+    attemptId: string;
+    terminalKey: string;
+    paymentIntentId: string;
+    terminalSessionId: string;
+    amount: number;
+    currency: string;
+    providerStatus: string;
+    confirmedAt: string;
+}
+
+async function hasSandboxRecoveryReceipts(): Promise<boolean> {
+    const db = await getSqliteDb();
+    const tables = await db.select<Array<{ name: string }>>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dojo_sandbox_recovery_receipts'",
+    );
+    return tables.some(table => table.name === 'dojo_sandbox_recovery_receipts');
+}
+
+async function confirmedSandboxReceipt(attemptId: string): Promise<SandboxRecoveryReceipt | null> {
+    if (!await hasSandboxRecoveryReceipts()) return null;
+    const db = await getSqliteDb();
+    const receipts = await db.select<SandboxRecoveryReceipt[]>(
+        "SELECT * FROM dojo_sandbox_recovery_receipts WHERE attemptId = ? AND confirmedAt <> '' LIMIT 1", [attemptId],
+    );
+    return receipts[0] ?? null;
+}
+
+function assertSandboxReceiptIdentity(
+    receipt: SandboxRecoveryReceipt, local: TerminalPaymentAttempt, remote: MysqlPaymentTerminalAttempt,
+): void {
+    if (!['Canceled', 'Reversed'].includes(receipt.providerStatus)
+        || !Number.isFinite(Date.parse(receipt.confirmedAt))
+        || !receipt.paymentIntentId.startsWith('pi_sandbox_')
+        || !receipt.terminalKey.includes(':tm_sandbox_')
+        || receipt.attemptId !== local.id || receipt.attemptId !== remote.id
+        || local.provider !== 'dojo' || remote.provider !== 'dojo'
+        || receipt.terminalKey !== local.terminalKey || receipt.terminalKey !== remote.terminalKey
+        || Number(receipt.amount) !== local.amount || Number(receipt.amount) !== remote.amount
+        || receipt.currency !== local.currency || receipt.currency !== remote.currency
+        || local.operationKind === 'refund' || remote.operationKind !== local.operationKind
+        || local.clientTransactionId !== receipt.paymentIntentId
+        || local.terminalSessionId !== receipt.terminalSessionId
+        || (remote.clientTransactionId && remote.clientTransactionId !== receipt.paymentIntentId)
+        || (remote.terminalSessionId && remote.terminalSessionId !== receipt.terminalSessionId)
+        || !['prepared', 'started', 'uncertain', 'failed', 'cancelled'].includes(remote.status)) {
+        throw new Error('The shared journal conflicts with a verified sandbox cancellation. Administrator review is required; the recovery evidence was kept.');
+    }
+}
+
+export interface SandboxSharedAcknowledgementResult {
+    acknowledged: number;
+    errors: string[];
+}
+
+let sandboxSharedAcknowledgement: Promise<SandboxSharedAcknowledgementResult> | null = null;
+const SANDBOX_SHARED_ACKNOWLEDGED = 'Dojo sandbox no-charge result verified twice; shared acknowledgement confirmed for dataset ';
+
+/**
+ * Upload only native-confirmed sandbox cancellations when the original shared
+ * database returns. This does not need a Dojo key or Shared terminal registration,
+ * and is never a prerequisite for preparing a new dedicated payment.
+ */
+export function reconcileConfirmedDojoSandboxRecoveries(): Promise<SandboxSharedAcknowledgementResult> {
+    if (sandboxSharedAcknowledgement) return sandboxSharedAcknowledgement;
+    const run = reconcileConfirmedDojoSandboxRecoveriesOnce();
+    sandboxSharedAcknowledgement = run;
+    void run.finally(() => {
+        if (sandboxSharedAcknowledgement === run) sandboxSharedAcknowledgement = null;
+    }).catch(() => undefined);
+    return run;
+}
+
+async function reconcileConfirmedDojoSandboxRecoveriesOnce(): Promise<SandboxSharedAcknowledgementResult> {
+    const result: SandboxSharedAcknowledgementResult = { acknowledged: 0, errors: [] };
+    const initial = get(connectionState);
+    if (initial.mode !== 'multi' || !initial.mysqlOnline || !await hasSandboxRecoveryReceipts()) return result;
+    const db = await getSqliteDb();
+    const readEpoch = async () => {
+        const rows = await db.select<Array<{ value: string }>>(
+            "SELECT value FROM settings WHERE key = 'server_data_epoch_seen' LIMIT 1",
+        );
+        return String(rows[0]?.value || '');
+    };
+    // Successful sync establishes this identity before calling recovery. An
+    // acknowledgement must be retried if MariaDB is later restored/replaced.
+    const epoch = await readEpoch();
+    if (!epoch) return result;
+    const marker = `${SANDBOX_SHARED_ACKNOWLEDGED}${epoch}`;
+    const pending = await db.select<Array<{ id: string }>>(
+        `SELECT local.id FROM payment_terminal_attempts local
+         JOIN dojo_sandbox_recovery_receipts proof ON proof.attemptId = local.id
+         WHERE local.provider = 'dojo' AND local.status = 'cancelled'
+           AND local.journalScope = 'shared' AND proof.confirmedAt <> ''
+           AND local.error <> ? ORDER BY proof.confirmedAt, local.id LIMIT 25`, [marker],
+    );
+    if (!pending.length) return result;
+    const assertSameConnection = async () => {
+        const current = get(connectionState);
+        if (current.mode !== 'multi' || !current.mysqlOnline || current.mysqlConfig !== initial.mysqlConfig
+            || await readEpoch() !== epoch) {
+            throw new Error('The shared database changed during sandbox acknowledgement; it will be checked again.');
+        }
+    };
+    await assertMariaDbCommerceWritesAllowed();
+    await assertSameConnection();
+    for (const { id } of pending) {
+        try {
+            await assertSameConnection();
+            const rows = await db.select<any[]>(
+                "SELECT * FROM payment_terminal_attempts WHERE id = ? AND provider = 'dojo' LIMIT 1", [id],
+            );
+            const receipt = await confirmedSandboxReceipt(id);
+            if (!rows[0] || !receipt) throw new Error('The original sandbox recovery proof is missing.');
+            const local = normalizeAttempt(rows[0]);
+            if (local.status !== 'cancelled' || !terminalAttemptUsesSharedJournal(local)) {
+                throw new Error('The original sandbox recovery journal changed.');
+            }
+            // Validate even if shared history has already been pruned. Missing
+            // remote history must never create a new terminal attempt.
+            assertSandboxReceiptIdentity(receipt, local, serializeAttempt(local));
+            const remote = await mysqlGetPaymentTerminalAttempt(id, 'dojo');
+            await assertSameConnection();
+            if (remote) await cacheRemoteAttempt(remote);
+            await assertSameConnection();
+            const updated = await db.execute(
+                `UPDATE payment_terminal_attempts SET error = ?
+                 WHERE id = ? AND provider = 'dojo' AND status = 'cancelled' AND journalScope = 'shared'
+                   AND clientTransactionId = ? AND terminalSessionId = ? AND amount = ? AND currency = ? AND error = ?`,
+                [marker, id, local.clientTransactionId, local.terminalSessionId, local.amount, local.currency, local.error],
+            );
+            if (Number(updated.rowsAffected) !== 1) throw new Error('The local recovery record changed before acknowledgement was saved.');
+            result.acknowledged += 1;
+        } catch (error) {
+            result.errors.push(`Sandbox payment ${id}: ${String(error)}`);
+        }
+    }
+    return result;
+}
+
 /**
  * Re-read the journal after acquiring the physical-terminal recovery lease.
  * MariaDB is authoritative for shared state; the monotonic cache merge keeps
@@ -782,8 +943,12 @@ export async function getRecoverablePaymentTerminalAttempts(
     let remoteIds = new Set<string>();
     if (options.includeShared !== false && isMultiMode() && get(connectionState).mysqlOnline) {
         const remotes = await mysqlGetOperationalPaymentTerminalAttempts(provider);
-        remoteIds = new Set(remotes.map((attempt) => attempt.id));
-        for (const remote of remotes) await cacheRemoteAttempt(remote);
+        for (const remote of remotes) {
+            const cached = await cacheRemoteAttempt(remote);
+            if (provider !== 'dojo' || cached.status !== 'cancelled' || !await confirmedSandboxReceipt(cached.id)) {
+                remoteIds.add(remote.id);
+            }
+        }
     }
     const rows = await db.select<any[]>(
         `SELECT * FROM payment_terminal_attempts
@@ -798,10 +963,12 @@ export async function getRecoverablePaymentTerminalAttempts(
 
 export async function prunePaymentTerminalAttempts(provider?: TerminalProvider, options: { includeShared?: boolean } = {}): Promise<void> {
     const db = await getSqliteDb();
+    const retainSandboxProof = await hasSandboxRecoveryReceipts();
     await db.execute(
         `DELETE FROM payment_terminal_attempts
          WHERE status IN ('completed', 'failed', 'cancelled')
            ${provider ? 'AND provider = ?' : ''}
+           ${retainSandboxProof ? "AND NOT EXISTS (SELECT 1 FROM dojo_sandbox_recovery_receipts proof WHERE proof.attemptId = payment_terminal_attempts.id AND proof.confirmedAt <> '')" : ''}
            AND julianday(updatedAt) < julianday('now', '-30 days')`,
         provider ? [provider] : [],
     );

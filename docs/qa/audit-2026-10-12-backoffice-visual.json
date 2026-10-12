@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "title": "Back Office square-screen visual inspection",
+  "auditDate": "2026-10-12",
+  "sourceRoot": "/Users/elamreda/Desktop/Tauri for Svelte POS",
+  "scope": {
+    "mode": "Back Office desktop",
+    "logicalViewport": {
+      "width": 1024,
+      "height": 768
+    },
+    "screenshotPixels": {
+      "width": 2048,
+      "height": 1536
+    },
+    "evidence": "Root-captured native Tauri screenshots; inspected read-only by /root/audit_admin_regressions",
+    "inspectionOnly": true
+  },
+  "limits": [
+    "Screenshots prove the captured visual state, not every button's behavior, scrolling reachability or uncaptured form/layout.",
+    "No app, product-source, native-service or app-data changes by this agent.",
+    "This snapshot includes all bo-*.png files and42-backoffice-overview.png that existed at inspection. Additional forms captured later need a follow-up review."
+  ],
+  "summary": {
+    "screenshotsInspected": 10,
+    "confirmedGeometricDefects": 1,
+    "nonBlockingLabelIssues": 1,
+    "uncapturedForms": "Add/edit/detail dialogs not visible in these initial Back Office captures; no form-width PASS claimed."
+  },
+  "findings": [
+    {
+      "id": "BO-VIS-01",
+      "priority": "P2",
+      "kind": "clipped_control",
+      "title": "Order receipt buttons are clipped inside the first table column",
+      "route": "/orders",
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/bo-orders.png",
+      "status": "native_screenshot_confirmed",
+      "observation": "The receipt buttons end abruptly at the first column's right boundary: the right border is missing and the last receipt-number glyph is at or clipped by that boundary. This repeats down the populated table while adjacent dates/statuses and totals fit.",
+      "sourceExplanation": "Back Office forces a fixed-layout table, gives the first column8%, hides overflow in table cells, and makes receipt buttons intrinsic auto width. The available column width can be smaller than the full number plus button padding.",
+      "sources": [
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 395
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 773
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 799
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 824
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 831
+        }
+      ],
+      "impact": "Receipt identification and the apparent clickable control boundary are compromised. The button still has a full accessible label/title; no loss of receipt data or click failure is inferred.",
+      "recommendation": "Reserve enough first-column width for the longest displayed receipt number and button padding, or use a constrained button with deliberate overflow handling. Validate the complete number and focus border at1024×768.",
+      "verificationNext": "Check7+digit and longer receipt numbers, keyboard focus outline, sidebar expanded/collapsed and actual configured font size; ensure the full identifier is available without an unmarked hard clip."
+    },
+    {
+      "id": "BO-VIS-02",
+      "priority": "P3",
+      "kind": "truncated_summary_label",
+      "title": "Staff summary truncates the full role names",
+      "route": "/employees",
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/bo-staff.png",
+      "status": "native_screenshot_confirmed_non_blocking",
+      "observation": "The six-column summary shows ADMINISTRA... and ATTENDANCE ... rather than Administrators and Attendance only. The suffix distinguishing attendance-only staff is missing.",
+      "sourceExplanation": "Six equal-width columns put label and count side by side; summary labels force nowrap/ellipsis and have no title attribute in their markup.",
+      "sources": [
+        {
+          "file": "src/routes/employees/+page.svelte",
+          "line": 291
+        },
+        {
+          "file": "src/routes/employees/+page.svelte",
+          "line": 297
+        },
+        {
+          "file": "src/routes/employees/+page.svelte",
+          "line": 431
+        },
+        {
+          "file": "src/routes/employees/+page.svelte",
+          "line": 433
+        },
+        {
+          "file": "src/app.css",
+          "line": 3324
+        }
+      ],
+      "impact": "Counts are readable, but some role descriptions are not completely visible. Staff row actions and role badges remain visible.",
+      "recommendation": "Wrap labels or stack label/count; alternatively use a3×2 summary at this container width. Provide the complete role label for sighted mouse/keyboard users.",
+      "verificationNext": "Verify all six full labels with nonzero counts and larger configured text, without squeezing staff-row controls."
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "42-backoffice-overview.png",
+      "route": "/admin",
+      "capturedState": "Overview tool groups",
+      "visualResult": "no_visible_geometric_defect_in_captured_content",
+      "notes": [
+        "All four groups and16tool tiles fit without title/button overlap.",
+        "Sidebar lower navigation item is partly offscreen at the scroll boundary; nav has overflow-y:auto, so this alone is not an unreachable-control defect."
+      ]
+    },
+    {
+      "file": "bo-items.png",
+      "route": "/items",
+      "capturedState": "Populated initial page;76,257items",
+      "visualResult": "no_confirmed_new_clipping_defect; horizontal_scroll_present",
+      "notes": [
+        "Goods Menu/Add Item and pagination remain fully visible.",
+        "Table uses both horizontal and vertical scrollbars; prices near the right edge warrant full-width/reachability testing, but screenshot alone does not prove they are unreachable.",
+        "Barcode/category truncation is deliberate and full values have title attributes.",
+        "Long search placeholder clips at the end; search purpose remains clear and this is not recorded as a geometric blocker."
+      ],
+      "verificationNext": "Inspect complete long currency values and horizontal-scroll end; Add/Edit form not captured."
+    },
+    {
+      "file": "bo-customers.png",
+      "route": "/customers",
+      "capturedState": "Populated all-customer list",
+      "visualResult": "no_visible_geometric_defect_in_captured_state",
+      "notes": [
+        "Add Customer, search/Find, credit summary, points/value/amount columns and all four row actions fit.",
+        "All Customers helper description uses ellipsis; the active view label and count remain visible.",
+        "Customer details/account/loyalty forms not captured."
+      ]
+    },
+    {
+      "file": "bo-orders.png",
+      "route": "/orders",
+      "capturedState": "Populated receipt history, page1",
+      "visualResult": "confirmed_clipped_receipt_control",
+      "findingIds": [
+        "BO-VIS-01"
+      ],
+      "notes": [
+        "Search/status controls, pagination, dates, status/payment badges and totals otherwise fit.",
+        "Bottom partial row is inside the normal scroll viewport, not another clipping defect."
+      ]
+    },
+    {
+      "file": "bo-reports.png",
+      "route": "/reports",
+      "capturedState": "Today; top report overview and sales-by-till",
+      "visualResult": "no_visible_geometric_defect_in_captured_state",
+      "notes": [
+        "Date/till/product filters, period tabs, Apply/Export/Print and summary values are readable.",
+        "The report continues vertically through a visible scrollbar; below-fold data not inspected here."
+      ]
+    },
+    {
+      "file": "bo-stock-receiving.png",
+      "route": "/stock-receiving",
+      "capturedState": "Empty Receive stock draft",
+      "visualResult": "no_visible_geometric_defect_in_captured_empty_state",
+      "notes": [
+        "Supplier/reference/Add note, Add products and footer cost/Receive stock fit.",
+        "Receive stock is visibly disabled for0products, consistent with empty draft.",
+        "Product picker, populated delivery lines and Recent receipts not captured in this mode."
+      ]
+    },
+    {
+      "file": "bo-staff.png",
+      "route": "/employees",
+      "capturedState": "Four active staff rows",
+      "visualResult": "non_blocking_role_summary_truncation",
+      "findingIds": [
+        "BO-VIS-02"
+      ],
+      "notes": [
+        "Attendance/Role Permissions/Add Staff Member header buttons fit.",
+        "Staff names, role badges, Active status and Edit/Deactivate/Delete row controls fit.",
+        "Add/Edit Staff and permission dialogs not captured."
+      ]
+    },
+    {
+      "file": "bo-attendance.png",
+      "route": "/attendance",
+      "capturedState": "My attendance plus filtered completed record",
+      "visualResult": "no_visible_geometric_defect_in_captured_state",
+      "notes": [
+        "Clock Out, Add Record/Export, summary, Staff/Status/From/To/Search and record-edit control fit.",
+        "Notes use deliberate ellipsis; date/time/worked/till/status columns do not visibly overlap in this mode.",
+        "The long886-hour open shift is mock-data content, not proof of a geometric defect or payroll-calculation failure.",
+        "Add/Edit Record dialog not captured."
+      ]
+    },
+    {
+      "file": "bo-audit-log.png",
+      "route": "/audit",
+      "capturedState": "Populated event list, page1",
+      "visualResult": "no_visible_geometric_defect_in_captured_state",
+      "notes": [
+        "Refresh, search/action/type filters, pagination and row chevrons fit.",
+        "Event-person/date columns are readable and do not overlap visible row titles.",
+        "Search placeholder is truncated but field purpose remains clear.",
+        "Sidebar is scrolled down with an explicit scrollbar; top navigation clipping is intentional viewport scrolling."
+      ]
+    },
+    {
+      "file": "bo-settings.png",
+      "route": "/settings",
+      "capturedState": "Shop & till tab top section",
+      "visualResult": "no_visible_geometric_defect_in_captured_state",
+      "notes": [
+        "Shop/database/device/stock summary and all five tabs fit.",
+        "Store-name/address/phone/email fields and Save shop fit their panel; loyalty controls fit the adjoining panel.",
+        "Lower Shop operation content continues below the normal scroll viewport; no cut-off page-footer claim is made.",
+        "Other settings tabs and dedicated settings forms not shown."
+      ]
+    }
+  ],
+  "reviewedNonFindings": [
+    {
+      "title": "Sidebar partly visible lower/upper links",
+      "reason": "The screenshot viewport cuts a scrolling navigation region; source BackOfficeSidebar.svelte:189–194 explicitly enables vertical scrolling. Another screenshot shows that region scrolled to Audit Log/Settings.",
+      "sources": [
+        {
+          "file": "src/lib/components/BackOfficeSidebar.svelte",
+          "line": 189
+        }
+      ]
+    },
+    {
+      "title": "Expected bounded list/table viewport",
+      "reason": "Partially visible final rows and below-fold panels correspond to visible scrollbars; not treated as broken page height without testing scroll reachability."
+    },
+    {
+      "title": "Intentional table-field ellipsis",
+      "reason": "Items barcode/category and customer/attendance auxiliary descriptions retain useful primary identifiers. Sources provide titles for item barcode/category. Deliberate ellipsis is distinguished from clipped receipt-control chrome.",
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 798
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 800
+        }
+      ]
+    }
+  ]
+}

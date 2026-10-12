@@ -11,6 +11,7 @@
     import {
         ATTENDANCE_CORRECTION_CONFLICT_CODE,
         ATTENDANCE_CORRECTION_CONFLICT_MESSAGE,
+        ATTENDANCE_OVERLAP_CODE,
         ATTENDANCE_EXPORT_MAX_ROWS,
         attendanceDateRange,
         attendanceCsvCell,
@@ -336,6 +337,11 @@
                 showEditor = false;
                 await loadPage();
                 toast(ATTENDANCE_CORRECTION_CONFLICT_MESSAGE, 'error');
+            } else if (message.includes(ATTENDANCE_OVERLAP_CODE)) {
+                // Keep their proposed correction intact, while refreshing the
+                // authoritative list so the conflicting session can be found.
+                await loadPage();
+                toast(message.replace(`${ATTENDANCE_OVERLAP_CODE}: `, ''), 'error');
             } else {
                 toast(message, 'error');
             }
@@ -465,7 +471,7 @@
         <div class="attendance-summary" aria-label="Attendance summary">
             <article><span>Filtered hours</span><strong>{formatAttendanceDuration(totalWorkedSeconds)}</strong></article>
             <article><span>Sessions</span><strong>{total}</strong><small>of {overallTotal}</small></article>
-            <article><span>Clocked in</span><strong>{openCount}</strong></article>
+            <article><span title="Open sessions whose clock-in matches the selected dates and filters">Open in this filter</span><strong>{openCount}</strong></article>
             <article><span>Period</span><strong>{formatPeriodLabel(startDate, endDate)}</strong></article>
         </div>
 

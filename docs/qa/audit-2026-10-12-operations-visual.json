@@ -1,0 +1,382 @@
+{
+  "date": "2026-10-12",
+  "method": "Independent visual inspection using view_image of25 root-captured native Tauri screenshots. No app interaction or app code/data mutations by this agent.",
+  "scope": "Screenshots01–25 only;01–06wide,07–25logical1024x768(retina captures2048x1536). Screenshot03 has no caught drawer alert and is excluded from alert conclusions.",
+  "screenshotsReviewed": 25,
+  "visualOnly": true,
+  "findingsCount": 6,
+  "observations": [
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/01-checkout-empty.png",
+      "page": "/",
+      "viewport": "wide",
+      "result": "no-visible-layout-defect",
+      "observation": "Checkout header, product tile, trolley tools, fixed total and bottom actions fit. Payment/hold/price controls are visibly disabled with an empty cart.",
+      "findingIds": [],
+      "limitations": [
+        "No square-checkout inference from this wide capture."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/02-attendance-pin.png",
+      "page": "/ staff attendance modal",
+      "viewport": "wide",
+      "result": "no-visible-layout-defect",
+      "observation": "Staff name, masked PIN display,1–2–3 keypad,Sign in and Close all fit inside the modal.",
+      "findingIds": [],
+      "limitations": [
+        "Static screenshot cannot confirm PIN validity or clock-in behavior."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/03-drawer-macos-limitation.png",
+      "page": "/",
+      "viewport": "wide",
+      "result": "not-assessed-for-alert",
+      "observation": "No drawer error/alert is present in the capture; per task instruction no drawer-alert conclusion made.",
+      "findingIds": [],
+      "limitations": [
+        "Hardware limitation requires root runtime log, not this image."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/04-scale-calculation.png",
+      "page": "/ scale modal",
+      "viewport": "wide",
+      "result": "no-visible-layout-defect",
+      "observation": "Product selection,1.25kg weight,£2.49/kg rate,£3.11 total, keypad and Add Weighed Item all visible. Disconnected scale status is clear.",
+      "findingIds": [],
+      "limitations": [
+        "Manual weighing surface only; hardware read is disabled as shown."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/05-customer-validation.png",
+      "page": "/ payment/new customer",
+      "viewport": "wide",
+      "result": "no-hard-clipping-confirmed",
+      "observation": "Touch keyboard and highlighted name editor fit. Underlying new-customer form remains present behind keyboard. Keyboard hides lower form fields/actions while editing, with visible Done to return.",
+      "findingIds": [],
+      "limitations": [
+        "No validation error is visible; cannot claim empty-name validation passed from this screenshot alone."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/06-sale-change.png",
+      "page": "/ sale-complete prompt",
+      "viewport": "wide",
+      "result": "no-visible-layout-defect",
+      "observation": "£2.89 change is prominent. Done·next customer,Print receipt and close X are visible.",
+      "findingIds": [],
+      "limitations": [
+        "Next-scan dismissal must rely on runtime testing."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/07-admin-1024x768.png",
+      "page": "/admin",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "All four tool groups and16 tool cards fit. Major card titles remain readable. Description ellipses are intentional; all actions visible.",
+      "findingIds": [],
+      "limitations": [
+        "Truncated descriptive subtitles are a density tradeoff, not hard overflow."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/08-items-1024x768.png",
+      "page": "/items",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Header actions, search/filter row, seven visible table columns, row edit/delete and pagination fit. Table has a vertical scrollbar.",
+      "findingIds": [],
+      "limitations": [
+        "Placeholder text truncation is normal input clipping."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/09-add-item-1024x768.png",
+      "page": "/items Add New Item",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Form is vertically scrollable while close X and sticky Cancel/Save remain visible. Name,image upload,SKU/barcode,PLU and price fields fit.",
+      "findingIds": [],
+      "limitations": [
+        "Optional image panel uses substantial vertical space; possible compact-layout enhancement but not blocked control."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/10-goods-manager.png",
+      "page": "/items Goods Menu Manager",
+      "viewport": "1024x768",
+      "result": "usability-concern",
+      "observation": "Modal title/search/footer fit, but available and selected lists expose only one row at a time.",
+      "findingIds": [
+        "VIS-GOODS-LIST-HEIGHT"
+      ],
+      "limitations": [
+        "Scrollbar exists, so screenshot does not prove other rows inaccessible."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/11-categories.png",
+      "page": "/categories",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Search,count, all column headings and row default/edit/delete actions fit. Long rows remain readable.",
+      "findingIds": [],
+      "limitations": [
+        "Bottom partially shown row is within normal vertical scroll container."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/12-stock-draft.png",
+      "page": "/stock-receiving draft",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Supplier/reference/notes,catalog search/paging,draft quantity/cost/remove and fixed Receive stock footer fit.",
+      "findingIds": [],
+      "limitations": [
+        "This shows checkout management layout; Back Office picker layout requires a separate capture."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/13-stock-receipts.png",
+      "page": "/stock-receiving recent receipts",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Receipt date,status,£0.00 amounts and Refresh readable. List body has generous space.",
+      "findingIds": [],
+      "limitations": [
+        "No receipt-detail/older-history action visible; source limitation already recorded separately."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/14-orders.png",
+      "page": "/orders",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Populated order-history table fits all seven columns. Receipt buttons,status,staff,items,payment,total and pagination readable.",
+      "findingIds": [],
+      "limitations": [
+        "Intentional scrolling causes a partially visible final row."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/15-order-detail.png",
+      "page": "/orders receipt1000081",
+      "viewport": "1024x768",
+      "result": "label-concern",
+      "observation": "Receipt modal header/close, scroll body,line table and sticky Close/Print footer fit. Weight/rate/total visible, but weighted item is labeled Price changed.",
+      "findingIds": [
+        "OPS-NATIVE-WEIGHT-PRICE-LABEL"
+      ],
+      "limitations": [
+        "Customer card truncates even Walk-in customer; tooltip/full data may exist. Payment section requires body scroll."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/16-x-report.png",
+      "page": "/reports Till1 X preview",
+      "viewport": "1024x768",
+      "result": "visible-icon-defect",
+      "observation": "Report body scrolls and footer Print/Close remain visible. Top-right header close button is visibly blank.",
+      "findingIds": [
+        "VIS-REPORT-CLOSE-ICON"
+      ],
+      "limitations": [
+        "Bottom Close provides an alternative; this screenshot does not prove header button click fails."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/17-whole-system-preview.png",
+      "page": "/reports whole-system preview",
+      "viewport": "1024x768",
+      "result": "visible-icon-defect",
+      "observation": "Period and write-pause warnings, KPIs and till card fit. Footer Close Period/Print/Close visible. Top-right header close button is blank.",
+      "findingIds": [
+        "VIS-REPORT-CLOSE-ICON"
+      ],
+      "limitations": [
+        "Body has expected vertical scrolling."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/18-cash-up.png",
+      "page": "/shifts",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Disabled cash-up feature explanation,history filters,session rows and expanded cash/card/activity details fit.",
+      "findingIds": [],
+      "limitations": [
+        "Two old open sessions for Till1 are data shown in capture, not proof this build permits duplicate session creation."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/19-orphan-customer-keyboard.png",
+      "page": "/customers after form dismissal",
+      "viewport": "1024x768",
+      "result": "visible-lifecycle-defect",
+      "observation": "Customer list is visible with no Add/Edit form modal, but floating Editing·Name field and touch keyboard still obscure/blur list.",
+      "findingIds": [
+        "VIS-ORPHAN-CUSTOMER-KEYBOARD"
+      ],
+      "limitations": [
+        "Root runtime sequence establishes form dismissal; screenshot independently shows orphan editor over list."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/20-permissions-attendance.png",
+      "page": "/employees/permissions",
+      "viewport": "1024x768",
+      "result": "minor-label-truncation",
+      "observation": "Role tabs,selected Attendance-only summary and permission controls fit. Attendance tab title is truncated to Attendanc… while Clock only badge remains.",
+      "findingIds": [
+        "VIS-PERMISSION-TAB-LABEL"
+      ],
+      "limitations": [
+        "Full selected-role heading below remains visible, reducing impact."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/21-attendance.png",
+      "page": "/attendance before manual record",
+      "viewport": "1024x768",
+      "result": "summary-label-concern",
+      "observation": "Header,Clock Out,summary,date/search controls and empty table fit. My attendance says Clocked in885h51m while summary says Clocked in0.",
+      "findingIds": [
+        "VIS-ATTENDANCE-CLOCKED-IN-SUMMARY"
+      ],
+      "limitations": [
+        "Source confirms summary follows selected record date filters; this is misleading presentation unless scope is explained."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/22-attendance-overlap.png",
+      "page": "/attendance after manual record",
+      "viewport": "1024x768",
+      "result": "summary-label-concern",
+      "observation": "All controls and completed8-hour row fit. My attendance still says Clocked in885h51m while summary Clocked in is0.",
+      "findingIds": [
+        "VIS-ATTENDANCE-CLOCKED-IN-SUMMARY",
+        "OPS-NATIVE-ATTENDANCE-OVERLAP"
+      ],
+      "limitations": [
+        "Overlap defect relies on root runtime and source investigation; screenshot confirms resulting open+completed presentation."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/23-scale-designer.png",
+      "page": "/design/scale",
+      "viewport": "1024x768",
+      "result": "discoverability-concern",
+      "observation": "Two panels and tile move/delete controls fit. Add Page is cut midway inside horizontal tab scroller, while Saved/Edit Page/Delete remain fully visible.",
+      "findingIds": [
+        "VIS-SCALE-ADD-PAGE-CLIPPING"
+      ],
+      "limitations": [
+        "Horizontal scrollbar is available, so not classified as unreachable."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/24-sync.png",
+      "page": "/sync",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Conflicts/schema,presence,actions and schema-check sections fit and scroll. Buttons visibly disabled with Sync now is running… status.",
+      "findingIds": [],
+      "limitations": [
+        "Single frame cannot distinguish normal in-progress state from a hang."
+      ]
+    },
+    {
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/25-audit-detail.png",
+      "page": "/audit",
+      "viewport": "1024x768",
+      "result": "no-visible-layout-defect",
+      "observation": "Filters,paging,expanded audit metadata and changed Notes value fit. Long note readable; technical details disclosure visible.",
+      "findingIds": [],
+      "limitations": [
+        "Technical IDs intentionally shortened; functionality beyond capture is not assessed."
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "VIS-ORPHAN-CUSTOMER-KEYBOARD",
+      "severity": "medium",
+      "confirmedVisual": true,
+      "title": "Touch keyboard survives dismissal of the customer form",
+      "screenshots": [
+        "19-orphan-customer-keyboard.png"
+      ],
+      "observation": "The Add/Edit customer modal is absent, yet its Name editor and keyboard remain over the Customers list. Background remains blurred and the editor targets an invisible field.",
+      "impact": "User cannot immediately interact with visible list normally and may continue typing into a stale form target.",
+      "recommendation": "Close and detach touch keyboard whenever the owning modal closes, saves, navigates or is destroyed. Restore focus to an existing control."
+    },
+    {
+      "id": "VIS-REPORT-CLOSE-ICON",
+      "severity": "low",
+      "confirmedVisual": true,
+      "title": "Period-report header close button renders without any visible icon",
+      "screenshots": [
+        "16-x-report.png",
+        "17-whole-system-preview.png"
+      ],
+      "observation": "Top-right rounded button is entirely blank on both Till X and whole-system previews; footer Close remains visible.",
+      "impact": "Header control's purpose is visually undiscoverable. This is not evidence its handler fails.",
+      "recommendation": "Render a visible close X with explicit width,height,stroke and current text color; check native WebView output."
+    },
+    {
+      "id": "VIS-GOODS-LIST-HEIGHT",
+      "severity": "low",
+      "confirmedVisual": true,
+      "title": "Goods Menu Manager shows only one row per list at square size",
+      "screenshots": [
+        "10-goods-manager.png"
+      ],
+      "observation": "Available items and selected-order lists each have room for only one full row, despite a large catalog. Modal overhead uses most space.",
+      "impact": "Browsing and ordering several selections requires repeated scrolling and loses context.",
+      "recommendation": "Give list panes a larger minimum/available height and shorten explanatory/header spacing, retaining visible sticky footer."
+    },
+    {
+      "id": "VIS-SCALE-ADD-PAGE-CLIPPING",
+      "severity": "low",
+      "confirmedVisual": true,
+      "title": "Add Page is only partially visible in Scale Tile Designer toolbar",
+      "screenshots": [
+        "23-scale-designer.png"
+      ],
+      "observation": "The tab strip ends midway through '+Add Page'; a horizontal scrollbar is visible while edit/delete actions sit outside it.",
+      "impact": "Page creation action is easy to overlook, though horizontal scrolling can expose it.",
+      "recommendation": "Keep Add Page as a fixed toolbar action outside the tab scroller or expose a clear overflow menu."
+    },
+    {
+      "id": "VIS-ATTENDANCE-CLOCKED-IN-SUMMARY",
+      "severity": "low",
+      "confirmedVisual": true,
+      "title": "Attendance summary shows Clocked in0 while current user is visibly clocked in",
+      "screenshots": [
+        "21-attendance.png",
+        "22-attendance-overlap.png"
+      ],
+      "observation": "Current user panel says Clocked in with885h51m and Clock Out action; unqualified Clocked in summary says0.",
+      "impact": "Manager can interpret0 as nobody currently working, even though only sessions whose clock-in falls within selected dates are counted.",
+      "recommendation": "Use global current-open count for this tile, or label it explicitly as open sessions among filtered records."
+    },
+    {
+      "id": "VIS-PERMISSION-TAB-LABEL",
+      "severity": "low",
+      "confirmedVisual": true,
+      "title": "Attendance-only role tab is truncated at square width",
+      "screenshots": [
+        "20-permissions-attendance.png"
+      ],
+      "observation": "Tab reads Attendanc… while other roles are fully visible. Selected role detail below is readable.",
+      "impact": "Minor consistency/discoverability issue; selected role remains identifiable.",
+      "recommendation": "Allow a wrapped role label, shorten tab badge, or use a full short label such as Attendance."
+    }
+  ],
+  "overall": "Most captured square management pages fit their important actions using visible vertical scroll containers. No broad table/modal horizontal overflow was observed. Main confirmed visual defects are orphan touch-keyboard lifecycle and blank period-report header close icon. Remaining findings concern cramped/discoverable controls or unclear labels.",
+  "functionalLimit": "Screenshots do not establish that every button works, saved writes are correct, printers work, provider cancellation succeeds or in-progress sync finishes."
+}

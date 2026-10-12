@@ -1,0 +1,48 @@
+{
+  "generatedAt": "2026-10-12T09:36:38.247Z",
+  "auditStatus": "AUDIT_REPORT_COMPLETE_WITH_EXPLICIT_TEST_LIMITS",
+  "restorationStatus": "CHECKOUT_EMPTY_AND_SYNCED; SANDBOX_PAYMENT_RESOLVED; MOCK_FIXTURES_DISCLOSED",
+  "nativeActions": 597,
+  "nativeRoutes": 42,
+  "nativeVerdicts": {
+    "PASS": 9,
+    "observed": 547,
+    "BLOCKED_HARDWARE": 1,
+    "FAIL_UI": 2,
+    "FAIL_VALIDATION": 1,
+    "PASS_WITH_UI_ISSUE": 1,
+    "UI_OBSERVED": 32,
+    "FAIL_FUNCTION": 1,
+    "FAILED": 3
+  },
+  "compactAfterStateRows": 579,
+  "sourcePages": 43,
+  "sourceOnlyRoutes": [
+    "/settings/owner-app"
+  ],
+  "sourceControlTemplates": 624,
+  "sharedControlTemplates": 59,
+  "findings": 41,
+  "priorities": {
+    "P1": 4,
+    "P2": 21,
+    "P3": 16
+  },
+  "tests": {
+    "passed": 1018,
+    "skipped": 2,
+    "filesPassed": 75,
+    "filesSkipped": 1,
+    "svelteErrors": 0,
+    "svelteWarnings": 0,
+    "rustPassed": 231,
+    "rustFailed": 0,
+    "rustFilteredOut": 9,
+    "rustWarnings": 4
+  },
+  "omittedScreenshots": [
+    "03-drawer-macos-limitation.png",
+    "54-pay-later-pool-timeout.png"
+  ],
+  "note": "Observed is not PASS. Raw AX and secure input values omitted. Restoration and remaining test limits are recorded in run-state.json."
+}

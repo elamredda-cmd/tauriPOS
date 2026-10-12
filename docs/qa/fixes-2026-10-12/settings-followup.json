@@ -1,0 +1,83 @@
+{
+  "date": "2026-10-12",
+  "scope": "Settings and existing-till setup continuation",
+  "nativeVerification": "Pending root-agent native Tauri verification. This agent did not control the native app, change saved provider secrets, submit a provider payment, send physical printer jobs, open the cash drawer or run a destructive maintenance operation.",
+  "checks": {
+    "svelteCheck": "0 errors, 0 warnings",
+    "isolatedTests": "33 tests across six files: settingsWriteQueue (9), savedSettings (3), setupSafety (2), settingsHandlers (10), connectionPersistence (2) and settingsBatchAudit (7)",
+    "testMethod": "Pure helper tests, actual route async handlers compiled in isolated service fixtures, and the actual production saveSettingsBatch plus audit/sanitization functions executed in VM fixtures. Native transaction boundaries and provider config callbacks are mocked; this is not a native SQLite engine, real provider-save fault injection or physical hardware test.",
+    "settingsAuditEvidence": "Seven production-function VM cases cover before-read failure before commit, one settings/audit batch, omitted unchanged/ignored audit rows, native commit rejection without store publication, preview audit history, sanitized credential/secret values and immutable submitted rows.",
+    "providerPersistenceReview": "Native provider config writes can reject after file replacement while syncing the parent directory. Confirmed-state recovery now distinguishes a persisted disable from a rejected disable that left the prior provider enabled.",
+    "diffCheck": "Passed"
+  },
+  "findings": [
+    {
+      "id": "AUDIT-02",
+      "status": "implemented_isolated_tested",
+      "implementation": "Provider switching validates/enables the target before disabling the prior working provider. Target-save rejection never disables the prior provider and warns that the target save may be unconfirmed. If disabling the prior provider rejects, a fresh native config read determines recovery: confirmed disabled keeps the successfully enabled target; confirmed enabled restores the target's prior enabled state; a reread failure leaves the target enabled and explicitly requires reloading both settings before payment. Rollback failure also presents explicit uncertain-state recovery instructions. An initial prior-provider read failure aborts before mutation. Separate operation guards prevent overlapping switches/tests/removal. Configuration and ownership fields are retained and no secret is read or printed by tests.",
+      "tests": "7 provider helper cases: target rejection, success ordering, confirmed-enabled previous-disable rejection with target rollback, rollback rejection instructions, post-write previous-disable rejection with confirmed-disabled state, uncertain reread without rollback, and ambiguous post-write target rejection. The same file includes 2 queue cases; all 33 scoped tests passed.",
+      "limits": "Recoverable two-provider sequence, not an atomic cross-provider native transaction. Confirmed-state callbacks use fresh production Dojo/SumUp public config reads, but tests mock those callbacks. Native filesystem durability faults, native failed-save injection and actual provider settings were not exercised or modified; uncertain configurations require operator reload/confirmation."
+    },
+    {
+      "id": "AUDIT-03",
+      "status": "implemented_isolated_tested",
+      "implementation": "Feedback, scale, printer and tax-mode settings publish only after saveSettingsBatch succeeds. Audited before-values and sanitized audit rows are prepared before commit; settings, audit records and sync outbox mutations then share the atomic local batch, avoiding a post-commit audit-read/write failure that could falsely report an already saved setting as failed. Unchanged and explicitly ignored settings omit audit rows. Failed before-reads or commit failures retain confirmed values and show an actionable error. Composite printer presets, protocols and drawer targets submit one batch. Tax mode uses this same batch, with busy guard, input lock and rollback of the draft on error.",
+      "tests": "savedSettings rejected/pending persistence and coherent batch fixtures; 7 actual-production-function settingsBatchAudit VM cases covering before-read failure, shared settings/audit commit, unchanged/ignored audit omissions, commit failure without publication, preview history, secret redaction and immutable rows; maintenance-handler failure tests. All 33 scoped tests passed.",
+      "limits": "Production batching and audit-policy functions are exercised with mocked native persistence. These fixtures verify submission/publication ordering, not real native SQLite transaction durability or MariaDB synchronization; root owns native verification."
+    },
+    {
+      "id": "AUDIT-07",
+      "status": "implemented_isolated_tested",
+      "implementation": "Font choices are serialized; the newest pending choice owns the highlight via a per-key version. No optimistic confirmed store update or stale rollback exists. Pending choices show Saving selection until the newest operation completes.",
+      "tests": "Queue rejection then newer success preserves order; unrelated queue keys proceed independently; pending persistence does not publish a saved value."
+    },
+    {
+      "id": "AUDIT-14",
+      "status": "implemented_isolated_tested",
+      "implementation": "Schema validation, conflict refresh and conflict dismissal handle rejection and always clear their own in-flight state. Failures retain visible conflicts and show retry guidance. Repeated checks are guarded; retry success cannot overwrite a later refresh failure.",
+      "tests": "Actual route-handler schema rejection, refresh rejection, dismissal rejection and pending duplicate invocation fixtures."
+    },
+    {
+      "id": "AUDIT-06",
+      "status": "printer_scope_implemented_isolated_tested",
+      "implementation": "Receipt test, label test and drawer pulse each have a synchronous handler guard, disabled busy button and immutable submitted hardware configuration. Each clears its busy state in finally. Module checks also guard all module test overlap.",
+      "tests": "Actual receipt, label and drawer handlers receive two pending invocations but issue one transport call; rejected transport finishes the busy state.",
+      "limits": "Other administrative save routes are owned by the other agents. Intended Windows transport and physical printer/drawer behavior still require hardware."
+    },
+    {
+      "id": "NATIVE-MAINTENANCE-BUSY-LABEL",
+      "status": "implemented_source_checked",
+      "implementation": "Delete History shows Deleting History only when the purge state is actually deleting, not when an unrelated maintenance task uses the shared busy lock. Schema and conflict buttons use their own operation labels."
+    },
+    {
+      "id": "AUDIT-17",
+      "status": "implemented_isolated_tested",
+      "implementation": "Provider overview distinguishes Could not load settings from genuine Setup required, with Retry loading settings. Dojo and SumUp detail pages also disable destructive/save actions after an initial read failure and expose safe Retry instead of permitting defaults to overwrite unread saved configuration.",
+      "tests": "Actual provider refresh fixture rejects SumUp read while returning genuinely unconfigured Dojo; independent error states are preserved."
+    },
+    {
+      "id": "AUDIT-16",
+      "status": "implemented_source_checked",
+      "implementation": "Barcode tester displays Not checked if the matched rule disables check-digit validation, and Valid only for rules that actually requested the parser check.",
+      "nativeTest": "Use 2312345002502 with validation disabled; expect Not checked."
+    },
+    {
+      "id": "SET-VISUAL-01",
+      "status": "implemented_native_visual_pending",
+      "implementation": "Non-blocking notifications moved from upper-right settings header/cards to a compact bottom-right stack, at most the newest two visible notices, max 22vh/180px. Click-through remains except dismiss buttons; financial/error prompts are unchanged.",
+      "limits": "Native square-screen screenshot and rapid theme/layout save verification pending."
+    },
+    {
+      "id": "OPS-NATIVE-SETUP-NO-CANCEL",
+      "status": "implemented_isolated_tested",
+      "implementation": "Configured signed-in administrators can use Cancel — Back to Settings without saving mode or credentials. It is not offered for initial setup, missing/inactive authentication, pending restore, admin recovery or a running connection operation.",
+      "tests": "Guard fixtures cover each forbidden state."
+    },
+    {
+      "id": "OPS-SOURCE-SETUP-RECONNECT-DATA-ACTIONS",
+      "status": "implemented_isolated_tested",
+      "implementation": "Existing authenticated tills use explicit Save & Reconnect Only. Candidate probing occurs before replacing reactive configuration. This path bypasses all inferred repair, force push, wipe-and-pull and import branches; connection mode/credentials save in one native atomic batch. Failed candidates restore the previous state, and a post-save reconnect failure attempts to restore the previous saved configuration with explicit failure guidance if that cannot be done. First-run and confirmed pending-restore paths retain their existing identity and restore guards.",
+      "tests": "Actual handleConnect fixtures: unchanged existing connection invokes no bootstrap/schema/data actions; failed probe retains prior configuration and runs no schema/data/save operations. Atomic configuration success/failure fixtures confirm one batch and no reactive replacement on persistence rejection."
+    }
+  ]
+}

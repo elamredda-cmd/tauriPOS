@@ -23,7 +23,7 @@ fn sessions() -> &'static Sessions {
 
 #[tauri::command]
 pub async fn open_mysql_session(mysql_uri: String, purpose: String) -> Result<String, String> {
-    if !matches!(purpose.as_str(), "report" | "schema") {
+    if !matches!(purpose.as_str(), "report" | "schema" | "attendance" | "catalogue") {
         return Err("Unsupported database session purpose".into());
     }
     if sessions().lock().await.len() >= 4 {
@@ -45,6 +45,13 @@ pub async fn open_mysql_session(mysql_uri: String, purpose: String) -> Result<St
             .await
             .map_err(|e| e.to_string())?;
         sqlx::query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
+            .execute(&mut conn)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else if purpose == "attendance" || purpose == "catalogue" {
+        // Attendance has its own short transaction, not the global schema
+        // lock. The caller locks the employee before inspecting intervals.
+        sqlx::query("SET SESSION innodb_lock_wait_timeout = 5")
             .execute(&mut conn)
             .await
             .map_err(|e| e.to_string())?;

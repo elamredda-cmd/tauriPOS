@@ -30,7 +30,7 @@
 
 {#if notices.length > 0}
     <div class="notification-stack" class:desktop={$deviceOperatingMode === 'back_office'} aria-label="Notifications" aria-live="polite" aria-relevant="additions">
-        {#each notices as notice (notice.id)}
+        {#each notices.slice(-2) as notice (notice.id)}
             <section class="notification-card" role="status">
                 <span class="notification-status" aria-hidden="true">{notice.type === 'success' ? '✓' : 'i'}</span>
                 <p>{notice.message}</p>
@@ -131,7 +131,7 @@
     .cash-change-result { display: flex; flex-direction: column; align-items: center; gap: .35rem; margin-top: 1.1rem; padding: 1.2rem .75rem; border: 2px solid var(--success); border-radius: .85rem; background: rgba(var(--success-rgb), .12); text-align: center; }
     .cash-change-result > span { color: var(--text-main); font-size: 1rem; font-weight: 700; }
     .cash-change-result > strong { color: var(--text-main); font-family: var(--app-font-mono); font-size: clamp(2.75rem, 8vw, 4.5rem); font-weight: 900; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; max-width: 100%; }
-    .notification-stack { position: fixed; right: 1rem; top: max(1rem, env(safe-area-inset-top)); z-index: 9998; display: flex; flex-direction: column; gap: .6rem; width: min(420px, calc(100vw - 2rem)); max-height: min(40dvh, 400px); overflow-y: auto; pointer-events: none; }
+    .notification-stack { position: fixed; right: 1rem; bottom: max(.75rem, env(safe-area-inset-bottom)); z-index: 9998; display: flex; flex-direction: column; gap: .35rem; width: min(360px, calc(100vw - 2rem)); max-height: min(22dvh, 180px); overflow-y: auto; pointer-events: none; }
     .notification-card { display: grid; grid-template-columns: 28px minmax(0,1fr) 44px; align-items: center; gap: .65rem; padding: .65rem .75rem; border: 1px solid var(--border-flat); border-radius: .65rem; background: var(--bg-card); color: var(--text-main); box-shadow: 0 6px 24px var(--shadow); pointer-events: none; }
     .notification-status { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--accent-primary); background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-panel)); font-weight: 700; }
     .notification-card p { margin: 0; font-size: .86rem; line-height: 1.45; overflow-wrap: anywhere; }

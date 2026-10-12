@@ -10,7 +10,34 @@ is historical and is not a claim that every scenario has been repeated on this b
 
 In **Settings → Payments → Dojo**, choose **Dedicated to this till — no MariaDB needed** and register the terminal for that computer. New configurations default to this option. Do not assign the same physical terminal to two dedicated tills. Internet is still required for Dojo; this is not offline card acceptance.
 
-An older saved registration remains shared until explicitly switched. Finish/recover its pending payments and connect its original MariaDB once so the app can verify that another till has no unfinished work. Do not delete its journal or credentials to bypass this handover. Fresh standalone registrations do not need MariaDB. This change does not remove MariaDB from multi-till business-data synchronization or shared customer-balance/refund checks.
+An older saved registration remains shared until explicitly switched. For **live** registrations, finish/recover pending payments and connect the original MariaDB once so the app can verify that another till has no unfinished work. For **sandbox** registrations blocked by old tests, use the administrator recovery workflow below. Do not delete journals or credentials to bypass payment checks. Fresh standalone registrations do not need MariaDB. This change does not remove MariaDB from multi-till business-data synchronization or shared customer-balance/refund checks.
+
+### Old sandbox payments blocking key removal (Windows or macOS)
+
+Install a build containing **Settings → Payments → Dojo → Resolve old sandbox payments**. Keep the existing sandbox key saved and internet available; MariaDB can stay off.
+
+1. Sign in as a real administrator, open that action and enter your administrator PIN.
+2. The native app reads the old shared journals and verifies their exact payment/reference, terminal-session and money details directly with Dojo. It does not initiate a new card payment. Unused `Created` intents with verified inactive sessions can be cancelled; active, captured, approved, account-payment, refund or ambiguous records stay protected for review.
+3. Leave the dialog open. A matching final no-charge result is checked again after at least 30 seconds, then retained in the local journal with an audit record. A lost connection or changed staff profile stops confirmation safely; reopen and retry.
+4. Once every local Dojo attempt is resolved and the selected sandbox terminal is available, the saved registration switches to **Dedicated**. Close the dialog and use **Remove Saved API Key**. Key removal is a separate explicit action; recovery itself keeps the key.
+5. Save the key/terminal intended for this till with **Dedicated to this till — no MariaDB needed** selected. Never assign one physical terminal to multiple dedicated tills.
+
+Confirmed sandbox recovery evidence survives ordinary history cleanup and journal pruning. If MariaDB is later reconnected, matching stale shared records are acknowledged without reopening the cancelled tests; contradictory shared evidence remains blocked. Portable shop-setup backups omit this machine-specific recovery evidence along with payment journals. This workflow is not a force-clear option and cannot resolve a provider result that cannot be verified.
+
+### Legacy sandbox recovery verification — 12 October 2026
+
+Automated checks: **1,018 frontend tests passed**, two skipped; **62 targeted native tests passed**, including 14 new provider/SQLite recovery tests. The native checks cover real isolated SQLite transactions and mocked HTTP request/response boundaries, legacy zero-default amount fields, mismatched/captured/active payments, missing latest-session evidence, sale-payload/accounting validation, two separated confirmations, staff/configuration races, history cleanup and portable backups. Reconnection tests cover Dedicated mode with no saved key, bounded acknowledgement, retries and restored shared-database epochs. `npm run check` reports zero errors/warnings; the native macOS debug app bundle builds successfully. Existing Rust dead-code and frontend bundle-size warnings are not new recovery failures.
+
+Independent Sol 6.1 Ultra acceptance used the rebuilt **native macOS Tauri app**, not browser emulation, with the MariaDB service stopped and no TCP 3306 listener. A protected backup was taken before reproducing legacy state on the mock-data laptop: the previously cancelled sandbox attempt `69c6344a-6ac2-4ea6-873b-8f8881c23920` was marked `uncertain/shared` with the legacy zero amount hint; its actual provider IDs, amount and sale payload were unchanged.
+
+- Before recovery, key removal was blocked. An incorrect administrator PIN left the journal unresolved, with no recovery receipt or audit entry.
+- With the correct PIN, Dojo's `Canceled` result was verified at **00:03:00.948Z** and **00:03:36.085Z**, 35.137 seconds apart. One native recovery receipt and one audit entry were saved; the journal remained `shared` and became `cancelled`.
+- The native dialog and saved settings confirmed **Dedicated** ownership with the original key retained. Explicit **Remove Saved API Key** then succeeded, disabled the integration and removed the key while MariaDB was still stopped.
+- No new charge was initiated. Orders/payments stayed at **86 each**, both totals **137,907 pence**, and active terminal attempts were zero.
+- MariaDB was restarted at **00:04:16Z** while the Dojo key was still removed. The running native app automatically acknowledged the confirmed receipt for the shared dataset. Its Sync Dashboard reported **Reachable / Ready / Pending 0 / Conflicts 0 / Schema Good**; a normal Sync Now also completed. The receipt/audit and unchanged financial totals were preserved.
+- After testing, the original protected credential/configuration files were restored byte-for-byte. The verified cancelled journal, receipt, audit and shared acknowledgement were retained; the database was not rolled back. MariaDB was left running again, with no pending local queue or active payment attempts.
+
+These results verify the native macOS flow; the Windows installer and physical-terminal UAT still require testing on Windows after rebuilding/installing this source.
 
 For acceptance testing, use sandbox credentials only:
 

@@ -6,6 +6,8 @@
     import { initMysqlDb } from '$lib/stores/mysql';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
+    import NativeQaControls from '$lib/components/NativeQaControls.svelte';
+    import { nativeQaEnabled } from '$lib/nativeQa';
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
     import {
         ensureDatabaseIdentityForSync,
@@ -45,6 +47,7 @@
     import BackOfficeSidebar from '$lib/components/BackOfficeSidebar.svelte';
     import SystemPrintHost from '$lib/components/SystemPrintHost.svelte';
     import LicenseNoticeDialog from '$lib/components/LicenseNoticeDialog.svelte';
+    import OnlineFinancialRecovery from '$lib/components/OnlineFinancialRecovery.svelte';
     import { startCustomerDisplayAutoOpenWatcher } from '$lib/customerDisplay';
     import { markAppNavigation } from '$lib/navigation';
     import { OWNER_CLOUD_ACTIVATION_EVENT, shouldStartOwnerCloudReporter } from '$lib/ownerCloudConfig';
@@ -190,6 +193,7 @@
         const message = String(error).toLowerCase();
         return [
             'connection timed out',
+            'pool timed out',
             'connect timeout',
             'connection refused',
             'connection reset',
@@ -522,16 +526,10 @@
                 startTerminalRecoverySchedule();
             }
 
-            // Remove legacy app data while preserving device-only preferences.
-            const customerDisplayMonitor = localStorage.getItem('customer_display_monitor');
-            const customerDisplayAutoOpen = localStorage.getItem('customer_display_auto_open');
-            localStorage.clear();
-            if (customerDisplayMonitor !== null) {
-                localStorage.setItem('customer_display_monitor', customerDisplayMonitor);
-            }
-            if (customerDisplayAutoOpen !== null) {
-                localStorage.setItem('customer_display_auto_open', customerDisplayAutoOpen);
-            }
+            // SQLite owns catalogue data; WebView storage also contains modern
+            // device-local journals/outboxes. Clearing it here would erase the
+            // latest trolley recovery mirror on every reload/restart. Do not
+            // bulk-delete storage as a legacy-seed cleanup.
             console.log("POS initialized ✅");
             dbReady = true;
             if (window.location.pathname !== '/customer-display') {
@@ -753,6 +751,7 @@
 </script>
 
 <svelte:window on:pointerdown|capture={handleGlobalButtonFeedback} />
+{#if nativeQaEnabled && $page.url.pathname !== '/customer-display'}<NativeQaControls />{/if}
 
 {#if $connectionState.syncError?.includes('DATABASE_IDENTITY_MISMATCH')}
     <div class="fixed inset-0 z-[3000] flex items-center justify-center bg-bg-base p-6 font-sans text-text-main">
@@ -797,6 +796,7 @@
 {#if $page.url.pathname !== '/customer-display'}
 <SystemPrintHost />
 <LicenseNoticeDialog enabled={dbReady} />
+{#if dbReady}<OnlineFinancialRecovery />{/if}
 <Toast />
 {#if $deviceOperatingMode === 'checkout'}
     <GlobalTouchInput />

@@ -1,0 +1,112 @@
+{
+  "recordedAtUtc": "2026-10-12T22:14:42Z",
+  "status": "PASS",
+  "scope": "Final frozen-source automated checks for device-local ordinary trolley recovery. Native Tauri interactions are recorded separately by the native operator.",
+  "frontend": {
+    "command": "env -u POS_TEST_CATALOGUE_SOCKET -u POS_TEST_MYSQL_DATABASE -u POS_TEST_MYSQL_HOST -u POS_TEST_MYSQL_USER -u POS_TEST_MYSQL_URI npx vitest run",
+    "status": "PASS",
+    "filesPassed": 104,
+    "filesSkipped": 3,
+    "filesTotal": 107,
+    "testsPassed": 1402,
+    "testsFailed": 0,
+    "testsSkipped": 56,
+    "testsTotal": 1458,
+    "durationSeconds": 14.50,
+    "startedAtLocal": "2026-10-12T23:09:07+01:00",
+    "skippedTestsAreNotClaimedAsExecuted": true,
+    "externalFixtureOptInsUnset": true,
+    "priorRunCorrections": [
+      "First full run: 1398 passed, 1 failed, 56 skipped. An existing source-structure assertion expected the old exact scannerFocusBlocked prefix and did not include the new checkoutDraftBlocked guard.",
+      "Second full run: 1398 passed, 1 failed, 56 skipped. After the first assertion was updated, a second exact-prefix assertion on scannerOverlayOpen required the same update.",
+      "Both assertions now explicitly require checkoutDraftBlocked before onlineFinancialReviewOpen. Production scanner guards were correct; no production-code change was needed for these two assertion updates.",
+      "After the startup repair optimization and isolated QA checkpoint allow-list correction, the final full rerun passed 1402 tests, including three additional startup repair SQL tests."
+    ]
+  },
+  "focusedJournalChecks": {
+    "command": "npx vitest run src/lib/checkoutDraft.test.ts src/lib/checkoutDraftSqlite.test.ts",
+    "status": "PASS",
+    "testsPassed": 67,
+    "testsFailed": 0,
+    "pureAndMockedBoundaryScenarios": 53,
+    "realSqliteScenarios": 14,
+    "covered": [
+      "Exact weighted cart/customer/discount/manual flag/recovery identity round-trip without payment or session data.",
+      "Synchronous immutable mirror, coalesced writes, rejection/retry and revisioned clear tombstones.",
+      "Validation limits, unavailable/full storage and malformed-copy fail-closed preservation.",
+      "Real SQLite atomic compare-and-swap: an older WebView save arriving after a newer clear cannot resurrect a trolley.",
+      "Equal revision idempotency, conflicting revisions, corruption introduced after validation, bounded contention and healthy retry."
+    ]
+  },
+  "typeAndSvelteChecks": {
+    "command": "npm run check",
+    "status": "PASS",
+    "errors": 0,
+    "warnings": 0
+  },
+  "invokeCapabilityAudit": {
+    "status": "PASS",
+    "frontendCommands": 99,
+    "registeredCommandsInSource": 105,
+    "allFrontendCommandsPermitted": true,
+    "newNativeCommandsNeededForTrolleyRecovery": false,
+    "note": "Source counts include cfg-gated QA entries; they are not a claim that QA handlers exist in a normal compiled artifact."
+  },
+  "normalSourceRust": {
+    "workingDirectory": "src-tauri",
+    "command": "env -u LBJ_NATIVE_QA -u VITE_NATIVE_QA -u POS_TEST_MYSQL_URI -u LBJ_PRINTER_MODULE_TEST_PACKAGE -u TAURI_CONFIG cargo test --lib -- --skip real_mariadb_ --skip live_snapshot_is_consistent_and_schema_lock_is_connection_scoped --skip validates_a_package_created_by_the_javascript_packager_when_supplied",
+    "status": "PASS",
+    "testsPassed": 251,
+    "testsFailed": 0,
+    "testsIgnored": 0,
+    "testsFiltered": 10,
+    "testDurationSeconds": 5.28,
+    "compileDurationSeconds": 43.97,
+    "compilerWarnings": 4,
+    "compilerWarningKind": "Existing unused restore helper functions in commerce.rs",
+    "nativeQaFeatureRequested": false,
+    "excludedExternalFixtures": {
+      "realMariaDbTests": 8,
+      "liveMySqlSessionTest": 1,
+      "externallyPackagedPrinterModuleTest": 1
+    },
+    "note": "External-fixture tests were explicitly filtered instead of claiming early-return passes. No original database or configured provider was accessed."
+  },
+  "isolatedQaHarnessRust": {
+    "command": "env -u VITE_NATIVE_QA -u POS_TEST_MYSQL_URI -u LBJ_PRINTER_MODULE_TEST_PACKAGE LBJ_NATIVE_QA=1 TAURI_CONFIG='{\"identifier\":\"com.elamreda.tauri-app.native-qa\"}' cargo test --lib --features native-qa native_qa::enabled::tests",
+    "status": "PASS",
+    "testsPassed": 3,
+    "testsFailed": 0,
+    "testsFiltered": 261,
+    "compileDurationSeconds": 40.90,
+    "testDurationSeconds": 0.00,
+    "nativeQaFeatureRequested": true,
+    "nativeQaOptIn": true,
+    "buildScriptOutput": "src-tauri/target/debug/build/tauri-app-407682525f3eb4ba/output",
+    "nativeQaCfgEmitted": true,
+    "tauriIdentifier": "com.elamreda.tauri-app.native-qa",
+    "testNames": [
+      "only_known_bounded_failure_modes_are_allowed",
+      "diagnostics_are_bounded",
+      "faults_are_consumed_exactly_once_without_matching_other_operations"
+    ],
+    "checkoutPointsValidated": [
+      "checkout.after-sale-commit",
+      "checkout.before-hold-commit",
+      "checkout.after-hold-commit"
+    ],
+    "notIncludedInNormalSourceRust251Count": true,
+    "note": "Cfg-enabled library unit tests only; no app was launched, no bundles were replaced and no external fixture tests were executed. The expanded allow-list check validates the checkout points used by the native crash/hold simulations."
+  },
+  "patchWhitespace": {
+    "command": "git diff --check",
+    "status": "PASS"
+  },
+  "normalBuildArtifactEvidence": "normal-build-artifact.json",
+  "limits": [
+    "Automated checks supplement, not replace, the separately recorded native Tauri reload and cold restart interactions.",
+    "Windows/WebView2 runtime behavior, physical printers, card terminals and live external providers were not certified by these tests.",
+    "No ordinary original-shop trolley, live database, history, provider key or terminal registration was changed by this verification agent.",
+    "The normal artifact was compiled for macOS arm64 debug with production frontend assets; no release or Windows build is claimed."
+  ]
+}

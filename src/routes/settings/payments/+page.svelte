@@ -7,18 +7,25 @@
     let sumupConfig: SumupConfig | null = null;
     let dojoConfig: DojoConfig | null = null;
     let providersLoading = true;
+    let sumupLoadError = false;
+    let dojoLoadError = false;
 
-    onMount(async () => {
+    async function refreshProviders() {
+        if (!providersLoading) providersLoading = true;
         const [sumup, dojo] = await Promise.allSettled([loadSumupConfig(), loadDojoConfig()]);
+        sumupLoadError = sumup.status === 'rejected';
+        dojoLoadError = dojo.status === 'rejected';
         if (sumup.status === 'fulfilled') sumupConfig = sumup.value;
         else console.warn('Could not load the SumUp provider status:', sumup.reason);
         if (dojo.status === 'fulfilled') dojoConfig = dojo.value;
         else console.warn('Could not load the Dojo provider status:', dojo.reason);
         providersLoading = false;
-    });
+    }
+    onMount(refreshProviders);
 
     $: sumupStatus = providersLoading
         ? 'Checking setup'
+        : sumupLoadError ? 'Could not load settings'
         : sumupConfig?.enabled && sumupConfig.ready
             ? 'Enabled on this till'
             : sumupConfig?.ready
@@ -26,6 +33,7 @@
                 : 'Setup required';
     $: dojoStatus = providersLoading
         ? 'Checking setup'
+        : dojoLoadError ? 'Could not load settings'
         : dojoConfig?.enabled && dojoConfig.ready
             ? 'Enabled on this till'
             : dojoConfig?.ready
@@ -34,6 +42,9 @@
 </script>
 
 <MgmtPage title="Card Payments" backFallback="/settings">
+    <div slot="actions">
+        {#if sumupLoadError || dojoLoadError}<button class="btn btn-secondary" disabled={providersLoading} on:click={refreshProviders}>{providersLoading ? 'Loading…' : 'Retry loading settings'}</button>{/if}
+    </div>
     <div class="settings-page-shell payment-providers-shell">
         <section class="settings-hero">
             <p class="settings-hero-kicker !text-success">Payment terminals</p>

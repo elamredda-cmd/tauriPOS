@@ -34,6 +34,7 @@
         setAutomaticSetupBackupSchedule,
         syncConflictSaleReference,
         upsert,
+        saveSettingsBatch,
         validateDatabaseSchemas,
         wipeAndPullFromServer,
         type DatabaseRestoreResult,
@@ -64,6 +65,9 @@
     let restoreFilePath = '';
     let restoreFileConfirmed = false;
     let busy = false;
+    let checkingSchemas = false;
+    let refreshingConflicts = false;
+    let savingTaxMode = false;
     let taxIncludedInPrice = $storeDB.taxIncludedInPrice;
     let syncConflicts: SyncConflict[] = [];
     let conflictStatus = '';
@@ -324,16 +328,25 @@
     }
 
     async function refreshConflicts() {
-        syncConflicts = await getSyncConflicts();
+        if (refreshingConflicts) return;
+        refreshingConflicts = true;
+        try {
+            syncConflicts = await getSyncConflicts();
+        } catch (error) {
+            conflictStatus = `Could not refresh conflicts: ${cleanError(error)}. Press Refresh to retry.`;
+        } finally {
+            refreshingConflicts = false;
+        }
     }
 
     async function retryConflict(id: string) {
+        if (busy) return;
         busy = true;
         conflictStatus = 'Retrying selected change...';
         try {
             await retrySyncConflict(id);
-            await refreshConflicts();
             conflictStatus = 'Retry completed. Any remaining conflict still needs attention.';
+            await refreshConflicts();
         } catch (error) {
             conflictStatus = `Retry failed: ${error}`;
         } finally {
@@ -352,14 +365,23 @@
     }
 
     async function performConflictDismiss(conflict: SyncConflict) {
+        if (busy) return;
+        busy = true;
         const retainedLocalSale = isRetainedLocalSaleConflict(conflict);
-        await dismissSyncConflict(conflict.id, {
-            acknowledgeRetainedLocalSale: retainedLocalSale,
-        });
-        await refreshConflicts();
-        conflictStatus = retainedLocalSale
-            ? 'Warning dismissed. The sale remains stored locally and was not uploaded.'
-            : 'Conflict dismissed on this till.';
+        try {
+            await dismissSyncConflict(conflict.id, {
+                acknowledgeRetainedLocalSale: retainedLocalSale,
+            });
+            conflictStatus = retainedLocalSale
+                ? 'Warning dismissed. The sale remains stored locally and was not uploaded.'
+                : 'Conflict dismissed on this till.';
+            await refreshConflicts();
+        } catch (error) {
+            conflictStatus = `Could not dismiss conflict: ${cleanError(error)}. The conflict is kept; retry when connected.`;
+            toast(conflictStatus, 'error');
+        } finally {
+            busy = false;
+        }
     }
 
     async function confirmRetainedSaleDismiss() {
@@ -370,16 +392,33 @@
     }
 
     async function saveTaxMode() {
+        if (savingTaxMode || busy) return;
+        savingTaxMode = true;
         const store = { ...$storeDB, taxIncludedInPrice } as Store;
-        storeDB.set(store);
-        await upsert('settings', { key: 'store_info', value: JSON.stringify(store), updatedAt: now() }, 'key');
-        toast('Tax calculation mode saved', 'success');
+        try {
+            await saveSettingsBatch([{ key: 'store_info', value: JSON.stringify(store), updatedAt: now() }]);
+            storeDB.set(store);
+            toast('Tax calculation mode saved', 'success');
+        } catch (error) {
+            taxIncludedInPrice = $storeDB.taxIncludedInPrice;
+            toast(`Tax mode was not saved. Previous setting kept. ${cleanError(error)}`, 'error');
+        } finally {
+            savingTaxMode = false;
+        }
     }
 
     async function validateSchemas() {
+        if (checkingSchemas || busy) return;
+        checkingSchemas = true;
         schemaStatus = 'Checking databases...';
-        const result = await validateDatabaseSchemas();
-        schemaStatus = result.ok ? 'SQLite and MariaDB schemas are ready.' : result.issues.join(' | ');
+        try {
+            const result = await validateDatabaseSchemas();
+            schemaStatus = result.ok ? 'SQLite and MariaDB schemas are ready.' : result.issues.join(' | ');
+        } catch (error) {
+            schemaStatus = `Database check failed: ${cleanError(error)}. Press Validate Database Schemas to retry.`;
+        } finally {
+            checkingSchemas = false;
+        }
     }
 
     async function migrateLocalData() {
@@ -599,10 +638,10 @@
             <h3 class="settings-section-title">Advanced Shop Configuration</h3>
             <p class="text-text-muted mb-4">Changing the tax mode affects how future transaction tax is calculated.</p>
             <div class="flex flex-wrap items-center gap-3">
-                <button class="btn {taxIncludedInPrice ? 'btn-success' : 'btn-secondary'}" on:click={() => taxIncludedInPrice = !taxIncludedInPrice}>
+                <button class="btn {taxIncludedInPrice ? 'btn-success' : 'btn-secondary'}" disabled={savingTaxMode || busy} on:click={() => taxIncludedInPrice = !taxIncludedInPrice}>
                     Tax Included in Price: {taxIncludedInPrice ? 'Yes' : 'No'}
                 </button>
-                <button class="btn btn-primary" on:click={saveTaxMode}>Save Tax Mode</button>
+                <button class="btn btn-primary" disabled={savingTaxMode || busy} on:click={saveTaxMode}>{savingTaxMode ? 'Saving…' : 'Save Tax Mode'}</button>
             </div>
         </section>
 
@@ -617,7 +656,7 @@
             </div>
             <div class="button-row">
                 <a href="/setup" class="btn btn-secondary">Change Setup / Database Mode</a>
-                <button class="btn btn-secondary" disabled={busy} on:click={validateSchemas}>Validate Database Schemas</button>
+                <button class="btn btn-secondary" disabled={busy || checkingSchemas} on:click={validateSchemas}>{checkingSchemas ? 'Checking databases…' : 'Validate Database Schemas'}</button>
                 {#if $connectionState.mode === 'multi'}
                     <button class="btn btn-primary" disabled={busy} on:click={migrateLocalData}>Migrate Local Data to Multi-Till</button>
                 {/if}
@@ -817,7 +856,7 @@
                     <h3 class="settings-section-title">Sync Conflicts</h3>
                     <p class="text-text-muted">Changes that could not safely overwrite newer MariaDB data appear here for review.</p>
                 </div>
-                <button class="btn btn-secondary" disabled={busy} on:click={refreshConflicts}>Refresh</button>
+                <button class="btn btn-secondary" disabled={busy || refreshingConflicts} on:click={refreshConflicts}>{refreshingConflicts ? 'Refreshing…' : 'Refresh'}</button>
             </div>
             {#if syncConflicts.length === 0}
                 <div class="status-card"><div><strong>No sync conflicts</strong><span>This till has no changes waiting for administrator review.</span></div></div>
@@ -894,7 +933,7 @@
                 disabled={busy || !purgeResponsibilityAccepted}
                 on:click={purgeTransactions}
             >
-                {busy ? 'Deleting History…' : purgeFinalConfirmation ? 'Delete History Permanently' : 'Continue to Final Confirmation'}
+                {purgeProgressState === 'deleting' ? 'Deleting History…' : purgeFinalConfirmation ? 'Delete History Permanently' : 'Continue to Final Confirmation'}
             </button>
             {#if purgeStatus}<p class="status-text">{purgeStatus}</p>{/if}
         </section>

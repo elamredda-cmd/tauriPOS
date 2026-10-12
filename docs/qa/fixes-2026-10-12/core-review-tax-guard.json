@@ -1,0 +1,57 @@
+{
+  "date": "2026-10-12",
+  "scope": "Independent review of saveTaxRateSnapshot, saveSettingsBatch, native tax CAS, debug timeout fixture, and account-repayment authorization; delegated tax registry hardening",
+  "review": [
+    {
+      "issue": "Shared tax SQL omitted an in-transaction dataset epoch fence",
+      "evidence": "Initial implementation only preflighted restore/close before starting its pinned transaction. A completed restore with matching tax baseline could admit a stale editor.",
+      "status": "Parent fix reviewed: pinned transaction locks close barrier, signed restore gate and dataset epoch before catalogue mutex and baseline comparison. Production orchestration regression rejects epoch change before any tax write."
+    },
+    {
+      "issue": "Shared tax cache could be overwritten by an older in-flight download or overwrite a newer downloaded snapshot",
+      "evidence": "Executed the production filterRowsNeedingLocalUpsert function in an isolated Node VM: local timestamp 20:10 and remote timestamp 20:09 still returned the stale remote tax row. The original server-first save had no pending upload guard and mirrored an editor-derived snapshot.",
+      "status": "Parent fix reviewed: native protected tax upserts compare parsed timestamps inside BEGIN IMMEDIATE; shared save and downloads use the same frontend tax mutex. The save publishes rehydrated accepted SQLite rows only after the cache batch succeeds, and does not report server failure if the post-commit mirror fails."
+    },
+    {
+      "issue": "Legacy queued tax default updates could leave two defaults",
+      "evidence": "When another till queued A=false/B=true before a new atomic switch to C, B could retain an older row timestamp and its queued true would remain eligible even though A=false conflicted. A table-level mutex alone did not protect default uniqueness.",
+      "status": "Fixed with catalogue_integrity_v3 singleton default registry and real MariaDB regression tests."
+    }
+  ],
+  "taxRegistry": {
+    "files": ["src/lib/catalogueIntegrity.ts", "src/lib/catalogueIntegrity.test.ts", "src/lib/catalogueIntegrity.integration.test.ts"],
+    "initialization": "Parent mysql.ts caller runs catalogueTaxDefaultInitializationSql only after v3 trigger installation. Until seeded, tax row writers fail closed. A scalar subquery rejects multiple existing defaults rather than choosing or repairing one.",
+    "guards": "All tax insert/update/delete operations serialize under pos_catalogue_mutex and maintain pos_tax_default_registry in the same transaction. Triggers never locking-read their own tax_rates table. Setting a different default requires the current default to be cleared first. Stale unsets clear the registry only when they refer to its current default.",
+    "restore": "The existing connection-bound restore bypass can delete/reinsert the default and rebuild registry state. It cannot introduce a second default.",
+    "scopeLimit": "Registry enforces at most one default. Exact-one validation at commit belongs to the complete snapshot transaction; legacy standalone unsetting can still leave zero because row triggers have no deferred commit hook."
+  },
+  "financialRecoveryFinalReview": {
+    "verdict": "No new blocking unsafe outcome found in source review. No implementation, native UI, provider, credential or shop-data changes were performed during this pass.",
+    "timeout": "Native cold acquisition uses a finite 5-second budget; authoritative replay has a 30-second timeout. Timeout preserves the immutable reserved receipt and durable intent, records its stage, and reports pending rather than cancellation. An exact relational replay plus dataset/report/restore fencing is required before local mirror and matching intent removal.",
+    "operatorRecovery": "The review is rebuilt from the saved journal, rechecks the reviewed order ID and operation-specific staff authority, and passes current actor version to native in-transaction authorization. Known pending or unreadable recovery state blocks replacement checkout. Only the exact submitted unchanged trolley is detached; other trolley edits are preserved. Display hydration failure after native success does not reverse or misreport the durable commit.",
+    "dojoExpiry": "Both collection callers bind the original journal ID. Automatic expired-intent DELETE is Sandbox-only in the monitor and independently requires the stored native sandbox key, matching durable identifiers, Expired session and Created payment. Fresh provider proof decides finality; a DELETE acknowledgement is not enough, and late capture wins. Live/Unknown flows do not use sandbox cleanup. Customer final cancelled/failed messages replace intermediate timeout prompts.",
+    "legacySandboxHandover": "Reviewed administrator reauthentication/version checks, native sandbox key/terminal guards, preservation of approved/account/refund work, latest-session checks, repeated settled no-charge evidence, journal comparison and accounting checks before resolution, registration mutex and idle-terminal/unchanged-configuration checks. Native evidence records are retained; conflicting remote approved/final states are rejected rather than overwritten.",
+    "intentionalLimits": [
+      "Existing automatic startup recovery uses recovery:null for a previously reserved immutable journal. The new explicit review/recover action is actor-gated; it does not introduce a new sale or terminal charge.",
+      "Timeout is an ambiguous outcome and can legitimately leave checkout blocked until original-receipt recovery or administrator review succeeds.",
+      "The native QA fault is compile-time debug-only and one-shot per process, so restart resets its one-shot. Parent must omit LBJ_QA_FINANCIAL_TIMEOUT_CUSTOMER from the final normal build.",
+      "Parent-reported checkout/customer TIP0 native evidence was not independently reproduced by this agent; this review does not claim a native UAT PASS."
+    ]
+  },
+  "verification": {
+    "catalogue": "56 tests passed: catalogueIntegrity.test.ts and catalogueIntegrity.integration.test.ts using POS_TEST_CATALOGUE_SOCKET=/tmp/pos-attendance-test.Gj6hi5/mysql.sock. Includes current and mixed legacy collations, stale outbox, atomic default save, rollback, concurrency, restore, initialization corruption rejection, existing deletion guards, and absence of trigger error 1442.",
+    "attendanceCompatibility": "9 tests passed in attendanceMariaDb.test.ts using POS_ATTENDANCE_TEST_SOCKET on the same explicitly disposable socket-only server.",
+    "cardRepayment": "55 tests passed across terminalRecovery.integration.test.ts, terminalRecovery.test.ts and customerDojoIntegration.test.ts. Native manual authorization is restricted to opening_balance/adjustment; payment recovery still posts entryType=payment and bypasses manager-adjustment authorization.",
+    "decoding": "No decoder mismatch found for standard tax schema: DOUBLE rate, INT default flag, and text fields are handled by pinned-session decoder; local expectedTaxRates CAS executes under one BEGIN IMMEDIATE transaction. Restore-gate selection explicitly casts isActive AS SIGNED.",
+    "finalProductionReview": "No additional blocking issue found in the revised tax save orchestration, including the final tax-audit parity patch. Exactly-one validation and audit insertions are before server COMMIT. No source implementation changes were made by this agent during these final review passes.",
+    "taxSnapshotOrchestration": "24 tests passed in taxRateSnapshotIntegration.test.ts, executing the extracted production saveTaxRateSnapshot and real audit helpers with mocked SQL/IPC: lock order, epoch/close/restore/missing-gate rejection, stale baseline, zero/two defaults, outbox/permission gates, cache publication/failure, local CAS, and audit parity/rollback. These are orchestration tests, not native UI or live SQL tests.",
+    "taxAuditParity": "Restoring audits is appropriate because prior generic tax upserts recorded tax_rate_created/tax_rate_updated. Reviewed and tested locked authoritative before/final-after snapshots, no temporary all-clear evidence, unchanged/boolean/timestamp no-op suppression, frozen permission-checked actor, rollback on a second audit insert failure, a single local CAS+audit batch, and browser in-memory audit parity. Shared cached audit copies use the committed audit IDs without independently queued duplicates.",
+    "nativeLocalBatch": "cargo test --manifest-path src-tauri/Cargo.toml --lib local_batch::tests -- --test-threads=1 passed all 15 tests. Includes stale-offset timestamp rejection/fresh-tax download acceptance and atomic tax CAS with rollback. Four pre-existing dead-code warnings; no errors.",
+    "typecheck": "npm run check passed: Tauri command audit (95 frontend commands, 101 registered commands), svelte-check 0 errors and 0 warnings.",
+    "finalRecoveryRegression": "179 tests passed across onlineFinancialRecovery.test.ts, stores/onlineFinancialRecovery.test.ts, onlineFinancialRecoveryUi.test.ts, dojoSessionFlow.test.ts, customerDojoIntegration.test.ts, dojoSandboxRecovery.test.ts and terminalAttempts.test.ts. Mocked/native-routing or isolated in-memory fixtures only; no configured database/provider calls or native UI actions.",
+    "debugFixture": "Compile-time debug-only option_env target, exact customer ID plus QA-name prefix, one use per process, loopback-only stalled listener and no provider/credential mutation. Parent should rebuild without the QA compile-time value after its test; one-shot resets on process restart.",
+    "settingsBatch": "Atomic local settings persistence is implemented; no new blocking decoder or transaction issue found. Shared per-key outbox replication is not a cross-till atomic preset transaction.",
+    "nativeUi": "Not run by this agent."
+  },
+  "safety": "Only parent-authorized disposable socket server and generated test schemas were used. Tests removed their generated schemas. Scratch server was explicitly shut down afterward; shop database and stored credentials were untouched."
+}

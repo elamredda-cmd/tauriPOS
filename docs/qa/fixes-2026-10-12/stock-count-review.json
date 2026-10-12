@@ -1,0 +1,101 @@
+{
+  "date": "2026-10-12",
+  "finding": "AUDIT-05",
+  "scope": "Final blocking stock-count persistence review and targeted correction; source and automated tests only for this agent.",
+  "status": "FIXED_WITH_AUTOMATED_AND_ROOT_NATIVE_HEALTHY_EVIDENCE",
+  "rootCause": [
+    "setStockLevel wrote an absolute count to SQLite before separately creating audit/outbox work.",
+    "pushWriteInBackground ignores its legacy write callback, so mysqlSetStockLevel(expectedStockLevel) was never the active native path.",
+    "The queued full-product snapshot could replay a stale absolute stock value and overwrite another till's sale.",
+    "Even metadata-only patches queued full product snapshots containing cached stockLevel."
+  ],
+  "correction": [
+    "Standalone counts use the existing native commit_local_batch command with the new setStock mutation: signed 32-bit integral count and expected value, UPDATE compare-and-set and audit in one BEGIN IMMEDIATE transaction.",
+    "setStock mutations cannot create an absolute outbox upload.",
+    "Shared counts are online-only and flush then reject remaining product/sale/receipt queue work, matching quarantined stock conflicts or online financial recovery intents.",
+    "The pinned MariaDB transaction locks close barrier, signed restore gate, dataset epoch and product before checking expected stock; only stockLevel and updatedAt change, and the stock_counted audit commits in that transaction.",
+    "Changed stock rolls back without a count/audit write and attempts guarded stock-only cache refresh before reporting the conflict.",
+    "Uncertain COMMIT reports that the count outcome is unconfirmed and explicitly says not to repeat it.",
+    "Confirmed server count is not reported as failed if cache refresh fails; confirmed standalone count is also preserved if the post-commit display read fails.",
+    "The native server-count cache mirror requires the same dataset epoch, unchanged local stock and updatedAt, and no pending or quarantined product/sale/receipt work; accepted cache stock only is published to the product store.",
+    "Catalogue reviewer added the narrow commerce.rs generic-upsert guard: stockLevel cannot update an existing product through metadata replay; new product INSERT retains initial stock. Dedicated sales and receipts are unaffected."
+  ],
+  "tests": {
+    "focusedCommand": "POS_TEST_CATALOGUE_SOCKET=/tmp/pos-catalogue-stock.fFapED/mysql.sock npx vitest run src/lib/stockCountPersistence.test.ts",
+    "focusedResult": "Initial full run: 24 passed (21 production-orchestration checks plus 3 exact-production-SQL checks against disposable MariaDB). Final hardening run without the now-shut-down scratch server: 23 orchestration checks passed, 3 real-SQL checks skipped. Combined evidence covers all 26 cases; the authority SQL is unchanged by the final local-cache/conflict hardening.",
+    "orchestrationCases": [
+      "Pinned lock/CAS/audit order and publication from accepted cache only",
+      "Sale after editor opening causes conflict, no count/audit write, observed-stock refresh",
+      "Offline shared count rejected without queueing",
+      "Missing dataset epoch rejected",
+      "Pending product/sale/receipt synchronization rejected",
+      "Unresolved quarantined stock synchronization conflicts rejected",
+      "Pending online financial intent rejected",
+      "Replaced shared dataset rejected",
+      "Active whole-system close rejected",
+      "Active database restore rejected",
+      "Deleted shared product rejected",
+      "Audit failure causes rollback before cache work",
+      "COMMIT transport failure explicitly prohibits repetition and creates no local retry",
+      "Confirmed server commit survives local cache-refresh failure",
+      "Standalone count and audit share one native CAS batch with no upload row",
+      "Standalone post-commit display-read failure cannot report a failed count or invite repetition",
+      "Browser preview uses local CAS and no SQL/native IPC",
+      "Fractional count rejected",
+      "Positive signed-32-bit overflow rejected",
+      "Negative signed-32-bit overflow rejected",
+      "NaN rejected",
+      "Infinity rejected",
+      "No-op count accepts zero changedRows and preserves audit"
+    ],
+    "realMariaDbCases": [
+      "Exact production transaction SQL commits stock and audit while preserving product name and price",
+      "Exact production stale-count rollback branch leaves stock and audit unchanged",
+      "Real duplicate-audit insertion failure rolls back the preceding stock update"
+    ],
+    "nativeCommand": "cargo test local_batch::tests --lib",
+    "nativeResult": "18 passed, including three new stock-specific test groups; four pre-existing dead-code warnings.",
+    "newNativeGroups": [
+      "Successful CAS+audit; stale expected count rejected; failed audit rolls count back; metadata retained; no upload created",
+      "Missing product, fractional values, integer overflow and queued absolute counts rejected",
+      "Server cache mirror accepts clean baseline; rejects changed stock, changed timestamp, replaced/missing epoch, product queue, sale bundle, receipt bundle and quarantined product/sale/receipt conflicts"
+    ],
+    "typecheck": "npm run check: 0 errors, 0 warnings; Tauri command audit passed (95 frontend commands, 101 registered).",
+    "independentReview": "Catalogue agent independently source-reviewed lock order, CAS/audit transaction, stock-only guarded cache mirror and standalone atomicity; no new blocker found.",
+    "scratchSafety": "Used only explicitly provided socket-only disposable MariaDB. Generated pos_test_count_<pid> schema was dropped after tests. No shop credentials, app database or real payment operations used. Catalogue reviewer subsequently confirmed shutdown of the exact scratch server and removal of its socket."
+  },
+  "limits": [
+    "Original source-author evidence did not control native UI; the later root nativeSupplement records the healthy count/restoration only. Neither scope claims a blanket native stale/error PASS.",
+    "Shared stock counts are intentionally unavailable offline; metadata edits retain their existing durable queue behavior.",
+    "Legacy queued full-product rows cannot distinguish an old absolute count from a metadata snapshot. Existing-product replay intentionally ignores their stock, protecting authoritative stock; old pending counts require review/recount rather than blind replay.",
+    "No new native command, capability, build feature or permission is needed.",
+    "The real MariaDB checks execute SQL captured from production orchestration; SQL/IPC boundary decisions are separately covered by the production-function VM fixture and native SQLite tests."
+  ],
+  "nativeSupplement": {
+    "recordedBy": "Root agent; original source author did not control native UI",
+    "nativeRetest": "PARTIAL_OBSERVATION",
+    "productId": "old-item-016480",
+    "barcode": "5020379111201",
+    "name": "0EGGS",
+    "scenario": "Native Save Item counted stock 0→1 with item tracking on, confirmed UI/database result and zero queue/conflicts/intents; second save restored stock 1→0, item tracking off and price 169p. Global stock tracking was restored off.",
+    "auditProof": {
+      "stockCountedRows": 2,
+      "changes": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "expectedCountCas": "Original expected-stock baselines retained"
+    },
+    "screenshots": [
+      "screenshots/63-native-stock-count-confirmed.png",
+      "screenshots/64-native-stock-original-restored.png"
+    ],
+    "limits": "Healthy native count/save/restoration only. Native stale/error, audit rollback, uncertain COMMIT and cache-failure branches were not fault injected; automated/source evidence above covers those boundaries. Details and stock remain separate commits."
+  }
+}

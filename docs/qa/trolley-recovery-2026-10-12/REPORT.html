@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Trolley recovery — native Tauri verification</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #21394a; background: #eef3f5; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 30px 20px; line-height: 1.55; }
+    main { max-width: 1120px; margin: auto; }
+    header, section { background: #fff; border: 1px solid #d6e1e7; border-radius: 14px; padding: 24px; margin-bottom: 18px; }
+    h1 { margin: 4px 0 10px; font-size: clamp(25px, 4vw, 35px); line-height: 1.2; }
+    h2 { font-size: 21px; margin: 0 0 12px; }
+    p { margin: 9px 0; }
+    .eyebrow { font-size: 12px; color: #546f82; letter-spacing: .08em; text-transform: uppercase; font-weight: 750; }
+    .muted { color: #596f7d; }
+    .badge { display: inline-block; border-radius: 6px; padding: 3px 9px; font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .pass { color: #276143; background: #e8f3eb; }
+    .pending { color: #80531b; background: #fff2d9; }
+    .status-line { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 15px; }
+    .summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 18px; }
+    .summary div { border: 1px solid #dce6eb; border-radius: 10px; background: #f7fafb; padding: 15px; }
+    .summary strong { display: block; font-size: 24px; }
+    .summary span { color: #5a707d; font-size: 13px; }
+    .notice { padding: 14px 17px; border-left: 4px solid #b47a30; border-radius: 7px; background: #fff8e9; margin: 14px 0 0; }
+    ul { padding-left: 22px; margin: 10px 0; }
+    li { margin: 7px 0; }
+    a { color: #1d628c; text-underline-offset: 3px; overflow-wrap: anywhere; }
+    table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    th { text-align: left; color: #526c7d; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; background: #f4f8fa; }
+    th, td { padding: 13px 12px; border-bottom: 1px solid #dde6eb; vertical-align: top; }
+    td:first-child { width: 31%; font-weight: 650; }
+    td:nth-child(2) { width: 100px; }
+    .table-wrap { overflow-x: auto; }
+    .evidence a { display: block; margin-top: 4px; font-size: 13px; }
+    footer { color: #5d7481; padding: 5px 4px 20px; font-size: 13px; }
+    code { font-size: .9em; background: #f1f5f7; padding: 1px 4px; border-radius: 3px; }
+    @media (max-width: 650px) { body { padding: 15px 10px; } header, section { padding: 18px; } .summary { grid-template-columns: 1fr; } table { min-width: 610px; } }
+    @media print { body { background: #fff; padding: 0; } header, section { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">12 October 2026 · Isolated native Tauri QA</div>
+    <h1>Trolley recovery after reload or restart</h1>
+    <p class="muted">Device-local recovery for unfinished checkout trolleys. All eight native cases passed, with the forced-restart renderer limitation recorded below. Full automated checks and the normal build passed after the latest startup and QA-harness corrections.</p>
+    <div class="status-line"><span class="badge pass">Automated PASS</span><span class="badge pass">Normal build PASS</span><span class="badge pass">Native checks 8 / 8</span></div>
+    <div class="summary">
+      <div><strong>1,402</strong><span>Frontend tests passed · 56 skipped</span></div>
+      <div><strong>251</strong><span>Normal-source Rust tests passed · 10 filtered</span></div>
+      <div><strong>8 / 8</strong><span>Native cases verified in Tauri</span></div>
+    </div>
+    <div class="notice"><strong>Historical trolley:</strong> the previously disappeared trolley has not been reconstructed. This change protects newly saved unfinished trolleys; it does not claim to restore the earlier RAM-only contents.</div>
+  </header>
+
+  <section>
+    <h2>What changed</h2>
+    <ul>
+      <li>Ordinary trolley drafts now save on this device in SQLite, with a synchronous WebView mirror covering an imminent reload. Draft recovery does not require MariaDB and is not synchronized to another till.</li>
+      <li>Revisioned clear tombstones and atomic compare-and-swap stop an older pending save from reviving a cleared trolley, including a command arriving from an older WebView.</li>
+      <li>Cart lines, quantities, prices, notes, manual flags, selected line, customer and discount references are retained. Payment tender/method/modal state, staff credentials and customer account balances are not saved in the draft.</li>
+      <li>Checkout startup checks saved sale/hold ownership before recovery; malformed copies are kept for investigation rather than silently overwritten. Write failures remain retryable.</li>
+      <li>Three startup NULL-normalization migrations avoid re-updating normalized rows while retaining legacy repairs, preventing needless catalogue/FTS update cascades.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Native checks — 8 passed</h2>
+    <p class="muted">These are genuine isolated Tauri interactions using mock data, not browser simulations. Reload, full restart, sale ownership and hold ownership were observed without MariaDB.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Case</th><th>Result</th><th>Expected proof / evidence</th></tr></thead>
+        <tbody>
+          <tr id="ordinary-reload"><td>Ordinary trolley survives page reload</td><td><span class="badge pass">PASS</span></td><td>Exactly two unpaid lines restored: weighted 374p × 1 with note “1500g” and quantity-lock/skip-stock flags; regular line temporary 225p × 3. Same customer, 4 items, £10.49 total.<div class="evidence"><a href="screenshots/01-cart-before-reload.png">01 — Cart before reload</a><a href="screenshots/02-cart-after-reload.png">02 — Cart after reload</a></div></td></tr>
+          <tr id="full-quit-restart"><td>Full quit and restart</td><td><span class="badge pass">PASS</span></td><td>Genuine Cmd+Q, reopen and normal staff authentication restored the exact same cart: 4 items, £10.49, without MariaDB.<div class="evidence"><a href="screenshots/04-cart-after-full-restart.png">04 — Cart after full restart</a></div></td></tr>
+          <tr id="preserved-customer-reset-cash"><td>Customer retained; cash/payment state reset</td><td><span class="badge pass">PASS</span></td><td>The same QA customer stayed selected. Previously entered £5 cash reset to £0, payment remained closed and no sale/payment resumed automatically. Discount-reference round-trip is covered separately by automated tests.<div class="evidence"><a href="screenshots/03-restored-customer-reset-tender.png">03 — Customer and reset tender</a></div></td></tr>
+          <tr id="clear-then-reload"><td>Clear then reload</td><td><span class="badge pass">PASS</span></td><td>Genuine Clear and confirmation saved a revisioned null tombstone. After native reload the trolley stayed empty.<div class="evidence"><a href="screenshots/05-empty-after-clear-reload.png">05 — Empty after confirmed clear/reload</a></div></td></tr>
+          <tr id="completed-cash-sale-no-revival"><td>Completed cash sale does not return</td><td><span class="badge pass">PASS</span></td><td>Clean repeat displayed the sale-complete modal and saved a 169p cash receipt. Actual reload left an empty trolley and null draft. The initial QA-only checkpoint error and its correction remain recorded transparently.<div class="evidence"><a href="screenshots/06-initial-qa-checkpoint-registration-error.png">06 — Initial QA checkpoint error</a><a href="screenshots/07-cash-sale-complete.png">07 — Successful cash sale</a><a href="screenshots/08-empty-after-cash-sale-reload.png">08 — Empty after completed sale/reload</a></div></td></tr>
+          <tr id="hold-retrieve-rehold"><td>Hold, retrieve and re-hold</td><td><span class="badge pass">PASS</span></td><td>A 169p hold saved once; reload stayed empty with exactly one hold. Retrieve restored it. Full restart showed the genuine held-recovery guard without automatic payment; Recover saved trolley restored it and re-hold kept exactly one held copy. A fresh ordinary cart then survived reload with empty hold/sale markers while the held trolley stayed separate.<div class="evidence"><a href="screenshots/11-held-trolley-empty-main.png">11 — Held trolley, empty main screen</a><a href="screenshots/12-held-survives-reload-no-duplicate.png">12 — One hold after reload</a><a href="screenshots/13-retrieved-held-trolley.png">13 — Retrieved trolley</a><a href="screenshots/14-held-restart-recovery-guard.png">14 — Held-recovery guard after full restart</a><a href="screenshots/15-fresh-cart-after-rehold-reload.png">15 — Fresh cart after re-hold/reload</a></div></td></tr>
+          <tr id="forced-after-sale-commit-restart"><td>Restart after durable sale commit</td><td><span class="badge pass">PASS</span></td><td>The real receipt committed while its draft stayed nonempty. Only the validated isolated QA process was terminated to simulate a crash. After reopen/authentication, the trolley was empty, the draft null and the exact receipt still one row. <strong>Observed limitation:</strong> the first launch briefly had a blank renderer and required a clean quit/relaunch without database edits; seamless first-launch recovery is not claimed.<div class="evidence"><a href="screenshots/09-after-receipt-commit-before-ui-clear.png">09 — Committed receipt before UI cleanup</a><a href="screenshots/10-empty-after-interrupted-commit-restart.png">10 — Empty after interrupted commit/restart</a></div></td></tr>
+          <tr id="reject-before-hold-restores"><td>Rejected hold preserves trolley</td><td><span class="badge pass">PASS</span></td><td>The actual pre-commit Reject checkpoint fired. Its error kept the unpaid trolley intact, cleared the pending-hold marker and did not change the existing held count. Native reload restored the one-item 169p cart without a false held tombstone or recovery block.<div class="evidence"><a href="screenshots/16-rejected-hold-keeps-trolley.png">16 — Rejected hold keeps the cart</a><a href="screenshots/17-rejection-proof-retained-cart.png">17 — Actual checkpoint rejection proof</a><a href="screenshots/18-cart-restored-after-rejected-hold-reload.png">18 — Unpaid cart restored after rejected hold/reload</a></div></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Automated verification — PASS</h2>
+    <p class="muted">The latest full suite and rebuilt normal artifact include the startup repair optimization and corrected QA checkpoint allow-list.</p>
+    <ul>
+      <li>Full frontend suite: <strong>1,402 passed</strong> across 104 files; 56 external-fixture tests skipped across 3 files. Skips are not claimed as passes.</li>
+      <li>Focused journal checks: <strong>67 passed</strong>, including 14 actual SQLite scenarios for cross-WebView ordering, corruption and compare-and-swap contention.</li>
+      <li>Normal-source Rust: <strong>251 passed</strong>; 10 external-fixture cases explicitly filtered. Four existing unused restore-helper warnings remain.</li>
+      <li>Separately, <strong>3 cfg-enabled QA harness unit tests passed</strong>, including validation of the checkout boundary checkpoints. These are not added to the normal Rust count; no app/bundle was launched or replaced by the unit run.</li>
+      <li>Svelte/type checks: <strong>0 errors, 0 warnings</strong>. Command permissions and <code>git diff --check</code> passed. The startup-repair SQL checks use a table mirror to verify skipped updates and legacy repairs; they do not exercise the actual FTS5 tokenizer.</li>
+      <li>Normal macOS arm64 debug app build passed. The compiled frontend QA gate is false, its checkpoint is a no-op, and enabled native QA handlers are excluded. Unused QA helper definitions remain; total QA byte removal is not claimed.</li>
+    </ul>
+    <p><a href="automated-verification.json">Automated evidence</a> · <a href="normal-build-artifact.json">Normal build and exclusion proof</a> · <a href="verification.json">Machine-readable native case record</a> · <a href="native-durable-evidence.json">Read-only native SQLite evidence</a></p>
+  </section>
+
+  <section>
+    <h2>Safety and limits</h2>
+    <p>QA uses <code>com.elamreda.tauri-app.native-qa</code> and its isolated mock-data profile. The original app/trolley and live business data are not modified for these checks; provider keys and registrations are not test targets. Only isolated mock cash/hold records were used. No live provider requests were made; physical printer/drawer actions are not certified. Manual discount round-trip was automated-only because no active discount was available in this mock profile.</p>
+    <p>Windows/WebView2, physical terminals and other hardware still require separate testing. This report's normal build is macOS arm64 debug, not a release or Windows certification. The forced-restart case needed one clean relaunch after a blank renderer, as recorded above.</p>
+    <p>The isolated QA app was left open with an empty ordinary trolley and a durable null draft. One 169p mock held trolley and three completed 169p mock cash receipts remain as test evidence; there are zero pending online payment intents. The original running app was not restarted or operated for this exercise. <a href="screenshots/19-final-empty-checkout.png">19 — Final empty checkout</a></p>
+  </section>
+  <footer>Completed native verification · 12 October 2026, 22:18 UTC · All eight cases passed subject to the recorded platform, fixture and forced-restart limitations.</footer>
+</main>
+</body>
+</html>

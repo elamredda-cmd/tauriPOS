@@ -5,6 +5,36 @@ export const ATTENDANCE_CORRECTION_CONFLICT_CODE = 'ATTENDANCE_CORRECTION_CONFLI
 export const ATTENDANCE_CORRECTION_CONFLICT_MESSAGE =
     'This attendance record changed on another till. Review the latest version before correcting it again.';
 export const ATTENDANCE_EXPORT_MAX_ROWS = 100_000;
+export const ATTENDANCE_OVERLAP_CODE = 'ATTENDANCE_OVERLAP';
+// Manual records describe completed work; tolerate a small device/server skew.
+export const ATTENDANCE_CLOCK_SKEW_MS = 2 * 60_000;
+
+export type AttendanceInterval = Pick<EmployeeAttendance, 'id' | 'employeeId' | 'clockInAt' | 'clockOutAt' | 'status'>;
+
+export function findAttendanceOverlap(
+    candidate: AttendanceInterval,
+    records: readonly AttendanceInterval[],
+): AttendanceInterval | undefined {
+    const start = new Date(candidate.clockInAt).getTime();
+    const end = candidate.status === 'open' || !candidate.clockOutAt
+        ? Infinity : new Date(candidate.clockOutAt).getTime();
+    return records.find((record) => {
+        if (record.employeeId !== candidate.employeeId || record.id === candidate.id) return false;
+        const otherStart = new Date(record.clockInAt).getTime();
+        const otherEnd = record.status === 'open' || !record.clockOutAt
+            ? Infinity : new Date(record.clockOutAt).getTime();
+        // Invalid historical intervals must be reviewed, not silently ignored.
+        return !Number.isFinite(otherStart) || Number.isNaN(otherEnd)
+            || (start < otherEnd && otherStart < end);
+    });
+}
+
+export function attendanceOverlapError(conflict?: AttendanceInterval): Error {
+    const detail = conflict
+        ? ` Record ${conflict.id} (${conflict.clockInAt} to ${conflict.status === 'open' || !conflict.clockOutAt ? 'still clocked in' : conflict.clockOutAt}) conflicts with these times.`
+        : '';
+    return new Error(`${ATTENDANCE_OVERLAP_CODE}: This staff member already has attendance in this time range.${detail} Review and correct the existing session before saving another record.`);
+}
 
 /**
  * Quote a CSV cell and neutralise spreadsheet formula prefixes. Attendance
@@ -79,7 +109,7 @@ export function attendanceDateRange(startDate: string, endDate: string): { start
     return { startAt: start.toISOString(), endAt: end.toISOString() };
 }
 
-export function validateClosedAttendance(clockInAt: string, clockOutAt: string): void {
+export function validateClosedAttendance(clockInAt: string, clockOutAt: string, currentTime = Date.now()): void {
     const start = new Date(clockInAt).getTime();
     const end = new Date(clockOutAt).getTime();
     if (!Number.isFinite(start) || !Number.isFinite(end)) {
@@ -88,6 +118,9 @@ export function validateClosedAttendance(clockInAt: string, clockOutAt: string):
     if (end <= start) throw new Error('Clock-out must be after clock-in');
     if (end - start > 7 * 24 * 60 * 60 * 1000) {
         throw new Error('One attendance session cannot be longer than 7 days');
+    }
+    if (start > currentTime + ATTENDANCE_CLOCK_SKEW_MS || end > currentTime + ATTENDANCE_CLOCK_SKEW_MS) {
+        throw new Error('Attendance cannot be recorded in the future (a 2-minute clock-skew allowance applies)');
     }
 }
 

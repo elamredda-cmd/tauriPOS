@@ -1,0 +1,1089 @@
+{
+  "schemaVersion": 1,
+  "title": "Native Rust automated library tests — safe offline audit run",
+  "auditDate": "2026-10-12",
+  "execution": {
+    "cwd": "/Users/elamreda/Desktop/Tauri for Svelte POS/src-tauri",
+    "command": "env -u POS_TEST_MYSQL_URI -u LBJ_PRINTER_MODULE_TEST_PACKAGE cargo test --offline --locked --lib -- --skip real_mariadb --skip live_snapshot_is_consistent_and_schema_lock_is_connection_scoped --skip validates_a_package_created_by_the_javascript_packager_when_supplied --test-threads=2",
+    "startedAtUtc": "2026-10-12 09:19:01 UTC",
+    "completedObservedAtUtc": "2026-10-12 09:20:02 UTC",
+    "observedIntervalSeconds": 61,
+    "cargoReportedBuildSeconds": 29.79,
+    "testRunnerReportedSeconds": 4.28,
+    "exitCode": 0,
+    "platform": "macOS (current development host)",
+    "profile": "test [unoptimized + debuginfo]",
+    "testThreads": 2
+  },
+  "result": {
+    "status": "passed",
+    "passed": 231,
+    "failed": 0,
+    "ignored": 0,
+    "measured": 0,
+    "filteredOut": 9,
+    "totalDiscovered": 240,
+    "exactRunnerSummary": "test result: ok. 231 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 4.28s",
+    "modulePassCounts": {
+      "cash_control": 12,
+      "cctv_tests": 2,
+      "commerce": 110,
+      "customer_media": 2,
+      "dojo::sandbox_recovery": 14,
+      "dojo": 23,
+      "licensing": 25,
+      "local_batch": 6,
+      "local_terminal": 11,
+      "printer_modules": 5,
+      "scale_tests": 3,
+      "secret_store": 13,
+      "sumup": 5
+    }
+  },
+  "safety": {
+    "repoInstructionsFound": [],
+    "inspectedFiles": [
+      "src-tauri/Cargo.toml",
+      "src-tauri/build.rs",
+      ".github/workflows/release.yml",
+      "docs/DOJO_TESTING.md",
+      "Rust test modules and environment-gated integration fixture locations"
+    ],
+    "mysqlTestUriConfiguredBeforeRun": false,
+    "printerPackageConfiguredBeforeRun": false,
+    "environmentVariablesExplicitlyRemoved": [
+      "POS_TEST_MYSQL_URI",
+      "LBJ_PRINTER_MODULE_TEST_PACKAGE"
+    ],
+    "networkDependencyDownloadsAllowed": false,
+    "lockfileChangesAllowed": false,
+    "realMariaDbFixturesRun": 0,
+    "providerApiCallsRun": 0,
+    "physicalHardwareCallsRun": 0,
+    "networkFixtures": "Ephemeral 127.0.0.1 loopback HTTP/TCP servers only, with dummy credentials",
+    "databaseFixtures": "In-memory SQLite or isolated temporary SQLite files only",
+    "secretStoreFixtures": "Temporary test paths and mock keychain loaders; no production secret reads or writes",
+    "applicationRestarted": false,
+    "productEditsPerformed": false,
+    "buildEffect": "Existing Cargo cache reused; several dependencies and library-test target compiled locally. No Tauri app launched, release bundle built or service restarted."
+  },
+  "excludedTests": [
+    {
+      "name": "cash_control::tests::real_mariadb_cash_control_when_configured",
+      "file": "src-tauri/src/cash_control.rs",
+      "line": 1353,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_held_claim_retry_keeps_one_owner_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 18352,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_signed_employee_authority_values_decode_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 20714,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_customer_delete_races_and_guards_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 20740,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_account_ledger_rejects_stale_writers_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 21158,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_whole_system_close_serializes_writers_and_recovers_expiry_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 21347,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "commerce::tests::real_mariadb_two_till_simulation_when_configured",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 22013,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI."
+    },
+    {
+      "name": "mysql_session::tests::live_snapshot_is_consistent_and_schema_lock_is_connection_scoped",
+      "file": "src-tauri/src/mysql_session.rs",
+      "line": 222,
+      "reason": "Requires disposable MariaDB database via POS_TEST_MYSQL_URI; intentionally filtered instead of counting environment-gated early return as a pass."
+    },
+    {
+      "name": "printer_modules::tests::validates_a_package_created_by_the_javascript_packager_when_supplied",
+      "file": "src-tauri/src/printer_modules.rs",
+      "line": 976,
+      "reason": "Requires LBJ_PRINTER_MODULE_TEST_PACKAGE fixture; intentionally filtered instead of counting missing-fixture early return as a pass."
+    }
+  ],
+  "warnings": [
+    {
+      "category": "dead_code",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 2832,
+      "function": "sqlite_restore_table_exists",
+      "message": "Function is never used"
+    },
+    {
+      "category": "dead_code",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 3378,
+      "function": "copy_restore_table_to_mysql",
+      "message": "Function is never used"
+    },
+    {
+      "category": "dead_code",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 4369,
+      "function": "assert_no_active_local_terminal_attempts_in_restore",
+      "message": "Function is never used"
+    },
+    {
+      "category": "dead_code",
+      "file": "src-tauri/src/commerce.rs",
+      "line": 14002,
+      "function": "validate_mariadb_restore_identity",
+      "message": "Function is never used"
+    }
+  ],
+  "testCases": [
+    {
+      "name": "cash_control::tests::cash_count_snapshot_includes_split_refund_accounts_movements_and_cashback_only_once",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_native_rate_limit_cannot_be_bypassed_by_renderer_login",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_ledger_has_database_append_only_guards",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_period_requires_midnights_and_supports_dst",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_pin_and_admin_role_are_checked_natively_on_reads_and_writes",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_new_count_rejects_missing_payment_and_duplicate_day",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_retry_is_idempotent_but_changes_to_same_request_are_rejected",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_revisions_preserve_snapshot_after_purge_and_reject_stale_head",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_shared_snapshot_requires_selected_till_readiness",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_unknown_till_purge_and_pending_payment_fail_closed",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_validation_rejects_negative_counts_empty_reason_and_overflow",
+      "result": "ok"
+    },
+    {
+      "name": "cctv_tests::latin1_keeps_pound_sign_and_replaces_unsupported_characters",
+      "result": "ok"
+    },
+    {
+      "name": "cctv_tests::sends_overlay_text_to_the_configured_tcp_port",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::account_charge_and_idempotent_payment_update_the_ledger_atomically",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::account_limit_failure_rolls_back_the_entire_sale",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::account_payment_cannot_exceed_the_amount_owed",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::approved_referenced_card_payment_can_preserve_excess_as_customer_credit",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::authoritative_account_cache_adopts_the_remote_final_balance",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::automatic_setup_backup_refuses_and_validator_rejects_pending_online_intent",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::automatic_setup_backup_strips_sales_and_keeps_only_two_daily_files",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::controlled_import_covers_every_authority_and_history_table",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::creates_and_verifies_a_consistent_sqlite_backup",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::customer_profile_cas_ignores_balance_and_timestamp_but_detects_deletion",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::customer_profile_cas_rejects_stale_edits_and_accepts_exact_retries",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::customer_profile_legacy_sync_cannot_overwrite_profiles_or_balances",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::customer_profile_payload_requires_a_complete_base_and_discards_financial_fields",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::database_shaped_refund_bundle_accepts_integer_boolean_flags",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::delegated_staff_editor_cannot_mint_or_modify_admin_access",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::employee_profile_cas_preserves_legacy_credentials_but_never_creates_them",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::empty_restore_ledger_without_payment_method_is_safe_to_migrate",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::failed_post_swap_restore_puts_the_original_database_back",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::failed_sale_rolls_back_every_part",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::failed_stock_receipt_rolls_back_every_part",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::first_admin_bootstrap_requires_a_truly_empty_staff_table",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::first_machine_restore_does_not_adopt_the_source_till",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::full_refund_requires_exact_original_stock_restoration",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::generic_outbox_keeps_financial_tables_narrow_and_identity_keys_fixed",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::generic_tombstones_require_an_exact_supported_identity",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::held_order_protocol_accepts_only_unpaid_hold_rows",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::insufficient_loyalty_balance_rolls_back_the_entire_sale",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::latest_backup_ignores_internal_restore_files",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::legacy_backup_without_critical_age_and_account_fields_is_rejected",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::legacy_cash_payment_without_split_columns_can_be_refunded",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::legacy_online_intent_schema_gains_an_empty_fail_closed_epoch",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_loyalty_adjustment_is_atomic_audited_and_retry_safe",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_loyalty_adjustment_repairs_refund_debt_with_cas_and_idempotency",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_loyalty_adjustment_rolls_back_conflicts_and_unauthorized_changes",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_sale_commits_once_with_exact_allocated_outbox_bundle",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_blocks_changed_dataset_even_with_existing_outbox",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_does_not_change_ordinary_cash_retry_behavior",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_preserves_authoritative_account_defaults_and_balances",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_refund_does_not_reverse_stock_twice",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_rejects_changed_request_money_reference_and_extras",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_rejects_conflicting_saved_financial_records",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_requeues_missing_outbox_once_and_preserves_canonical_times",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_requires_local_approved_evidence_and_pinned_outbox",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_standalone_retains_receipt_without_duplicate_loyalty_or_stock",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_terminal_replay_sumup_keeps_distinct_client_and_provider_transaction_ids",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_transaction_allocates_unique_receipts_for_stale_bundles",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_transaction_continues_multi_till_receipts_after_history_purge",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_transaction_continues_standalone_receipts_after_history_purge",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_transaction_purge_retains_confirmed_sandbox_recovery_journals",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::local_transaction_purge_rolls_back_failure_and_preserves_account_ledger",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::loyalty_adjustment_validation_and_permissions_match_the_renderer_policy",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::loyalty_changes_commit_with_the_sale",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::malformed_refund_bundle_is_rejected",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::manual_loyalty_history_survives_receipt_history_purge",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::mariadb_binary_coordination_reads_cast_to_utf8mb4_text",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::mariadb_transaction_retry_is_limited_to_contention_failures",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::mariadb_v4_customer_guards_use_one_explicit_unicode_collation",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::mariadb_v4_guard_definition_requires_current_body_and_metadata",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::mariadb_v4_guard_health_requires_every_current_guard_and_no_legacy_guard",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::multi_till_restore_requires_the_same_verified_shop_identity",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::native_employee_authority_queries_normalize_unsigned_mariadb_values",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::native_employee_pin_validation_matches_runtime_formats",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::native_mariadb_writes_require_the_canonical_collation_marker",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::nonempty_restore_ledger_missing_payment_method_is_rejected_before_swap",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::on_account_refund_is_not_reclassified_as_loyalty",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::online_financial_intent_reservation_and_local_replay_are_idempotent",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::online_intent_epoch_is_fail_closed_for_legacy_or_different_datasets",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::opening_balance_is_atomic_and_can_only_be_posted_once",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::partial_then_final_refund_commits_and_blocks_over_refund",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::per_till_snapshot_uses_the_exact_server_tick_as_its_exclusive_bound",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_ack_retry_is_a_noop_but_does_not_overwrite_other_till",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_delete_retry_and_manual_percentage_are_supported",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_normalizes_nulls_booleans_and_metadata",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_offline_edit_chain_ignores_server_arrival_timestamps",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_rejects_schema_overflow_and_invalid_price_values",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::promotion_sync_removed_member_is_a_conflict_not_a_deleted_offer",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::refund_financial_fields_cannot_exceed_original_sale",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::replay_accepts_server_update_stamps_at_or_after_the_financial_stamp",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::report_cutoff_is_the_exclusive_successor_of_the_server_tick",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::report_epoch_accepts_equivalent_rfc3339_precision_and_rejects_invalid_values",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::report_period_bounds_reject_empty_or_reversed_cutoffs",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_gate_is_fail_closed_except_for_one_exact_claiming_session",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_keeps_only_the_target_till_identity",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_migrates_legacy_settings_metadata_before_post_swap_work",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_rejects_active_dedicated_payment_without_erasing_dispatch_guard",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_rejects_payment_ledger_rows_with_blank_payment_method",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_repair_removes_only_orphan_transaction_children",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_replaces_backup_tombstones_after_all_business_rows",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_terminal_guard_allows_first_install_and_legacy_database_without_journal",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::restore_upload_never_copies_device_or_control_settings",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::sale_rolls_back_when_its_atomic_outbox_insert_fails",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::simultaneous_local_sales_allocate_different_receipts",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::slow_till_repayment_is_stamped_after_the_mariadb_report_cutoff",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::stock_receipt_commits_once_with_its_outbox",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::stock_receipt_handles_legacy_null_and_negative_stock",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::stock_receipt_rejects_duplicate_record_ids_and_mismatched_audit_actor",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::stock_receipt_rejects_stock_overflow_without_committing_any_part",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::stock_receipt_rejects_values_that_cannot_sync_or_render_exactly",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::terminal_extras_account_additions_require_card_payment_and_safe_total",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::terminal_extras_account_repayment_preserves_base_debt_and_idempotency",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::terminal_extras_goods_refund_retains_additions_and_void_is_rejected",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::terminal_extras_legacy_payloads_default_to_zero_and_validate_separately",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::terminal_extras_sale_persists_and_replays_without_changing_product_revenue",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::till_close_cas_uses_the_effective_marker_and_server_bounded_period",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::two_tills_accumulate_stock_and_keep_unique_receipts",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::usable_admin_invariant_rejects_inactive_or_malformed_credentials",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::void_requires_original_open_shift_and_rejects_closed_periods",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::whole_system_close_duplicate_till_names_include_a_safe_short_id",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::whole_system_close_marker_requires_the_expected_latest_marker",
+      "result": "ok"
+    },
+    {
+      "name": "commerce::tests::whole_system_close_setup_and_barrier_locks_are_bounded_and_abort_is_minimal",
+      "result": "ok"
+    },
+    {
+      "name": "customer_media::tests::checks_content_as_well_as_extension",
+      "result": "ok"
+    },
+    {
+      "name": "customer_media::tests::media_access_is_limited_to_generated_names",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_accepts_legacy_zero_amount_hint_and_signature_rejection",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_accounting_changed_journal_and_close_barrier_block_resolution",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_active_session_or_mismatch_never_sends_delete",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_capture_race_stays_unresolved",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_changed_evidence_restarts_settling",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_created_without_latest_history_does_not_cancel_old_session",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_deletes_created_expired_and_requires_canceled_readback",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_does_not_trust_default_sale_kind_or_ignore_existing_payment_id",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_handover_cannot_ignore_new_active_work_or_staff_changes",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_handover_requires_idle_exact_terminal_and_unchanged_saved_registration",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_missing_ids_uses_unique_reference_and_preserves_not_found",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_rejects_live_approved_account_and_malformed_journals",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_requires_current_active_admin_and_tracks_profile_version",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::sandbox_recovery::tests::legacy_sandbox_recovery_settles_twice_preserves_history_scope_and_audit",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::api_error_details_are_unicode_safe_and_bounded",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::api_error_reads_are_bounded_and_html_falls_back_to_status",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::api_errors_do_not_expose_html_or_unstructured_response_bodies",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::api_errors_preserve_readable_json_details_and_fall_back_to_safe_titles",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::cancellation_requests_send_explicit_zero_length_on_the_wire",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::expiry_review_requires_receipt_evidence_and_whole_nonnegative_extras",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::malformed_present_money_never_becomes_an_omitted_extra",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::new_registration_is_dedicated_but_legacy_registration_remains_shared",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::payment_intent_preserves_money_breakdown",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::payment_intent_uses_minor_units",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::production_requires_assigned_partner_ids_and_live_terminal",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::ready_config_requires_terminal_and_partner_access",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::reference_search_accepts_a_match_without_terminal_history",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::reference_search_parses_exact_match_and_latest_terminal_session",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::reference_search_rejects_duplicate_exact_matches",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::reference_search_rejects_malformed_matching_terminal_history",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::reference_search_window_has_five_minute_safety_margins",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::refund_rejection_requires_exact_final_provider_result",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::retry_requires_latest_declined_session_and_uncharged_matching_intent",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::sandbox_cancellation_requires_actual_sandbox_key_and_unapproved_journal",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::sandbox_cancellation_requires_created_then_confirmed_canceled_and_preserves_capture_race",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::sandbox_cancellation_requires_exact_expired_session_linkage",
+      "result": "ok"
+    },
+    {
+      "name": "dojo::tests::saved_config_never_serializes_secret",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::accepts_a_real_cloud_kms_signature",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::accepts_a_valid_shop_bound_support_code",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::accepts_a_valid_shop_license",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::concurrent_activation_cannot_overwrite_a_changed_licence_or_shop",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::enforces_the_till_allowance",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::expiry_date_is_the_first_blocked_day",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::licence_sync_does_not_choose_between_different_claims_with_equal_issue_time",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::licence_sync_does_not_reactivate_an_older_longer_licence_after_latest_expiry",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::licence_sync_never_resets_the_trial_or_turns_invalid_paid_code_into_a_trial",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::licence_sync_preserves_valid_tokens_against_unsigned_tampered_or_wrong_shop_rows",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::licence_sync_uses_signed_issue_time_not_mutable_update_time",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::malformed_or_future_trial_dates_do_not_grant_a_new_trial",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::missing_license_starts_a_ten_day_trial",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::older_license_cannot_replace_a_newer_installed_license",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::paid_expiry_uses_the_supplied_local_calendar_date",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::paid_license_warns_from_seven_days_before_expiry",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::rejects_a_license_for_another_shop",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::rejects_a_license_without_pos_sales",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::rejects_a_tampered_payload",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::rejects_expired_or_overlong_support_codes",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::rejects_support_code_for_another_request_or_shop",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::support_request_can_only_be_consumed_once",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::till_count_ignores_only_known_legacy_placeholders",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::trial_ends_after_ten_complete_days",
+      "result": "ok"
+    },
+    {
+      "name": "licensing::tests::trial_initialization_only_migrates_empty_legacy_dates",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::entire_page_rolls_back_on_invalid_row",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::failed_package_upload_rolls_back_local_edits",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::licence_download_keeps_local_paid_token_even_without_a_successful_upload_queue",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::mutation_and_queue_roll_back_together",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::pending_local_edit_is_not_overwritten_by_download",
+      "result": "ok"
+    },
+    {
+      "name": "local_batch::tests::reholding_clears_recovery_only_with_a_complete_local_save",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::a_different_till_cannot_prepare_or_dispatch_a_local_payment",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::expired_lease_does_not_discard_an_unresolved_payment",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::incorrect_amount_currency_terminal_state_or_ownership_never_dispatches",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::invalid_preparation_never_acquires_a_lease_or_inserts_a_journal",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::journal_and_dispatch_survive_connection_restart_without_any_mysql",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::legacy_shared_attempts_stay_shared_and_block_new_local_work",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::local_barrier_and_restore_fences_apply_before_prepare_and_dispatch",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::preparation_and_reservation_are_atomic_and_idempotent_acquire_is_safe",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::provider_dispatch_is_once_per_create_and_once_per_retry_session",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::refunds_are_bound_to_the_original_provider_payment_and_operation",
+      "result": "ok"
+    },
+    {
+      "name": "local_terminal::tests::registration_file_lock_excludes_another_handle_and_recovers_on_drop",
+      "result": "ok"
+    },
+    {
+      "name": "printer_modules::tests::module_ids_are_safe_directory_names",
+      "result": "ok"
+    },
+    {
+      "name": "printer_modules::tests::rejects_path_traversal",
+      "result": "ok"
+    },
+    {
+      "name": "printer_modules::tests::rejects_unsigned_files_added_after_installation",
+      "result": "ok"
+    },
+    {
+      "name": "printer_modules::tests::signed_payload_is_stable_when_file_order_changes",
+      "result": "ok"
+    },
+    {
+      "name": "printer_modules::tests::verifies_signature_and_rejects_manifest_tampering",
+      "result": "ok"
+    },
+    {
+      "name": "scale_tests::defaults_to_automatic_request_mode",
+      "result": "ok"
+    },
+    {
+      "name": "scale_tests::parses_compact_gram_output",
+      "result": "ok"
+    },
+    {
+      "name": "scale_tests::parses_weight_from_a_multiline_adam_packet",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::atomic_writes_do_not_use_a_shared_fixed_temporary_name",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::cross_process_lock_prevents_a_mixed_provider_and_secret_snapshot",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::existing_local_value_wins_without_reading_keychain",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::interrupted_migration_can_resume_from_per_account_markers",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::local_save_load_and_delete_never_need_a_legacy_loader",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::local_write_failure_does_not_disable_crash_recovery",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::migration_commits_each_account_and_never_reads_it_twice",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::migration_failure_leaves_current_and_later_accounts_pending",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::next_lock_recovers_a_crash_between_provider_commit_and_journal_clear",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::owner_cloud_password_roundtrip_preserves_whitespace_exactly",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::related_config_failure_rolls_back_a_multi_secret_update",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::related_config_failure_rolls_back_a_secret_clear",
+      "result": "ok"
+    },
+    {
+      "name": "secret_store::tests::secret_file_is_restricted_to_the_current_user",
+      "result": "ok"
+    },
+    {
+      "name": "sumup::tests::currency_is_normalized",
+      "result": "ok"
+    },
+    {
+      "name": "sumup::tests::new_registration_is_dedicated_but_legacy_registration_remains_shared",
+      "result": "ok"
+    },
+    {
+      "name": "sumup::tests::ready_config_requires_all_payment_fields",
+      "result": "ok"
+    },
+    {
+      "name": "sumup::tests::refund_amount_uses_successful_refund_events",
+      "result": "ok"
+    },
+    {
+      "name": "sumup::tests::saved_config_never_serializes_secrets",
+      "result": "ok"
+    },
+    {
+      "name": "cash_control::tests::cash_pin_verification_matches_browser_pbkdf2_and_legacy_formats",
+      "result": "ok"
+    }
+  ],
+  "limitations": [
+    "Passing unit/local-fixture tests does not invalidate native UI failures independently observed during this audit.",
+    "No real MariaDB, two-physical-till synchronization, live payment provider, sandbox portal, physical printer/scale/cash drawer or Windows runtime was exercised by this command.",
+    "Nine tests were filtered intentionally; they are not passed tests and were not ignored tests according to the Rust harness.",
+    "The observed UTC interval includes orchestration/inspection latency; Cargo reported 29.79 seconds for compilation and the test harness 4.28 seconds for execution.",
+    "Source and line numbers reflect the current dirty working tree without modifying product code."
+  ]
+}

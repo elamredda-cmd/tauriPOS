@@ -1,0 +1,68 @@
+{
+  "recordedAtUtc": "2026-10-12T20:51:59Z",
+  "status": "PASS",
+  "command": "env -u VITE_NATIVE_QA -u LBJ_NATIVE_QA -u TAURI_CONFIG npm run tauri build -- --debug --bundles app",
+  "exitCode": 0,
+  "configuration": {
+    "tauriConfig": "src-tauri/tauri.conf.json",
+    "qaConfigOverride": false,
+    "nativeQaFeatureRequested": false,
+    "viteNativeQaEnvironmentUnset": true,
+    "lbjNativeQaEnvironmentUnset": true,
+    "tauriConfigEnvironmentUnset": true,
+    "rustProfile": "debug",
+    "frontendBuildMode": "production"
+  },
+  "artifact": {
+    "bundlePath": "/Users/elamreda/Desktop/Tauri for Svelte POS/src-tauri/target/debug/bundle/macos/L&Bj POS.app",
+    "executablePath": "/Users/elamreda/Desktop/Tauri for Svelte POS/src-tauri/target/debug/bundle/macos/L&Bj POS.app/Contents/MacOS/tauri-app",
+    "bundleIdentifier": "com.elamreda.tauri-app",
+    "bundleName": "L&Bj POS",
+    "version": "0.1.1",
+    "architecture": "Mach-O 64-bit arm64",
+    "executableBytes": 64166424,
+    "executableModifiedAt": "2026-10-12T21:51:33+0100",
+    "executableSha256": "a0f36bc780d01a7514d7f37cee76de7907f7610251c5a2aac06c4a3e38ccc774"
+  },
+  "nativeQaExclusionProof": {
+    "buildScriptOutput": "src-tauri/target/debug/build/tauri-app-cc38735ee554403e/output",
+    "buildScriptOutputModifiedAtUtc": "2026-10-12T20:50:51.875Z",
+    "nativeQaCfgEmitted": false,
+    "emittedCfgDirectives": ["desktop"],
+    "binaryFingerprint": "src-tauri/target/debug/.fingerprint/tauri-app-070d98f89b595b01/bin-tauri-app.json",
+    "libraryFingerprint": "src-tauri/target/debug/.fingerprint/tauri-app-3fe5407444b60b0e/lib-tauri_app_lib.json",
+    "selectedCargoFeatures": [],
+    "enabledQaCommandSymbolsInNm": 0,
+    "sourceGate": "All four native QA command registrations and the enabled implementation module require cfg(native_qa). The observed build did not emit that cfg.",
+    "interpretation": "Native QA handlers are excluded from this normal compiled artifact. Generic no-op checkpoint and isolation helper symbols may remain; their namespace alone does not indicate enabled QA commands."
+  },
+  "frontendQaGateProof": {
+    "builtAssetFilesScanned": 197,
+    "gateChunk": "build/_app/immutable/chunks/BOGFV-Ni.js",
+    "layoutChunk": "build/_app/immutable/nodes/0.CiKP5YTV.js",
+    "nativeQaEnabledCompiledValue": false,
+    "checkpointCompiledAsNoOp": true,
+    "nativeQaCheckpointInvokeStringPresent": false,
+    "controlsMountCondition": "The compiled layout imports the false constant and requires it before mounting the QA controls.",
+    "unusedToolbarStringsAndArmReleaseStatusHelpersRetained": true,
+    "interpretation": "QA controls are disabled by the compiled false mount gate, not byte-absent from the JavaScript bundle. Unreachable toolbar strings and helper definitions remain, but the normal native binary has no corresponding QA handlers. No claim of total QA byte removal is made."
+  },
+  "warnings": {
+    "rust": "Four existing unused restore helper warnings in commerce.rs.",
+    "frontend": "Vite reported chunks larger than 500 kB after minification.",
+    "buildErrors": 0
+  },
+  "checks": {
+    "invokeCapabilityAudit": "PASS: 99 frontend commands, 105 source-registered commands, all permitted",
+    "gitDiffCheck": "PASS",
+    "bundleMetadataRead": true,
+    "executableSymbolScan": true
+  },
+  "safetyAndLimits": {
+    "normalApplicationLaunchedOrRestartedByThisBuild": false,
+    "originalLiveTrolleyNotInteractedWith": true,
+    "qaProfileOrArtifactsDeleted": false,
+    "releaseProfileCompiled": false,
+    "releaseExclusion": "Source-only proof: build.rs cannot emit native_qa when PROFILE=release. This record verifies the requested normal debug artifact, not a release build."
+  }
+}

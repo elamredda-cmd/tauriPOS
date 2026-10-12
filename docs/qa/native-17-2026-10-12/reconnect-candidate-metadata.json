@@ -1,0 +1,62 @@
+{
+  "recordedAtUtc": "2026-10-12T20:48:41Z",
+  "scope": "Read-only metadata for the disposable native reconnect candidate, not the original shop server or application profile.",
+  "candidate": {
+    "database": "qa_native17",
+    "listener": "127.0.0.1:65153",
+    "processId": 57428,
+    "privateDirectory": "/var/folders/j6/vw1tjdjn50b0yvrlx0fbq45m0000gn/T/lbj-native-qa-mariadb-pOfpnG",
+    "socket": "/var/folders/j6/vw1tjdjn50b0yvrlx0fbq45m0000gn/T/lbj-native-qa-mariadb-pOfpnG/server.sock"
+  },
+  "beforeNativeReconnect": {
+    "tables": 0,
+    "appIdentityTablePresent": false,
+    "ordinaryTcpAuthenticationProbe": "PASS"
+  },
+  "afterNativeReconnectCheckpoint": {
+    "tables": 49,
+    "appIdentityRows": 1,
+    "appIdentityRowsWithNonemptyShopId": 1,
+    "appIdentityRowsWithSignaturePresent": 1,
+    "exactBusinessRowCounts": {
+      "products": 0,
+      "categories": 0,
+      "suppliers": 0,
+      "customers": 0,
+      "customer_accounts": 0,
+      "customer_account_entries": 0,
+      "employees": 0,
+      "tax_rates": 0,
+      "settings": 0,
+      "orders": 0,
+      "order_lines": 0,
+      "payments": 0,
+      "stock_receipts": 0,
+      "stock_receipt_lines": 0,
+      "cash_movements": 0,
+      "audit_logs": 0,
+      "payment_terminal_attempts": 0,
+      "registers": 0,
+      "till_presence": 0
+    },
+    "interpretation": "The native flow genuinely initialized and claimed the empty candidate. The inspected business tables remained empty; no business import or upload occurred. This record does not independently establish local settings rollback; see the native UI and local durable evidence."
+  },
+  "privacy": {
+    "identityContentsRead": false,
+    "identityContentsPrinted": false,
+    "credentialsRecorded": false,
+    "queries": "information_schema table metadata and exact COUNT(*) queries, including only nonempty-presence predicates for the identity claim."
+  },
+  "shutdown": {
+    "status": "COMPLETE",
+    "verifiedAtUtc": "2026-10-12T20:49:10.779Z",
+    "method": "Graceful mariadb-admin shutdown over the exact private socket after verifying process ID 57428 against the private pidfile.",
+    "commandExitCode": 0,
+    "serverProcessExitCode": 0,
+    "processAbsent": true,
+    "portNoLongerListening": true,
+    "socketAbsent": true,
+    "dataDirectoryRetained": true,
+    "filesDeleted": false
+  }
+}

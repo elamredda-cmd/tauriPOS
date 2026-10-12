@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "status": "PASS_SCOPED_DURABLE_ASSERTIONS",
+  "capturedAtUtc": "2026-10-12T20:29:01.944Z",
+  "timezone": "Europe/London",
+  "reader": "SQLite CLI -readonly, explicit BEGIN/COMMIT read snapshot; WAL-aware; no immutable mode",
+  "isolatedDatabase": "/Users/elamreda/Library/Application Support/com.elamreda.tauri-app.native-qa/pos.db",
+  "helper": "../../../scripts/qa/native-catalogue-evidence.mjs",
+  "originalDatabaseReadOrModifiedByThisVerification": false,
+  "privateStaffFieldsReadOrPrinted": false,
+  "scale": {
+    "pageAId": "qa-native17-20261012-page-a",
+    "pageACount": 102,
+    "pageAUniqueCount": 102,
+    "pageAOriginalRangeCount": 100,
+    "pageAMissingAssignmentCount": 1,
+    "pageAAdded0104Count": 1,
+    "pageAForeignPageBCount": 0,
+    "pageBId": "qa-native17-20261012-page-b",
+    "pageBCount": 3,
+    "pageBExpectedUniqueCount": 3,
+    "canonicalPageASaved": true,
+    "pageBUnchanged": true,
+    "assertion": "Page A contains original fixture products 0001–0100 plus its explicit missing assignment and new product 0104. Page B remains exactly 0101–0103; no foreign Page B assignment was copied into Page A."
+  },
+  "settings": {
+    "posMode": "single",
+    "mysqlConfigRows": 0,
+    "stockTrackingEnabled": "false",
+    "fontFamily": "legacy"
+  },
+  "attendance": {
+    "recordCount": 8,
+    "correctionAuditRowsSince20Utc": 0,
+    "baselineRecordCountReportedByController": 8,
+    "baselineCountUnchanged": true,
+    "baselineProvenance": "Previously recorded original/clone baseline supplied by the root controller; this verification did not reopen the original database."
+  },
+  "stockBaselineForNextNativeItemChecks": {
+    "countAuditRowsSince20Utc": 0,
+    "fixtureProductId": "qa-native17-20261012-product-0001",
+    "stock": 100,
+    "tracking": 1,
+    "pricePence": 249,
+    "pluEmpty": true
+  },
+  "stockCasNativeCheck": {
+    "capturedAtUtc": "2026-10-12T20:37:05.491Z",
+    "fixtureProductId": "qa-native17-20261012-product-0001",
+    "nativeCheckpoint": "stock.before-count",
+    "nativeAttemptReportedByController": 12,
+    "submittedStock": 105,
+    "submittedExpectedStock": 100,
+    "competingWriter": "Controller-authorized guarded SQLite write to this synthetic QA fixture only; not a real sale or another physical till.",
+    "competingStock": 107,
+    "competingUpdatedAtUtc": "2026-10-12T20:36:30.359Z",
+    "persistedStockAfterNativeConflict": 107,
+    "persistedCostPence": 177,
+    "persistedPricePence": 249,
+    "persistedTracking": 1,
+    "baselineOwnStockCountAuditRowsReportedByController": 4,
+    "ownStockCountAuditRowsAfterNativeConflict": 4,
+    "ownStockCountAuditDatesUtc": [
+      "2026-10-12T20:36:12.097Z",
+      "2026-10-12T20:35:21.414Z",
+      "2026-10-12T20:34:48.763Z",
+      "2026-10-12T20:34:09.340Z"
+    ],
+    "ownStockCountAuditRowsAfterCompetingWrite": 0,
+    "nativeOutcomeReportedByController": "STOCK_COUNT_CONFLICT; acknowledging the alert refreshed the editor to stock107/cost£1.77.",
+    "nativeEvidence": [
+      "screenshots/46-stock-CAS-conflict-rejected.png.png",
+      "screenshots/47-stock-CAS-refresh-preserves-107.png.png"
+    ],
+    "assertion": "The native stale stock105 attempt did not overwrite the newer competing stock107 and did not add a false stock_counted audit row. Four earlier healthy count/restore audits remain; this is not a zero-total-audit claim."
+  },
+  "itemAndGoodsSaveDurableCheck": {
+    "capturedAtUtc": "2026-10-12T20:40:13.089Z",
+    "fixtureProductId": "qa-native17-20261012-product-0001",
+    "matchingProductRows": 1,
+    "stock": 100,
+    "costPence": 175,
+    "pricePence": 249,
+    "tracking": 1,
+    "showInGoods": true,
+    "goodsSortOrder": 2,
+    "totalGoodsSelectedCount": 2,
+    "ownStockCountAuditRows": 5,
+    "healthyRestoreLatestStockAuditUtc": "2026-10-12T20:37:24.066Z",
+    "nativeItemSaveContextReportedByController": {
+      "checkpoint": "items.save",
+      "armedAttempt": 13,
+      "checkpointHitsBefore": 7,
+      "checkpointHitsAfter": 8,
+      "pendingBehavior": "Repeated Saving clicks and Escape did not close or resubmit; editor controls disabled.",
+      "evidence": "screenshots/48-item-save-duplicate-disabled.png.png"
+    },
+    "nativeGoodsSaveContext": {
+      "checkpoint": "items.goods-save",
+      "armedAttemptReportedByController": 14,
+      "evidence": "screenshots/49-goods-save-duplicate-disabled.png.png",
+      "checkpointCounterVerification": "Controller owns UI counter verification; this read-only assertion publishes persisted synthetic item fields and total selected count only."
+    },
+    "assertion": "After native completion the synthetic product remains a single row with restored stock100/cost175p and no additional stock count audit beyond the healthy restoration. It is selected at Goods order2, with two selected items total. No non-QA item names or field values were read."
+  },
+  "supplierSaveDurableCheck": {
+    "capturedAtUtc": "2026-10-12T20:41:43.690Z",
+    "fixtureName": "QA Native17 Save Guard",
+    "fixtureId": "efd9c70a-ebc4-43b0-beeb-2232c87c8b89",
+    "matchingSupplierRows": 1,
+    "totalSupplierRows": 126,
+    "initialFixtureSupplierRows": 125,
+    "nativeContextReportedByController": "One controlled native rejection followed by one successful retry; suppliers.save checkpoint hits2 total. Pending duplicate save controls were disabled.",
+    "nativeEvidence": [
+      "screenshots/50-supplier-save-duplicate-disabled.png.png",
+      "screenshots/51-supplier-save-rejected.png.png"
+    ],
+    "assertion": "The rejected/retried native form created exactly one labeled QA supplier; the 125 seeded fixture suppliers plus that new supplier total126. No non-QA supplier names or contact details were read."
+  },
+  "taxNameOnlySaveRestoredDurableCheck": {
+    "capturedAtUtc": "2026-10-12T20:43:12.637Z",
+    "standardRow": {
+      "id": "tax-standard-vat",
+      "restoredName": "Standard VAT (20%)",
+      "rate": 0.2,
+      "isDefault": false
+    },
+    "zeroRow": {
+      "id": "tax-zero",
+      "name": "Zero VAT (0%)",
+      "rate": 0,
+      "isDefault": true
+    },
+    "nativeContextReportedByController": "The pending native name-only save completed with QA Standard VAT (20%) while its rate remained 20% and Default remained off; controller then restored the original display name through a healthy native save before this read.",
+    "assertion": "The final durable standard rate remains 0.2/default0 and zero rate remains 0/default1. This read proves the restored values; the temporary QA display-name acceptance is native UI evidence reported by the controller, not a captured durable intermediate value."
+  },
+  "reconnectRollbackDurableCheck": {
+    "capturedAtUtc": "2026-10-12T20:48:08.704Z",
+    "nativeCheckpoint": "setup.after-reconnect-save",
+    "armedAttemptReportedByController": 23,
+    "nativeOutcomeReportedByController": "Checkpoint entered then rejected; native Connection failed reached 100%; Cancel/Back returned to Advanced Settings.",
+    "nativeEvidence": "screenshots/61-reconnect-durable-save-rejected-rollback.png.png",
+    "posMode": "single",
+    "mysqlConfigRows": 0,
+    "stockTrackingEnabledBeforeControllerRestoration": true,
+    "baselineCountsReportedByController": {
+      "products": 77362,
+      "orders": 94,
+      "suppliers": 126,
+      "customers": 855,
+      "employees": 4
+    },
+    "actualCountsAfterRejectedReconnect": {
+      "products": 77362,
+      "orders": 94,
+      "suppliers": 126,
+      "customers": 855,
+      "employees": 4
+    },
+    "allListedCountsUnchanged": true,
+    "queuedMutations": 0,
+    "syncConflicts": 0,
+    "onlineFinancialIntents": 0,
+    "assertion": "After the injected post-save reconnect failure, durable mode remains single and mysql_config is absent. All five listed row counts exactly match the pre-reconnect baseline. No queue, conflict or financial-intent row was introduced. This establishes local rollback, not successful connection to a real MariaDB server."
+  },
+  "safety": {
+    "queuedMutations": 0,
+    "syncConflicts": 0,
+    "onlineFinancialIntents": 0
+  },
+  "providerMetadataOnly": {
+    "capturedAtUtc": "2026-10-12T20:29:56.454Z",
+    "dojoEnabled": true,
+    "sumupEnabled": false,
+    "workingProviderPreserved": true,
+    "source": "Root-authorized isolated QA dummy dojo.json and sumup.json; only enable booleans were published; no API key or full configuration was printed.",
+    "nativeContext": "Root observed two failed provider switches before requesting this durable metadata check."
+  },
+  "backup": {
+    "path": "/Users/elamreda/Library/Application Support/com.elamreda.tauri-app.native-qa/backups/LBj POS Backups/Native QA Till-625114a0/pos-backup-20261012-202541-007.db",
+    "exists": true,
+    "bytes": 54198272,
+    "modifiedAtUtc": "2026-10-12T20:25:41.862Z",
+    "modifiedAtLondon": "2026-10-12 21:25:41 BST",
+    "integrityCheck": "ok",
+    "independentFile": true,
+    "counts": {
+      "products": 77362,
+      "suppliers": 125,
+      "stockReceipts": 67,
+      "attendance": 8,
+      "fontFamily": "legacy",
+      "stockTrackingEnabled": "false"
+    }
+  },
+  "limits": [
+    "This proves the listed durable values at the captured snapshot, not every UI interaction or future state after additional native tests.",
+    "Scale assignments and receipt/supplier pagination use explicitly labeled fixtures in a separate standalone profile; historical receipt fixtures do not prove the delivery-write workflow.",
+    "Attendance no-save proof uses counts and audit absence plus the root controller's UI observations, without reading private staff fields."
+  ]
+}

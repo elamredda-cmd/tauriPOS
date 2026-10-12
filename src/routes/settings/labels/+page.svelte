@@ -1,11 +1,13 @@
 <script lang="ts">
     import { onDestroy, onMount, tick } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
+    import { clearSystemPrintSnapshot } from '$lib/systemPrint';
     import { Printer, RotateCcw, Save } from '@lucide/svelte';
     import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import SearchField from '$lib/components/SearchField.svelte';
-    import { formatMoney, now, settingsDB, storeDB, type Product } from '$lib/stores/db';
+    import { formatMoney, now, settingsDB, storeDB, type Product, type Store } from '$lib/stores/db';
     import { getProductsPage, upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
     import {
@@ -36,10 +38,11 @@
     let quantity = 1;
     let savingDesign = false;
     let printingLabels = false;
+    let systemPrintSnapshot: { product: Product; store: Store; design: LabelDesign; copies: number } | null = null;
 
     $: labelPrinter = getLabelPrinterConfig($settingsDB);
-    $: copies = Array.from({ length: Math.max(1, Math.min(500, Math.floor(quantity || 1))) });
-    $: renderSystemPrintSheet = printingLabels && (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system');
+    $: printPageWidth = Math.max(15, Math.min(210, Number((systemPrintSnapshot?.design || design).widthMm) || 50));
+    $: printPageHeight = Math.max(15, Math.min(297, Number((systemPrintSnapshot?.design || design).heightMm) || 30));
 
     const templates: Array<{ id: LabelTemplate; name: string; description: string }> = [
         { id: 'compact', name: 'Compact', description: 'Price-led' },
@@ -167,11 +170,19 @@
         if (printingLabels) return;
         if (labelPrinter.connection === 'system' || labelPrinter.protocol === 'system') {
             printingLabels = true;
+            const retainNativeSnapshot = isTauri();
             try {
+                clearSystemPrintSnapshot();
+                systemPrintSnapshot = structuredClone({ product: selectedProduct, store: $storeDB, design,
+                    copies: Math.max(1, Math.min(500, Math.floor(quantity || 1))) });
                 await tick();
-                window.print();
-                toast('Print dialog opened for labels', 'success');
+                await Promise.resolve(window.print());
+                toast('Label print dialog requested. Printing or cancellation is confirmed in the system dialog.', 'info');
+            } catch (error) {
+                systemPrintSnapshot = null;
+                toast(`Could not open the label print dialog: ${error}`, 'error');
             } finally {
+                if (!retainNativeSnapshot) systemPrintSnapshot = null;
                 printingLabels = false;
             }
             return;
@@ -195,6 +206,7 @@
 
 <svelte:head>
     <title>Label Designer - L&amp;Bj POS</title>
+    <style>{`@media print { @page { size: ${printPageWidth}mm ${printPageHeight}mm; margin: 0; } }`}</style>
 </svelte:head>
 
 <div class="label-designer-page">
@@ -386,7 +398,7 @@
 </div>
 
 <div class="label-print-sheet">
-    {#if renderSystemPrintSheet && selectedProduct}{#each copies as _}<ProductLabel product={selectedProduct} store={$storeDB} {design} />{/each}{/if}
+    {#if systemPrintSnapshot}{#each Array.from({ length: systemPrintSnapshot.copies }) as _}<ProductLabel product={systemPrintSnapshot.product} store={systemPrintSnapshot.store} design={systemPrintSnapshot.design} />{/each}{/if}
 </div>
 
 <style>

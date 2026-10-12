@@ -64,6 +64,8 @@ import {
     updatePaymentTerminalAttempt,
     refreshPaymentTerminalAttempt,
     getRecoverablePaymentTerminalAttempts,
+    reconcileConfirmedDojoSandboxRecoveries,
+    prunePaymentTerminalAttempts,
     terminalAttemptUsesSharedJournal,
 } from '$lib/terminalAttempts';
 import {
@@ -613,10 +615,35 @@ describe('shared terminal approval acknowledgement', () => {
 
 describe('atomic shared cache merge boundaries (isolated SQLite)', () => {
     let db: DatabaseSync;
+    function recoveredSandboxFixture(confirmedAt = '2026-09-01T10:00:31.000Z') {
+        db.exec(`CREATE TABLE dojo_sandbox_recovery_receipts (
+            attemptId TEXT PRIMARY KEY, terminalKey TEXT, paymentIntentId TEXT,
+            terminalSessionId TEXT, amount INTEGER, currency TEXT,
+            providerStatus TEXT, confirmedAt TEXT)`);
+        const local = {
+            ...terminalAttempt(saleBundle()), provider: 'dojo', journalScope: 'shared',
+            terminalKey: 'dojo:softwareHouse1:tm_sandbox_terminal',
+            clientTransactionId: 'pi_sandbox_payment', terminalSessionId: 'ts_sandbox_session',
+            status: 'cancelled', saleBundle: JSON.stringify(saleBundle()),
+            updatedAt: '2020-01-01T00:00:00.000Z',
+        };
+        const keys = Object.keys(local);
+        db.prepare(`INSERT INTO payment_terminal_attempts (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`)
+            .run(...Object.values(local));
+        db.prepare('INSERT INTO dojo_sandbox_recovery_receipts VALUES (?,?,?,?,?,?,?,?)')
+            .run(local.id, local.terminalKey, local.clientTransactionId, local.terminalSessionId,
+                local.amount, local.currency, 'Canceled', confirmedAt);
+        const remote = { ...local, status: 'uncertain' } as MysqlPaymentTerminalAttempt;
+        mocks.mysqlGetOperational.mockResolvedValue([remote]);
+        mocks.mysqlUpdate.mockResolvedValue({ applied: true, attempt: { ...remote, status: 'cancelled' } });
+        return { local, remote };
+    }
     beforeEach(() => {
         vi.resetAllMocks();
         mocks.connection.mode = 'multi'; mocks.connection.mysqlOnline = true;
         db = new DatabaseSync(':memory:');
+        db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO settings VALUES ('server_data_epoch_seen', 'original-server-epoch')`);
         db.exec(`CREATE TABLE payment_terminal_attempts (
             id TEXT PRIMARY KEY, provider TEXT, terminalKey TEXT, clientTransactionId TEXT,
             terminalSessionId TEXT, operationKind TEXT, amount INTEGER, expectedProviderAmount INTEGER,
@@ -651,6 +678,202 @@ describe('atomic shared cache merge boundaries (isolated SQLite)', () => {
         await expect(getRecoverablePaymentTerminalAttempts('sumup')).rejects.toThrow('changed while merging');
         expect(db.prepare('SELECT status, journalScope FROM payment_terminal_attempts').get())
             .toMatchObject({ status: 'uncertain', journalScope: 'local' });
+    });
+
+    it('acknowledges stale shared sandbox work without reopening the confirmed local cancellation', async () => {
+        const { local } = recoveredSandboxFixture();
+        expect(await getRecoverablePaymentTerminalAttempts('dojo')).toEqual([]);
+        expect(mocks.mysqlUpdate).toHaveBeenCalledWith(local.id, 'dojo', 'cancelled', expect.objectContaining({
+            clientTransactionId: local.clientTransactionId, terminalSessionId: local.terminalSessionId,
+        }));
+        expect(db.prepare('SELECT status, journalScope FROM payment_terminal_attempts').get())
+            .toMatchObject({ status: 'cancelled', journalScope: 'shared' });
+        // A second stale response remains harmless and idempotent.
+        expect(await getRecoverablePaymentTerminalAttempts('dojo')).toEqual([]);
+        expect(db.prepare('SELECT COUNT(*) AS count FROM dojo_sandbox_recovery_receipts').get()?.count).toBe(1);
+    });
+
+    it('does not acknowledge a remotely captured or approved sandbox payment', async () => {
+        const { remote } = recoveredSandboxFixture();
+        mocks.mysqlGetOperational.mockResolvedValue([{ ...remote, status: 'approved' }]);
+        await expect(getRecoverablePaymentTerminalAttempts('dojo')).rejects.toThrow('conflicts with a verified sandbox cancellation');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+        expect(db.prepare('SELECT status FROM payment_terminal_attempts').get()?.status).toBe('cancelled');
+    });
+
+    it.each(['amount', 'paymentIntentId', 'terminalKey', 'providerStatus', 'confirmedAt'])('rejects contradictory receipt %s', async (field) => {
+        recoveredSandboxFixture();
+        db.prepare(`UPDATE dojo_sandbox_recovery_receipts SET ${field}=?`)
+            .run(field === 'amount' ? 1 : 'contradiction');
+        await expect(getRecoverablePaymentTerminalAttempts('dojo')).rejects.toThrow('conflicts with a verified sandbox cancellation');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+    });
+
+    it('keeps evidence when shared acknowledgement races with a stronger state', async () => {
+        const { remote } = recoveredSandboxFixture();
+        mocks.mysqlUpdate.mockResolvedValue({ applied: false, attempt: { ...remote, status: 'completed' } });
+        await expect(getRecoverablePaymentTerminalAttempts('dojo')).rejects.toThrow('conflicts with a verified sandbox cancellation');
+        expect(db.prepare('SELECT status FROM payment_terminal_attempts').get()?.status).toBe('cancelled');
+        expect(db.prepare('SELECT COUNT(*) AS count FROM dojo_sandbox_recovery_receipts').get()?.count).toBe(1);
+    });
+
+    it('never treats an unconfirmed observation as permission to clear shared work', async () => {
+        recoveredSandboxFixture('');
+        const recovered = await getRecoverablePaymentTerminalAttempts('dojo');
+        expect(recovered).toHaveLength(1);
+        // Without final native proof this remains visible for normal recovery.
+        expect(recovered[0].status).toBe('cancelled');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+    });
+
+    it('retains confirmed sandbox journals while pruning ordinary old final records', async () => {
+        recoveredSandboxFixture();
+        db.exec(`INSERT INTO payment_terminal_attempts (id, provider, status, updatedAt)
+            VALUES ('ordinary-old', 'dojo', 'cancelled', '2020-01-01T00:00:00.000Z')`);
+        await prunePaymentTerminalAttempts('dojo', { includeShared: false });
+        expect(db.prepare('SELECT id FROM payment_terminal_attempts').all()).toEqual([{ id: 'sale-1' }]);
+        expect(db.prepare('SELECT COUNT(*) AS count FROM dojo_sandbox_recovery_receipts').get()?.count).toBe(1);
+        expect(mocks.mysqlPrune).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges only known receipts after Dedicated reconnect with its Dojo key removed', async () => {
+        const { local, remote } = recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockResolvedValue(remote);
+        mocks.invoke.mockRejectedValue(new Error('Dojo API key removed'));
+        mocks.connection.mysqlOnline = false;
+
+        expect(await getRecoverablePaymentTerminalAttempts('dojo', { includeShared: false })).toEqual([]);
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 0, errors: [] });
+        expect(mocks.mysqlGetAttempt).not.toHaveBeenCalled();
+
+        mocks.connection.mysqlOnline = true;
+        expect(await getRecoverablePaymentTerminalAttempts('dojo', { includeShared: false })).toEqual([]);
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 1, errors: [] });
+        expect(mocks.mysqlGetAttempt).toHaveBeenCalledExactlyOnceWith(local.id, 'dojo');
+        expect(mocks.mysqlUpdate).toHaveBeenCalledOnce();
+        expect(mocks.mysqlGetOperational).not.toHaveBeenCalled();
+        expect(mocks.invoke).not.toHaveBeenCalled();
+        expect(db.prepare('SELECT error FROM payment_terminal_attempts').get()?.error)
+            .toContain('shared acknowledgement confirmed for dataset original-server-epoch');
+
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 0, errors: [] });
+        expect(mocks.mysqlGetAttempt).toHaveBeenCalledOnce();
+        expect(mocks.mysqlUpdate).toHaveBeenCalledOnce();
+    });
+
+    it('does not acknowledge until sync establishes the shared dataset identity', async () => {
+        recoveredSandboxFixture();
+        db.exec('DELETE FROM settings');
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 0, errors: [] });
+        expect(mocks.mysqlGetAttempt).not.toHaveBeenCalled();
+    });
+
+    it('rechecks an acknowledged receipt when the shared database has been restored', async () => {
+        const { remote } = recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockResolvedValue(remote);
+        expect((await reconcileConfirmedDojoSandboxRecoveries()).acknowledged).toBe(1);
+        db.exec("UPDATE settings SET value = 'restored-server-epoch'");
+
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 1, errors: [] });
+        expect(mocks.mysqlGetAttempt).toHaveBeenCalledTimes(2);
+        expect(db.prepare('SELECT error FROM payment_terminal_attempts').get()?.error)
+            .toContain('shared acknowledgement confirmed for dataset restored-server-epoch');
+    });
+
+    it('retains the pending acknowledgement after a network failure and retries next sync', async () => {
+        const { local, remote } = recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockRejectedValueOnce(new Error('MariaDB connection lost')).mockResolvedValueOnce(remote);
+
+        const failed = await reconcileConfirmedDojoSandboxRecoveries();
+        expect(failed.acknowledged).toBe(0);
+        expect(failed.errors).toHaveLength(1);
+        expect(failed.errors[0]).toContain('MariaDB connection lost');
+        expect(db.prepare('SELECT error FROM payment_terminal_attempts').get()?.error).toBe(local.error);
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 1, errors: [] });
+    });
+
+    it('stops before the shared write if the database identity changes during lookup', async () => {
+        const { local, remote } = recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockImplementationOnce(async () => {
+            db.exec("UPDATE settings SET value = 'different-server-epoch'");
+            return remote;
+        });
+
+        const result = await reconcileConfirmedDojoSandboxRecoveries();
+        expect(result.acknowledged).toBe(0);
+        expect(result.errors[0]).toContain('shared database changed');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+        expect(db.prepare('SELECT error FROM payment_terminal_attempts').get()?.error).toBe(local.error);
+    });
+
+    it('does not acknowledge a stronger remote financial state during Dedicated reconnect', async () => {
+        const { local, remote } = recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockResolvedValue({ ...remote, status: 'completed' });
+
+        const result = await reconcileConfirmedDojoSandboxRecoveries();
+        expect(result.acknowledged).toBe(0);
+        expect(result.errors[0]).toContain('conflicts with a verified sandbox cancellation');
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+        expect(db.prepare('SELECT error, status FROM payment_terminal_attempts').get())
+            .toEqual({ error: local.error, status: 'cancelled' });
+    });
+
+    it('preserves local proof without recreating shared history that has already been removed', async () => {
+        recoveredSandboxFixture();
+        mocks.mysqlGetAttempt.mockResolvedValue(null);
+
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 1, errors: [] });
+        expect(mocks.mysqlUpdate).not.toHaveBeenCalled();
+        expect(mocks.mysqlPrepare).not.toHaveBeenCalled();
+        expect(db.prepare('SELECT COUNT(*) AS count FROM dojo_sandbox_recovery_receipts').get()?.count).toBe(1);
+    });
+
+    it('joins concurrent reconnect checks so the same receipt is not uploaded twice', async () => {
+        const { remote } = recoveredSandboxFixture();
+        let release!: (value: MysqlPaymentTerminalAttempt) => void;
+        mocks.mysqlGetAttempt.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+        const first = reconcileConfirmedDojoSandboxRecoveries();
+        const second = reconcileConfirmedDojoSandboxRecoveries();
+        await vi.waitFor(() => expect(mocks.mysqlGetAttempt).toHaveBeenCalledOnce());
+        release(remote);
+
+        expect(await Promise.all([first, second])).toEqual([
+            { acknowledged: 1, errors: [] }, { acknowledged: 1, errors: [] },
+        ]);
+        expect(mocks.mysqlUpdate).toHaveBeenCalledOnce();
+    });
+
+    it('does not acknowledge unconfirmed receipts or unrelated shared payments', async () => {
+        recoveredSandboxFixture('');
+        db.exec(`INSERT INTO payment_terminal_attempts (id, provider, status, journalScope)
+            VALUES ('unrelated-shared', 'dojo', 'uncertain', 'shared')`);
+
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 0, errors: [] });
+        expect(mocks.mysqlGetAttempt).not.toHaveBeenCalled();
+        expect(mocks.mysqlGetOperational).not.toHaveBeenCalled();
+    });
+
+    it('bounds each sync batch and continues the remaining confirmed receipts next time', async () => {
+        const { local } = recoveredSandboxFixture();
+        for (let index = 2; index <= 26; index += 1) {
+            const id = `sale-${index}`;
+            db.prepare(`INSERT INTO payment_terminal_attempts
+                SELECT ?, provider, terminalKey, clientTransactionId, terminalSessionId, operationKind,
+                       amount, expectedProviderAmount, currency, status, saleBundle, providerReference,
+                       error, tillId, createdAt, updatedAt, operatorResolution, journalScope
+                FROM payment_terminal_attempts WHERE id = ?`).run(id, local.id);
+            db.prepare(`INSERT INTO dojo_sandbox_recovery_receipts
+                SELECT ?, terminalKey, paymentIntentId, terminalSessionId, amount, currency, providerStatus, confirmedAt
+                FROM dojo_sandbox_recovery_receipts WHERE attemptId = ?`).run(id, local.id);
+        }
+        // Shared history was already deleted; the local proof remains durable.
+        mocks.mysqlGetAttempt.mockResolvedValue(null);
+
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 25, errors: [] });
+        expect(mocks.mysqlGetAttempt).toHaveBeenCalledTimes(25);
+        expect(await reconcileConfirmedDojoSandboxRecoveries()).toEqual({ acknowledged: 1, errors: [] });
+        expect(mocks.mysqlGetAttempt).toHaveBeenCalledTimes(26);
+        expect(mocks.mysqlGetOperational).not.toHaveBeenCalled();
     });
 });
 

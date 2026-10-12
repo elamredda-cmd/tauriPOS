@@ -1,0 +1,2215 @@
+{
+  "reportDate": "2026-10-12",
+  "scope": "Checkout and operations route/control source inventory for root native-Tauri audit",
+  "authorTask": "audit_checkout_operations_inventory",
+  "sourceOnly": true,
+  "runtimeEvidence": "This agent did not control the app, execute financial actions, modify app source or mutate app data. Root owns all native UI testing. Inventory entries are not pass claims.",
+  "countingMethod": "One entry per distinct practical control or tightly related control family. Repeated product/record buttons and keypad digits are represented as families, not every data row instance.",
+  "pageCount": 7,
+  "controlFamilyCount": 200,
+  "sharedChecks": [
+    "MgmtPage Back/navigation and sidebar buttons are inventoried elsewhere",
+    "Shared SearchField: input,clear,touch-keyboard button,Enter",
+    "Shared CustomSelect: open,search wherepresent,optionselect,clearwherepresent,Escape/outsideclick",
+    "Shared Modal: X,Escape,backdrop,focusreturn,busy-dismiss-lock",
+    "Shared touch keyboard: digits/text,Backspace,Clear,Enter,Close and physicalkeyboard compatibility"
+  ],
+  "pages": [
+    {
+      "route": "/",
+      "source": "src/routes/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Square 1024x768 and 1280x1024 checkout",
+        "Brand and Admin button readable",
+        "Trolley item space, fixed totals and long discount labels",
+        "All modal close/footer controls fit viewport",
+        "Number pads use 1-2-3 first row",
+        "Keyboard focus trapped in modal; Escape and hardware scanner behavior",
+        "Selected payment customer retained after returning to trolley",
+        "Sale-complete change amount prominent and next scan dismisses prompt"
+      ],
+      "controls": [
+        {
+          "id": "checkout-1",
+          "label": "Enter / Exit full screen",
+          "surface": "Staff sign-in",
+          "line": 4782,
+          "effect": "Toggles native full screen",
+          "verification": "Click twice; preserve prior native window state",
+          "risk": "native window",
+          "dependency": "Tauri window API"
+        },
+        {
+          "id": "checkout-2",
+          "label": "Choose staff member",
+          "surface": "Staff sign-in",
+          "line": 4815,
+          "effect": "Selects active employee",
+          "verification": "Name/role visible; advances to correct PIN screen",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-3",
+          "label": "Open Setup",
+          "surface": "Staff sign-in empty state",
+          "line": 4833,
+          "effect": "Navigates to recovery/setup",
+          "verification": "Only shown when no eligible staff exist",
+          "risk": "navigation",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-4",
+          "label": "L&Bj Support",
+          "surface": "Staff sign-in",
+          "line": 4836,
+          "effect": "Opens signed support-code form",
+          "verification": "Open and close; do not activate real support session",
+          "risk": "access",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-5",
+          "label": "Change user",
+          "surface": "Staff PIN",
+          "line": 4850,
+          "effect": "Returns to employee picker",
+          "verification": "PIN cleared; no sign-in action",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-6",
+          "label": "Staff PIN / Sign In / Enter",
+          "surface": "Back Office sign-in",
+          "line": 4862,
+          "effect": "Signs in using hardware keyboard",
+          "verification": "Wrong PIN error then valid admin sign-in; input masked",
+          "risk": "authentication",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-7",
+          "label": "Touch PIN pad digits, Clear, delete, Sign In",
+          "surface": "Checkout sign-in",
+          "line": 4892,
+          "effect": "Enters and submits PIN",
+          "verification": "1–9 top rows,0 lower row; max8 digits; masked; clear/delete; wrong and correct PIN",
+          "risk": "authentication",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-8",
+          "label": "Opening float pad / Open Shift",
+          "surface": "Open Till Shift",
+          "line": 4934,
+          "effect": "Creates till cash session with entered opening float",
+          "verification": "Opening float in pence; prevent duplicate submit; opening state visible",
+          "risk": "financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-9",
+          "label": "Cancel and Sign Out",
+          "surface": "Open Till Shift",
+          "line": 4947,
+          "effect": "Abandons opening shift and signs out",
+          "verification": "No shift created",
+          "risk": "authentication",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-10",
+          "label": "Admin",
+          "surface": "Checkout header",
+          "line": 4973,
+          "effect": "Navigates to management",
+          "verification": "Checkout current trolley survives return; logo readable",
+          "risk": "navigation",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-11",
+          "label": "Change user / employee name",
+          "surface": "Checkout header",
+          "line": 4985,
+          "effect": "Logs out staff",
+          "verification": "Current trolley and active shift handling follows session rules",
+          "risk": "authentication",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-12",
+          "label": "Staff attendance clock",
+          "surface": "Checkout header",
+          "line": 5025,
+          "effect": "Opens attendance clock with staff sign-in",
+          "verification": "Clock dialog doesn't confer full POS access",
+          "risk": "navigation",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-13",
+          "label": "Product category / tile page tabs",
+          "surface": "Product catalog",
+          "line": 5053,
+          "effect": "Selects tile page",
+          "verification": "Category state and visible products change; active style clear",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-14",
+          "label": "Product tile",
+          "surface": "Product catalog",
+          "line": 5074,
+          "effect": "Adds normal product or opens weighable item scale",
+          "verification": "Correct item, price, quantity, stock; age-restricted prompts where configured",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-15",
+          "label": "Cash drawer",
+          "surface": "Checkout product footer",
+          "line": 5123,
+          "effect": "Opens drawer and logs action",
+          "verification": "Button permission and clear unavailable-device feedback",
+          "risk": "hardware",
+          "dependency": "Configured drawer/printer"
+        },
+        {
+          "id": "checkout-16",
+          "label": "Previous / Next product tile page",
+          "surface": "Product footer",
+          "line": 5150,
+          "effect": "Changes catalog page",
+          "verification": "Boundary disabled; page state and item content change",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-17",
+          "label": "SCALE / LABEL PRINT / DISCOUNT / GOODS / RECENT TRANS / CHANGE PRICE",
+          "surface": "Checkout toolbar",
+          "line": 5167,
+          "effect": "Opens respective dialog or route",
+          "verification": "All configurable actions readable and clickable; behavior matches bottom duplicate actions",
+          "risk": "navigation / trolley write",
+          "dependency": "Some configured permission and hardware dependencies"
+        },
+        {
+          "id": "checkout-18",
+          "label": "Retrieve Trolleys",
+          "surface": "Trolley header",
+          "line": 5204,
+          "effect": "Opens held trolley dialog",
+          "verification": "Own/other count accurate; opens without covering header/footer",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-19",
+          "label": "Scan/search input",
+          "surface": "Trolley scan field",
+          "line": 5249,
+          "effect": "Adds barcode/product match",
+          "verification": "Exact barcode, unknown barcode, next scan after completion; focus restored",
+          "risk": "trolley write",
+          "dependency": "Scanner or keyboard"
+        },
+        {
+          "id": "checkout-20",
+          "label": "Clear trolley",
+          "surface": "Trolley header",
+          "line": 5262,
+          "effect": "Opens destructive clear confirmation",
+          "verification": "Cancel retains; confirm removes lines and selected customer",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-21",
+          "label": "Select trolley line",
+          "surface": "Trolley list",
+          "line": 5310,
+          "effect": "Selects line for quantity/price edits",
+          "verification": "Keyboard/touch selection styling visible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-22",
+          "label": "Delete individual line",
+          "surface": "Trolley list",
+          "line": 5362,
+          "effect": "Removes one line",
+          "verification": "Correct selected line removed; total recalculated",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-23",
+          "label": "+ / − quantity",
+          "surface": "Trolley tools",
+          "line": 5391,
+          "effect": "Adjusts selected item quantity",
+          "verification": "No selection state, max/min bounds, weight restrictions",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-24",
+          "label": "Move selection up / down",
+          "surface": "Trolley tools",
+          "line": 5411,
+          "effect": "Changes selected line",
+          "verification": "Boundary behavior; item remains visible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-25",
+          "label": "Delete selected",
+          "surface": "Trolley tools",
+          "line": 5447,
+          "effect": "Deletes selected trolley line",
+          "verification": "Selection transitions correctly; total recalculated",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-26",
+          "label": "Quantity pad",
+          "surface": "Trolley tools",
+          "line": 5466,
+          "effect": "Opens quantity entry",
+          "verification": "Selected line preserved; quantity display and submit reachable",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-27",
+          "label": "PAYMENT",
+          "surface": "Checkout bottom actions",
+          "line": 5530,
+          "effect": "Opens payment dialog",
+          "verification": "Empty trolley blocked; nonempty amount accurate",
+          "risk": "navigation",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-28",
+          "label": "GOODS / CHANGE PRICE / SCALE / DISCOUNT",
+          "surface": "Checkout bottom actions",
+          "line": 5536,
+          "effect": "Opens editing modal",
+          "verification": "Matches toolbar versions; no unexpected current trolley mutation until confirmed",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-29",
+          "label": "LAST RECEIPT",
+          "surface": "Checkout bottom actions",
+          "line": 5541,
+          "effect": "Prints last receipt for this till",
+          "verification": "Empty history error graceful; no sale mutation",
+          "risk": "hardware",
+          "dependency": "Receipt printer or native print"
+        },
+        {
+          "id": "checkout-30",
+          "label": "HOLD",
+          "surface": "Checkout bottom actions",
+          "line": 5553,
+          "effect": "Saves held trolley and clears current cart",
+          "verification": "Double-click doesn't create duplicate; no false sync warning; customer/order values retained",
+          "risk": "financial/trolley write",
+          "dependency": "Shared database for cross-till hold; local mode support"
+        },
+        {
+          "id": "checkout-31",
+          "label": "Close discount dialog",
+          "surface": "Discount modal",
+          "line": 5588,
+          "effect": "Closes modal",
+          "verification": "Escape and close retain chosen discount state",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-32",
+          "label": "No discount / discount option",
+          "surface": "Discount modal",
+          "line": 5591,
+          "effect": "Chooses manual discount",
+          "verification": "Multiple applied labels fit; total and fixed footer don't jump",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-33",
+          "label": "Close scale dialog",
+          "surface": "Scale modal",
+          "line": 5630,
+          "effect": "Closes scale modal",
+          "verification": "Hardware polling stopped and scanner focus restored",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-34",
+          "label": "Scale tile-page buttons",
+          "surface": "Scale modal",
+          "line": 5637,
+          "effect": "Selects weighable catalog page",
+          "verification": "Active page, search reset, result list update",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-35",
+          "label": "Scale product button",
+          "surface": "Scale modal",
+          "line": 5663,
+          "effect": "Selects product to weigh",
+          "verification": "Unit price and product name visible; long name wraps",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-36",
+          "label": "Scale search / clear / keyboard",
+          "surface": "Scale modal",
+          "line": 5648,
+          "effect": "Filters weighable products",
+          "verification": "No-result state; physical keyboard and touch keyboard",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-37",
+          "label": "Previous / Next scale products",
+          "surface": "Scale modal",
+          "line": 5693,
+          "effect": "Paginates scale products",
+          "verification": "First/last disabled correctly",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-38",
+          "label": "Kilograms / Grams",
+          "surface": "Scale modal",
+          "line": 5721,
+          "effect": "Changes entry unit",
+          "verification": "Conversion displayed correctly without changing intended weight",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-39",
+          "label": "Read scale",
+          "surface": "Scale modal",
+          "line": 5733,
+          "effect": "Reads attached scale",
+          "verification": "Disabled when unavailable; read failure clear",
+          "risk": "hardware",
+          "dependency": "Serial scale"
+        },
+        {
+          "id": "checkout-40",
+          "label": "Scale pad digits, decimal, Clear, delete",
+          "surface": "Scale modal",
+          "line": 5739,
+          "effect": "Edits weight",
+          "verification": "1–2–3 layout; unit bounds; no duplicate decimal",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-41",
+          "label": "Add Weighed Item",
+          "surface": "Scale modal",
+          "line": 5759,
+          "effect": "Adds line with measured/manual weight",
+          "verification": "Product required; positive weight; correct weight, price, notes",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-42",
+          "label": "Close quantity dialog",
+          "surface": "Quantity pad",
+          "line": 5783,
+          "effect": "Closes without applying",
+          "verification": "Original quantity retained",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-43",
+          "label": "Quantity digits1–9,0 / Clear / delete",
+          "surface": "Quantity pad",
+          "line": 5808,
+          "effect": "Edits quantity",
+          "verification": "Max quantity guard; 1–2–3 layout; decimal not accepted",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-44",
+          "label": "Enter Quantity",
+          "surface": "Quantity pad",
+          "line": 5827,
+          "effect": "Applies entered quantity",
+          "verification": "Zero/min/max/error cases; totals and selected line correct",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-45",
+          "label": "Close price dialog",
+          "surface": "Change Price",
+          "line": 5853,
+          "effect": "Closes without applying",
+          "verification": "Original price retained",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-46",
+          "label": "Price digits1–9,00,0 / Clear",
+          "surface": "Change Price",
+          "line": 5874,
+          "effect": "Edits price in pence",
+          "verification": "Input cap; no backspace control unlike other money pads",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-47",
+          "label": "Change only for this order",
+          "surface": "Change Price",
+          "line": 5887,
+          "effect": "Overrides trolley-line price",
+          "verification": "Price changes only current order; discount calculation correct",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-48",
+          "label": "Change permanently",
+          "surface": "Change Price",
+          "line": 5892,
+          "effect": "Changes product's saved price",
+          "verification": "Permission/manager approval; prevent accidental product write in audit",
+          "risk": "product write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-49",
+          "label": "Goods department filter / clear / keyboard",
+          "surface": "Goods",
+          "line": 5915,
+          "effect": "Filters open-price departments",
+          "verification": "50-result limit explained; long labels readable",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-50",
+          "label": "Goods department button",
+          "surface": "Goods",
+          "line": 5933,
+          "effect": "Adds selected department with typed price",
+          "verification": "Zero amount handling, correct department and amount",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-51",
+          "label": "Close goods price dialog",
+          "surface": "Goods",
+          "line": 5963,
+          "effect": "Closes goods dialog",
+          "verification": "Entered value resets/persists predictably",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-52",
+          "label": "Goods price digits1–9,00,0 / Clear / delete",
+          "surface": "Goods",
+          "line": 5984,
+          "effect": "Edits goods amount",
+          "verification": "1–2–3 layout; pence interpretation; max bound",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-53",
+          "label": "Select/search customer",
+          "surface": "Payment header",
+          "line": 6037,
+          "effect": "Shows customer search",
+          "verification": "Modal expands without cropping cash pad; name search keyboard clear",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-54",
+          "label": "New customer",
+          "surface": "Payment header",
+          "line": 6048,
+          "effect": "Opens checkout customer registration",
+          "verification": "Permission check; customer form doesn't close active payment",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-55",
+          "label": "Close payment",
+          "surface": "Payment header",
+          "line": 6051,
+          "effect": "Returns to trolley",
+          "verification": "Selected customer retained after adding more items; disabled during payment",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-56",
+          "label": "Customer search result",
+          "surface": "Payment customer search",
+          "line": 6073,
+          "effect": "Selects customer",
+          "verification": "Customer and account/loyalty latest values; selection persists",
+          "risk": "trolley customer",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-57",
+          "label": "Use / remove loyalty credit",
+          "surface": "Payment customer",
+          "line": 6113,
+          "effect": "Toggles available loyalty redemption",
+          "verification": "Correct due reduction; cannot spend unavailable points; busy lock",
+          "risk": "financial write on sale",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-58",
+          "label": "Remove selected customer",
+          "surface": "Payment customer",
+          "line": 6123,
+          "effect": "Clears current trolley customer",
+          "verification": "Pay later fallback; due resets",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-59",
+          "label": "Cash",
+          "surface": "Payment method",
+          "line": 6139,
+          "effect": "Selects cash mode",
+          "verification": "Cash pad and notes visible; duplicate tab clicks safe",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-60",
+          "label": "Card / configured provider name",
+          "surface": "Payment method",
+          "line": 6150,
+          "effect": "Selects card mode",
+          "verification": "Terminal availability; manual/external confirmation copy; dedicated vs shared behavior",
+          "risk": "financial",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-61",
+          "label": "Pay later",
+          "surface": "Payment method",
+          "line": 6164,
+          "effect": "Selects customer account charge",
+          "verification": "Missing/disabled customer, limit, permission and multi-mode offline reasons visible",
+          "risk": "financial write",
+          "dependency": "Live account verification in multi mode"
+        },
+        {
+          "id": "checkout-62",
+          "label": "Edit cash amount",
+          "surface": "Payment cash/card split",
+          "line": 6215,
+          "effect": "Returns to cash entry",
+          "verification": "Retained tender amount and remaining card balance correct",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-63",
+          "label": "Pay exact",
+          "surface": "Payment cash",
+          "line": 6226,
+          "effect": "Completes sale at exact due",
+          "verification": "No change; double-click one sale",
+          "risk": "financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-64",
+          "label": "Pay rounded",
+          "surface": "Payment cash",
+          "line": 6238,
+          "effect": "Completes sale at next pound",
+          "verification": "Exact change; hidden for whole-pound due",
+          "risk": "financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-65",
+          "label": "£5 / £10 / £20 / £50 notes",
+          "surface": "Payment cash",
+          "line": 6258,
+          "effect": "Adds note and completes when fully paid",
+          "verification": "Small accumulation vs enough amount; change prominent; one sale",
+          "risk": "financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-66",
+          "label": "Cash amount digits1–9,00,0 / Clear / delete",
+          "surface": "Payment cash",
+          "line": 6298,
+          "effect": "Edits tendered cash",
+          "verification": "1–2–3 layout; cap; underpayment blocked; keyboard key behavior",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-67",
+          "label": "Cancel Terminal",
+          "surface": "Payment card",
+          "line": 6346,
+          "effect": "Requests terminal cancellation then verifies result",
+          "verification": "Sandbox only; final canceled proof before retry; unresolved stays protected",
+          "risk": "provider write",
+          "dependency": "Dojo/SumUp API and configured sandbox terminal"
+        },
+        {
+          "id": "checkout-68",
+          "label": "Complete Sale / Confirm Card Payment / Send to Dojo / Confirm Pay Later",
+          "surface": "Payment footer",
+          "line": 6408,
+          "effect": "Submits selected payment flow",
+          "verification": "Correct disabled/busy state; sale/order/payment count exactly1; trolley clear only on committed result",
+          "risk": "financial write",
+          "dependency": "Payment provider if managed card; DB/account dependencies vary"
+        },
+        {
+          "id": "checkout-69",
+          "label": "Back to payment / Save & select customer",
+          "surface": "Checkout new customer",
+          "line": 6440,
+          "effect": "Cancels registration or saves new customer and selects it",
+          "verification": "Required name/code, duplicate code, email/native form validation, offline guard",
+          "risk": "customer write",
+          "dependency": "src/lib/components/CheckoutCustomerForm.svelte:29"
+        },
+        {
+          "id": "checkout-70",
+          "label": "Close held trolleys dialog",
+          "surface": "Held trolleys",
+          "line": 6464,
+          "effect": "Closes held list",
+          "verification": "No stale feedback obscuring buttons",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-71",
+          "label": "Recover interrupted trolley",
+          "surface": "Held trolleys",
+          "line": 6474,
+          "effect": "Checks local interrupted claim and payment before restoring",
+          "verification": "Disabled with cart present; no duplicate sale/claim restore",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-72",
+          "label": "This till / Other tills",
+          "surface": "Held trolleys",
+          "line": 6480,
+          "effect": "Filters source of held trolley",
+          "verification": "Counts accurate; other till identifiable",
+          "risk": "read-only",
+          "dependency": "Other tills need shared database"
+        },
+        {
+          "id": "checkout-73",
+          "label": "Held trolley card / Retrieve",
+          "surface": "Held trolleys",
+          "line": 6503,
+          "effect": "Claims and restores held cart",
+          "verification": "Atomic claim, correct lines/customer/discount; second retrieve rejected only if truly claimed",
+          "risk": "financial/trolley write",
+          "dependency": "Shared DB for shared claims"
+        },
+        {
+          "id": "checkout-74",
+          "label": "Close recent transactions",
+          "surface": "Recent Transactions",
+          "line": 6572,
+          "effect": "Closes receipts dialog",
+          "verification": "Disabled during reversal; focus restored",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-75",
+          "label": "Receipt row",
+          "surface": "Recent Transactions",
+          "line": 6590,
+          "effect": "Selects receipt preview",
+          "verification": "Populated receipt with long names/notes stays readable",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-76",
+          "label": "Print Receipt",
+          "surface": "Recent Transactions",
+          "line": 6665,
+          "effect": "Prints selected receipt",
+          "verification": "Correct receipt/till/cashier/payment breakdown",
+          "risk": "hardware",
+          "dependency": "Configured printer"
+        },
+        {
+          "id": "checkout-77",
+          "label": "Amount Ref / Refund / Refund Remaining / Void",
+          "surface": "Recent Transactions",
+          "line": 6672,
+          "effect": "Starts authorized reversal flow",
+          "verification": "Manager authorization, amount and stock behavior; void only original open session; use mock transaction",
+          "risk": "financial write",
+          "dependency": "Original payment refund support/provider"
+        },
+        {
+          "id": "checkout-78",
+          "label": "Dismiss unknown barcode",
+          "surface": "Item Not Found",
+          "line": 6744,
+          "effect": "Closes error dialog",
+          "verification": "Scanner continues; no lost input",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-79",
+          "label": "Quick Add item",
+          "surface": "Item Not Found",
+          "line": 6778,
+          "effect": "Opens product registration",
+          "verification": "Permission and barcode populated",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-80",
+          "label": "Close Quick Add",
+          "surface": "Quick Add",
+          "line": 6807,
+          "effect": "Closes registration",
+          "verification": "No product saved",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-81",
+          "label": "Product name / barcode / category / tax / age restriction / price pad",
+          "surface": "Quick Add",
+          "line": 6820,
+          "effect": "Edits new product draft",
+          "verification": "Required fields, duplicate barcode, correct tax, price cap; age restriction explicit",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-82",
+          "label": "Save & Add to Cart",
+          "surface": "Quick Add",
+          "line": 6930,
+          "effect": "Saves product and adds line",
+          "verification": "One product/line; age verification if required",
+          "risk": "product/trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-83",
+          "label": "Save, Add & Print Label",
+          "surface": "Quick Add",
+          "line": 6938,
+          "effect": "Saves product/adds line/prints label",
+          "verification": "Printing failure doesn't create duplicate saved product",
+          "risk": "product/hardware write",
+          "dependency": "Label printer"
+        },
+        {
+          "id": "checkout-84",
+          "label": "Do Not Add / ID Checked — Add Item",
+          "surface": "Age verification",
+          "line": 6980,
+          "effect": "Rejects/confirms age-restricted add",
+          "verification": "No item before confirmation; clear specific product name",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-85",
+          "label": "Approving staff / approval PIN pad / Approve / Cancel",
+          "surface": "Approval Required",
+          "line": 7005,
+          "effect": "Authorizes restricted operation",
+          "verification": "Eligible roles only; invalid PIN error; cancel executes nothing",
+          "risk": "authentication / action-dependent",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-86",
+          "label": "Refund amount pad / Review Refund / Cancel",
+          "surface": "Amount Refund",
+          "line": 7057,
+          "effect": "Previews price-adjustment refund",
+          "verification": "Positive ≤ remaining goods amount; no stock quantity changes",
+          "risk": "financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-87",
+          "label": "Clear Order confirm / cancel",
+          "surface": "Clear confirmation",
+          "line": 7074,
+          "effect": "Clears or retains trolley",
+          "verification": "Lines and selected customer state correct",
+          "risk": "trolley write",
+          "dependency": "local app"
+        },
+        {
+          "id": "checkout-88",
+          "label": "Accept Signature / Reject Signature",
+          "surface": "Dojo signature confirmation",
+          "line": 7082,
+          "effect": "Responds to provider signature step",
+          "verification": "No ambiguous close; compare final capture vs rejection once",
+          "risk": "provider write",
+          "dependency": "Signature sandbox terminal"
+        },
+        {
+          "id": "checkout-89",
+          "label": "Retry / stop card payment",
+          "surface": "Dojo declined dialog",
+          "line": 7094,
+          "effect": "Retries existing intent or stops",
+          "verification": "No duplicate charge/attempt; journal tracks latest session",
+          "risk": "provider write",
+          "dependency": "src/lib/components/DojoRetryDialog.svelte"
+        },
+        {
+          "id": "checkout-90",
+          "label": "Expired payment review / Record checked result / Keep unresolved",
+          "surface": "Dojo expired review",
+          "line": 7095,
+          "effect": "Admin reconciles uncertain payment with evidence",
+          "verification": "Reference, result, breakdown, admin PIN and audit required; no force clear",
+          "risk": "financial/provider write",
+          "dependency": "src/lib/components/DojoExpiryReview.svelte"
+        },
+        {
+          "id": "checkout-91",
+          "label": "Confirm Refund / Void Sale / Cancel",
+          "surface": "Reversal confirmation",
+          "line": 7099,
+          "effect": "Commits or abandons reversal",
+          "verification": "Captured extras excluded as documented; one journal/reversal",
+          "risk": "financial write",
+          "dependency": "DB/provider as configured"
+        }
+      ]
+    },
+    {
+      "route": "/orders",
+      "source": "src/routes/orders/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Populated history table at square size",
+        "Long receipt/customer/cashier names wrap or truncate with discoverable full values",
+        "Native receipt modal fits viewport with scrollable body and visible footer",
+        "Back Office versus checkout management mode"
+      ],
+      "controls": [
+        {
+          "id": "orders-1",
+          "label": "Search receipt/customer/till/cashier",
+          "surface": "Order history filters",
+          "line": 354,
+          "effect": "Edits query",
+          "verification": "Search and clear via touch and keyboard",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-2",
+          "label": "Find / Enter",
+          "surface": "Order history filters",
+          "line": 366,
+          "effect": "Applies query",
+          "verification": "Correct results/count; loading and no-results states",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-3",
+          "label": "Status filter",
+          "surface": "Order history filters",
+          "line": 369,
+          "effect": "Filters completed/refunded/holds/voids",
+          "verification": "Select each option; page resets",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-4",
+          "label": "Reset",
+          "surface": "Order history filters",
+          "line": 371,
+          "effect": "Clears search/status/page",
+          "verification": "Default result list restored",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-5",
+          "label": "Receipt number",
+          "surface": "Order history row",
+          "line": 396,
+          "effect": "Opens receipt details modal",
+          "verification": "Correct selected record, long populated receipt",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-6",
+          "label": "Retry",
+          "surface": "Order history error",
+          "line": 419,
+          "effect": "Reloads orders",
+          "verification": "Failure recovers without stale rows",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-7",
+          "label": "Newer / Older",
+          "surface": "Order history paging",
+          "line": 427,
+          "effect": "Moves between25-row pages",
+          "verification": "Bounds and scroll position; no selected modal left open",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-8",
+          "label": "Close receipt / modal X / Escape",
+          "surface": "Receipt details",
+          "line": 603,
+          "effect": "Closes receipt detail",
+          "verification": "Focus returns to selected row",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "orders-9",
+          "label": "Print Receipt",
+          "surface": "Receipt details",
+          "line": 604,
+          "effect": "Prints selected receipt",
+          "verification": "Native printer selection/error feedback; no order change",
+          "risk": "hardware",
+          "dependency": "Configured receipt printer or native printing"
+        }
+      ]
+    },
+    {
+      "route": "/customers",
+      "source": "src/routes/customers/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "All/outstanding buttons match management style",
+        "Search positioning consistent",
+        "Customer table doesn't crop row actions in square mode",
+        "Loyalty history/adjustment modal and account/entry modals fit vertically",
+        "Long account statement references and notes wrap"
+      ],
+      "controls": [
+        {
+          "id": "customers-1",
+          "label": "Add Customer",
+          "surface": "Page actions",
+          "line": 1476,
+          "effect": "Opens new profile form",
+          "verification": "No customer written until Save",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-2",
+          "label": "All Customers / Outstanding Credit",
+          "surface": "List switch",
+          "line": 1490,
+          "effect": "Changes all versus positive balances list",
+          "verification": "Counts, sums and pagination update; active style clear",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-3",
+          "label": "Customer search / clear / keyboard / Find",
+          "surface": "List filters",
+          "line": 1524,
+          "effect": "Searches profile/loyalty code",
+          "verification": "Enter/find equivalence; empty and cleared state",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-4",
+          "label": "Account",
+          "surface": "Customer row",
+          "line": 1569,
+          "effect": "Opens independent account statement",
+          "verification": "Current owes/credit correct; history retention explained",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-5",
+          "label": "Points / Loyalty",
+          "surface": "Customer row",
+          "line": 1580,
+          "effect": "Opens loyalty balance/history",
+          "verification": "Live value, barcode, points and monetary equivalent",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-6",
+          "label": "Edit customer",
+          "surface": "Customer row",
+          "line": 1591,
+          "effect": "Opens profile edit",
+          "verification": "Existing profile fields; points not overwritten",
+          "risk": "customer write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-7",
+          "label": "Delete customer",
+          "surface": "Customer row",
+          "line": 1601,
+          "effect": "Checks usage before confirmation",
+          "verification": "Outstanding credit/points/account/history deletion blocked; unused mock customer confirm/cancel",
+          "risk": "customer delete",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-8",
+          "label": "Previous / Next customers",
+          "surface": "Paging",
+          "line": 1635,
+          "effect": "Changes customer list page",
+          "verification": "Boundary disabled; query/view preserved",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-9",
+          "label": "Name / Phone / Email / Postcode / Loyalty Code / Notes",
+          "surface": "Profile form",
+          "line": 1663,
+          "effect": "Edits profile",
+          "verification": "Name required; duplicate/invalid code; invalid email test; compare limits with checkout form",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-10",
+          "label": "Cancel / Save Customer",
+          "surface": "Profile form",
+          "line": 1674,
+          "effect": "Abandons or persists profile",
+          "verification": "One save; errors visible; points unchanged during profile edit",
+          "risk": "customer write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-11",
+          "label": "Adjust Points",
+          "surface": "Loyalty history footer",
+          "line": 1855,
+          "effect": "Opens adjustment screen",
+          "verification": "Permission required; live history required",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-12",
+          "label": "Refresh / Close",
+          "surface": "Loyalty history footer",
+          "line": 1857,
+          "effect": "Reloads history or closes",
+          "verification": "No double load; correct latest points",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-13",
+          "label": "Add / Remove / Set balance",
+          "surface": "Loyalty adjustment",
+          "line": 1742,
+          "effect": "Chooses adjustment semantics",
+          "verification": "Preview current,new and change accurate; no negative forbidden balance",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-14",
+          "label": "Whole points / Reason",
+          "surface": "Loyalty adjustment",
+          "line": 1777,
+          "effect": "Edits audited correction",
+          "verification": "Integer-only; reason required/capped; invalid or no-change submit disabled",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-15",
+          "label": "Back / Save correction",
+          "surface": "Loyalty adjustment footer",
+          "line": 1860,
+          "effect": "Abandons or appends correction",
+          "verification": "Exactly1 correction audit; concurrent balance conflict reloads; idempotent retry",
+          "risk": "loyalty financial write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-16",
+          "label": "Record Payment",
+          "surface": "Account statement",
+          "line": 1906,
+          "effect": "Opens debt repayment form",
+          "verification": "Active till session and role required; opening amount sensible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-17",
+          "label": "Opening Balance",
+          "surface": "Account statement",
+          "line": 1918,
+          "effect": "Creates initial owed value",
+          "verification": "Only when no prior entries; reason and positive valid amount",
+          "risk": "account write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-18",
+          "label": "Increase Owed / Reduce / Add Credit",
+          "surface": "Account statement",
+          "line": 1920,
+          "effect": "Appends balance adjustment",
+          "verification": "Reason required; reduction beyond debt becomes credit",
+          "risk": "account write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-19",
+          "label": "Pay later enabled / Account limit / Save settings",
+          "surface": "Account settings",
+          "line": 1932,
+          "effect": "Changes account enablement and maximum owed",
+          "verification": "Permission and valid pence; disabled account cannot charge later",
+          "risk": "account write",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-20",
+          "label": "Print acknowledgement",
+          "surface": "Account payment statement row",
+          "line": 1980,
+          "effect": "Prints account repayment slip",
+          "verification": "Selected entry amount/reference/till; doesn't print as goods sale",
+          "risk": "hardware",
+          "dependency": "Configured receipt printer"
+        },
+        {
+          "id": "customers-21",
+          "label": "Load more entries",
+          "surface": "Account statement",
+          "line": 1997,
+          "effect": "Appends older account entries",
+          "verification": "No duplicates; end disabled/hidden",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-22",
+          "label": "Refresh / Close account",
+          "surface": "Account statement footer",
+          "line": 2013,
+          "effect": "Reloads statement or closes",
+          "verification": "Latest balance preserved; no close during critical save",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-23",
+          "label": "Amount (£)",
+          "surface": "Account entry",
+          "line": 2036,
+          "effect": "Edits adjustment/repayment amount",
+          "verification": "Positive amount, max/decimal validation; locked after approved card",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-24",
+          "label": "Cash / Card / Other",
+          "surface": "Account payment methods",
+          "line": 2043,
+          "effect": "Chooses repayment tender",
+          "verification": "Provider config loading errors; Other requires reference; external Card exact approval checkbox",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-25",
+          "label": "External card approved confirmation",
+          "surface": "Account payment external mode",
+          "line": 2094,
+          "effect": "Acknowledges external approved transaction",
+          "verification": "Exact amount frozen; reference required; no provider charge from manual record",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-26",
+          "label": "Reason/note / Reference",
+          "surface": "Account entry",
+          "line": 2110,
+          "effect": "Sets permanent adjustment/payment metadata",
+          "verification": "Reason mandatory for adjustment, reference mandatory forOther/externalcard",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "customers-27",
+          "label": "Cancel / Record Payment / Send to provider / Save adjustment",
+          "surface": "Account entry footer",
+          "line": 2149,
+          "effect": "Abandons or commits account entry",
+          "verification": "One entry and proper till cash/card totals; approved retry never charges card again",
+          "risk": "account financial/provider write",
+          "dependency": "Dojo/SumUp if managed card; DB account validation"
+        },
+        {
+          "id": "customers-28",
+          "label": "Accept Signature / Reject Signature",
+          "surface": "Customer-account Dojo signature",
+          "line": 2184,
+          "effect": "Responds to signature request",
+          "verification": "Captured/rejected outcome; no duplicate account entry",
+          "risk": "provider write",
+          "dependency": "Signature sandbox terminal"
+        },
+        {
+          "id": "customers-29",
+          "label": "Retry / stop card payment",
+          "surface": "Customer-account decline dialog",
+          "line": 2193,
+          "effect": "Retries failed card or ends flow",
+          "verification": "Original attempt ID retained; statement only after capture",
+          "risk": "provider write",
+          "dependency": "Dojo sandbox"
+        },
+        {
+          "id": "customers-30",
+          "label": "Confirm Delete / Cancel",
+          "surface": "Delete confirmation",
+          "line": 2172,
+          "effect": "Deletes unused customer or keeps",
+          "verification": "Data layer rechecks usage before deletion",
+          "risk": "customer delete",
+          "dependency": "local app"
+        }
+      ]
+    },
+    {
+      "route": "/stock-receiving",
+      "source": "src/routes/stock-receiving/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Back Office compact draft with product picker",
+        "Checkout inline product catalog plus draft",
+        "Square-screen footer total/Receive button reachable",
+        "Long product names and invalid input errors fit",
+        "Notes collapsed only in Back Office"
+      ],
+      "controls": [
+        {
+          "id": "stock-receiving-1",
+          "label": "Receive stock / Recent receipts",
+          "surface": "Page tabs",
+          "line": 193,
+          "effect": "Switches draft/history",
+          "verification": "Unsaved draft preserved between tabs",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-2",
+          "label": "Supplier / Delivery reference / Notes",
+          "surface": "Delivery metadata",
+          "line": 198,
+          "effect": "Edits delivery metadata",
+          "verification": "Supplier list; reference255/notes2000limits; disabled after uncertain submission",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-3",
+          "label": "+ Add note / Edit note / Hide note",
+          "surface": "Back Office metadata",
+          "line": 200,
+          "effect": "Toggles optional notes",
+          "verification": "Typed note preserved hidden",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-4",
+          "label": "Find products search / clear / keyboard / Enter",
+          "surface": "Checkout catalog",
+          "line": 208,
+          "effect": "Searches active products",
+          "verification": "Name, SKU, barcode; debounced stale-response protection",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-5",
+          "label": "Retry search",
+          "surface": "Checkout catalog error",
+          "line": 211,
+          "effect": "Reloads search",
+          "verification": "Error clears after recovery",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-6",
+          "label": "Add product",
+          "surface": "Checkout catalog",
+          "line": 214,
+          "effect": "Adds/increments delivery line",
+          "verification": "Same product increments existing line; original product data visible",
+          "risk": "draft write",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-7",
+          "label": "Previous / Next products",
+          "surface": "Checkout catalog paging",
+          "line": 217,
+          "effect": "Pages20 results",
+          "verification": "Bounds and loading guard",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-8",
+          "label": "Clear draft",
+          "surface": "Delivery heading",
+          "line": 221,
+          "effect": "Opens discard confirmation",
+          "verification": "Cancel retains; confirm removes draft/reference/notes; doesn't reverse already received stock",
+          "risk": "draft discard",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-9",
+          "label": "Add products",
+          "surface": "Back Office delivery",
+          "line": 221,
+          "effect": "Opens product picker",
+          "verification": "Keyboard-friendly picker; no giant catalog in main draft",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-10",
+          "label": "Remove product",
+          "surface": "Delivery line",
+          "line": 226,
+          "effect": "Removes draft line",
+          "verification": "Correct item; cost updates",
+          "risk": "draft write",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-11",
+          "label": "Quantity / Unit cost (£)",
+          "surface": "Delivery line",
+          "line": 228,
+          "effect": "Edits stock receipt draft",
+          "verification": "Positive integer quantity, valid2decimalcost, safe totals; inline errors",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-12",
+          "label": "Receive stock / Retry receipt",
+          "surface": "Delivery footer",
+          "line": 240,
+          "effect": "Commits atomic receipt and stock increment",
+          "verification": "Duplicate tap blocked; uncertain retry same IDs; fresh product stock and history; refresh failure not duplicate",
+          "risk": "inventory financial write",
+          "dependency": "Database connectivity/model as configured"
+        },
+        {
+          "id": "stock-receiving-13",
+          "label": "Refresh receipts",
+          "surface": "Receipt history",
+          "line": 244,
+          "effect": "Reloads latest50 deliveries",
+          "verification": "Error and stale-loading state visible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-14",
+          "label": "Product picker search / clear / keyboard / Enter",
+          "surface": "Back Office picker",
+          "line": "src/lib/components/StockReceivingProductPicker.svelte:139",
+          "effect": "Searches active catalog",
+          "verification": "Keyboard arrows and Enter target selected row",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-15",
+          "label": "Picker product / Previous / Next / Retry / Done",
+          "surface": "Back Office picker",
+          "line": "src/lib/components/StockReceivingProductPicker.svelte:150",
+          "effect": "Adds products, pages, recovers search or closes",
+          "verification": "Current quantities visible; correct item adds; Done preserves draft",
+          "risk": "draft write",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-16",
+          "label": "Clear draft / Cancel",
+          "surface": "Discard confirmation",
+          "line": 269,
+          "effect": "Discards unsaved draft or retains",
+          "verification": "Unconfirmed submission warning clear",
+          "risk": "draft discard",
+          "dependency": "local app"
+        },
+        {
+          "id": "stock-receiving-17",
+          "label": "Leave page / Keep editing",
+          "surface": "Navigation confirmation",
+          "line": 270,
+          "effect": "Leaves with draft loss or cancels navigation",
+          "verification": "No loss on Keep editing; history tab itself preserves draft",
+          "risk": "draft discard",
+          "dependency": "local app"
+        }
+      ]
+    },
+    {
+      "route": "/shifts",
+      "source": "src/routes/shifts/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Cash-up form only for configured feature/authorized role",
+        "Blind expected totals hidden until closed",
+        "Square history table expandable details wrap"
+      ],
+      "controls": [
+        {
+          "id": "shifts-1",
+          "label": "Counted cash",
+          "surface": "Current session",
+          "line": 326,
+          "effect": "Sets drawer count",
+          "verification": "Nonnegative pence conversion; zero allowed; invalid values don't enable close",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-2",
+          "label": "No cash",
+          "surface": "Current session",
+          "line": 327,
+          "effect": "Sets count to0",
+          "verification": "Value visibly changes; no close yet",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-3",
+          "label": "Card-machine total",
+          "surface": "Current session",
+          "line": 332,
+          "effect": "Sets reconciled card count",
+          "verification": "Shown when reconcileCard enabled; nonnegative/zero; correct pence",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-4",
+          "label": "No card payments",
+          "surface": "Current session",
+          "line": 333,
+          "effect": "Sets card count to0",
+          "verification": "Only changes draft",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-5",
+          "label": "Closing notes",
+          "surface": "Current session",
+          "line": 338,
+          "effect": "Sets optional explanation",
+          "verification": "Long note wraps or remains editable",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-6",
+          "label": "Close Session",
+          "surface": "Current session",
+          "line": 340,
+          "effect": "Closes till shift, records variance and signs out",
+          "verification": "Current actor permission, counted totals, one close, staff signout; mock session only",
+          "risk": "financial close",
+          "dependency": "Shared mode needs safe close preflight"
+        },
+        {
+          "id": "shifts-7",
+          "label": "Search sessions / clear / keyboard / Find / Enter",
+          "surface": "Cash-up history",
+          "line": 361,
+          "effect": "Applies till/cashier/date/note query",
+          "verification": "Correct counts and history",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-8",
+          "label": "Status / Reset",
+          "surface": "Cash-up history",
+          "line": 375,
+          "effect": "Filters open/closed or clears filters",
+          "verification": "Page reset and clear state",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-9",
+          "label": "Retry",
+          "surface": "Cash-up history error",
+          "line": 382,
+          "effect": "Reloads rows",
+          "verification": "Failure/error state recovers",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-10",
+          "label": "View / Hide session details",
+          "surface": "Cash-up history row",
+          "line": 392,
+          "effect": "Expands reconciled cash/card/activity",
+          "verification": "Long notes and extras/cashback accounting visible; open shift expected values remain hidden",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "shifts-11",
+          "label": "Newer / Older",
+          "surface": "Cash-up history paging",
+          "line": 433,
+          "effect": "Pages20 sessions",
+          "verification": "First/last disabled; no duplicate/reordered stale rows",
+          "risk": "read-only",
+          "dependency": "local app"
+        }
+      ]
+    },
+    {
+      "route": "/attendance",
+      "source": "src/routes/attendance/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Admin management versus attendance-only role restrictions",
+        "Square date/filter controls and table",
+        "Clock-in/out dialog and correction footer visible",
+        "Warnings distinctly separate from empty records"
+      ],
+      "controls": [
+        {
+          "id": "attendance-1",
+          "label": "Add Record",
+          "surface": "Page actions",
+          "line": 440,
+          "effect": "Opens manual attendance editor",
+          "verification": "Only attendance-manage role; defaults and date fields clear",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-2",
+          "label": "Export CSV",
+          "surface": "Page actions",
+          "line": 443,
+          "effect": "Exports all filtered attendance records",
+          "verification": "Bounded to 100000 rows; check CSV escaping and native save/download result",
+          "risk": "file output",
+          "dependency": "WebView download support"
+        },
+        {
+          "id": "attendance-3",
+          "label": "Sign Out",
+          "surface": "Attendance-only page actions",
+          "line": 448,
+          "effect": "Ends attendance-only staff session",
+          "verification": "Returns staff picker and cannot see management",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-4",
+          "label": "Clock In / Clock Out",
+          "surface": "My attendance",
+          "line": 460,
+          "effect": "Opens self clock dialog",
+          "verification": "Correct current employee; existing open session visible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-5",
+          "label": "Staff / Status / From / To",
+          "surface": "Attendance filters",
+          "line": 474,
+          "effect": "Filters employee/status/date period",
+          "verification": "Employee filter only view-all; from≤to≤today; pagination reset",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-6",
+          "label": "Search / clear / keyboard / Search button / Enter",
+          "surface": "Attendance filters",
+          "line": 480,
+          "effect": "Applies text search",
+          "verification": "Staff,till,notes; correct count and period label",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-7",
+          "label": "Retry",
+          "surface": "Attendance error",
+          "line": 492,
+          "effect": "Reloads live attendance",
+          "verification": "Cache warning vs genuine empty results; clock gating",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-8",
+          "label": "Manager Clock Out",
+          "surface": "Open attendance row",
+          "line": 509,
+          "effect": "Opens confirmation to end another staff session",
+          "verification": "Permission/live connectivity; confirm appends audited out timestamp",
+          "risk": "attendance write",
+          "dependency": "Live MariaDB in multi mode"
+        },
+        {
+          "id": "attendance-9",
+          "label": "Correct attendance record",
+          "surface": "Completed row",
+          "line": 518,
+          "effect": "Opens editor with optimistic expected version",
+          "verification": "Record immutable while stale; concurrent correction reloads",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-10",
+          "label": "Newer / Older",
+          "surface": "Attendance paging",
+          "line": 534,
+          "effect": "Pages filtered records",
+          "verification": "Boundary/loading disabled",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-11",
+          "label": "Staff member / Clock in / Clock out / Clock-in till / Clock-out till / Correction note",
+          "surface": "Attendance editor",
+          "line": 546,
+          "effect": "Edits new/corrected closed attendance record",
+          "verification": "Out≥in; no overlapping sessions; future validation; note500cap",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-12",
+          "label": "Cancel / Save Record",
+          "surface": "Attendance editor footer",
+          "line": 555,
+          "effect": "Closes or writes audited record",
+          "verification": "Error doesn't dismiss unless stale conflict; one saved record",
+          "risk": "attendance write",
+          "dependency": "Database validation"
+        },
+        {
+          "id": "attendance-13",
+          "label": "Clock Out / Cancel",
+          "surface": "Manager clockout confirmation",
+          "line": 562,
+          "effect": "Confirms or cancels staff clock-out",
+          "verification": "Record audited; duplicate confirmation safe",
+          "risk": "attendance write",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-14",
+          "label": "Find your name / employee choice",
+          "surface": "Staff clock modal",
+          "line": "src/lib/components/AttendanceClock.svelte:182",
+          "effect": "Selects active attendance staff",
+          "verification": "Search shown for>8staff; clock permission/live connection gates",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-15",
+          "label": "PIN digits / Clear / delete / Sign in / Change",
+          "surface": "Staff clock modal",
+          "line": "src/lib/components/AttendanceClock.svelte:194",
+          "effect": "Authenticates only for attendance",
+          "verification": "Masked PIN; wrongPIN; staff not granted whole POS",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-16",
+          "label": "Clock In / Clock Out / Retry status check",
+          "surface": "Clock modal",
+          "line": "src/lib/components/AttendanceClock.svelte:210",
+          "effect": "Checks and toggles live attendance",
+          "verification": "Correct current status; one open session; cache cannot clock",
+          "risk": "attendance write",
+          "dependency": "MariaDB for multi mode"
+        },
+        {
+          "id": "attendance-17",
+          "label": "Next staff member / Use a different staff member",
+          "surface": "Clock modal",
+          "line": "src/lib/components/AttendanceClock.svelte:173",
+          "effect": "Resets staff-only clock selection",
+          "verification": "Clears authenticated attendance identity",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "attendance-18",
+          "label": "View Attendance / Close / Done / modal X",
+          "surface": "Clock modal",
+          "line": "src/lib/components/AttendanceClock.svelte:223",
+          "effect": "Navigates history or closes",
+          "verification": "History link role/surface conditional; dismissal blocked while saving",
+          "risk": "read-only",
+          "dependency": "local app"
+        }
+      ]
+    },
+    {
+      "route": "/reports",
+      "source": "src/routes/reports/+page.svelte",
+      "inspection": "source-only",
+      "nativeRuntimeStatus": "not-tested-by-this-agent",
+      "layoutChecks": [
+        "Square filter bar and long date labels",
+        "All totals/till tables scroll without cutting numbers",
+        "X/Z preview body scrolls independently with footer visible",
+        "Whole-system close progress and problem/release buttons reachable",
+        "Recovery entries and long references wrap"
+      ],
+      "controls": [
+        {
+          "id": "reports-1",
+          "label": "Today /7Days /ThisMonth /ThisYear",
+          "surface": "Date presets",
+          "line": 1222,
+          "effect": "Chooses and applies report period",
+          "verification": "Local calendar range correct; current selection visible",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-2",
+          "label": "Start Date / End Date / Till / Top Products sort",
+          "surface": "Report filters",
+          "line": 1233,
+          "effect": "Sets pending report filters",
+          "verification": "Date order/invalid values; selectedTill metadata corresponds applied filters",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-3",
+          "label": "Apply Filters",
+          "surface": "Report filters",
+          "line": 1247,
+          "effect": "Reloads report totals",
+          "verification": "Dirty indicator clears only for current data; invalid range error",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-4",
+          "label": "Export CSV",
+          "surface": "Report actions",
+          "line": 1251,
+          "effect": "Exports current report",
+          "verification": "Totals match applied range/till; output native download verified",
+          "risk": "file output",
+          "dependency": "Native WebView download"
+        },
+        {
+          "id": "reports-5",
+          "label": "Print",
+          "surface": "Report actions",
+          "line": 1255,
+          "effect": "Prints current report",
+          "verification": "Applied range/till and correct totals; no control UI on paper",
+          "risk": "hardware",
+          "dependency": "Receipt/OS printing as configured"
+        },
+        {
+          "id": "reports-6",
+          "label": "Compare previous period",
+          "surface": "Performance",
+          "line": 1285,
+          "effect": "Loads comparable prior period",
+          "verification": "Equal calendar days; partial-current-period note; metadata accurate",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-7",
+          "label": "Retry comparison",
+          "surface": "Performance",
+          "line": 1299,
+          "effect": "Repeats failed comparison query",
+          "verification": "Current report not replaced by old comparison",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-8",
+          "label": "Close This Till",
+          "surface": "Period close actions",
+          "line": 1684,
+          "effect": "Preflights and previews current till period",
+          "verification": "Only this till period; lasttill/systemclose marker latest; Cancel preserves marker",
+          "risk": "financial close",
+          "dependency": "Database and unresolved payment checks"
+        },
+        {
+          "id": "reports-9",
+          "label": "Close Whole System",
+          "surface": "Period close actions",
+          "line": 1687,
+          "effect": "Obtains all active till barriers and previews system period",
+          "verification": "Unavailable till timeout/problem UI; cancel releasesbarrier; no forever Working",
+          "risk": "financial close",
+          "dependency": "All active registered tills and shared DB in multi mode"
+        },
+        {
+          "id": "reports-10",
+          "label": "Preview This Till (X)",
+          "surface": "Period close actions",
+          "line": 1690,
+          "effect": "Generates period preview without close",
+          "verification": "No marker reset and no staff logout",
+          "risk": "read-only / barrier",
+          "dependency": "Relevant active payments"
+        },
+        {
+          "id": "reports-11",
+          "label": "Which period does each report cover?",
+          "surface": "Explanation disclosure",
+          "line": 1697,
+          "effect": "Expands period semantics",
+          "verification": "Correct scope; no financial mutation",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-12",
+          "label": "Unfinished card payments disclosure",
+          "surface": "Payment recovery",
+          "line": 1704,
+          "effect": "Shows provider attempts blocking close",
+          "verification": "Current terminal/scope/till; stale records identified",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-13",
+          "label": "Check payment results",
+          "surface": "Payment recovery",
+          "line": 1716,
+          "effect": "Reconciles provider journals before period close",
+          "verification": "Doesn't force-clear uncertain or captured payments",
+          "risk": "financial/provider reconciliation",
+          "dependency": "Configured Dojo/SumUp APIs and DB by ownership"
+        },
+        {
+          "id": "reports-14",
+          "label": "Review expired payment",
+          "surface": "Payment recovery row",
+          "line": 1746,
+          "effect": "Opens administrator evidence review",
+          "verification": "Fresh verified provider required; PIN/reference/result; audit",
+          "risk": "financial/provider reconciliation",
+          "dependency": "src/lib/components/DojoExpiryReview.svelte"
+        },
+        {
+          "id": "reports-15",
+          "label": "Cancel test payment",
+          "surface": "Payment recovery row",
+          "line": 1751,
+          "effect": "Opens sandbox-only expiry cancellation confirmation",
+          "verification": "Created uncaptured expired sandbox only; keep payment vs confirmedprovidercancel",
+          "risk": "provider write",
+          "dependency": "Dojo sandbox API"
+        },
+        {
+          "id": "reports-16",
+          "label": "Close This Till Instead",
+          "surface": "Whole-system close problem",
+          "line": 1783,
+          "effect": "Falls back from system to till close",
+          "verification": "Releases system barrier first; preserves other tills",
+          "risk": "financial close",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-17",
+          "label": "Cancel generation",
+          "surface": "Close generation progress",
+          "line": 1788,
+          "effect": "Cancels preflight/preview generation",
+          "verification": "Barrierreleased; no markerreset orhang",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-18",
+          "label": "Retry release / Close this till / Dismiss",
+          "surface": "Pending close problem",
+          "line": 1811,
+          "effect": "Recovers barrier release or acknowledges problem",
+          "verification": "Release-confirmed status; don't allow newfinancialwrites whilepending",
+          "risk": "financial maintenance",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-19",
+          "label": "Close report preview / backdrop / Escape",
+          "surface": "Period preview",
+          "line": 1834,
+          "effect": "Cancels or closes preview",
+          "verification": "No period closure; close barrier released; busy dismissalblocked",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-20",
+          "label": "Close Period",
+          "surface": "Period preview footer",
+          "line": 2042,
+          "effect": "Opens second-step close confirmation",
+          "verification": "No reset until final confirm",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-21",
+          "label": "Cancel / Yes, Close Period",
+          "surface": "Period close confirmation",
+          "line": 2035,
+          "effect": "Abandons or commits Z close",
+          "verification": "One closemarker; sale counts/till totals; next period starts here",
+          "risk": "financial close",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-22",
+          "label": "Print period report",
+          "surface": "Period preview footer",
+          "line": 2046,
+          "effect": "Prints X/Z period report",
+          "verification": "Per-till totals visible and match; printerfailuredoesn'tcloseperiod",
+          "risk": "hardware",
+          "dependency": "Configured report printer"
+        },
+        {
+          "id": "reports-23",
+          "label": "Close",
+          "surface": "Period preview footer",
+          "line": 2049,
+          "effect": "Closes report and releases barrier",
+          "verification": "Idlebuttons after close; pendingrelease visible iffailure",
+          "risk": "read-only",
+          "dependency": "local app"
+        },
+        {
+          "id": "reports-24",
+          "label": "Cancel test payment / Keep payment",
+          "surface": "Sandbox expiry confirmation",
+          "line": 2060,
+          "effect": "Confirms provider-verified sandbox cancellation",
+          "verification": "No effect on captured/live records; unresolved protected",
+          "risk": "provider write",
+          "dependency": "Dojo sandbox"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "OPS-SOURCE-01",
+      "severity": "medium",
+      "type": "missing-control",
+      "runtimeStatus": "not-reproduced",
+      "page": "/customers",
+      "title": "No visible cancellation action during a managed customer-account card payment",
+      "evidence": [
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1102,
+          "description": "Dojo monitor has an internal cancel callback"
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 2149,
+          "description": "Footer Cancel is disabled while accountSaving"
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 2025,
+          "description": "Modal dismissal disabled while saving or managedcardapproved"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6346,
+          "description": "Checkout has a visible Cancel Terminal control"
+        }
+      ],
+      "impact": "A user who needs to abort an account debt repayment while a terminal is waiting cannot use the same on-screen cancellation available in checkout.",
+      "verificationNeeded": "Start an account-payment sandbox timeout session and inspect all visible controls; cancel on device only after root verifies UI absence."
+    },
+    {
+      "id": "OPS-SOURCE-02",
+      "severity": "low",
+      "type": "inconsistent-control",
+      "runtimeStatus": "not-reproduced",
+      "page": "/",
+      "title": "Change Price pad lacks a delete-last-digit control",
+      "evidence": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5873,
+          "description": "Key list is1–9,00,0,C"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5807,
+          "description": "Quantity key list includes delete"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6311,
+          "description": "Payment key list includes delete"
+        }
+      ],
+      "impact": "Correcting a mistyped price requires clearing and re-entering the full amount in this pad.",
+      "verificationNeeded": "Open Change Price, enter1234 and check whether hardware Backspace works and whether a visible delete control exists."
+    },
+    {
+      "id": "OPS-SOURCE-03",
+      "severity": "suggestion",
+      "type": "feature-limitation",
+      "runtimeStatus": "not-reproduced",
+      "page": "/stock-receiving",
+      "title": "Recent receipts stops at latest50 and does not expose receipt-line details",
+      "evidence": [
+        {
+          "file": "src/routes/stock-receiving/+page.svelte",
+          "line": 132,
+          "description": "getRecentStockReceipts(50)"
+        },
+        {
+          "file": "src/routes/stock-receiving/+page.svelte",
+          "line": 244,
+          "description": "History copy explicitly says latest50; static receiptcards"
+        }
+      ],
+      "impact": "Older delivery investigations require another database/reporting route; item-by-item receipt inspection is unavailable here.",
+      "verificationNeeded": "Confirm available history controls and decide whether an older-history/detail feature belongs on the product roadmap."
+    }
+  ],
+  "highRiskRootVerification": [
+    "Dojo sandbox only for payment/cancellation; confirm Saved API key and ownership are suitable before provider action",
+    "Use isolated mock sale/customer/session for goods sales, account repayments, loyaltycorrections, stockreceipts, refunds and shift/Zclosures",
+    "Z report previewcancel must release all barriers without closing period",
+    "Whole-systemZclose and tillZclose intentionally coverdifferent,possiblyoverlappingranges",
+    "Receipt/CSV/export buttons need actual native file/printer feedback before pass",
+    "Attendance multi-mode cache intentionally disables clock writes; record liveerror separately from expected offline gating",
+    "No broad deletion or databasewipe solely to exercise audit controls"
+  ]
+}

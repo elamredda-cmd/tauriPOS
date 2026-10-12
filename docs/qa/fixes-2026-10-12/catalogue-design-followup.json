@@ -1,0 +1,97 @@
+{
+  "date": "2026-10-12",
+  "scope": "Remaining catalogue, supplier, scale-designer and label-print audit findings",
+  "sourceReport": "docs/qa/audit-2026-10-12/REPORT.html",
+  "testEvidence": {
+    "command": "npx vitest run src/lib/catalogueDesignWorkflows.test.ts src/lib/catalogueIntegrity.test.ts",
+    "result": "36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests)",
+    "check": "npm run check: Tauri command permission audit passed; svelte-check 0 errors and 0 warnings",
+    "method": "Deferred success/failure fixtures execute actual route handlers extracted from TypeScript AST. Source-wiring checks validate shared modal focus actions, explicit modal sizing and toolbar placement. These are not native UI tests.",
+    "native": "Owned by parent agent. No native UI PASS is asserted by this artifact."
+  },
+  "findings": [
+    {
+      "id": "AUDIT-04",
+      "status": "implemented_and_automated_tested",
+      "change": "Tax editor sends one immutable expected snapshot through saveTaxRateSnapshot. Parent implementation commits all default flags and the edited rate atomically, with snapshot conflict detection. UI publishes only after commit; failed saves keep the draft and show the actual error.",
+      "tests": ["One frozen tax snapshot submitted despite repeated clicks; mutable draft and expected rows cannot alter the submitted data."],
+      "nativeNext": "Switch default tax through Tauri, confirm exactly one default remains and cancellation saves nothing. Parent separately ran native transaction CAS regression."
+    },
+    {
+      "id": "AUDIT-05",
+      "status": "implemented_and_automated_tested",
+      "change": "Retains the existing details-then-stock persistence model but explains partial success accurately. If stock fails after details commit, editor refreshes its saved product/stock baseline before retry. If refresh fails, stale editor closes and requests reopening; no misleading generic all-or-nothing Save error.",
+      "tests": ["Delayed immutable item submission and duplicate guard", "Details success plus stock failure refreshes stock baseline", "Snapshot read failure closes stale editor"],
+      "limit": "This is intentionally explicit partial-success handling, not an atomic combined details/stock transaction."
+    },
+    {
+      "id": "AUDIT-06",
+      "status": "catalogue_part_implemented_and_automated_tested",
+      "change": "Items, Goods Menu, Suppliers and Tax Rates have handler-level busy guards, immutable drafts, Saving labels and disabled edits/dismissal during commit. Supplier cache replaces matching ID rather than appending duplicate optimistic rows. Item deactivate/reactivate and supplier delete also reject overlap.",
+      "tests": ["Delayed double item Save sends one update", "Delayed Goods save sends one batch and ignores mutations", "Delayed supplier Save sends one row and captures original draft", "Failed supplier Save retains draft and clears busy state", "Delayed tax Save sends one atomic snapshot"],
+      "limit": "Printer/drawer hardware-test overlap belongs to the settings follow-up; this artifact covers catalogue routes only."
+    },
+    {
+      "id": "AUDIT-08",
+      "status": "implemented_and_automated_tested",
+      "change": "Scale edits are blocked while assigned products load or loading has failed. Page loads clear stale display rows and validate generation plus page ID. Add/Remove/reorder derive from canonical current-page product IDs, not a potentially stale or incomplete displayed product list.",
+      "tests": ["Add rejected during delayed selected-page loading", "Canonical Add retains missing assignments without importing old-page rows", "Late page result ignored after page switch"]
+    },
+    {
+      "id": "AUDIT-09",
+      "status": "implemented_and_automated_tested",
+      "change": "Generate PLU captures item ID and editor generation and discards results after close/reopen, including reopening the same item. Concurrent generation is blocked and Save waits for generation. Product-image asynchronous reads also respect the editor generation.",
+      "tests": ["PLU result ignored for another generation even with same item ID", "Valid open draft receives generated PLU once"]
+    },
+    {
+      "id": "AUDIT-11",
+      "status": "implemented_source_wiring_tested_native_pending",
+      "change": "Item editor, nested selling-price pad and Goods Menu use the shared modalFocusTrap action. Item name is initial focus; opener restoration and background inertness use the common action. Busy submissions cannot dismiss.",
+      "tests": ["Source wiring confirms focus action and busy-dismissal guards"],
+      "nativeNext": "Keyboard-open both dialogs, Tab/Shift+Tab through edges, dismiss and verify opener restoration."
+    },
+    {
+      "id": "AUDIT-12",
+      "status": "implemented_and_automated_tested",
+      "change": "Dirty internal navigation opens Save Changes / Discard / Cancel. Save failure stays on the draft. Reload Latest requires the same confirmation before discarding. Save disables mutation and navigation. Unload cancellation uses SvelteKit's native leave confirmation.",
+      "tests": ["Dirty Reload Latest requests confirmation", "Actual beforeNavigate callback cancels dirty exit", "Save failure does not navigate", "Explicit Discard performs requested navigation"],
+      "nativeNext": "Make one unsaved tile change; test Cancel, Save and Discard route exits and dirty Reload Latest."
+    },
+    {
+      "id": "AUDIT-13",
+      "status": "implemented_and_automated_tested_native_os_cancel_pending",
+      "change": "System print no longer clears selected label quantities. Browser print API cannot distinguish print from cancel, so job remains selected until explicit Clear. Close toast does not claim a successful print.",
+      "tests": ["System print returning without result retains quantities", "System print open failure retains quantities"],
+      "nativeNext": "With system label printer selected, open native OS print dialog, cancel and confirm quantities remain."
+    },
+    {
+      "id": "AUDIT-18",
+      "status": "implemented_and_automated_tested",
+      "change": "Supplier management uses the shared search strip and bounded 25-row getSuppliersPage query; company/contact/phone/email filtering and Previous/Next are available. Parent owns the SQLite query. Delayed old searches cannot replace newer results.",
+      "tests": ["Actual delayed supplier loader ignores stale result", "Source wiring confirms bounded query and page offset"],
+      "nativeNext": "Search a mock supplier, clear search and check paging at more than 25 records."
+    },
+    {
+      "id": "AUDIT-19",
+      "status": "implemented_and_automated_tested",
+      "change": "Scale and label suggestions expose result ranges, capped total suffixes and Previous/Next. Scale pages the catalogue before hiding assigned IDs, preserving access to later unassigned matches instead of silently truncating to 60. Search scheduling invalidates stale requests immediately.",
+      "tests": ["Label page 2 requests offset 100 and exposes capped total", "Scale page 2 requests offset 100 then filters assignments", "Stale label scan result cannot add another query's item"],
+      "nativeNext": "Use more than 100 matching products and confirm Next reaches additional matches."
+    },
+    {
+      "id": "VIS-GOODS-LIST-HEIGHT",
+      "status": "implemented_source_wiring_tested_native_visual_pending",
+      "change": "Goods Menu has an explicit viewport-bounded 700px working height, reduced header spacing and independently scrolling list panes with sticky footer. It no longer relies on max-height alone to allocate its list area.",
+      "tests": ["Source wiring confirms explicit bounded dialog height"],
+      "nativeNext": "At 1024x768 checkout and Back Office, confirm several list rows plus Save/Cancel remain visible."
+    },
+    {
+      "id": "VIS-SCALE-ADD-PAGE-CLIPPING",
+      "status": "implemented_source_wiring_tested_native_visual_pending",
+      "change": "Add Page moved outside the horizontally scrolling tab strip into fixed page actions. Toolbar row height adapts to its content instead of fixed heights that can clip wrapped actions.",
+      "tests": ["Source wiring confirms Add Page follows fixed scale-page-actions rather than tab scroller"],
+      "nativeNext": "At 1024x768 and Back Office, confirm Add Page remains wholly visible with several page tabs."
+    }
+  ],
+  "safety": "No native UI operated by this subagent. No live provider payments, credentials/config changes, database wipes, commits or deployments. Existing priority catalogue deletion guards preserved."
+}

@@ -1,0 +1,659 @@
+{
+  "scope": "Remaining 36 original findings; native timeout recovery included separately",
+  "startedAt": "2026-10-12T19:09:46.554Z",
+  "status": "IMPLEMENTATION_COMPLETE_NATIVE_SCENARIOS_RECORDED_WITH_LIMITS",
+  "findings": [
+    {
+      "id": "OPS-SOURCE-CUSTOMER-HOLD-ADJUSTMENT-POLICY",
+      "priority": "P2",
+      "title": "Account-on-hold wording and browser preview disagree with native opening/increase adjustment rules",
+      "routes": [
+        "/customers"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native held QA customer accepted a 200p opening balance and a 100p historical increase without enabling purchases. A 300p cash repayment cleared the balance while the hold remained in place. The final native account view showed Allow Pay Later purchases unchecked, status On hold, balance 0p and points 0.",
+      "fix": "Purchase hold and credit limit apply to charge entries, not historical opening balances or manager corrections. Native opening_balance and adjustment posts require a nonblank reason and a currently active employee with adjust_customer_account permission, using the stored role-permission matrix. Historical entries preserve account hold, credit limit and configuration. The customer dialog explains this policy. Parent agent owns matching database.ts preview validation changes.",
+      "automatedEvidence": "historical_debt_keeps_hold_and_purchase_limit_unchanged; manual_customer_account_permission_policy_matches_custom_roles; first_manual_customer_entry_rolls_back_invalid_or_unauthorized_actions; account_limit_failure_rolls_back_the_entire_sale Artifact suite evidence: 57 tests passed across 3 files. Source artifact: customer-dojo-followup.json.",
+      "limits": "Observed local historical-debt/repayment workflow passed. Shared-MariaDB first-writer concurrency and custom-role authorization rejection were not native UI tested; automated policy checks remain separate.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/26-new-account-opening-held.png",
+        "screenshots/29-new-customer-restored-clear.png",
+        "screenshots/57-customer-held-state-clear-wording.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-SETUP-NO-CANCEL",
+      "priority": "P2",
+      "title": "Database setup traps an existing configured till without a non-mutating return action",
+      "routes": [
+        "/setup"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Configured native setup exposed Cancel — Back to Settings and returned to Advanced Settings without committing a mode or credential change.",
+      "fix": "Configured signed-in administrators can use Cancel — Back to Settings without saving mode or credentials. It is not offered for initial setup, missing/inactive authentication, pending restore, admin recovery or a running connection operation.",
+      "automatedEvidence": "Guard fixtures cover each forbidden state. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Configured, authenticated success path observed. Initial setup, pending restore, inactive authentication and running-operation cancellation exclusions are isolated guard tests, not additional native scenarios.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/52-existing-till-setup-cancel-reconnect.png",
+        "screenshots/53-setup-cancel-returned-settings.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION",
+      "priority": "P2",
+      "title": "Inline sandbox timeout cancellation remains uncertain and requires separate recovery because production callers omit the tested expiry-cleanup callback",
+      "routes": [
+        "/",
+        "/customers",
+        "/settings/payments/dojo",
+        "/reports"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native VCMLABJTIP0 sandbox recovery obtained definitive Canceled proof for customer attempt 5bf39884 (300p) and checkout attempt 02873c32 (169p). Neither produced a charge; order count remained 91.",
+      "fix": "Customer monitoring now supplies cancelExpiredSandboxDojoPaymentIntent(reference), binding the original durable attempt ID. The parent applied the same callback in checkout; an AST/execution regression checks both real production monitor option objects. The existing monitor invokes cleanup only for Sandbox plus Expired plus Created, retains the lease, and obtains fresh payment-intent proof after cleanup. Cleanup acknowledgement alone remains uncertain; a racing Captured outcome wins even when native cleanup rejects. Live and Unknown environments never invoke sandbox cleanup.",
+      "automatedEvidence": "customerDojoIntegration.test.ts sandbox cancellation, uncertain acknowledgement, late capture, Live/Unknown exclusion, and both route callback bindings; dojoSessionFlow.test.ts matching provider identity, lease retention/loss, final proof and late capture; dojoExpiryReview.test.ts existing receipt review/finality safeguards Artifact suite evidence: 57 tests passed across 3 files. Source artifact: customer-dojo-followup.json.",
+      "limits": "Dojo sandbox only. Fresh final provider/journal proof, rather than a cancellation-request acknowledgement, established these outcomes. Late capture, Live/Unknown exclusion and uncertain-result branches are automated fixtures, not native live-payment certification.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/27-customer-dojo-cancel-visible.png",
+        "screenshots/28-customer-timeout-returned-safe.png",
+        "screenshots/35-checkout-timeout-returned-safe.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-CUSTOMER-ACCOUNT-INITIALIZATION",
+      "priority": "P2",
+      "title": "New customer accounts expose ledger actions before their persisted account row exists",
+      "routes": [
+        "/customers"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "A newly saved native customer had its missing held account initialized by a 200p opening post. A subsequent 100p increase and 300p cash repayment succeeded; balance returned to zero without changing its purchase hold.",
+      "fix": "An explicit manual ledger post validates its shape, customer and adjustment actor before creating a missing account inside the same transaction. The default account is held, with zero purchase limit and zero initial balance; the ledger movement and account creation commit or roll back together. MariaDB keeps the existing dataset/report/restore guards and customer identity lock, then checks/locks the account before inserting it. Existing accounts are not upserted or reconfigured on replay. Read APIs stay side-effect-free. Checkout sale mutations retain their original account requirement and purchasing guards.",
+      "automatedEvidence": "first_manual_customer_entry_creates_a_held_account_atomically; first_manual_customer_entry_rolls_back_invalid_or_unauthorized_actions; first_manual_customer_entry_idempotency_conflict_does_not_leave_an_account; opening_balance_is_atomic_and_can_only_be_posted_once Artifact suite evidence: 57 tests passed across 3 files. Source artifact: customer-dojo-followup.json.",
+      "limits": "Native local account initialization/ledger workflow passed. MariaDB simultaneous first-writer behavior and unauthorized/invalid rollback branches were not exercised through the native UI.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/26-new-account-opening-held.png",
+        "screenshots/29-new-customer-restored-clear.png"
+      ]
+    },
+    {
+      "id": "BO-VIS-01",
+      "priority": "P2",
+      "title": "Order receipt buttons are clipped inside the first table column",
+      "routes": [
+        "/orders"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Back Office order history with 91 populated records displayed receipt buttons within the first column instead of clipping them.",
+      "fix": "Back Office orders reserve a 112px first table column, allow the receipt button to size within that column, and reduce its padding/font size. Existing checkout table and open-receipt actions remain intact.",
+      "automatedEvidence": "Source inspection: src/routes/orders/+page.svelte Back Office orders-table first-column and receipt-button rules. No dedicated automated visual assertion or native clipping PASS has been recorded.",
+      "limits": "Observed populated square-screen layout passed. This is not a complete receipt-number-length, zoom or every supported resolution matrix.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/36-back-office-populated-orders.png"
+      ]
+    },
+    {
+      "id": "AUDIT-21",
+      "priority": "P2",
+      "title": "Touch keyboard remains after its form closes and across page navigation",
+      "routes": [
+        "/customers",
+        "/attendance",
+        "/design",
+        "/"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native new-customer form save closed the on-screen keyboard instead of leaving it orphaned over the next view.",
+      "fix": "The global touch keyboard checks that its target is connected, visible, editable and outside hidden/inert ancestors. Route navigation and a DOM mutation observer close stale keyboards without committing into a removed input; delayed refocus also verifies target identity.",
+      "automatedEvidence": "src/lib/followupUi.test.ts tests live, detached, disabled, readonly, hidden, inert and explicitly opted-out input targets. Native new-customer form save cleanup was observed in screenshots/25-new-customer-save-keyboard-cleanup.png.",
+      "limits": "Customer form-save path only. Attendance/design modal closure and cross-page navigation are covered by source/target-eligibility fixtures but were not individually native verified.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/25-new-customer-save-keyboard-cleanup.png"
+      ]
+    },
+    {
+      "id": "AUDIT-02",
+      "priority": "P2",
+      "title": "A failed card-provider switch can disable the working provider",
+      "routes": [
+        "/settings/payments/dojo",
+        "/settings/payments/sumup"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "No native provider-switch failure was injected and no saved provider key or configuration was changed. Confirmed-state recovery is covered by seven provider helper cases plus native source review.",
+      "fix": "Provider switching validates/enables the target before disabling the prior working provider. Target-save rejection never disables the prior provider and warns that the target save may be unconfirmed. If disabling the prior provider rejects, a fresh native config read determines recovery: confirmed disabled keeps the successfully enabled target; confirmed enabled restores the target's prior enabled state; a reread failure leaves the target enabled and explicitly requires reloading both settings before payment. Rollback failure also presents explicit uncertain-state recovery instructions. An initial prior-provider read failure aborts before mutation. Separate operation guards prevent overlapping switches/tests/removal. Configuration and ownership fields are retained and no secret is read or printed by tests.",
+      "automatedEvidence": "7 provider helper cases: target rejection, success ordering, confirmed-enabled previous-disable rejection with target rollback, rollback rejection instructions, post-write previous-disable rejection with confirmed-disabled state, uncertain reread without rollback, and ambiguous post-write target rejection. The same file includes 2 queue cases; all 33 scoped tests passed. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Recoverable two-provider sequence, not an atomic cross-provider transaction. Before rollback, production rereads the prior provider after an ambiguous write failure; mocked tests cover confirmed-enabled, confirmed-disabled and unreadable outcomes. Native filesystem faults/failed-save branches are not a native PASS; uncertain configurations require reload/confirmation.",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "nativeEvidence": []
+    },
+    {
+      "id": "AUDIT-07",
+      "priority": "P2",
+      "title": "An older failed font save can undo a newer successful selection",
+      "routes": [
+        "/settings/fonts"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native font selection saved the L&Bj default choice, then saved the original Legacy choice again and confirmed restoration.",
+      "fix": "Font choices are serialized; the newest pending choice owns the highlight via a per-key version. No optimistic confirmed store update or stale rollback exists. Pending choices show Saving selection until the newest operation completes.",
+      "automatedEvidence": "Queue rejection then newer success preserves order; unrelated queue keys proceed independently; pending persistence does not publish a saved value. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Healthy font saves/restoration were observed. Older-save rejection, rapid overlapping choice order and durable audit failure were simulated in isolated fixtures, not injected into native Tauri.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/55-font-save-original-restored.png"
+      ]
+    },
+    {
+      "id": "AUDIT-13",
+      "priority": "P2",
+      "title": "Canceling the OS label print dialog still clears the selected labels",
+      "routes": [
+        "/label-print"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native label selection retained one chosen label until explicit Clear. Print was disabled because no printer was configured.",
+      "fix": "System print no longer clears selected label quantities. Browser print API cannot distinguish print from cancel, so job remains selected until explicit Clear. Close toast does not claim a successful print.",
+      "automatedEvidence": "System print returning without result retains quantities; System print open failure retains quantities Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "No native OS print dialog opened, so OS cancellation retention is automated-only. Native selection and explicit Clear were observed; no physical label print was sent.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/62-label-selected-explicit-clear.png"
+      ]
+    },
+    {
+      "id": "AUDIT-04",
+      "priority": "P2",
+      "title": "Changing the default tax rate is a partially committing write sequence",
+      "routes": [
+        "/tax-rates"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native tax default changed Zero → Standard → Zero through the atomic save path. Original default was restored, two tax rates remained and four related audit records were retained.",
+      "fix": "Tax editor sends one immutable expected snapshot through saveTaxRateSnapshot. Parent implementation commits all default flags and the edited rate atomically, with snapshot conflict detection. UI publishes only after commit; failed saves keep the draft and show the actual error.",
+      "automatedEvidence": "One frozen tax snapshot submitted despite repeated clicks; mutable draft and expected rows cannot alter the submitted data. Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json. Core tax snapshot/CAS helpers are covered by src/lib/followupUi.test.ts; src-tauri/src/local_batch.rs implements atomic expected-snapshot guards.",
+      "limits": "Healthy atomic snapshot saves and restoration passed in native Tauri. Compare-and-set conflicts, concurrent editors and commit rejection remain automated checks rather than native fault injection.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/46-tax-default-atomic-native.png",
+        "screenshots/47-tax-original-default-restored.png"
+      ]
+    },
+    {
+      "id": "OPS-SOURCE-SETUP-RECONNECT-DATA-ACTIONS",
+      "priority": "P2",
+      "title": "Connect on an existing till reruns bootstrap data actions without an explicit reconnect-only path",
+      "routes": [
+        "/setup"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Test Connection and Save & Reconnect Only succeeded on the configured till without entering import, forced-upload or cache-rebuild UI. Counts remained 91 orders, 855 customers and 2 tax rates.",
+      "fix": "Existing authenticated tills use explicit Save & Reconnect Only. Candidate probing occurs before replacing reactive configuration. This path bypasses all inferred repair, force push, wipe-and-pull and import branches; connection mode/credentials save in one native atomic batch. Failed candidates restore the previous state, and a post-save reconnect failure attempts to restore the previous saved configuration with explicit failure guidance if that cannot be done. First-run and confirmed pending-restore paths retain their existing identity and restore guards.",
+      "automatedEvidence": "Actual handleConnect fixtures: unchanged existing connection invokes no bootstrap/schema/data actions; failed probe retains prior configuration and runs no schema/data/save operations. Atomic configuration success/failure fixtures confirm one batch and no reactive replacement on persistence rejection. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Observed healthy same-target reconnect preserved data counts. Failed candidate, post-save failure/rollback, changed-server identity and restore branches were isolated/source tests, not native failures; absence of destructive UI is not a full tracing claim for every server operation.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/52-existing-till-setup-cancel-reconnect.png",
+        "screenshots/53-setup-cancel-returned-settings.png"
+      ]
+    },
+    {
+      "id": "AUDIT-10",
+      "priority": "P2",
+      "title": "Customer-account card payments have no visible on-screen cancellation",
+      "routes": [
+        "/customers"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "The native customer-account Dojo TIP0 payment displayed Cancel Terminal. An on-screen request returned without an account charge; later final provider/journal verification established Canceled.",
+      "fix": "Customer-account Dojo monitoring exposes Cancel Terminal while the monitor is active, then disables repeated requests. Cancellation requests feed the existing monitor; they do not dismiss the payment, record cancellation, release the lease early or authorize a new charge. An uncertain result preserves the journal, displays a persistent do-not-retry warning and disables submission/payment-method changes in the current dialog, directing the operator to administrator Reports / Payment checks recovery. Definitive capture still wins after an operator cancellation; the monitor never sends another card retry after a cancellation decision takes precedence.",
+      "automatedEvidence": "customerDojoIntegration.test.ts executes extracted production takeDojoAccountPayment and cancellation handlers with mock provider/native callbacks; dojoSessionFlow.test.ts cancellation, late capture, lease renewal and cancellation-versus-retry cases Artifact suite evidence: 57 tests passed across 3 files. Source artifact: customer-dojo-followup.json.",
+      "limits": "Observed sandbox customer cancellation workflow passed without going to a physical terminal. Final-state wording in the latest rebuild was source verified, not captured again natively. Live card cancellation, late capture and uncertain recovery remain separate automated/provider certification scopes.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/27-customer-dojo-cancel-visible.png",
+        "screenshots/28-customer-timeout-returned-safe.png"
+      ]
+    },
+    {
+      "id": "AUDIT-03",
+      "priority": "P2",
+      "title": "Failed settings saves can still appear saved",
+      "routes": [
+        "/settings/feedback",
+        "/settings/scale",
+        "/settings/printers",
+        "/settings/advanced"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native feedback toggles saved confirmed off/on values and restored the original setting. Font saves also confirmed the selected value and restored Legacy. Failed saves are no longer treated as confirmed by the shared batch path.",
+      "fix": "Feedback, scale, printer and tax-mode settings publish only after saveSettingsBatch succeeds. Audited before-values and sanitized audit rows are prepared before commit; settings, audit records and sync outbox mutations then share the atomic local batch, avoiding a post-commit audit-read/write failure that could falsely report an already saved setting as failed. Unchanged and explicitly ignored settings omit audit rows. Failed before-reads or commit failures retain confirmed values and show an actionable error. Composite printer presets, protocols and drawer targets submit one batch. Tax mode uses this same batch, with busy guard, input lock and rollback of the draft on error.",
+      "automatedEvidence": "savedSettings rejected/pending persistence and coherent batch fixtures; 7 actual-production-function settingsBatchAudit VM cases covering before-read failure, shared settings/audit commit, unchanged/ignored audit omissions, commit failure without publication, preview history, secret redaction and immutable rows; maintenance-handler failure tests. All 33 scoped tests passed. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Native healthy save paths observed. Seven production-function VM tests execute batching/audit policy with mocked transaction boundaries; before-read failure, atomic commit rejection, audit sanitization and publication ordering were not native fault injected. Scale/printer/tax failure paths are not blanket native PASS.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/58-feedback-restored-confirmed.png",
+        "screenshots/55-font-save-original-restored.png"
+      ]
+    },
+    {
+      "id": "AUDIT-09",
+      "priority": "P2",
+      "title": "Generate PLU can write into a different item draft",
+      "routes": [
+        "/items"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Generate PLU editor-generation and delayed-result protection passed isolated production-handler fixtures; no native delayed PLU result was induced.",
+      "fix": "Generate PLU captures item ID and editor generation and discards results after close/reopen, including reopening the same item. Concurrent generation is blocked and Save waits for generation. Product-image asynchronous reads also respect the editor generation.",
+      "automatedEvidence": "PLU result ignored for another generation even with same item ID; Valid open draft receives generated PLU once Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Native close/reopen, same-ID editor reuse and image-read races remain unobserved. Automated stale-generation proof is not a native UI PASS.",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "nativeEvidence": []
+    },
+    {
+      "id": "AUDIT-11",
+      "priority": "P2",
+      "title": "Item and Goods Menu dialogs lack the shared keyboard-focus handling",
+      "routes": [
+        "/items"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Goods dialog initially focused Close, Tab reached search and Escape closed it. Native item editor initially focused Name and Escape closed it.",
+      "fix": "Item editor, nested selling-price pad and Goods Menu use the shared modalFocusTrap action. Item name is initial focus; opener restoration and background inertness use the common action. Busy submissions cannot dismiss.",
+      "automatedEvidence": "Source wiring confirms focus action and busy-dismissal guards Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Initial focus, traversal and dismissal observed. Accessibility clicks on openers did not establish keyboard focus, so opener-focus restoration was not native verified; nested pad and full focus-cycle/inertness checks remain source/isolated coverage.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/44-goods-picker-square.png",
+        "screenshots/56-goods-manager-square-lists.png"
+      ]
+    },
+    {
+      "id": "AUDIT-05",
+      "priority": "P2",
+      "title": "Item fields can save while the stock change fails",
+      "routes": [
+        "/items"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Edit Item for 0EGGS (barcode 5020379111201, old-item-016480) started at stock 0, item tracking off, price 169p. With global stock tracking temporarily on, enabling item tracking and Save Item counted 0→1; UI and database confirmed stock 1/tracking on with queue 0, conflicts 0, intents 0. Reopening, counting 1→0 and disabling item tracking restored stock 0/tracking off/price 169p. Exactly two stock_counted audit rows recorded 0→1 and1→0 with the original expected-count CAS values. Global tracking was restored off.",
+      "fix": "Retains the existing details-then-stock persistence model but explains partial success accurately. If stock fails after details commit, editor refreshes its saved product/stock baseline before retry. If refresh fails, stale editor closes and requests reopening; no misleading generic all-or-nothing Save error. Counted stock now uses an atomic local CAS+audit batch or an online pinned MariaDB close/restore/epoch-fenced expected-stock transaction; counts cannot queue absolute stock uploads. Confirmed results survive cache/display-read failure, uncertain COMMIT explicitly prohibits repetition, and guarded cache mirrors publish stock only from an unchanged clean baseline. Generic existing-product metadata replay excludes stockLevel while preserving metadata updates and new-product opening stock.",
+      "automatedEvidence": "Delayed immutable item submission and duplicate guard; Details success plus stock failure refreshes stock baseline; Snapshot read failure closes stale editor Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json. Final stock evidence: stock-count-review.json records 23 production-orchestration fixtures, three exact-production-SQL disposable MariaDB cases and native local batch/CAS/audit/cache guards. catalogue-stock-guard-followup.json records the generic replay metadata-preserve predicate plus an actual native MariaDB replay retaining sale-reduced stock; overlapping checks are included once in final 1,234 frontend / 251 Rust / 55 real-database totals.",
+      "limits": "Native healthy count/save and exact restoration passed; native stale-count races, audit failure, cache failure and uncertain COMMIT were not injected. Actual production SQL and native batch/CAS/generic-replay tests cover those boundaries separately. Details and stock remain separate commits with explicit partial-success handling. Shared counted-stock writes intentionally require online authority; legacy queued absolute counts need review/recount, not blind replay.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/63-native-stock-count-confirmed.png",
+        "screenshots/64-native-stock-original-restored.png"
+      ]
+    },
+    {
+      "id": "AUDIT-06",
+      "priority": "P2",
+      "title": "Repeated clicks can overlap saves and hardware tests",
+      "routes": [
+        "/items",
+        "/suppliers",
+        "/tax-rates",
+        "/settings/printers"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native tax snapshot saves succeeded. Repeated-click submission and hardware transport overlap protection passed isolated handler tests.",
+      "fix": "Receipt test, label test and drawer pulse each have a synchronous handler guard, disabled busy button and immutable submitted hardware configuration. Each clears its busy state in finally. Module checks also guard all module test overlap. Items, Goods Menu, Suppliers and Tax Rates have handler-level busy guards, immutable drafts, Saving labels and disabled edits/dismissal during commit. Supplier cache replaces matching ID rather than appending duplicate optimistic rows. Item deactivate/reactivate and supplier delete also reject overlap.",
+      "automatedEvidence": "Actual receipt, label and drawer handlers receive two pending invocations but issue one transport call; rejected transport finishes the busy state. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json. Delayed double item Save sends one update; Delayed Goods save sends one batch and ignores mutations; Delayed supplier Save sends one row and captures original draft; Failed supplier Save retains draft and clears busy state; Delayed tax Save sends one atomic snapshot Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Actual double-click races were mocked, not native induced. Receipt/label/drawer tests are AUTOMATED_ONLY at mocked transport boundaries; no physical printer or drawer job/pulse was sent. Healthy tax saves do not prove duplicate-click or hardware safety natively.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/46-tax-default-atomic-native.png",
+        "screenshots/47-tax-original-default-restored.png"
+      ]
+    },
+    {
+      "id": "AUDIT-12",
+      "priority": "P2",
+      "title": "Scale layout edits can be discarded without an exit/reload warning",
+      "routes": [
+        "/design/scale"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native scale designer moved the apple later without saving; sidebar Settings triggered the unsaved-change warning. Cancel kept the draft. The apple was moved earlier and Save restored the original order.",
+      "fix": "Dirty internal navigation opens Save Changes / Discard / Cancel. Save failure stays on the draft. Reload Latest requires the same confirmation before discarding. Save disables mutation and navigation. Unload cancellation uses SvelteKit's native leave confirmation.",
+      "automatedEvidence": "Dirty Reload Latest requests confirmation; Actual beforeNavigate callback cancels dirty exit; Save failure does not navigate; Explicit Discard performs requested navigation Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Observed dirty sidebar navigation, Cancel and save/restoration passed. Reload, OS unload and rejected-save navigation branches remain automated/source coverage.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/49-scale-unsaved-exit-warning.png"
+      ]
+    },
+    {
+      "id": "AUDIT-08",
+      "priority": "P2",
+      "title": "Scale page Add can commit stale page selections",
+      "routes": [
+        "/design/scale"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Selected-page loading/generation and canonical assignment safeguards passed delayed async fixtures; no native Add was raced against a loading page.",
+      "fix": "Scale edits are blocked while assigned products load or loading has failed. Page loads clear stale display rows and validate generation plus page ID. Add/Remove/reorder derive from canonical current-page product IDs, not a potentially stale or incomplete displayed product list.",
+      "automatedEvidence": "Add rejected during delayed selected-page loading; Canonical Add retains missing assignments without importing old-page rows; Late page result ignored after page switch Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Native delayed loading, stale page completion and incomplete catalogue races were not induced; the protected Add path is automated-only.",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "nativeEvidence": []
+    },
+    {
+      "id": "AUDIT-14",
+      "priority": "P2",
+      "title": "Some maintenance failures leave an inert or Checking state",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Validate Schemas changed to Checking, completed with schemas ready, and re-enabled the control.",
+      "fix": "Schema validation, conflict refresh and conflict dismissal handle rejection and always clear their own in-flight state. Failures retain visible conflicts and show retry guidance. Repeated checks are guarded; retry success cannot overwrite a later refresh failure.",
+      "automatedEvidence": "Actual route-handler schema rejection, refresh rejection, dismissal rejection and pending duplicate invocation fixtures. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Healthy native validation observed. Schema rejection, conflict refresh/dismiss rejection and repeated pending invocation were mocked production-handler tests; failure recovery is not a native fault-injection PASS.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/51-schema-validation-completed.png"
+      ]
+    },
+    {
+      "id": "VIS-SCALE-ADD-PAGE-CLIPPING",
+      "priority": "P3",
+      "title": "Add Page is only partially visible in Scale Tile Designer toolbar",
+      "routes": [
+        "/design/scale"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native scale toolbar displayed Add Page fully in fixed page actions outside the horizontally scrolling tab strip. Final normal native 1024×768 Back Office also displayed Royal, Conference, Grapes, Lemons, Limes, tomato and watermelon prices fully. Toolbar actions remained visible and page chips scrolled independently.",
+      "fix": "Add Page moved outside the horizontally scrolling tab strip into fixed page actions. Toolbar row height adapts to its content instead of fixed heights that can clip wrapped actions.",
+      "automatedEvidence": "Source wiring confirms Add Page follows fixed scale-page-actions rather than tab scroller Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Original Add Page clipping and final square-screen tile-price-row regressions passed in native Tauri. This does not certify all screen sizes, extreme product names, translations or font/zoom settings; delayed page assignment races are automated-only.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/48-scale-toolbar-add-page-visible.png",
+        "screenshots/65-final-scale-price-rows-visible.png"
+      ]
+    },
+    {
+      "id": "VIS-ATTENDANCE-CLOCKED-IN-SUMMARY",
+      "priority": "P3",
+      "title": "Attendance summary shows Clocked in0 while current user is visibly clocked in",
+      "routes": [
+        "/attendance"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native attendance summary displayed Open in this filter 0 while the current user's actual clock status was outside the filtered period, making the scope distinction explicit.",
+      "fix": "The date/status/search-filtered summary now says Open in this filter, with an explanatory title. The separate My attendance card continues to show the current staff member's real clock-in status.",
+      "automatedEvidence": "Source inspection: src/routes/attendance/+page.svelte filtered open-session label and independent selfOpen attendance card. No dedicated automated visual test for this label is recorded.",
+      "limits": "Observed filtered-period label passed. All date/status/search combinations and live clock-state changes are not a complete native matrix.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/41-attendance-filter-summary.png"
+      ]
+    },
+    {
+      "id": "VIS-PERMISSION-TAB-LABEL",
+      "priority": "P3",
+      "title": "Attendance-only role tab is truncated at square width",
+      "routes": [
+        "/employees/permissions"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native role-permission tabs showed full wrapped labels including Attendance only at square width.",
+      "fix": "Staff-role tabs allow wrapped labels with a readable line height instead of single-line ellipsis, and use fewer columns at narrower widths so Attendance only remains readable.",
+      "automatedEvidence": "Source inspection: src/routes/employees/permissions/+page.svelte role-tabs wrapping and responsive column rules. No automated screenshot/native visual PASS is recorded.",
+      "limits": "Observed permission tab layout passed. No permissions were changed; every role/translation/zoom variant is not certified.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/40-role-permission-tabs-wrapped.png"
+      ]
+    },
+    {
+      "id": "AUDIT-16",
+      "priority": "P3",
+      "title": "Barcode testing labels unchecked check digits Valid",
+      "routes": [
+        "/settings/barcodes"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native barcode tester used 2312345002502 with unsaved check-digit validation switched off and displayed Not checked. The original saved rule was restored/left unchanged.",
+      "fix": "Barcode tester displays Not checked if the matched rule disables check-digit validation, and Valid only for rules that actually requested the parser check.",
+      "automatedEvidence": "Source checked; no finding-specific automated execution recorded. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Observed unchecked-rule label passed. No barcode rule was persisted; parser/rule-matching edge cases remain automated coverage.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/54-barcode-not-checked-label.png"
+      ]
+    },
+    {
+      "id": "AUDIT-15",
+      "priority": "P3",
+      "title": "Change Price touch pad has no delete-last-digit button",
+      "routes": [
+        "/"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Change Price used touch Delete last digit to change 169p → 16p, then physical Backspace to change 16p → 1p. Cancel retained the item's original 169p price.",
+      "fix": "Change Price has an explicit Delete last digit control. Touch deletion and physical Backspace/Delete use the same editPriceDigits operation, preserving the remaining amount and the first-input replacement behavior.",
+      "automatedEvidence": "src/lib/followupUi.test.ts tests last-digit removal, zero fallback, first digit replacement, double-zero behavior and digit limits. Source wiring in src/routes/+page.svelte connects touch and physical keys.",
+      "limits": "Observed touch/keyboard deletion and cancellation passed. This is not every key sequence or completed discounted/return sale combination.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/30-price-pad-backspace.png"
+      ]
+    },
+    {
+      "id": "NATIVE-MAINTENANCE-BUSY-LABEL",
+      "priority": "P3",
+      "title": "Creating Full Backup labels Delete History as Deleting History",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Maintenance button labels are scoped to their own operations in source; no native full-backup/history-delete overlap was run.",
+      "fix": "Delete History shows Deleting History only when the purge state is actually deleting, not when an unrelated maintenance task uses the shared busy lock. Schema and conflict buttons use their own operation labels.",
+      "automatedEvidence": "Source checked; no finding-specific automated execution recorded. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Busy-label predicate was source checked. Full backup, history deletion and destructive maintenance were not executed to verify the shared-lock visual behavior.",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "nativeEvidence": []
+    },
+    {
+      "id": "VIS-GOODS-LIST-HEIGHT",
+      "priority": "P3",
+      "title": "Goods Menu Manager shows only one row per list at square size",
+      "routes": [
+        "/items"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native Goods Menu Manager displayed eight visible rows in the square-screen list instead of a single row.",
+      "fix": "Goods Menu has an explicit viewport-bounded 700px working height, reduced header spacing and independently scrolling list panes with sticky footer. It no longer relies on max-height alone to allocate its list area.",
+      "automatedEvidence": "Source wiring confirms explicit bounded dialog height Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Observed populated manager layout passed. Extremely long names, maximum row counts, alternate font sizes and every viewport remain separate visual scopes.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/56-goods-manager-square-lists.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-WEIGHT-PRICE-LABEL",
+      "priority": "P3",
+      "title": "Order detail marks weighed items as Price changed even when their catalog price was used",
+      "routes": [
+        "/orders"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native receipt 1000081 displayed apples at 1.25kg and the catalogue £2.49/kg without a false Price changed label. A genuine DELIA price override retained its disclosure.",
+      "fix": "Order details use hasActualPriceOverride rather than blindly displaying the stored isPriceOverride flag. Ordinary calculated weighed prices no longer say Price changed; genuinely different weighed prices retain that disclosure.",
+      "automatedEvidence": "src/lib/followupUi.test.ts tests unchanged weighted/return lines, genuinely changed weighted prices, ordinary overrides and absent override flags. Source: src/lib/scaleSale.ts and orders detail markup.",
+      "limits": "Observed ordinary weighed calculation and genuine override distinction passed. Historical lines with incomplete metadata retain only distinctions supported by stored data; not every return/legacy line was native checked.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/38-weighted-order-no-false-price-change.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-CASH-DETAIL-LABEL",
+      "priority": "P3",
+      "title": "Order payment breakdown does not clearly distinguish cash retained from cash received",
+      "routes": [
+        "/orders"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native receipt 1000082 showed Cash received 200p, Cash retained 169p and Change given 31p as distinct values.",
+      "fix": "Cash payment details explicitly separate Cash received, Cash retained and Change given. Received cash is retained cash plus the nonnegative recorded change, making the retained allocation distinct from the customer's tender.",
+      "automatedEvidence": "Source inspection of src/routes/orders/+page.svelte payment allocation markup. Existing src/lib/receiptPayments.test.ts covers receipt cash tender/change disclosure; this is not a native order-detail visual test.",
+      "limits": "Observed cash-only detail passed. Mixed card/cash, cashback, negative return allocations and every legacy tender shape were not native UI tested.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/37-order-cash-received-retained.png"
+      ]
+    },
+    {
+      "id": "VIS-REPORT-CLOSE-ICON",
+      "priority": "P3",
+      "title": "Period-report header close button renders without any visible icon",
+      "routes": [
+        "/reports"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native period-report preview displayed a visible close X and the close control worked.",
+      "fix": "The period-report preview close button now includes an explicit 22px inline stroked X SVG with fixed flex sizing, theme text color, an accessible label and the existing save-busy guard.",
+      "automatedEvidence": "Source inspection: src/routes/reports/+page.svelte Close report preview button. No dedicated automated visual assertion or native icon PASS is recorded.",
+      "limits": "Observed preview icon/close workflow passed. Every theme, focus style, font scaling and save-busy close guard is not a complete native visual matrix.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/50-period-report-visible-close-icon.png"
+      ]
+    },
+    {
+      "id": "BO-VIS-02",
+      "priority": "P3",
+      "title": "Staff summary truncates the full role names",
+      "routes": [
+        "/employees"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native populated staff summary displayed full role names rather than truncating them.",
+      "fix": "Staff summary role labels wrap instead of ellipsizing, with a readable line height and responsive summary grid, preserving full Administrator/Attendance only wording.",
+      "automatedEvidence": "Source inspection: src/routes/employees/+page.svelte staff-summary label and grid rules. No automated screenshot/native role-label PASS is recorded.",
+      "limits": "Observed Back Office square-screen summary passed. Other resolutions, localization and unusually long custom labels remain separate visual checks.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/39-back-office-staff-role-summary.png"
+      ]
+    },
+    {
+      "id": "SET-VISUAL-01",
+      "priority": "P3",
+      "title": "Success notifications cover settings content and header actions",
+      "routes": [
+        "/settings/themes",
+        "/settings/layout"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native safe Test Terminal notification appeared at bottom-right with settings header/actions uncovered.",
+      "fix": "Non-blocking notifications moved from upper-right settings header/cards to a compact bottom-right stack, at most the newest two visible notices, max 22vh/180px. Click-through remains except dismiss buttons; financial/error prompts are unchanged.",
+      "automatedEvidence": "Source checked; no finding-specific automated execution recorded. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Observed single safe notification placement passed. Rapid two-notice stacking, every theme/layout save and every viewport are not fully native verified; blocking financial/error dialogs intentionally remain unchanged.",
+      "nativeRetest": "PASS",
+      "nativeEvidence": [
+        "screenshots/60-dojo-terminal-available.png"
+      ]
+    },
+    {
+      "id": "AUDIT-17",
+      "priority": "P3",
+      "title": "Card-provider read errors are presented as Setup required",
+      "routes": [
+        "/settings/payments"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native provider overview showed Dojo Enabled and genuinely unconfigured SumUp Setup required after healthy reads.",
+      "fix": "Provider overview distinguishes Could not load settings from genuine Setup required, with Retry loading settings. Dojo and SumUp detail pages also disable destructive/save actions after an initial read failure and expose safe Retry instead of permitting defaults to overwrite unread saved configuration.",
+      "automatedEvidence": "Actual provider refresh fixture rejects SumUp read while returning genuinely unconfigured Dojo; independent error states are preserved. Artifact suite evidence: 33 tests across settingsWriteQueue, savedSettings, setupSafety, settingsHandlers, connectionPersistence and settingsBatchAudit. Source artifact: settings-followup.json.",
+      "limits": "Native healthy read states observed. Read rejection/Retry and fail-closed detail save/removal protections were tested with mocks, not by corrupting or changing provider configuration; saved keys were unchanged.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/59-payment-provider-status.png"
+      ]
+    },
+    {
+      "id": "AUDIT-19",
+      "priority": "P3",
+      "title": "Scale/label bounded suggestions do not explain omitted results",
+      "routes": [
+        "/design/scale",
+        "/label-print"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native label catalogue displayed a 76,000-item bounded result set at 100 per page; Next showed 101–200. Scale displayed its bounded 10-item result range.",
+      "fix": "Scale and label suggestions expose result ranges, capped total suffixes and Previous/Next. Scale pages the catalogue before hiding assigned IDs, preserving access to later unassigned matches instead of silently truncating to 60. Search scheduling invalidates stale requests immediately.",
+      "automatedEvidence": "Label page 2 requests offset 100 and exposes capped total; Scale page 2 requests offset 100 then filters assignments; Stale label scan result cannot add another query's item Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json.",
+      "limits": "Native label next-page and displayed scale boundaries observed. Later unassigned scale pages, capped-total edge cases and stale searches remain isolated fixtures, not a full native catalogue traversal.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/61-label-suggestions-next-page.png",
+        "screenshots/48-scale-toolbar-add-page-visible.png"
+      ]
+    },
+    {
+      "id": "AUDIT-20",
+      "priority": "P3",
+      "title": "Stock-receipt history stops at50 without receipt-line detail",
+      "routes": [
+        "/stock-receiving"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native two-receipt stock history supported search and opened receipt detail containing three lines.",
+      "fix": "Stock receiving history is paged instead of silently stopping at the newest 50. It exposes receipt counts/ranges, Newer/Older controls, supplier/reference/notes filters and a read-only receipt-line details modal with quantity, unit cost, line cost, loading, empty and retry states.",
+      "automatedEvidence": "src/lib/stores/catalogueHistoryPersistence.test.ts executes actual SQLite queries: 65 receipts reached across deterministic non-overlapping pages, combined filters, literal/bound search safety, exact receipt lines and missing-product fallback. Stock history source-wiring assertions cover loading/zero-result paging and detail states; src/lib/stores/stockReceiptPreview.test.ts covers matching preview history behavior.",
+      "limits": "Native search/detail passed on the small existing history. Traversal beyond 50 receipts is actual SQLite fixture evidence, not a native >50-record scenario. Product names are current catalogue names, not historical snapshots. Final native stock count/save restoration is separately recorded under AUDIT-05.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/42-stock-history-searchable.png",
+        "screenshots/43-stock-history-line-details.png"
+      ]
+    },
+    {
+      "id": "AUDIT-18",
+      "priority": "P3",
+      "title": "Suppliers lack search and paging",
+      "routes": [
+        "/suppliers"
+      ],
+      "status": "IMPLEMENTATION_COMPLETE",
+      "native": "Native supplier page with zero suppliers showed search and empty/paging controls without broken layout.",
+      "fix": "Supplier management uses the shared search strip and bounded 25-row getSuppliersPage query; company/contact/phone/email filtering and Previous/Next are available. Parent owns the SQLite query. Delayed old searches cannot replace newer results.",
+      "automatedEvidence": "Actual delayed supplier loader ignores stale result; Source wiring confirms bounded query and page offset Artifact suite evidence: 36 tests passed (23 catalogue/design workflow tests and 13 catalogue integrity tests). Source artifact: catalogue-design-followup.json. Actual SQLite paging, literal search, bounds and 125-supplier no-overlap traversal are covered by src/lib/stores/catalogueHistoryPersistence.test.ts.",
+      "limits": "Observed empty-state UI only. Populated search, large supplier paging and stale delayed searches are isolated/actual SQLite fixtures, not native large-data traversal.",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "nativeEvidence": [
+        "screenshots/45-suppliers-search-pages.png"
+      ]
+    }
+  ],
+  "implementationSummary": {
+    "originalRemainingFindings": 36,
+    "implementationComplete": 36,
+    "nativeFullPassesRecordedHere": 19,
+    "nativePartialObservations": 13,
+    "nativePendingWithoutObservation": 0,
+    "note": "All 36 implementations are recorded: 19 explicit native scenario passes, 13 partial native observations and four automated/source-only findings. No finding-level native test is still awaiting the planned final run, but each item's untested hardware/failure matrix remains explicit. Original P1 receipt 1000085 recovery and final fixture restoration are separately verified.",
+    "sourceArtifacts": [
+      "settings-followup.json",
+      "customer-dojo-followup.json",
+      "catalogue-design-followup.json",
+      "stock-count-review.json",
+      "catalogue-stock-guard-followup.json"
+    ],
+    "nativeAutomatedOnly": 4,
+    "nativePendingAfterFollowupFix": 0
+  }
+}

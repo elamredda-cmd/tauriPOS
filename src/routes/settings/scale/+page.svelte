@@ -2,8 +2,8 @@
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { now, settingsDB } from '$lib/stores/db';
-    import { upsert } from '$lib/stores/database';
+    import { settingsDB } from '$lib/stores/db';
+    import { saveSetting } from '$lib/savedSettings';
     import { toast } from '$lib/stores/toast';
     import {
         formatScaleReading,
@@ -40,15 +40,7 @@
         void findScalePorts(true);
     });
 
-    async function updateSetting(key: string, value: string) {
-        const row = { key, value, updatedAt: now() };
-        settingsDB.update((settings) => {
-            const index = settings.findIndex((item) => item.key === key);
-            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
-            return [...settings, row];
-        });
-        await upsert('settings', row, 'key');
-    }
+    const updateSetting = saveSetting;
 
     function portOptionsFor(currentPath: string) {
         const options = foundPorts.map((port) => ({
@@ -63,6 +55,7 @@
     }
 
     async function findScalePorts(quiet = false) {
+        if (findingPorts) return;
         findingPorts = true;
         if (!quiet) portFinderStatus = 'Finding serial ports...';
         try {
@@ -85,6 +78,7 @@
     }
 
     async function testScale() {
+        if (testingScale) return;
         scaleTestStatus = 'Reading scale...';
         testingScale = true;
         try {

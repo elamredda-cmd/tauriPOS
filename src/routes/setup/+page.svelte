@@ -1,7 +1,8 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import { goto } from '$app/navigation';
-    import { connectionState, getMysqlDb, saveMode, testMysqlConnection, type MysqlConfig } from '$lib/stores/connection';
+    import { captureConnectionSettings, connectionState, getMysqlDb, resetMysqlConnection, restoreConnectionSettings, saveMode, testMysqlConnection, type ConnectionSettingsSnapshot, type MysqlConfig } from '$lib/stores/connection';
+    import { nativeQaEnabled, nativeQaCheckpoint } from '$lib/nativeQa';
     import { initMysqlDb } from '$lib/stores/mysql';
     import {
         ensureDatabaseIdentityForSync,
@@ -19,7 +20,8 @@
         wipeAndPullFromServer
     } from '$lib/stores/database';
     import { upsert } from '$lib/stores/database';
-    import { hashPin, normalizeEmployeeForRuntime } from '$lib/stores/session';
+    import { currentEmployee, hashPin, normalizeEmployeeForRuntime } from '$lib/stores/session';
+    import { canCancelSetup, sameMysqlTarget } from '$lib/setupSafety';
     import { employeesDB, settingsDB, now, uuid } from '$lib/stores/db';
     import { get } from 'svelte/store';
 
@@ -45,6 +47,11 @@
     let needsShopDetails = true;
     let stockTrackingEnabled = true;
     let restorePendingMariaDbReplace = false;
+    let configuredOnEntry = false;
+    $: activeMaintenanceAdmin = Boolean($currentEmployee?.isActive && $currentEmployee.role === 'admin');
+    $: reconnectOnly = configuredOnEntry && activeMaintenanceAdmin && !restorePendingMariaDbReplace;
+    $: canReturn = canCancelSetup({ configured: configuredOnEntry, activeAdmin: activeMaintenanceAdmin,
+        pendingRestore: restorePendingMariaDbReplace, committing: connecting || testResult === 'testing', adminRecovery: adminRecoveryRequired || needsAdmin });
     const RESTORE_NOTICE_KEY = 'pos_restore_notice';
 
     type SetupProgressState = 'idle' | 'running' | 'success' | 'error';
@@ -119,6 +126,7 @@
         }
 
         const state = get(connectionState);
+        configuredOnEntry = Boolean(state.mode && hasActiveAdmin());
         if (state.mode) selectedMode = state.mode;
         if (state.mysqlConfig) {
             host = state.mysqlConfig.host;
@@ -254,6 +262,7 @@
     }
 
     async function handleTestConnection() {
+        if (connecting || testResult === 'testing') return;
         testResult = 'testing';
         testMessage = '';
         resetSetupProgress();
@@ -270,9 +279,35 @@
     }
 
     async function handleConnect() {
+        if (connecting || testResult === 'testing') return;
+        const previous = { ...get(connectionState), mysqlConfig: get(connectionState).mysqlConfig ? { ...get(connectionState).mysqlConfig! } : null };
+        let reconnectConfigSaved = false;
+        let previousSettings: ConnectionSettingsSnapshot | null = null;
         connecting = true;
         try {
+            previousSettings = await captureConnectionSettings();
             const cfg = buildConfig();
+            // Probe the draft first; a failed test must not replace the working configuration.
+            if (!(await testMysqlConnection(cfg))) throw new Error('Could not connect. Previous connection and data were kept.');
+            resetMysqlConnection();
+            if (reconnectOnly) {
+                setSetupProgress('running', 20, 'Reconnecting only', 'No import, forced upload or local cache replacement will be run.');
+                connectionState.set({ ...previous, mode: 'multi', mysqlConfig: cfg, mysqlOnline: false, mysqlReady: false, mysqlStatus: 'pending', syncError: null });
+                await verifyDatabaseIdentityBeforeSchemaMutation();
+                if (!sameMysqlTarget(previous.mysqlConfig, cfg) || !previous.mysqlReady) await initMysqlDb(cfg);
+                const server = await getMysqlDb();
+                if (!server) throw new Error('Connection could not be reopened. Previous configuration is kept.');
+                await ensureDatabaseIdentityForSync();
+                await saveMode('multi', cfg);
+                reconnectConfigSaved = true;
+                if (nativeQaEnabled) await nativeQaCheckpoint('setup.after-reconnect-save');
+                if (!(await getMysqlDb())) throw new Error('Connection disconnected while saving. Retry reconnect.');
+                connectionState.update(state => ({ ...state, mysqlOnline: true, mysqlReady: true, mysqlStatus: 'online', syncError: null }));
+                await startBackgroundSync();
+                setSetupProgress('success', 100, 'Reconnected', 'Saved connection is ready. No bootstrap data actions were run.');
+                await goto('/settings/advanced');
+                return;
+            }
             setSetupProgress('running', 10, 'Checking shop identity', 'Verifying this database before making any server changes...');
             connectionState.set({
                 mode: 'multi',
@@ -410,7 +445,15 @@
             );
             connecting = false;
         } catch (err) {
-            const message = cleanError(err);
+            let message = cleanError(err);
+            let restoredPreviousConfig = true;
+            if (reconnectConfigSaved && previous.mode && previousSettings) {
+                try { await restoreConnectionSettings(previousSettings); }
+                catch (restoreError) {
+                    restoredPreviousConfig = false;
+                    message += ` Previous connection could not be restored: ${cleanError(restoreError)}. Reopen connection settings before using this till.`;
+                }
+            }
             if (restoreNotice?.type === 'success') {
                 restoreNotice = {
                     type: 'error',
@@ -425,19 +468,18 @@
             }
             testResult = 'fail';
             setSetupProgress('error', 100, 'Connection failed', message);
-            connectionState.set({
-                mode: null,
-                mysqlConfig: null,
-                mysqlOnline: false,
-                mysqlReady: false,
-                mysqlStatus: 'blocked',
-                syncError: message,
+            resetMysqlConnection();
+            connectionState.set(restoredPreviousConfig && previous.mode ? previous : {
+                mode: null, mysqlConfig: null, mysqlOnline: false, mysqlReady: false,
+                mysqlStatus: 'blocked', syncError: message,
             });
+            if (restoredPreviousConfig && previous.mode === 'multi' && previous.mysqlConfig) void startBackgroundSync().catch(() => undefined);
             connecting = false;
         }
     }
 
     async function handleContinueSingle() {
+        if (connecting || testResult === 'testing') return;
         connecting = true;
         try {
             await saveMode('single');
@@ -459,6 +501,7 @@
     }
 
     async function handleCreateAdmin() {
+        if (connecting) return;
         connecting = true;
         try {
             await createShopAdmin();
@@ -487,6 +530,7 @@
             <p class="mt-2 text-text-muted text-base">
                 Choose how you want to run your point-of-sale system.
             </p>
+            {#if canReturn}<button class="btn btn-secondary mt-4" on:click={() => goto('/settings/advanced')}>Cancel — Back to Settings</button>{/if}
         </div>
 
         <!-- ── Mode cards ────────────────────────────────────── -->
@@ -519,7 +563,7 @@
 
             <!-- Single POS -->
             <button
-                disabled={restorePendingMariaDbReplace}
+                disabled={restorePendingMariaDbReplace || connecting || testResult === 'testing'}
                 class="group relative flex flex-col items-center gap-4 p-8 rounded-lg border-2 transition-all duration-200 cursor-pointer
                     {selectedMode === 'single'
                         ? 'border-accent-primary bg-bg-card shadow-lg shadow-accent-primary/10'
@@ -544,6 +588,7 @@
 
             <!-- Multi POS -->
             <button
+                disabled={connecting || testResult === 'testing'}
                 class="group relative flex flex-col items-center gap-4 p-8 rounded-lg border-2 transition-all duration-200 cursor-pointer
                     {selectedMode === 'multi'
                         ? 'border-accent-primary bg-bg-card shadow-lg shadow-accent-primary/10'
@@ -582,11 +627,12 @@
                 <h2 class="text-base font-semibold text-text-main">
                     MariaDB Connection
                 </h2>
+                {#if reconnectOnly}<p class="rounded-md border border-border-flat bg-bg-card p-3 text-sm text-text-muted">Connection settings only. This will not replace local data, repair uploads or import a shop. Use the separately confirmed maintenance actions for those operations.</p>{/if}
                 {#if username.toLowerCase() === 'root'}
                     <p class="text-danger text-sm">For shop safety, create and use a dedicated MariaDB account such as <strong>pos_app</strong>, not root.</p>
                 {/if}
 
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <fieldset class="grid grid-cols-1 sm:grid-cols-2 gap-4 border-0 p-0 m-0" disabled={connecting || testResult === 'testing'}>
                     <!-- Host -->
                     <div class="field">
                         <label for="db-host">Host</label>
@@ -612,7 +658,7 @@
                         <label for="db-name">Database</label>
                         <input id="db-name" type="text" bind:value={database} placeholder="pos_db" />
                     </div>
-                </div>
+                </fieldset>
 
                 <!-- Status message -->
                 {#if testMessage}
@@ -648,7 +694,7 @@
                 <div class="flex gap-3 justify-end">
                     <button
                         class="btn btn-secondary"
-                        disabled={testResult === 'testing'}
+                        disabled={testResult === 'testing' || connecting}
                         on:click={handleTestConnection}
                     >
                         {testResult === 'testing' ? 'Testing…' : 'Test Connection'}
@@ -663,7 +709,7 @@
                             ? 'Connecting…'
                             : restorePendingMariaDbReplace
                                 ? 'Finish Restore to MariaDB'
-                                : 'Connect'}
+                                : reconnectOnly ? 'Save & Reconnect Only' : 'Connect'}
                     </button>
                 </div>
             </div>

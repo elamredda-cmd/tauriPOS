@@ -26,8 +26,9 @@ import {
     assertCurrentReportPeriod,
 } from '../reportMarkers';
 import type { MysqlConfig } from './connection';
-import { get } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { nativeQaEnabled, nativeQaCheckpoint } from '$lib/nativeQa';
 import {
     authorizeAttendanceAction,
     currentEmployee,
@@ -39,13 +40,21 @@ import {
     normalizeEmployeeForRuntime,
 } from './session';
 import { hasPermission } from '$lib/permissions';
+import {
+    canRecoverOnlineFinancialIntent,
+    OnlineFinancialPendingError,
+    parsePendingOnlineFinancialIntent,
+    type PendingOnlineFinancialIntent,
+} from '$lib/onlineFinancialRecovery';
 import { notifyOwnerCloudDataChanged } from '$lib/ownerCloudEvents';
 import { findStrongLegacySharedDataProof, type LegacySharedDataProof } from './databaseIdentity';
 import { AsyncMutex } from '$lib/utils/asyncMutex';
 import { readReconciliationCheckpoint, reconcileVersionPage } from './reconciliation';
 import { withMysqlSession } from './mysqlSession';
+import { CATALOGUE_INTEGRITY_MIGRATION, catalogueCategoryUsageSql, removeCatalogueWithAuthority } from '$lib/catalogueIntegrity';
 import { cacheCustomerSnapshot, isCustomerSnapshotOlder } from './customerSnapshotCache';
 import { createStockReceiptPreview, validateStockReceiptBundle } from './stockReceiptPreview';
+import { taxRateSnapshotsMatch, updatedTaxRateSnapshot } from '$lib/taxRateSnapshot';
 import { PROMOTION_QUEUE_HEAD_PREDICATE, promotionDeletionTargets, promotionSaveMutations, promotionSnapshotAfterSave, promotionSnapshotsMatch, refreshAfterPromotionCommit, validatePromotionForPersistence, type PromotionSnapshot } from './promotionPersistence';
 export type { PromotionSnapshot } from './promotionPersistence';
 import { HELD_RECOVERY_SETTING, withHeldRecoveryWrite } from '$lib/heldOrderRecovery';
@@ -74,6 +83,9 @@ import type {
     Employee,
     EmployeeAttendance,
     LoyaltyLog,
+    TaxRate,
+    Setting,
+    Supplier,
 } from './db';
 import {
     ATTENDANCE_CHANGED_EVENT,
@@ -82,6 +94,8 @@ import {
     attendanceCorrectionVersionMatches,
     attendanceDurationSeconds,
     attendanceOpenSessionMatches,
+    attendanceOverlapError,
+    findAttendanceOverlap,
     openAttendanceDeactivationMessage,
     syncedTablesIncludeAttendance,
     validateClosedAttendance,
@@ -469,6 +483,7 @@ export function syncConflictSaleReference(
 }
 
 export async function getSyncConflicts(): Promise<SyncConflict[]> {
+    if (nativeQaEnabled) await nativeQaCheckpoint('conflicts.refresh');
     const d = await sqlite.getDb();
     return d.select(`SELECT * FROM _sync_conflicts ORDER BY created_at DESC`);
 }
@@ -477,6 +492,7 @@ export async function dismissSyncConflict(
     id: string,
     options: { acknowledgeRetainedLocalSale?: boolean } = {},
 ): Promise<void> {
+    if (nativeQaEnabled) await nativeQaCheckpoint('conflicts.dismiss');
     const d = await sqlite.getDb();
     const rows: SyncConflict[] = await d.select(
         `SELECT * FROM _sync_conflicts WHERE id = ? LIMIT 1`,
@@ -843,6 +859,18 @@ async function recordTableAudit(
 async function getAuditBefore(table: string, obj: any, idKey: string): Promise<any | null> {
     if (!shouldAuditTableMutation(table, obj)) return null;
     return getLocalRow(table, idKey, obj?.[idKey]);
+}
+
+function taxSnapshotAuditRows(before: TaxRate[], after: TaxRate[], employeeId: string): any[] {
+    const previous = new Map(before.map(row => [row.id, row]));
+    return after.flatMap(row => {
+        const oldRow = previous.get(row.id);
+        if (oldRow && auditComparable(oldRow) === auditComparable(row)) return [];
+        const stamp = new Date().toISOString();
+        return [{ id: crypto.randomUUID(), employeeId,
+            action: oldRow ? 'tax_rate_updated' : 'tax_rate_created', entityType: 'tax_rate', entityId: row.id,
+            oldData: auditJson(oldRow), newData: auditJson(row), createdAt: stamp, updatedAt: stamp }];
+    });
 }
 
 const OFFLINE_QUEUE_BATCH_SIZE = 100;
@@ -1594,7 +1622,7 @@ async function tryMysql(): Promise<boolean> {
 const LOCAL_ONLY_SETTING_KEYS = new Set([
     LOCAL_TERMINAL_CLOSE_BARRIER_KEY,
     'pos_mode', 'mysql_config', 'till_id', 'till_name', 'till_name_manual', 'till_seq',
-    'device_operating_mode', 'held_order_recovery_v1',
+    'device_operating_mode', 'held_order_recovery_v1', 'checkout_draft_v1',
     RECEIPT_HIGH_WATER_KEY,
     'automatic_setup_backup_enabled', 'automatic_setup_backup_time',
     'automatic_setup_backup_directory', 'backup_directory',
@@ -2398,7 +2426,7 @@ async function applyTombstoneRows(rows: any[]): Promise<number> {
     const allowedTables = new Set([...ALL_SYNC_TABLES.filter(table => table !== 'app_identity'), 'tombstones']);
     const mutations: sqlite.LocalMutation[] = [];
     const recreated = new Set<string>();
-    for (const table of PROMOTION_SYNC_TABLES) {
+    for (const table of [...PROMOTION_SYNC_TABLES, 'categories', 'tax_rates']) {
         const ids = rows.filter(row => row.table_name === table).map(row => String(row.row_id));
         for (const row of await mysql.mysqlGetSyncRowsByIds(table, ids)) recreated.add(`${table}:${row.id}`);
     }
@@ -2412,9 +2440,12 @@ async function applyTombstoneRows(rows: any[]): Promise<number> {
             );
             continue;
         }
-        // An older deletion must not undo a subsequently recreated promotion.
+        // Ignore obsolete promotion tombstones and legacy catalogue tombstones
+        // whose authoritative parent still exists. New catalogue guards reject
+        // both standalone tombstones for live rows and parent resurrection.
         if (recreated.has(`${t.table_name}:${t.row_id}`)) continue;
-        mutations.push({ table: t.table_name, kind: 'remove', data: { id: t.row_id } },
+        mutations.push({ table: t.table_name, kind: 'remove', data: { id: t.row_id },
+                ...(['categories', 'tax_rates'].includes(t.table_name) ? { authoritativeCatalogueDelete: true } : {}) },
             { table: 'tombstones', data: t });
     }
     await sqlite.commitBatch(mutations);
@@ -2957,6 +2988,9 @@ async function maybeBootstrapUpload(mysqlDb: any): Promise<void> {
 // ─── CRUD Operations ────────────────────────────────────────────────────────
 
 async function upsertAfterClosePreflight(table: string, obj: any, idKey: string = 'id'): Promise<void> {
+    // Settings and their audit evidence must share one commit. A later audit
+    // read/write failure must never make an already saved setting look unsaved.
+    if (table === 'settings') return saveSettingsBatch([obj]);
     if (table === 'customers') {
         throw new Error('Use saveCustomerProfile to change customer details, or the loyalty commands to change points');
     }
@@ -3006,6 +3040,117 @@ export async function upsert(table: string, obj: any, idKey: string = 'id'): Pro
     return wholeSystemCloseLocalMutex.runExclusive(async () => {
         await assertMariaDbCommerceWritesAllowed();
         await upsertAfterClosePreflight(table, obj, idKey);
+    });
+}
+
+/** One durable save for coherent presets; the UI changes only after local commit. */
+export async function saveSettingsBatch(rows: Setting[]): Promise<void> {
+    const frozen = rows.map(row => ({ ...row }));
+    if (new Set(frozen.map(row => row.key)).size !== frozen.length || frozen.some(row => !row.key)) {
+        throw new Error('A settings save must contain distinct non-empty keys');
+    }
+    const native = isTauri();
+    const auditRows: any[] = [];
+    for (const row of frozen) {
+        if (!shouldAuditTableMutation('settings', row)) continue;
+        const before = native ? await getLocalRow('settings', 'key', row.key)
+            : get(settingsDB).find(current => current.key === row.key) || null;
+        if (before && auditComparable(before) === auditComparable(row)) continue;
+        const stamp = new Date().toISOString();
+        auditRows.push({ id: crypto.randomUUID(), employeeId: currentAuditEmployeeId(),
+            action: before ? 'setting_updated' : 'setting_created', entityType: 'setting', entityId: row.key,
+            oldData: auditJson(before), newData: auditJson(row), createdAt: stamp, updatedAt: stamp });
+    }
+    if (native) {
+        const epoch = await captureServerDataEpochForMutation();
+        await persistLocalChanges([
+            ...frozen.map(data => ({ table: 'settings', idKey: 'key', data })),
+            ...auditRows.map(data => ({ table: 'audit_logs', data })),
+        ], epoch);
+    } else if (auditRows.length) {
+        auditLogDB.update(current => [...auditRows, ...current]);
+    }
+    settingsDB.update(current => [...current.filter(row => !frozen.some(saved => saved.key === row.key)), ...frozen]);
+    drainLocalChanges();
+}
+
+const taxSnapshotMutex = new AsyncMutex();
+/** Default flags and the edited rate always commit as one authoritative transaction. */
+export async function saveTaxRateSnapshot(saved: TaxRate, expectedRates: TaxRate[]): Promise<void> {
+    const baseline = expectedRates.map(rate => ({ ...rate }));
+    const after = updatedTaxRateSnapshot({ ...saved }, baseline);
+    await taxSnapshotMutex.runExclusive(async () => {
+        if (!hasPermission(get(currentEmployee), 'open_tax_rates', get(settingsDB))) {
+            throw new Error('Tax-rate management permission is required');
+        }
+        const auditEmployeeId = currentAuditEmployeeId();
+        if (!isTauri()) {
+            if (!taxRateSnapshotsMatch(get(taxRatesDB), baseline)) throw new Error('Tax rates changed. Reload before saving.');
+            const audits = taxSnapshotAuditRows(baseline, after, auditEmployeeId);
+            if (audits.length) auditLogDB.update(current => [...audits, ...current]);
+        } else if (isMultiMode()) {
+            const expectedEpoch = await captureServerDataEpochForMutation();
+            await assertMariaDbCommerceWritesAllowed();
+            await flushOfflineQueue();
+            const local = await sqlite.getDb();
+            const queued: any[] = await local.select("SELECT COUNT(*) AS count FROM _offline_queue WHERE table_name = 'tax_rates'");
+            if (Number(queued[0]?.count)) throw new Error('Wait for existing tax-rate edits to sync before changing the default.');
+            const config = get(connectionState).mysqlConfig;
+            if (!config) throw new Error('Connect to the shop database to change tax rates.');
+            const stamp = new Date().toISOString();
+            const committed = await withMysqlSession(buildMysqlUri(config), 'catalogue', async database => {
+                await database.execute('START TRANSACTION');
+                try {
+                    // Same lock order as native commerce and restore. Preflight alone
+                    // cannot fence a dataset replacement which finishes before this transaction.
+                    const barriers: any[] = await database.select("SELECT CAST(state AS CHAR) AS state FROM pos_close_barrier WHERE id = 1 FOR UPDATE");
+                    if (barriers.length !== 1 || barriers[0].state !== 'idle') throw new Error('Finish the whole-system report close before changing tax rates.');
+                    const gates: any[] = await database.select('SELECT CAST(isActive AS SIGNED) AS isActive FROM pos_restore_gate WHERE id = 1 FOR UPDATE');
+                    if (gates.length !== 1 || Number(gates[0].isActive) !== 0) throw new Error('Finish the database restore before changing tax rates.');
+                    const epochs: any[] = await database.select("SELECT CAST(value AS CHAR) AS value FROM settings WHERE `key` = 'server_data_epoch' LIMIT 1 FOR UPDATE");
+                    if (String(epochs[0]?.value || '').trim() !== expectedEpoch) throw new Error('The shop database was replaced. Reload tax rates before saving.');
+                    await database.execute('UPDATE pos_catalogue_mutex SET id = id WHERE id = 1');
+                    const current: TaxRate[] = await database.select('SELECT id, name, rate, isDefault, createdAt FROM tax_rates ORDER BY id FOR UPDATE');
+                    if (!taxRateSnapshotsMatch(current, baseline)) throw new Error('Tax rates changed on another till. Reload before saving.');
+                    // Clear old default first, but only inside this transaction.
+                    if (saved.isDefault) await database.execute('UPDATE tax_rates SET isDefault = 0 WHERE isDefault = 1');
+                    await database.execute('INSERT INTO tax_rates (id, name, rate, isDefault, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE name = VALUES(name), rate = VALUES(rate), isDefault = VALUES(isDefault), updatedAt = VALUES(updatedAt)',
+                        [saved.id, saved.name, saved.rate, saved.isDefault ? 1 : 0, saved.createdAt, stamp]);
+                    const result: TaxRate[] = await database.select('SELECT * FROM tax_rates ORDER BY id');
+                    if (result.filter(row => Number(row.isDefault) === 1).length !== 1) {
+                        throw new Error('Tax rates must have exactly one default. Reload before saving.');
+                    }
+                    const audits = taxSnapshotAuditRows(current, result, auditEmployeeId);
+                    for (const row of audits) {
+                        await database.execute('INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            [row.id, row.employeeId, row.action, row.entityType, row.entityId, row.oldData, row.newData, row.createdAt, row.updatedAt]);
+                    }
+                    await database.execute('COMMIT');
+                    return { rows: result, audits };
+                } catch (error) { await database.execute('ROLLBACK').catch(() => undefined); throw error; }
+            });
+            // The server commit is final. A cache-refresh problem must not invite a second save.
+            try {
+                await sqlite.commitBatch([
+                    ...committed.rows.map(data => ({ table: 'tax_rates', data, protectPending: true })),
+                    ...committed.audits.map(data => ({ table: 'audit_logs', data, protectPending: true })),
+                ]);
+                // A newer download may already have won the native monotonic guard.
+                // Publish the accepted cache, not the older server snapshot we sent.
+                const cachedRows = await sqlite.getAll('tax_rates');
+                taxRatesDB.set(cachedRows.map(row => sqlite.rehydrateBooleans(row, ['isDefault'])));
+            } catch (error) {
+                console.warn('Tax rates saved on server; cache refresh will retry:', error);
+            }
+            return;
+        } else {
+            await sqlite.commitBatch([
+                ...after.map((data, index) => ({ table: 'tax_rates', data,
+                    ...(index === 0 ? { expectedTaxRates: baseline } : {}) })),
+                ...taxSnapshotAuditRows(baseline, after, auditEmployeeId).map(data => ({ table: 'audit_logs', data })),
+            ]);
+        }
+        taxRatesDB.set(after);
     });
 }
 
@@ -3165,12 +3310,39 @@ async function removeAfterClosePreflight(table: string, id: string, idKey: strin
     }
     const serverDataEpoch = await captureServerDataEpochForMutation();
     const auditBefore = AUDITED_TABLES.has(table) ? await getLocalRow(table, idKey, id) : null;
-    await persistLocalChanges([
+    const deletion = [
         { table, kind: 'remove', data: { [idKey]: id }, idKey },
         ...(idKey === 'id' && table !== 'tombstones' ? [tombstoneMutation(table, id)] : []),
-    ], serverDataEpoch);
+    ] as sqlite.LocalMutation[];
+    if (table === 'categories' || table === 'tax_rates') {
+        const shared = isMultiMode();
+        await removeCatalogueWithAuthority({
+            shared,
+            removeOnServer: async () => {
+                if (!get(connectionState).mysqlOnline) throw new Error('Connect to the shop database before deleting a category or tax rate. Nothing has been deleted.');
+                const server = await getMysqlDb();
+                if (!server) throw new Error('The shop database is unavailable. Nothing has been deleted.');
+                const guards: any[] = await server.select('SELECT name FROM pos_schema_migrations WHERE name = ?', [CATALOGUE_INTEGRITY_MIGRATION]);
+                if (!guards.length) throw new Error('Update the shop database before deleting categories or tax rates. Nothing has been deleted.');
+                // The server transaction checks usage/defaults via triggers and
+                // creates its own tombstone only after a successful deletion.
+                await commitMysqlOutboxOperation(table, 'remove', { [idKey]: id }, idKey, serverDataEpoch);
+            },
+            removeLocally: async () => {
+                await sqlite.commitBatch(deletion.map(mutation => shared && mutation.kind === 'remove'
+                    ? { ...mutation, authoritativeCatalogueDelete: true } : mutation));
+            },
+            mirrorFailed: error => console.warn('Catalogue deletion committed on the server; local cache refresh is pending:', error),
+        });
+    } else {
+        await persistLocalChanges(deletion, serverDataEpoch);
+    }
     if (auditBefore && shouldAuditTableMutation(table, auditBefore)) {
-        await recordTableAudit(table, 'deleted', idKey, auditBefore, null);
+        try { await recordTableAudit(table, 'deleted', idKey, auditBefore, null); }
+        catch (error) {
+            if (table !== 'categories' && table !== 'tax_rates') throw error;
+            console.warn('Catalogue deletion committed; audit cache write failed:', error);
+        }
     }
 
     if (PROMOTION_SYNC_TABLE_SET.has(table)) {
@@ -3908,8 +4080,11 @@ export async function postCustomerAccountEntry(
     if (!Number.isSafeInteger(amountPence) || amountPence === 0) {
         throw new Error('Account entry amount must be a non-zero whole number of pence');
     }
-    if (input.entryType === 'charge' && amountPence < 0) {
+    if ((input.entryType === 'charge' || input.entryType === 'opening_balance') && amountPence < 0) {
         throw new Error('Account charges must increase the amount owed');
+    }
+    if ((input.entryType === 'adjustment' || input.entryType === 'opening_balance') && !String(input.description || '').trim()) {
+        throw new Error('Enter a reason for this balance correction');
     }
     if ((input.entryType === 'payment' || input.entryType === 'refund') && amountPence > 0) {
         throw new Error('Payments and refunds must reduce the amount owed');
@@ -3981,6 +4156,11 @@ export async function postCustomerAccountEntry(
 
     let result: CustomerAccountMutationResult;
     if (!isTauri()) {
+        if (!get(customersDB).some(customer => customer.id === customerId)) throw new Error('Customer was not found');
+        if ((input.entryType === 'adjustment' || input.entryType === 'opening_balance')
+            && !hasPermission(get(currentEmployee), 'adjust_customer_account', get(settingsDB))) {
+            throw new Error('Customer-account adjustment permission is required');
+        }
         const before = await getCustomerAccount(customerId);
         if (input.entryType === 'opening_balance'
             && get(customerAccountEntriesDB).some((entry) => entry.customerId === customerId)) {
@@ -4895,13 +5075,34 @@ export async function getProductsByIds(ids: string[], activeOnly = true, compact
     return hydrateProducts(await sqlite.getProductsByIds(ids, activeOnly, compact));
 }
 
-export const getCategoryUsageSummary = sqlite.getCategoryUsageSummary;
+export async function getCategoryUsageSummary(): Promise<sqlite.CategoryUsageSummary[]> {
+    if (!isTauri()) {
+        const result = new Map<string, sqlite.CategoryUsageSummary>();
+        for (const product of get(productsDB)) {
+            if (!product.categoryId) continue;
+            const row = result.get(product.categoryId) || { categoryId: product.categoryId, total: 0, active: 0, deactivated: 0 };
+            row.total += 1;
+            if (product.isActive) row.active += 1; else row.deactivated += 1;
+            result.set(row.categoryId, row);
+        }
+        return [...result.values()];
+    }
+    if (!isMultiMode()) return sqlite.getCategoryUsageSummary();
+    const server = await getMysqlDb();
+    if (!server) throw new Error('Connect to the shop database to check category usage');
+    const rows: any[] = await server.select(catalogueCategoryUsageSql);
+    return rows.map(row => ({ categoryId: String(row.categoryId), total: Number(row.total), active: Number(row.active), deactivated: Number(row.total) - Number(row.active) }));
+}
 
 export async function getTaxRateProductUsageCount(taxRateId: string): Promise<number> {
     if (!isTauri()) {
         return get(productsDB).filter((product) => product.taxRateId === taxRateId).length;
     }
-    return sqlite.getTaxRateProductUsageCount(taxRateId);
+    if (!isMultiMode()) return sqlite.getTaxRateProductUsageCount(taxRateId);
+    const server = await getMysqlDb();
+    if (!server) throw new Error('Connect to the shop database to check tax-rate usage');
+    const rows: any[] = await server.select('SELECT COUNT(*) AS count FROM products WHERE taxRateId = ?', [taxRateId]);
+    return Number(rows[0]?.count || 0);
 }
 
 const stockReceiptPreview = createStockReceiptPreview();
@@ -4909,6 +5110,24 @@ const stockReceiptPreview = createStockReceiptPreview();
 export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
     if (!isTauri()) return stockReceiptPreview.recent(limit);
     return sqlite.getRecentStockReceipts(limit);
+}
+
+export async function getSuppliersPage(options: sqlite.SupplierPageOptions = {}): Promise<{ rows: Supplier[]; total: number }> {
+    if (isTauri()) return sqlite.getSuppliersPage(options);
+    const query = String(options.query || '').trim().toLocaleLowerCase();
+    const matches = get(suppliersDB).filter(supplier => !query || [supplier.name, supplier.contactName, supplier.phone, supplier.email]
+        .some(value => String(value || '').toLocaleLowerCase().includes(query))).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit) || 25)));
+    const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+    return { rows: matches.slice(offset, offset + limit).map(row => ({ ...row })), total: matches.length };
+}
+
+export async function getStockReceiptHistory(options: sqlite.StockReceiptHistoryOptions = {}): Promise<{ rows: any[]; total: number }> {
+    return isTauri() ? sqlite.getStockReceiptHistory(options) : stockReceiptPreview.history(options);
+}
+
+export async function getStockReceiptLines(receiptId: string): Promise<any[]> {
+    return isTauri() ? sqlite.getStockReceiptLines(receiptId) : stockReceiptPreview.lines(receiptId);
 }
 
 export async function getOrdersPage(options: sqlite.OrderPageOptions = {}): Promise<sqlite.OrderPageResult> {
@@ -5023,38 +5242,144 @@ export async function prepareHeldOrderClaim(): Promise<{ claimId: string; server
 
 export async function heldRecoverySaleCompleted(saleIds: string[]): Promise<boolean> {
     if (!saleIds.length) return false;
-    if (isMultiMode() && !get(connectionState).mysqlOnline) {
-        throw new Error('Reconnect MariaDB before recovering this trolley so completed payments can be checked.');
+    // Held and ordinary trolleys use the same no-double-charge proof. A generic
+    // cancelled row must not release a hold, and a dedicated terminal's proven
+    // negative result does not need MariaDB merely to check the payment.
+    const result = await checkoutDraftDisposition(saleIds, '');
+    if (result.state === 'review') throw new Error(result.message || 'This interrupted payment needs review before restoring the held trolley.');
+    return result.state === 'consumed';
+}
+
+export type CheckoutDraftDisposition = {
+    state: 'restore' | 'consumed' | 'review';
+    message?: string;
+};
+
+/**
+ * A final journal status alone is not proof that no money was collected. In
+ * particular an unsuccessful/expired Dojo session can still have a Created
+ * intent requiring reconciliation. Only exact, persisted provider outcomes
+ * (or the native twice-checked sandbox receipt) release a submitted trolley.
+ */
+function checkoutAttemptHasNoChargeProof(attempt: any, receipt?: any): boolean {
+    if (!['failed', 'cancelled', 'declined'].includes(String(attempt.status))) return false;
+    if (attempt.operationKind && attempt.operationKind !== 'sale') return false;
+    const provider = String(attempt.provider || '');
+    const error = String(attempt.error || '').trim();
+    if (provider === 'dojo' && receipt
+        && receipt.attemptId === attempt.id
+        && receipt.terminalKey === attempt.terminalKey
+        && receipt.paymentIntentId === attempt.clientTransactionId
+        && receipt.terminalSessionId === attempt.terminalSessionId
+        && Number(receipt.amount) === Number(attempt.amount)
+        && receipt.currency === attempt.currency
+        && ['Canceled', 'Reversed'].includes(receipt.providerStatus)
+        && Number.isFinite(Date.parse(receipt.confirmedAt || ''))) return true;
+
+    const direct = /^(Dojo|SumUp) status:\s*([A-Za-z_]+)$/i.exec(error);
+    if (direct && direct[1].toLowerCase() === provider) {
+        const status = direct[2].replace(/_/g, '').toUpperCase();
+        return provider === 'dojo'
+            ? ['DECLINED', 'SIGNATUREVERIFICATIONREJECTED', 'CANCELED', 'CANCELLED', 'REVERSED', 'TIMEDOUT'].includes(status)
+            : provider === 'sumup' && ['DECLINED', 'CANCELED', 'CANCELLED', 'TIMEDOUT'].includes(status);
     }
-    const databases = [await sqlite.getDb()];
-    if (isMultiMode()) databases.push(await mysql.getDb());
-    const safelyCancelled = new Set<string>();
-    for (const d of databases) {
-        for (let offset = 0; offset < saleIds.length; offset += 100) {
-            const ids = saleIds.slice(offset, offset + 100);
-            const rows: any[] = await d.select(`SELECT id FROM orders WHERE id IN (${ids.map(() => '?').join(',')}) AND status <> 'hold' LIMIT 1`, ids);
-            if (rows.length) return true;
-            const deleted: any[] = await d.select(`SELECT row_id FROM tombstones WHERE table_name = 'orders' AND row_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, ids);
-            if (deleted.length) return true;
-            const attempts: any[] = await d.select(`SELECT id, status FROM payment_terminal_attempts WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
-            for (const attempt of attempts) {
-                if (attempt.status === 'completed') return true;
-                if (['declined', 'cancelled'].includes(attempt.status)) safelyCancelled.add(attempt.id);
-                else throw new Error('An interrupted card payment still needs reconciliation. Resolve it before restoring this trolley.');
+
+    // Recovery only commits a negative result after separated observations.
+    const settled = /^PROVIDER_FINAL_CANDIDATE:(dojo|sumup):(failed|cancelled):[0-9]+:([0-9]+): (.+)$/.exec(error);
+    if (!settled || settled[1] !== provider || Number(settled[3]) < 2) return false;
+    if (provider === 'dojo') {
+        const result = /^Dojo final status: terminal ([A-Za-z_]+), payment intent ([A-Za-z_]+)$/.exec(settled[4]);
+        if (!result) return false;
+        const terminal = result[1].replace(/_/g, '').toUpperCase();
+        const payment = result[2].toUpperCase();
+        return ['CANCELED', 'CANCELLED', 'REVERSED'].includes(payment)
+            || (payment === 'CREATED' && ['DECLINED', 'SIGNATUREVERIFICATIONREJECTED', 'CANCELED', 'CANCELLED'].includes(terminal));
+    }
+    const result = /^SumUp final status: ([A-Za-z_]+)$/.exec(settled[4]);
+    return Boolean(result && ['DECLINED', 'CANCELED', 'CANCELLED', 'TIMEDOUT'].includes(result[1].replace(/_/g, '').toUpperCase()));
+}
+
+/**
+ * Determine whether an ordinary device-local trolley can safely return after
+ * reload. This never queries a payment provider or requires MariaDB merely to
+ * restore an unpaid draft / a dedicated terminal's proven no-charge result.
+ * Missing or ambiguous submitted work remains saved for review, not replay.
+ */
+export async function checkoutDraftDisposition(
+    saleIds: string[], pendingHoldId: string,
+): Promise<CheckoutDraftDisposition> {
+    const review = (message = 'This trolley has an interrupted payment. Check payment recovery before charging it again.'): CheckoutDraftDisposition => ({ state: 'review', message });
+    if (!Array.isArray(saleIds) || saleIds.some(id => typeof id !== 'string' || !id.trim())
+        || typeof pendingHoldId !== 'string') return review('The saved trolley recovery references are invalid. Keep the draft for support review.');
+    const ids = [...new Set(saleIds)];
+    if (!ids.length && !pendingHoldId) return { state: 'restore' };
+    const state = get(connectionState);
+    try {
+        const local = await sqlite.getDb();
+        const consumedIn = async (db: Awaited<ReturnType<typeof sqlite.getDb>>, references: string[], includeHold = false) => {
+            for (let offset = 0; offset < references.length; offset += 100) {
+                const batch = references.slice(offset, offset + 100);
+                const placeholders = batch.map(() => '?').join(',');
+                const orders: any[] = await db.select(`SELECT id FROM orders WHERE id IN (${placeholders})${includeHold ? '' : " AND status <> 'hold'"} LIMIT 1`, batch);
+                if (orders.length) return true;
+                const tombstones: any[] = await db.select(`SELECT row_id FROM tombstones WHERE table_name = 'orders' AND row_id IN (${placeholders}) LIMIT 1`, batch);
+                if (tombstones.length) return true;
+            }
+            return false;
+        };
+        if (await consumedIn(local, ids) || (pendingHoldId && await consumedIn(local, [pendingHoldId], true))) {
+            return { state: 'consumed' };
+        }
+        // A missing hold after an interrupted save is not proof of failure:
+        // another till may have retrieved it before its local cache updated.
+        if (pendingHoldId) return review('The interrupted hold has not been confirmed. Check held trolleys before restoring this draft.');
+        const placeholders = ids.map(() => '?').join(',');
+        const localAttempts: any[] = await local.select(`SELECT * FROM payment_terminal_attempts WHERE id IN (${placeholders})`, ids);
+        if (localAttempts.some(attempt => attempt.status === 'completed')) return { state: 'consumed' };
+        const intents: any[] = await local.select(`SELECT orderId FROM _online_financial_intent WHERE orderId IN (${placeholders}) LIMIT 1`, ids);
+        if (intents.length) return review('This trolley has an online financial transaction awaiting verification. Resolve it before restoring the trolley.');
+        const localById = new Map(localAttempts.map(attempt => [String(attempt.id), attempt]));
+        const sharedIds = ids.filter(id => !localById.has(id) || localById.get(id).journalScope !== 'local');
+        let remoteAttempts: any[] = [];
+        if (sharedIds.length) {
+            if (state.mode !== 'multi' || !state.mysqlOnline) {
+                return review('Reconnect the original shared database to verify this attempted payment. The trolley has been kept; do not charge again.');
+            }
+            const remote = await mysql.getDb();
+            const consumedRemotely = await consumedIn(remote, sharedIds);
+            const remotePlaceholders = sharedIds.map(() => '?').join(',');
+            remoteAttempts = await remote.select(`SELECT * FROM payment_terminal_attempts WHERE id IN (${remotePlaceholders})`, sharedIds);
+            // Do not trust evidence from a different connection if reconnection
+            // changed the server while the awaited reads were in flight.
+            const current = get(connectionState);
+            if (current.mode !== state.mode || !current.mysqlOnline || current.mysqlConfig !== state.mysqlConfig) return review();
+            if (consumedRemotely || remoteAttempts.some(attempt => attempt.status === 'completed')) return { state: 'consumed' };
+        }
+        const receiptTables: any[] = await local.select("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dojo_sandbox_recovery_receipts'");
+        const receipts: any[] = receiptTables.length
+            ? await local.select(`SELECT * FROM dojo_sandbox_recovery_receipts WHERE attemptId IN (${placeholders}) AND confirmedAt <> ''`, ids)
+            : [];
+        const receiptsById = new Map(receipts.map(receipt => [String(receipt.attemptId), receipt]));
+        const remoteById = new Map(remoteAttempts.map(attempt => [String(attempt.id), attempt]));
+        for (const id of ids) {
+            const attempt = localById.get(id);
+            if (!attempt) return review();
+            if (!checkoutAttemptHasNoChargeProof(attempt, receiptsById.get(id))) return review();
+            if (attempt.journalScope !== 'local') {
+                const remote = remoteById.get(id);
+                if (!remote || remote.provider !== attempt.provider
+                    || remote.terminalKey !== attempt.terminalKey
+                    || Number(remote.amount) !== Number(attempt.amount)
+                    || remote.currency !== attempt.currency
+                    || (remote.clientTransactionId && attempt.clientTransactionId && remote.clientTransactionId !== attempt.clientTransactionId)
+                    || (remote.terminalSessionId && attempt.terminalSessionId && remote.terminalSessionId !== attempt.terminalSessionId)
+                    || !checkoutAttemptHasNoChargeProof(remote, receiptsById.get(id))) return review();
             }
         }
+        return { state: 'restore' };
+    } catch (error) {
+        return review(`Trolley recovery could not verify the transaction result. The draft has been kept. ${String(error).replace(/^Error:\s*/, '')}`);
     }
-    const local = databases[0];
-    const intents: any[] = await local.select('SELECT orderId FROM _online_financial_intent');
-    if (intents.some(row => saleIds.includes(row.orderId))) {
-        throw new Error('An online payment is still being recovered. Resolve it before restoring this trolley.');
-    }
-    if (saleIds.some(id => !safelyCancelled.has(id))) {
-        // Missing history is not proof of a failed payment (history may have
-        // been purged). Keep the draft but require review, never charge twice.
-        throw new Error('An attempted payment has no conclusive result. Review payment recovery before restoring this trolley.');
-    }
-    return false;
 }
 
 export async function claimHeldOrder(orderId: string, claimId: string, expectedServerDataEpoch: string): Promise<boolean> {
@@ -5336,23 +5661,110 @@ export async function setStockLevel(
     stockLevel: number,
     expectedStockLevel: number,
 ): Promise<void> {
-    const serverDataEpoch = await captureServerDataEpochForMutation();
-    const stamped = { id: productId, stockLevel, updatedAt: new Date().toISOString() };
-    const before = await getLocalRow('products', 'id', productId);
-    await sqlite.setStockLevel(productId, stockLevel);
-    const after = await getLocalRow('products', 'id', productId);
-    await recordAuditEvent(
-        'stock_counted',
-        'product',
-        productId,
-        before ? { id: before.id, name: before.name, stockLevel: before.stockLevel } : null,
-        after ? { id: after.id, name: after.name, stockLevel: after.stockLevel, expectedStockLevel } : { stockLevel, expectedStockLevel },
-    );
-    await pushWriteInBackground(
-        `stock count for ${productId}`,
-        () => mysql.mysqlSetStockLevel(productId, stockLevel, expectedStockLevel),
-        () => queueLocalProductSnapshot(productId, stamped, serverDataEpoch),
-    );
+    if (!productId || ![stockLevel, expectedStockLevel].every(value => Number.isInteger(value)
+        && value >= -2147483648 && value <= 2147483647)) {
+        throw new Error('Counted and expected stock must be whole numbers within the supported range.');
+    }
+    const employeeId = currentAuditEmployeeId();
+    await wholeSystemCloseLocalMutex.runExclusive(async () => {
+        const before = isTauri() ? await getLocalRow('products', 'id', productId)
+            : get(productsDB).find(row => row.id === productId);
+        if (!before) throw new Error('The item no longer exists. Reload before counting again.');
+        const conflictMessage = 'STOCK_COUNT_CONFLICT: Stock changed. Reload before counting again.';
+        const stamp = new Date().toISOString();
+        const makeAudit = (row: any) => ({ id: crypto.randomUUID(), employeeId, action: 'stock_counted',
+            entityType: 'product', entityId: productId,
+            oldData: auditJson({ id: productId, name: row.name, stockLevel: Number(row.stockLevel || 0) }),
+            newData: auditJson({ id: productId, name: row.name, stockLevel, expectedStockLevel }),
+            createdAt: stamp, updatedAt: stamp });
+        if (!isTauri()) {
+            if (Number(before.stockLevel || 0) !== expectedStockLevel) throw new Error(conflictMessage);
+            patchProductInStore({ id: productId, stockLevel, updatedAt: stamp });
+            auditLogDB.update(rows => [makeAudit(before), ...rows]);
+            return;
+        }
+        if (!isMultiMode()) {
+            // Count, CAS and audit share one native BEGIN IMMEDIATE; no absolute
+            // product snapshot is ever queued by a stock count.
+            await sqlite.commitBatch([
+                { table: 'products', kind: 'setStock', data: { id: productId, stockLevel, expectedStockLevel, updatedAt: stamp } },
+                { table: 'audit_logs', data: makeAudit(before) },
+            ]);
+            try {
+                const accepted = await getLocalRow('products', 'id', productId);
+                if (accepted) patchProductInStore({ id: productId, stockLevel: accepted.stockLevel, updatedAt: accepted.updatedAt });
+            } catch (error) {
+                console.warn('Stock count and audit committed locally; stock display refresh will retry:', error);
+            }
+            return;
+        }
+        const epoch = await captureServerDataEpochForMutation();
+        const state = get(connectionState);
+        if (!epoch || !state.mysqlOnline || !state.mysqlConfig) {
+            throw new Error('Reconnect and synchronize the shop database before counting stock. Stock counts cannot be queued offline.');
+        }
+        await assertMariaDbCommerceWritesAllowed();
+        await flushOfflineQueue();
+        const local = await sqlite.getDb();
+        const queued: any[] = await local.select(`SELECT COUNT(*) AS count FROM _offline_queue
+            WHERE operation IN ('saleBundle', 'stockReceiptBundle')
+            OR (table_name = 'products' AND json_extract(CASE WHEN json_valid(data) THEN data ELSE '{}' END, '$.id') = ?)`, [productId]);
+        const conflicts: any[] = await local.select(`SELECT COUNT(*) AS count FROM _sync_conflicts
+            WHERE operation IN ('saleBundle', 'stockReceiptBundle')
+            OR (table_name = 'products' AND json_extract(CASE WHEN json_valid(data) THEN data ELSE '{}' END, '$.id') = ?)`, [productId]);
+        if (Number(queued[0]?.count) || Number(conflicts[0]?.count) || await pendingOnlineFinancialIntentCount()) {
+            throw new Error('Finish pending stock synchronization, resolve stock sync conflicts and complete payment recovery before counting stock.');
+        }
+        // The baseline for cache hydration is captured after flushing this till's
+        // metadata. A later local sale, receipt or download must win over it.
+        const cacheBefore = await getLocalRow('products', 'id', productId);
+        const result = await withMysqlSession(buildMysqlUri(state.mysqlConfig), 'catalogue', async database => {
+            await database.execute('START TRANSACTION');
+            let committing = false;
+            try {
+                const barriers: any[] = await database.select('SELECT CAST(state AS CHAR) AS state FROM pos_close_barrier WHERE id = 1 FOR UPDATE');
+                if (barriers.length !== 1 || barriers[0].state !== 'idle') throw new Error('Finish the whole-system report close before counting stock.');
+                const gates: any[] = await database.select('SELECT CAST(isActive AS SIGNED) AS isActive FROM pos_restore_gate WHERE id = 1 FOR UPDATE');
+                if (gates.length !== 1 || Number(gates[0].isActive) !== 0) throw new Error('Finish the database restore before counting stock.');
+                const epochs: any[] = await database.select("SELECT CAST(value AS CHAR) AS value FROM settings WHERE `key` = 'server_data_epoch' LIMIT 1 FOR UPDATE");
+                if (String(epochs[0]?.value || '').trim() !== epoch) throw new Error('The shop database was replaced. Reload before counting stock.');
+                const rows: any[] = await database.select('SELECT id, name, COALESCE(stockLevel, 0) AS stockLevel, updatedAt FROM products WHERE id = ? FOR UPDATE', [productId]);
+                const current = rows[0];
+                if (!current) throw new Error('The item no longer exists. Reload before counting again.');
+                if (Number(current.stockLevel) !== expectedStockLevel) {
+                    await database.execute('ROLLBACK');
+                    return { row: current, conflict: true };
+                }
+                await database.execute('UPDATE products SET stockLevel = ?, updatedAt = ? WHERE id = ? AND COALESCE(stockLevel, 0) = ?',
+                    [stockLevel, stamp, productId, expectedStockLevel]);
+                const audit = makeAudit(current);
+                await database.execute('INSERT INTO audit_logs (id, employeeId, action, entityType, entityId, oldData, newData, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [audit.id, audit.employeeId, audit.action, audit.entityType, audit.entityId, audit.oldData, audit.newData, audit.createdAt, audit.updatedAt]);
+                const after: any[] = await database.select('SELECT id, name, COALESCE(stockLevel, 0) AS stockLevel, updatedAt FROM products WHERE id = ?', [productId]);
+                committing = true;
+                await database.execute('COMMIT');
+                return { row: after[0], conflict: false };
+            } catch (error) {
+                await database.execute('ROLLBACK').catch(() => undefined);
+                if (committing) throw new Error('The stock count outcome could not be confirmed. Do not repeat it; reconnect and refresh stock to check the saved count.');
+                throw error;
+            }
+        });
+        // Server audit is part of the authoritative transaction. The cache is
+        // best-effort and stock-only, never a write-back product snapshot.
+        try {
+            if (cacheBefore && result.row) await sqlite.commitBatch([{ table: 'products', kind: 'setStock',
+                protectPending: true, serverDataEpoch: epoch,
+                data: { id: productId, stockLevel: Number(result.row.stockLevel),
+                    expectedStockLevel: Number(cacheBefore.stockLevel || 0), expectedUpdatedAt: String(cacheBefore.updatedAt || ''),
+                    updatedAt: result.row.updatedAt } }]);
+            const accepted = await getLocalRow('products', 'id', productId);
+            if (accepted) patchProductInStore({ id: productId, stockLevel: accepted.stockLevel, updatedAt: accepted.updatedAt });
+        } catch (error) {
+            console.warn('Authoritative stock was checked; local stock refresh will retry:', error);
+        }
+        if (result.conflict) throw new Error(conflictMessage);
+    });
 }
 
 export interface StockReceiptBundle {
@@ -5511,6 +5923,27 @@ const ONLINE_FINANCIAL_RETRY_VOLATILE_KEYS = new Set([
 ]);
 
 let retryableOnlineFinancialBundle: { fingerprint: string; bundle: SaleBundle } | null = null;
+export const pendingOnlineFinancialIntent = writable<PendingOnlineFinancialIntent | null>(null);
+export const pendingOnlineFinancialReadError = writable('');
+
+/** Read-only journal review, also used after failures; never infer cancellation. */
+export async function refreshPendingOnlineFinancialIntent(): Promise<PendingOnlineFinancialIntent | null> {
+    if (!isTauri()) return null;
+    try {
+        const local = await sqlite.getDb();
+        const rows: Record<string, unknown>[] = await local.select(
+            'SELECT operation, orderId, bundleJson, createdAt, lastError FROM _online_financial_intent WHERE id = 1',
+        );
+        const intent = rows[0] ? parsePendingOnlineFinancialIntent(rows[0]) : null;
+        pendingOnlineFinancialIntent.set(intent);
+        pendingOnlineFinancialReadError.set('');
+        return intent;
+    } catch (error) {
+        // Do not discard a known pending receipt just because its review failed.
+        pendingOnlineFinancialReadError.set('Financial recovery status could not be read. Do not repeat a pending transaction; retry review.');
+        throw error;
+    }
+}
 
 function stableOnlineFinancialValue(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stableOnlineFinancialValue);
@@ -5641,19 +6074,53 @@ export async function withCurrentReportEpoch<T extends {
 }
 
 /** Finish a MariaDB-authoritative financial commit left uncertain by a crash. */
-export async function recoverOnlineFinancialIntent(config?: MysqlConfig): Promise<SaleBundle | null> {
+export async function recoverOnlineFinancialIntent(
+    config?: MysqlConfig,
+    reviewedOrderId?: string,
+): Promise<SaleBundle | null> {
     if (!isTauri() || !isMultiMode()) return null;
-    const mysqlConfig = config || get(connectionState).mysqlConfig;
-    if (!mysqlConfig) throw new Error('MariaDB configuration is unavailable');
-    const committed = await invoke<CommitSaleResult | null>('recover_online_financial_intent', {
-        mysqlUri: buildMysqlUri(mysqlConfig),
+    return wholeSystemCloseLocalMutex.runExclusive(async () => {
+        const mysqlConfig = config || get(connectionState).mysqlConfig;
+        if (!mysqlConfig) throw new Error('MariaDB configuration is unavailable');
+        let recovery = null;
+        if (reviewedOrderId !== undefined) {
+            const pending = await refreshPendingOnlineFinancialIntent();
+            if (!pending || pending.orderId !== reviewedOrderId) {
+                throw new Error('The pending transaction changed. Review the current saved receipt before recovery.');
+            }
+            const actor = get(currentEmployee);
+            if (!canRecoverOnlineFinancialIntent(actor, pending, get(settingsDB))) {
+                throw new Error('Sign in with permission for this transaction before recovering it.');
+            }
+            recovery = {
+                expectedOrderId: reviewedOrderId,
+                employeeId: actor!.id,
+                employeeUpdatedAt: currentEmployeeAuthorizationVersion() || actor!.updatedAt || '',
+            };
+        }
+        try {
+            const committed = await invoke<CommitSaleResult | null>('recover_online_financial_intent', {
+                mysqlUri: buildMysqlUri(mysqlConfig), recovery,
+            });
+            retryableOnlineFinancialBundle = null;
+            if (!committed) {
+                await refreshPendingOnlineFinancialIntent();
+                return null;
+            }
+            // Native success includes the authoritative commit, local mirror
+            // and journal removal. A display refresh cannot undo that result.
+            pendingOnlineFinancialIntent.set(null);
+            pendingOnlineFinancialReadError.set('');
+            await hydrateSvelteStores().catch((error) => {
+                console.warn('database: financial receipt recovered; display refresh deferred:', error);
+            });
+            notifyOwnerCloudDataChanged();
+            return committed.bundle;
+        } catch (error) {
+            await refreshPendingOnlineFinancialIntent().catch(() => undefined);
+            throw error;
+        }
     });
-    if (!committed) return null;
-
-    retryableOnlineFinancialBundle = null;
-    await hydrateSvelteStores();
-    notifyOwnerCloudDataChanged();
-    return committed.bundle;
 }
 
 function commitBrowserPreviewSale(bundle: SaleBundle): SaleBundle {
@@ -5893,6 +6360,8 @@ async function commitSaleAfterClosePreflight(
                     bundle: retryableBundle,
                 });
                 retryableOnlineFinancialBundle = null;
+                pendingOnlineFinancialIntent.set(null);
+                pendingOnlineFinancialReadError.set('');
                 notifyOwnerCloudDataChanged();
                 return committed.bundle;
             } catch (e) {
@@ -5903,6 +6372,8 @@ async function commitSaleAfterClosePreflight(
                         syncError: String(e),
                     }));
                 }
+                const pending = await refreshPendingOnlineFinancialIntent().catch(() => null);
+                if (pending) throw new OnlineFinancialPendingError(pending);
                 throw e;
             }
         }
@@ -5926,8 +6397,11 @@ async function commitSaleAfterClosePreflight(
 }
 
 export async function commitSale(bundle: SaleBundle): Promise<SaleBundle> {
-    if (!isTauri() || !isMultiMode()) return commitSaleAfterClosePreflight(bundle);
+    if (!isTauri()) return commitSaleAfterClosePreflight(bundle);
     return wholeSystemCloseLocalMutex.runExclusive(async () => {
+        const pending = await refreshPendingOnlineFinancialIntent();
+        if (pending) throw new OnlineFinancialPendingError(pending);
+        if (!isMultiMode()) return commitSaleAfterClosePreflight(bundle);
         const requiresOnlineFinancialAuthority = bundle.order?.type === 'return'
             || Boolean(bundle.accountChanges?.length)
             || (bundle.order?.type === 'sale' && Boolean(bundle.loyaltyChanges?.some(
@@ -8101,6 +8575,8 @@ export async function clockInEmployeeAttendance(
             createdByEmployeeId: normalizedActorId, updatedByEmployeeId: normalizedActorId,
             createdAt: stamp, updatedAt: stamp,
         };
+        const conflict = findAttendanceOverlap(row, browserAttendanceRows);
+        if (conflict) throw attendanceOverlapError(conflict);
         browserAttendanceRows.push(row);
         notifyAttendanceChanged();
         return browserAttendanceRow(row);
@@ -8111,13 +8587,12 @@ export async function clockInEmployeeAttendance(
         const openRow = await requireOnlineAttendanceWrites(normalizedEmployeeId);
         if (openRow) throw new Error('ATTENDANCE_ALREADY_CLOCKED_IN');
         try {
-            row = await withTimeout(
-                mysql.mysqlInsertOpenEmployeeAttendance(
-                    crypto.randomUUID(), normalizedEmployeeId, tillId, normalizedActorId,
-                    String(notes || '').trim().slice(0, 500),
-                ),
-                7_000,
-                'Attendance clock-in timed out',
+            // A UI timeout cannot cancel a pinned native transaction. Await its
+            // commit/rollback result so the caller cannot report failure and
+            // release its busy guard while a clock-in can still commit.
+            row = await mysql.mysqlInsertOpenEmployeeAttendance(
+                crypto.randomUUID(), normalizedEmployeeId, tillId, normalizedActorId,
+                String(notes || '').trim().slice(0, 500),
             );
         } catch (error) {
             if (String(error).includes('ATTENDANCE_EMPLOYEE_INACTIVE')) {
@@ -8174,10 +8649,13 @@ export async function clockOutEmployeeAttendance(
         }
         const oldRow = { ...browserAttendanceRows[index] };
         const stamp = new Date().toISOString();
-        browserAttendanceRows[index] = {
+        const candidate: EmployeeAttendance = {
             ...oldRow, clockOutAt: stamp, clockOutTillId: tillId, status: 'closed',
             updatedByEmployeeId: normalizedActorId, updatedAt: stamp,
         };
+        const conflict = findAttendanceOverlap(candidate, browserAttendanceRows);
+        if (conflict) throw attendanceOverlapError(conflict);
+        browserAttendanceRows[index] = candidate;
         notifyAttendanceChanged();
         return browserAttendanceRow(browserAttendanceRows[index]);
     }
@@ -8191,16 +8669,16 @@ export async function clockOutEmployeeAttendance(
     }
     let row: EmployeeAttendance;
     if (isMultiMode()) {
-        row = await withTimeout(
-            mysql.mysqlCloseOpenEmployeeAttendance(oldRow.id, normalizedEmployeeId, tillId, normalizedActorId),
-            7_000,
-            'Attendance clock-out timed out',
+        // Keep the exact session pending until the native transaction resolves;
+        // Promise.race would time out without cancelling its eventual write.
+        row = await mysql.mysqlCloseOpenEmployeeAttendance(
+            oldRow.id, normalizedEmployeeId, tillId, normalizedActorId,
         );
         const nextOpen = await mysql.mysqlGetOpenEmployeeAttendance(normalizedEmployeeId).catch(() => null);
         await reconcileAttendanceCacheWithoutFailingRemoteAction(normalizedEmployeeId, nextOpen);
     } else {
         row = await sqlite.closeOpenEmployeeAttendance(
-            normalizedEmployeeId, tillId, normalizedActorId, new Date().toISOString(),
+            normalizedEmployeeId, tillId, normalizedActorId, new Date().toISOString(), oldRow.id,
         );
     }
     await auditAttendanceChange('attendance_clocked_out', row, oldRow, normalizedActorId);
@@ -8212,7 +8690,9 @@ export async function saveClosedEmployeeAttendance(
     input: EmployeeAttendance,
     actorEmployeeId: string,
 ): Promise<EmployeeAttendance> {
-    validateClosedAttendance(input.clockInAt, input.clockOutAt);
+    // Shared writes validate the future-date boundary against MariaDB's clock
+    // inside their transaction, not an independently configured till clock.
+    validateClosedAttendance(input.clockInAt, input.clockOutAt, isTauri() && isMultiMode() ? Infinity : Date.now());
     const employeeId = String(input.employeeId || '').trim();
     if (!employeeId) throw new Error('Choose a staff member');
     const actorId = String(actorEmployeeId || '').trim();
@@ -8260,10 +8740,15 @@ export async function saveClosedEmployeeAttendance(
     if (oldRow?.status === 'open') {
         throw new Error('Clock out this employee before correcting the attendance record');
     }
+    if (expectedUpdatedAt
+        ? !oldRow || !attendanceCorrectionVersionMatches(expectedUpdatedAt, oldRow.updatedAt)
+        : Boolean(oldRow)) {
+        throw new Error(`${ATTENDANCE_CORRECTION_CONFLICT_CODE}: ${ATTENDANCE_CORRECTION_CONFLICT_MESSAGE}`);
+    }
     const stamp = new Date().toISOString();
     const candidate: EmployeeAttendance = {
         id: input.id || crypto.randomUUID(), employeeId,
-        clockInAt: input.clockInAt, clockOutAt: input.clockOutAt,
+        clockInAt: new Date(input.clockInAt).toISOString(), clockOutAt: new Date(input.clockOutAt).toISOString(),
         clockInTillId: String(input.clockInTillId || ''),
         clockOutTillId: String(input.clockOutTillId || ''),
         status: 'closed', notes,
@@ -8274,17 +8759,18 @@ export async function saveClosedEmployeeAttendance(
     };
     let row: EmployeeAttendance;
     if (!isTauri()) {
+        const conflict = findAttendanceOverlap(candidate, browserAttendanceRows);
+        if (conflict) throw attendanceOverlapError(conflict);
         const index = browserAttendanceRows.findIndex((entry) => entry.id === candidate.id);
         if (index >= 0) browserAttendanceRows[index] = candidate;
         else browserAttendanceRows.push(candidate);
         row = browserAttendanceRow(candidate);
     } else if (isMultiMode()) {
         try {
-            row = await withTimeout(
-                mysql.mysqlSaveClosedEmployeeAttendance(candidate, expectedUpdatedAt),
-                7_000,
-                'Attendance correction timed out',
-            );
+            // Native connect, lock and statement timeouts bound this operation.
+            // Do not race it with an uncancellable JS timeout: a late commit
+            // would otherwise look like a failed edit and invite another save.
+            row = await mysql.mysqlSaveClosedEmployeeAttendance(candidate, expectedUpdatedAt);
         } catch (error) {
             if (String(error).includes(ATTENDANCE_CORRECTION_CONFLICT_CODE)) {
                 throw new Error(
@@ -8299,13 +8785,7 @@ export async function saveClosedEmployeeAttendance(
             console.warn('database: attendance correction succeeded in MariaDB but its local cache update failed:', error);
         }
     } else {
-        await sqlite.upsert('employee_attendance', candidate, 'id');
-        const d = await sqlite.getDb();
-        const rows = await d.select<EmployeeAttendance[]>(
-            `SELECT * FROM employee_attendance WHERE id = ? LIMIT 1`,
-            [candidate.id],
-        );
-        row = rows[0];
+        row = await sqlite.saveClosedEmployeeAttendance(candidate, expectedUpdatedAt);
     }
     await auditAttendanceChange(
         oldRow ? 'attendance_corrected' : 'attendance_manual_record_added',
@@ -8848,6 +9328,8 @@ const MARIADB_COORDINATION_SCHEMA: Record<string, string[]> = {
     pos_restore_gate: ['id', 'ownerTillId', 'isActive', 'claimedAt'],
     pos_account_write_authority: ['connectionId', 'authorityToken', 'expiresAt'],
     pos_customer_write_locks: ['customerId'],
+    pos_catalogue_mutex: ['id'],
+    pos_catalogue_presence: ['tableName', 'rowId', 'isPresent'],
     payment_terminal_locks: [
         'terminalKey', 'tillId', 'tillName', 'paymentReference', 'acquiredAt', 'expiresAt',
     ],
@@ -8860,6 +9342,7 @@ const MARIADB_COORDINATION_SCHEMA: Record<string, string[]> = {
 };
 
 const REQUIRED_MARIADB_MIGRATION_MARKERS = [
+    CATALOGUE_INTEGRITY_MIGRATION,
     '2026-07-customer-account-schema-v4',
     mysql.MYSQL_IDENTIFIER_COLLATION_MIGRATION,
     '2026-07-account-ledger-guards-binary-v1',
@@ -9034,6 +9517,7 @@ export async function getSyncRuntimeDiagnostics(): Promise<SyncRuntimeDiagnostic
 }
 
 export async function validateDatabaseSchemas(): Promise<SchemaValidationResult> {
+    if (nativeQaEnabled) await nativeQaCheckpoint('schema.validate');
     const issues: string[] = [];
     let localAvailable = true;
     let mariaDbAvailable: boolean | null = isMultiMode() ? false : null;
@@ -10358,6 +10842,13 @@ async function applyRemoteSyncRows(
     idKey: string,
     allowPromotionPrune = false,
 ): Promise<number> {
+    if (table === 'tax_rates') {
+        return taxSnapshotMutex.runExclusive(() => applyRemoteSyncRowsUnlocked(table, remoteRows, idKey, allowPromotionPrune));
+    }
+    return applyRemoteSyncRowsUnlocked(table, remoteRows, idKey, allowPromotionPrune);
+}
+
+async function applyRemoteSyncRowsUnlocked(table: string, remoteRows: any[], idKey: string, allowPromotionPrune: boolean): Promise<number> {
     if (table === 'app_identity') {
         // Never hide a newer signed renewal behind an older pending upload or
         // mutable row timestamp. The native singleton merge preserves both the
@@ -10540,6 +11031,16 @@ async function verifyOneSyncPage(): Promise<void> {
     }
 }
 
+async function acknowledgeRecoveredSandboxPaymentsAfterSync(): Promise<string | null> {
+    try {
+        const { reconcileConfirmedDojoSandboxRecoveries } = await import('$lib/terminalAttempts');
+        const result = await reconcileConfirmedDojoSandboxRecoveries();
+        return result.errors.length ? result.errors.join(' ') : null;
+    } catch (error) {
+        return `Sandbox payment history could not be acknowledged yet: ${String(error)}`;
+    }
+}
+
 /** Poll one tiny MariaDB cursor, then pull only tables which actually changed. */
 export async function runChangeSyncCycle(): Promise<void> {
     if (!isMultiMode() || isChangeSyncRunning || isFastSyncRunning || isSyncRunning) return;
@@ -10593,6 +11094,9 @@ export async function runChangeSyncCycle(): Promise<void> {
                 activityError = `Background verification will retry: ${String(error)}`;
                 console.warn(activityError);
             }
+        }
+        if (!reloadAfterPurge && !activityError && get(connectionState).mysqlOnline) {
+            activityError = await acknowledgeRecoveredSandboxPaymentsAfterSync();
         }
         activitySucceeded = get(connectionState).mysqlOnline && !activityError;
     } catch (error) {
@@ -10678,8 +11182,9 @@ export async function runFastSyncCycle(): Promise<void> {
         }
         notifySyncedTableChanges(changedTables, removed);
 
+        if (!activityError) activityError = await acknowledgeRecoveredSandboxPaymentsAfterSync();
         activitySucceeded = !activityError;
-        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: null }));
+        connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: activityError }));
     } catch (e: any) {
         activityError = String(e);
         console.warn('database: fast sync failed:', e);
@@ -10780,6 +11285,7 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
         }
         notifySyncedTableChanges(changedTables, removed);
 
+        if (!activityError) activityError = await acknowledgeRecoveredSandboxPaymentsAfterSync();
         activitySucceeded = !activityError;
         connectionState.update(s => ({ ...s, mysqlOnline: true, syncError: activityError }));
         console.log('database: full sync complete ✅');

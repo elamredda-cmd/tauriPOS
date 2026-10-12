@@ -1,0 +1,69 @@
+{
+  "recordedAtUtc": "2026-10-12T20:29:55Z",
+  "scope": "Final automated verification of the current shared source after native QA fixes. Native UI outcomes are recorded separately by the native operator.",
+  "frontend": {
+    "command": "npx vitest run",
+    "status": "PASS",
+    "filesPassed": 99,
+    "filesSkipped": 3,
+    "filesTotal": 102,
+    "testsPassed": 1271,
+    "testsSkipped": 56,
+    "testsTotal": 1327,
+    "durationSeconds": 9.98,
+    "skippedTestsAreNotClaimedAsExecuted": true
+  },
+  "typeAndSvelteChecks": {
+    "command": "npm run check",
+    "status": "PASS",
+    "errors": 0,
+    "warnings": 0
+  },
+  "invokeCapabilityAudit": {
+    "command": "node scripts/check-tauri-command-permissions.mjs",
+    "status": "PASS",
+    "frontendCommands": 99,
+    "registeredCommandsInSource": 105,
+    "allFrontendCommandsPermitted": true,
+    "note": "The source inventory includes cfg-gated QA entries. This count is not a claim that QA handlers exist in a normal or release binary."
+  },
+  "normalSourceRust": {
+    "workingDirectory": "src-tauri",
+    "command": "env -u LBJ_NATIVE_QA -u VITE_NATIVE_QA -u POS_TEST_MYSQL_URI -u LBJ_PRINTER_MODULE_TEST_PACKAGE cargo test --lib -- --skip real_mariadb_ --skip live_snapshot_is_consistent_and_schema_lock_is_connection_scoped --skip validates_a_package_created_by_the_javascript_packager_when_supplied",
+    "status": "PASS",
+    "testsPassed": 251,
+    "testsFailed": 0,
+    "testsIgnored": 0,
+    "testsFiltered": 10,
+    "testDurationSeconds": 5.43,
+    "compilerWarnings": 4,
+    "compilerWarningKind": "Existing unused restore helper functions in commerce.rs",
+    "nativeQaFeatureRequested": false,
+    "excludedExternalFixtures": {
+      "realMariaDbTests": 8,
+      "liveMySqlSessionTest": 1,
+      "externallyPackagedPrinterModuleTest": 1
+    },
+    "note": "Environment-dependent tests were explicitly filtered rather than allowed to return early and be misreported as executed passes. This run did not use or change the original database."
+  },
+  "qaIsolationSourceAudit": {
+    "status": "PASS_SOURCE_INSPECTION",
+    "buildGate": "src-tauri/build.rs emits cfg(native_qa) only when LBJ_NATIVE_QA=1, the native-qa Cargo feature is selected, and PROFILE=debug.",
+    "commandGate": "All four native_qa command registrations and the enabled implementation module require cfg(native_qa). The normal checkpoint implementation is a no-op.",
+    "runtimeGate": "QA startup and commands require the exact isolated application identifier com.elamreda.tauri-app.native-qa and the compile-time QA opt-in.",
+    "frontendGate": "VITE_NATIVE_QA=1 and isTauri() are both required for the QA frontend checkpoint and controls.",
+    "secretIsolation": "The isolated identifier skips legacy keychain migration; other secret operations use app-local files. QA provider network calls are rejected and printer/drawer network transport is loopback-only.",
+    "normalBuildResult": "Normal-source Rust tests compiled and passed without QA opt-ins; enabled QA tests and command implementations are excluded by cfg.",
+    "releaseBuildResult": "Not compiled in this verification. Source gate excludes PROFILE=release even with the QA feature and environment opt-in; no release artifact verification is claimed.",
+    "noSuccessfulOperationResultsFabricated": true
+  },
+  "patchWhitespace": {
+    "command": "git diff --check",
+    "status": "PASS"
+  },
+  "limits": [
+    "These automated results do not replace the separately recorded native Tauri interactions.",
+    "Physical printers, card terminals, external provider services, and live business data were not certified by this run.",
+    "The disposable loopback-only MariaDB candidate remains running for the separately controlled native reconnect exercise."
+  ]
+}

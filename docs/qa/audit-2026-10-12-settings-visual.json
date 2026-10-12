@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "title": "Independent settings screenshot UI review",
+  "auditDate": "2026-10-12",
+  "sourceRoot": "/Users/elamreda/Desktop/Tauri for Svelte POS",
+  "screenshotDirectory": "docs/qa/audit-2026-10-12/screenshots",
+  "viewport": {
+    "logicalWidth": 1024,
+    "logicalHeight": 768,
+    "retinaScale": 2,
+    "note": "Parent captured native Tauri window screenshots. App chrome is included; content height is smaller than the complete image."
+  },
+  "provenance": {
+    "method": "Independent read-only view_image inspection of screenshots 26 through 37; relevant source checked only to distinguish normal scrolling and click-through overlays from defects.",
+    "nativeUiActionsPerformedByThisAgent": 0,
+    "productFilesChangedByThisAgent": 0,
+    "claims": "Findings describe visible screenshot states only. This file does not claim every action, persistence, external service or physical device passed."
+  },
+  "findings": [
+    {
+      "id": "SET-VISUAL-01",
+      "priority": "P3",
+      "category": "notification_occlusion",
+      "title": "Success notifications cover settings content and header actions",
+      "routes": ["/settings/themes", "/settings/layout"],
+      "screenshots": ["26-themes.png", "28-button-layout.png"],
+      "observed": "Themes screenshot shows four stacked success notifications covering the upper-right theme cards. Button Setup screenshot shows a save notification across the upper-right header-action area. The affected text and controls are visually hidden while the notification is displayed.",
+      "source": [{"file": "src/lib/components/Toast.svelte", "line": 134}],
+      "scope": "Visual occlusion is confirmed. General button click blocking is not claimed: notification stack and cards use pointer-events:none; only notification dismiss buttons receive pointer events.",
+      "suggestion": "Coalesce repeated configuration-save notifications or use a compact status location that leaves active settings controls visible. Preserve click-through behavior.",
+      "verification": "screenshot_confirmed_visual_issue"
+    },
+    {
+      "id": "SET-VISUAL-02",
+      "priority": "P3",
+      "category": "misleading_validation_label",
+      "title": "Unchecked barcode digit is labelled Valid",
+      "routes": ["/settings/barcodes"],
+      "screenshots": ["29-unchecked-digit-valid.png"],
+      "sourceFindingId": "SET-SOURCE-03",
+      "observed": "Validate check digit is switched off, the tester input is 2312345006997, and the result still reports Check digit: Valid. The diagram's generated check digit is 8, not the entered final digit 7.",
+      "source": [{"file": "src/routes/settings/barcodes/+page.svelte", "line": 422}, {"file": "src/lib/barcodeRules.ts", "line": 173}],
+      "scope": "The accepted-rule result may be intended with validation disabled, but saying Valid falsely implies the checksum was checked and passed.",
+      "suggestion": "Show Not checked when checksum validation is disabled, or independently compute and display actual checksum validity without changing the configured acceptance rule.",
+      "verification": "screenshot_confirmed_ui_content_issue"
+    }
+  ],
+  "inspectedScreenshots": [
+    {
+      "file": "26-themes.png",
+      "route": "/settings/themes",
+      "visibleState": "Two-column theme cards at a scrolled position after multiple theme selections.",
+      "result": "Visual issue SET-VISUAL-01; otherwise visible card content fits the page width.",
+      "normalScrolling": "Lower theme cards continue below the viewport in the visible scrollable page."
+    },
+    {
+      "file": "27-fonts.png",
+      "route": "/settings/fonts",
+      "visibleState": "Scrolled font-choice grid with Legacy POS crisp selected and product-tile size section beginning below.",
+      "result": "No genuine clipping, overlap or missing control found in the visible state.",
+      "normalScrolling": "Top and bottom viewport cuts follow the current scroll position, not clipped card content."
+    },
+    {
+      "file": "28-button-layout.png",
+      "route": "/settings/layout",
+      "visibleState": "Cart and toolbar four-row reorder lists, matching live preview, and save notification.",
+      "result": "Visual issue SET-VISUAL-01; all reorder rows and preview columns otherwise fit.",
+      "normalScrolling": "Not needed for the currently visible rows."
+    },
+    {
+      "file": "29-unchecked-digit-valid.png",
+      "route": "/settings/barcodes",
+      "visibleState": "Price rule diagram and test result for wrong final digit with checksum validation switched off.",
+      "result": "UI-content issue SET-VISUAL-02; no layout overflow visible.",
+      "normalScrolling": "No offscreen control is used as evidence of a defect."
+    },
+    {
+      "file": "30-scale-setup.png",
+      "route": "/settings/scale",
+      "visibleState": "Scale disabled; port finder and manual port field; two discovered ports status.",
+      "result": "No genuine clipping, overlap or missing control found in the visible state.",
+      "normalScrolling": "Further connection controls continue below the viewport in the page scroll area."
+    },
+    {
+      "file": "31-printer-modules.png",
+      "route": "/settings/printers",
+      "visibleState": "Modules tab with zero installed printer SDK modules; refresh and install actions.",
+      "result": "All four tabs, module actions and empty-state text fit; no genuine UI issue visible.",
+      "normalScrolling": "Entire visible empty-state panel fits."
+    },
+    {
+      "file": "32-label-designer.png",
+      "route": "/settings/labels",
+      "visibleState": "Design tab, Shelf template, size sliders, information toggles and selected-item label preview.",
+      "result": "Reset, Save and Print actions, preview and visible design controls fit; no genuine UI issue visible.",
+      "normalScrolling": "Print date controls continue below the left panel. Source .design-scroll has overflow-y:auto, so below-fold controls are not classified as missing."
+    },
+    {
+      "file": "33-receipt-designer.png",
+      "route": "/settings/receipt",
+      "visibleState": "Content tab with ten visible content toggles and complete normal-size 80 mm receipt preview.",
+      "result": "Header actions, content controls and preview fit; no genuine UI issue visible.",
+      "normalScrolling": "Visible receipt fits the preview panel. Missing empty store fields cannot be diagnosed from this screenshot alone."
+    },
+    {
+      "file": "34-customer-display-settings.png",
+      "route": "/settings/customer-display",
+      "visibleState": "Scrolled welcome-message settings with preview, saved status and disabled Save changes actions.",
+      "result": "Visible inputs, colour controls, preview, Close/Open display and Save actions fit; no genuine UI issue visible.",
+      "normalScrolling": "The welcome section heading is cut at the upper edge because the page has already scrolled."
+    },
+    {
+      "file": "35-feedback.png",
+      "route": "/settings/feedback",
+      "visibleState": "Scrolled scan/sale feedback cards, unsupported haptics state and four failed-barcode sound choices.",
+      "result": "Visible card text, On/Off/Unavailable states and Test Barcode Alert action fit; no genuine clipping or overlap found.",
+      "normalScrolling": "Earlier controls are above the current scroll position. Screenshot alone does not verify audible output."
+    },
+    {
+      "file": "36-dojo-available.png",
+      "route": "/settings/payments/dojo",
+      "visibleState": "Dojo enabled, dedicated terminal assignment selected, old sandbox recovery action visible.",
+      "result": "Header actions, provider state, assignment value and recovery action fit; no genuine UI issue visible.",
+      "normalScrolling": "API access and assigned-terminal details continue below the current viewport."
+    },
+    {
+      "file": "37-sumup-setup.png",
+      "route": "/settings/payments/sumup",
+      "visibleState": "Scrolled blank credentials, unconfigured Solo reader, Not tested status and beginning of pairing section.",
+      "result": "Credential fields, Find My Readers, reader placeholder and status fit; no genuine UI issue visible.",
+      "normalScrolling": "Earlier fields and later pairing controls are outside the current scroll position. Disabled Test Reader is consistent with the visible unconfigured state."
+    }
+  ],
+  "limitations": [
+    "These twelve screenshots show one native window size and selected scroll/tab states, not every combination of font size, theme, device mode or long text.",
+    "No conclusion about persistence, button response, remote API, sound, physical scale, printer or cash drawer is derived solely from a screenshot.",
+    "Scrollable content outside the captured viewport is not reported as inaccessible unless a scroll failure is separately reproduced.",
+    "No product source, running app, configuration, credentials, services or data were modified by this reviewer."
+  ]
+}

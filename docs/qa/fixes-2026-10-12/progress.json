@@ -1,0 +1,298 @@
+{
+  "sourceAudit": "../audit-2026-10-12/REPORT.html",
+  "report": "REPORT.html",
+  "status": "ALL_41_IMPLEMENTED_NATIVE_SCENARIOS_RECORDED_WITH_EXPLICIT_LIMITS",
+  "completedAt": "2026-10-12T19:52:23.086Z",
+  "scope": "All 41 original findings have implementations: four P1 fixes, the related future-attendance guard and 36 continuation findings. Planned native scenarios and final restoration are recorded; partial and automated-only coverage and remaining hardware/failure limits are explicit.",
+  "priorities": [
+    {
+      "id": "OPS-NATIVE-CACHED-SCAN-AGE-GATE-BYPASS",
+      "status": "IMPLEMENTED_NATIVE_REGRESSION_PASSED",
+      "implementation": "Consume Enter before cached lookup; neutral dialog focus; reject inherited/held keys and additional scanner bursts.",
+      "native": "Initial/cached/held Return and focused approval scan tests passed. Explicit pointer and fresh keyboard approval each added one item. Final incremental build rescan rejected automatic approval.",
+      "screenshots": [
+        "02-age-cached-scan-blocked.png",
+        "03-age-keyboard-approved-one-item.png",
+        "23-final-incremental-age-gate.png"
+      ]
+    },
+    {
+      "id": "OPS-NATIVE-PAY-LATER-POOL-TIMEOUT-RECOVERY",
+      "status": "IMPLEMENTED_NATIVE_HEALTHY_AND_TIMEOUT_RECOVERY_PASSED",
+      "implementation": "Bounded native acquisition and replay; immutable reserved-receipt recovery with live authority checks; persistent Review/Recover UI; no replacement financial operation; scanner blocked behind recovery modal.",
+      "native": "Historical healthy receipt 1000084 completed once for 169p and was repaid. In the later native controlled timeout after 5,003 ms, reserved receipt 1000085 remained pending, not cancelled; Review/Recover replayed the original receipt and verified exactly one sale and one 169p account charge. A normal 169p cash repayment restored balance 0p, Allow Pay Later purchases disabled/status On hold, and pending financial journals 0.",
+      "automated": "Rust stalled TCP acquisition retained exact journal and receipt, blocked replacement; frontend review and recovery checks passed.",
+      "limit": "Observed controlled mock acquisition-timeout/replay path passed; not every crash, transaction stage, network boundary or shared-till concurrency case. Historical healthy-flow evidence is retained separately and is not substituted for the timeout scenario.",
+      "screenshots": [
+        "06-pay-later-confirmed-success.png",
+        "08-mock-account-restored-clear.png",
+        "31-financial-timeout-pending-alert.png",
+        "32-financial-review-original-receipt.png",
+        "33-recovered-original-receipt-completed.png",
+        "34-recovery-account-restored.png"
+      ],
+      "historicalHealthyNative": "Receipt 1000084 completed once for 169p; customer balance increased exactly; normal 169p repayment restored zero balance and original hold setting.",
+      "historicalInitialLimit": "Timeout Review/Recover UI was not fault-injected in Tauri. Healthy native sale is not a full timeout recovery PASS.",
+      "nativeTimeoutRecovery": {
+        "timeoutElapsedMs": 5003,
+        "receipt": 1000085,
+        "amountPence": 169,
+        "exactSaleCount": 1,
+        "exactAccountChargeCount": 1,
+        "repaymentPence": 169,
+        "customerBalancePenceAfter": 0,
+        "customerPayLaterEnabledAfter": false,
+        "customerStatusAfter": "On hold",
+        "pendingFinancialJournalsAfter": 0,
+        "totalOrdersAfter": 91,
+        "finalBundleTestFaultFlag": false,
+        "orderId": "1faa4e9c-0d6e-455b-95db-d9f9d1ffbd4",
+        "customerId": "8ee6ce7f-c3f5-4a82-868e-7456ee7b6422",
+        "matchingCustomerChargeEntries": 1
+      }
+    },
+    {
+      "id": "OPS-NATIVE-ATTENDANCE-OVERLAP",
+      "status": "IMPLEMENTED_NATIVE_VALID_INVALID_SAVES_PASSED",
+      "implementation": "Atomic SQLite guards; pinned shared transactions and ordered employee locks; immutable session IDs and CAS corrections; await commit/rollback; indexed exact staff lookup compatible with legacy collations.",
+      "native": "Overlap rejected with exact open interval; future date rejected; one valid Arda 8-hour labelled fixture saved. Existing historical overlaps not auto-repaired.",
+      "automated": "Nine isolated MariaDB cases including five two-manager conflicting interval races; delayed 20-second frontend completion tests passed.",
+      "screenshots": [
+        "13-attendance-valid-save-confirmed.png",
+        "14-attendance-overlap-final-build.png",
+        "15-attendance-future-final-build.png"
+      ]
+    },
+    {
+      "id": "AUDIT-01",
+      "status": "IMPLEMENTED_NATIVE_PROTECTIONS_AND_FIXTURE_DELETES_PASSED",
+      "implementation": "Usage-query fail-closed; atomic server-first parent/default/reference/tombstone guards; server-confirmed cache tombstones; indexed comparisons respect installed legacy collations; native-decodable integral aggregate types.",
+      "native": "Used DRINKS and default GROCERY refused; used Standard VAT refused. Disposable unused category/tax each saved then deleted normally, one tombstone each; category/tax counts restored.",
+      "automated": "30 isolated catalogue cases across current and legacy mixed collations passed, including competing assignment/deletion ordering.",
+      "screenshots": [
+        "17-used-category-rejected.png",
+        "18-default-category-rejected.png",
+        "19-unused-category-deleted.png",
+        "20-used-tax-rejected.png",
+        "21-unused-tax-deleted.png"
+      ]
+    }
+  ],
+  "additionalFinding": {
+    "id": "OPS-SOURCE-ATTENDANCE-FUTURE",
+    "status": "IMPLEMENTED_NATIVE_FUTURE_DATE_REJECTED",
+    "allowanceMinutes": 2
+  },
+  "combinedChecks": {
+    "frontend": {
+      "passed": 1234,
+      "skipped": 56,
+      "totalTests": 1290,
+      "filesPassed": 95,
+      "filesSkipped": 3,
+      "totalFiles": 98,
+      "databaseOptionalSkipped": 54,
+      "databaseOptionalSeparatelyPassed": 54,
+      "otherOptionalSkippedNotRun": 2
+    },
+    "isolatedMariaDb": {
+      "passed": 55,
+      "catalogue": 42,
+      "attendance": 9,
+      "stockCountSql": 3,
+      "genericStockReplay": 1,
+      "unitCasesExcluded": 14,
+      "notes": "Final scopes are not additive. Frontend 56 skips include 54 real-MariaDB cases separately passed (42 catalogue + 9 attendance + 3 stock-count SQL), plus 2 other optional cases not run. Rust 10 filtered cases include the generic-stock MariaDB replay separately passed, plus 9 other optional cases not run. Real database total55 excludes14additionalunitcases."
+    },
+    "rust": {
+      "passed": 251,
+      "excluded": 10,
+      "existingWarnings": 4,
+      "databaseOptionalFilteredSeparatelyPassed": 1,
+      "otherOptionalFilteredNotRun": 9
+    },
+    "svelte": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "commandPermissionAudit": {
+      "frontendCommands": 95,
+      "registeredCommands": 101,
+      "passed": true
+    },
+    "diffCheck": "passed",
+    "nativeBundle": "Final normal debug macOS bundle built without the test fault flag and launched successfully"
+  },
+  "nativeObservations": {
+    "count": 478,
+    "first": "2026-10-12T18:25:37.338Z",
+    "last": "2026-10-12T19:52:23.086Z",
+    "note": "Count and timestamp metadata only; no raw accessibility values or credentials. Observations are not automatically verdicts; per-finding limits distinguish verified scenarios from partial/automated coverage."
+  },
+  "restoration": {
+    "status": "FINAL_NATIVE_HANDOFF_VERIFIED",
+    "observedAt": "2026-10-12T19:52:23.086Z",
+    "nativeOpen": true,
+    "page": "/",
+    "mode": "Checkout",
+    "staffDisplayName": "Alan",
+    "trolleyItems": 0,
+    "trolleyTotalPence": 0,
+    "sync": "Synced",
+    "offlineQueue": 0,
+    "onlineFinancialIntents": 0,
+    "conflicts": 0,
+    "activeTerminalAttempts": 0,
+    "orders": 91,
+    "customers": 855,
+    "categories": 95,
+    "taxRates": 2,
+    "attendance": 8,
+    "globalStockTracking": false,
+    "restoredProduct": {
+      "id": "old-item-016480",
+      "barcode": "5020379111201",
+      "name": "0EGGS",
+      "stockLevel": 0,
+      "trackStock": false,
+      "pricePence": 169
+    },
+    "restoredTaxDefaults": {
+      "Zero": true,
+      "Standard": false
+    },
+    "qaCustomerRestoration": {
+      "count": 2,
+      "balancesPence": [
+        0,
+        0
+      ],
+      "points": [
+        0,
+        0
+      ],
+      "payLaterEnabled": [
+        false,
+        false
+      ],
+      "status": "On hold"
+    },
+    "dojo": {
+      "providerConfiguration": "unchanged",
+      "savedKeys": "unchanged",
+      "environment": "Sandbox",
+      "virtualTerminal": "VCMLABJTIP0",
+      "terminalUsage": "Dedicated"
+    },
+    "finalBundle": "normal debug macOS Tauri, rebuilt and launched without the test fault flag",
+    "evidence": [
+      "screenshots/63-native-stock-count-confirmed.png",
+      "screenshots/64-native-stock-original-restored.png",
+      "screenshots/65-final-scale-price-rows-visible.png",
+      "screenshots/66-final-checkout-empty-synced.png"
+    ],
+    "limits": "Mock fixtures retained with normal audit rows; not a byte-for-byte database rollback. No Windows installation, physical hardware, live card certification or destructive maintenance verdict.",
+    "historicalPriorityRecord": "historicalPriorityRestoration"
+  },
+  "remainingScope": {
+    "originalFindingsOpen": 0,
+    "P2": 20,
+    "P3": 16,
+    "limits": [
+      "Per-finding partial and automated-only native/fault-injection limits in continuation-verification.json",
+      "Windows build/install/update",
+      "Physical printer, scale, drawer and card terminals",
+      "Physical multi-till concurrency",
+      "Destructive history/restore/Z-close workflows"
+    ],
+    "deployment": "Local changes only; not committed, pushed or deployed.",
+    "attendanceNote": "Existing historical overlapping mock sessions require review; old shared clients fail closed until updated.",
+    "originalFindings": 41,
+    "implementationComplete": 41,
+    "remainingContinuationFindings": 36,
+    "nativeCoverage": {
+      "originalFindings": 36,
+      "implemented": 36,
+      "nativePass": 19,
+      "nativePartial": 13,
+      "automatedOnly": 4,
+      "nativePending": 0
+    }
+  },
+  "historicalPriorityChecks": {
+    "frontend": {
+      "passed": 1085,
+      "skipped": 41,
+      "filesPassed": 82,
+      "filesSkipped": 3
+    },
+    "isolatedMariaDb": {
+      "passed": 39,
+      "catalogue": 30,
+      "attendance": 9,
+      "notes": "39 optional cases skipped in default frontend suite separately passed on an isolated socket-only server; do not double count."
+    },
+    "rust": {
+      "passed": 240,
+      "excluded": 9,
+      "existingWarnings": 4
+    },
+    "svelte": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "commandPermissionAudit": {
+      "frontendCommands": 95,
+      "registeredCommands": 101,
+      "passed": true
+    },
+    "diffCheck": "passed",
+    "nativeBundle": "debug macOS app built; explicit build-directory dependency added; fresh and subsequent incremental native startup passed"
+  },
+  "historicalPriorityRestoration": {
+    "nativeOpen": true,
+    "page": "/",
+    "trolleyItems": 0,
+    "sync": "Synced",
+    "offlineUploads": 0,
+    "onlineFinancialIntents": 0,
+    "unresolvedTerminalAttempts": 0,
+    "ordersBefore": 89,
+    "ordersAfter": 90,
+    "mockSaleReceipt": 1000084,
+    "mockSalePence": 169,
+    "mockRepaymentPence": 169,
+    "mockCustomerBalancePence": 0,
+    "mockCustomerPoints": 0,
+    "mockCustomerPayLaterEnabled": false,
+    "attendanceBefore": 7,
+    "attendanceAfter": 8,
+    "retainedAttendance": "Arda 2026-10-12 11:40–19:40 Europe/London; explicitly labelled QA PRIORITY FIX",
+    "categories": 95,
+    "taxRates": 2,
+    "temporaryFixturesDeleted": [
+      {
+        "table": "categories",
+        "id": "424c7ab5-1c51-4c2c-ae3a-2c7d5f0627cb",
+        "tombstones": 1
+      },
+      {
+        "table": "tax_rates",
+        "id": "3c6dc5aa-2751-4b39-b577-c650bafdd6ed",
+        "tombstones": 1
+      }
+    ],
+    "privateBackup": "Private pre-test SQLite backup exists outside repository; not a byte-for-byte rollback.",
+    "credentialsAndLiveConfig": "unchanged",
+    "scope": "Historical initial priority retest; not the final continuation handoff"
+  },
+  "priorityCompletedAt": "2026-10-12T18:53:19.357Z",
+  "continuationReport": "CONTINUATION.html",
+  "historicalPriorityObservations": {
+    "count": 171,
+    "first": "2026-10-12T18:25:37.338Z",
+    "last": "2026-10-12T18:53:19.357Z",
+    "note": "Observations are not individually labelled PASS. Raw secure AX values excluded; scenario verdicts above distinguish failed checkpoints and verified fixes.",
+    "scope": "Historical initial priority retest; later native scenarios are in continuation-verification.json"
+  }
+}

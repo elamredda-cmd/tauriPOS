@@ -5,6 +5,10 @@ description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
+[features]
+# Commands exist only in a debug build explicitly requesting this feature.
+native-qa = []
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]

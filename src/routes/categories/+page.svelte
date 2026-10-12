@@ -11,6 +11,7 @@
     import { getCategoryUsageSummary, upsert, remove as removeSql } from '$lib/stores/database';
     import { randomTileColor } from '$lib/tileColors';
     import { DEFAULT_PRODUCT_CATEGORY_SETTING_KEY } from '$lib/categoryDefaults';
+    import { catalogueDeletionError } from '$lib/catalogueIntegrity';
     import { onMount } from 'svelte';
 
     type CategoryUsage = { total: number; active: number; deactivated: number };
@@ -23,6 +24,8 @@
     let searchQuery = "";
     let categoryUsageById = new Map<string, CategoryUsage>();
     let usageLoading = true;
+    let usageError = '';
+    let checkingUsageId = '';
     let saving = false;
     let deleting = false;
     let defaultSavingId = '';
@@ -61,11 +64,15 @@
 
     async function loadCategoryUsage() {
         usageLoading = true;
+        usageError = '';
         try {
             const rows = await getCategoryUsageSummary();
             categoryUsageById = new Map(rows.map(row => [row.categoryId, row]));
+            return true;
         } catch (error) {
             console.warn('Could not load category usage:', error);
+            usageError = 'Could not check item usage. Reconnect and try again before deleting a category.';
+            return false;
         } finally {
             usageLoading = false;
         }
@@ -131,7 +138,15 @@
     }
 
     async function confirmDel(id: string) {
-        await loadCategoryUsage();
+        if (checkingUsageId || deleting) return;
+        if (id === defaultCategoryId) {
+            toast('Choose another default category before deleting this one.', 'error');
+            return;
+        }
+        checkingUsageId = id;
+        const loaded = await loadCategoryUsage();
+        checkingUsageId = '';
+        if (!loaded) { toast(usageError, 'error'); return; }
         const usage = categoryUsage(id);
         if (usage.total > 0) {
             toast(`This category is used by ${usage.total} item${usage.total === 1 ? '' : 's'} (${usage.active} active, ${usage.deactivated} deactivated). Move those items first.`, 'error');
@@ -148,28 +163,16 @@
         try {
             await removeSql('categories', id);
         } catch (e) {
-            console.error(e); toast('Failed to delete category', 'error'); return;
+            console.error(e); toast(catalogueDeletionError(e, 'Category was not deleted. Reconnect and refresh usage before trying again.'), 'error'); return;
         } finally {
             deleting = false;
         }
         categoriesDB.update(l => l.filter(c => c.id !== id));
-        if (id === defaultCategoryId) {
-            const setting = { key: DEFAULT_PRODUCT_CATEGORY_SETTING_KEY, value: '', updatedAt: now() };
-            try {
-                await upsert('settings', setting, 'key');
-                settingsDB.update((list) => [
-                    ...list.filter((item) => item.key !== setting.key),
-                    setting,
-                ]);
-            } catch (error) {
-                console.warn('Could not clear the deleted default category:', error);
-            }
-        }
         toast('Category deleted', 'info');
         showDelConfirm = false;
     }
 
-    onMount(loadCategoryUsage);
+    onMount(() => { void loadCategoryUsage(); });
 </script>
 
 <MgmtPage title="Categories">
@@ -213,6 +216,8 @@
                 <td>
                     {#if usageLoading}
                         <span class="text-text-muted">...</span>
+                    {:else if usageError}
+                        <span class="text-danger">Unavailable</span>
                     {:else}
                         <span class="font-semibold">{usage.total}</span>
                         <span class="text-text-muted text-xs">({usage.active} active, {usage.deactivated} deactivated)</span>
@@ -230,7 +235,7 @@
                         on:click={() => setDefaultCategory(cat)}
                     ><Star size={16} fill={cat.id === defaultCategoryId ? 'currentColor' : 'none'} /></button>
                     <button class="btn-icon act-btn" title="Edit category" aria-label={`Edit ${cat.name}`} on:click={() => edit(cat)}><Pencil size={16} /></button>
-                    <button class="btn-icon act-btn danger" title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}><Trash2 size={16} /></button>
+                    <button class="btn-icon act-btn danger" disabled={checkingUsageId !== '' || deleting} title="Delete category" aria-label={`Delete ${cat.name}`} on:click={() => confirmDel(cat.id)}><Trash2 size={16} /></button>
                 </div></td>
             </tr>
             {/each}

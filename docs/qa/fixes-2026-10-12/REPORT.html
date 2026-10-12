@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>L&amp;Bj POS · Priority fixes and 36-finding continuation · 12 October 2026</title>
+  <style>
+    :root{color-scheme:light;--ink:#233549;--muted:#56697c;--paper:#fffefb;--line:#d4dce3;--accent:#245c7d}
+    *{box-sizing:border-box}body{margin:0;background:#eef1f3;color:var(--ink);font:16px/1.6 system-ui,sans-serif}
+    main{max-width:1100px;margin:auto;padding:32px 24px 64px}header,section{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:24px;margin:0 0 20px}
+    h1{font-size:clamp(26px,4vw,40px);line-height:1.2;margin:8px 0 16px}h2{font-size:24px;line-height:1.3}h3{font-size:19px;margin:0 0 12px}p{margin:12px 0}a{color:var(--accent);text-underline-offset:3px}code{font-size:.86em;overflow-wrap:anywhere}
+    .muted{color:var(--muted)}.eyebrow{font-size:13px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}.status{display:inline-block;background:#e2efe7;color:#275943;border-radius:8px;padding:5px 10px;font-weight:650;font-size:14px}.limit{background:#fff2d7;color:#795518}.notice{border-left:4px solid #cf922d;background:#fff8e9;padding:12px 16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.metric{border:1px solid var(--line);padding:14px;border-radius:10px}.metric strong{display:block;font-size:25px}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid var(--line)}th{background:#eef3f6}li{margin:8px 0}img{width:100%;height:auto;border:1px solid var(--line);border-radius:10px}figure{margin:20px 0}figcaption{font-size:14px;color:var(--muted)}details{margin:16px 0}summary{cursor:pointer;font-weight:650}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef3f6;padding:16px;font-size:13px;border-radius:10px}
+    @media(max-width:600px){main{padding:16px 12px}header,section{padding:18px}td,th{padding:9px}}
+  </style>
+</head>
+<body><main>
+<header>
+  <div class="eyebrow">L&amp;Bj POS · 12 October 2026 · Native macOS Tauri</div>
+  <h1>Priority fixes<br>and the 36-finding continuation</h1>
+  <p><strong>Historical priority-fix snapshot. The latest 36-scoped native follow-up is directly below; its current test counts and handoff warning are in the linked report.</strong></p>
+  <span class="status">41 / 41 original findings implemented</span>
+  <p>The age-check bypass, unclear pending Pay Later outcome, overlapping attendance and unsafe category/tax deletion were addressed in priority order. Native retests caught two further compatibility failures; both were corrected and retested.</p>
+  <p class="notice">This follows the <a href="../audit-2026-10-12/REPORT.html">original 41-finding audit</a>. The four high-priority fixes and related future-attendance guard are documented below; the remaining 36 findings now have implementations, one-by-one evidence and explicit verification limits in the <a href="CONTINUATION.html">continuation report</a>. The pending Pay Later timeout Review/Recover path has now passed a native Tauri test for original receipt <strong>1000085</strong>. Implementation completion is not a claim that every hardware, Windows or injected-failure scenario has passed.</p>
+</header>
+<section id="native-17-follow-up" class="panel"><h2>Latest native follow-up</h2><p>The remaining36 findings now have19 earlier plus17 newly verified scoped native verdicts. <a href="../native-17-2026-10-12/REPORT.html">Open the completed17-check native report</a>; <a href="CONTINUATION.html">the earlier continuation</a> keeps historical verdicts for traceability.</p><p class="notice"><strong>Original trolley preservation NOT CONFIRMED:</strong> final0items/£0.00 differs from earlier reported16/£103.83; exact event unknown. A separate source-confirmed ordinary-unheld RAM-cart persistence risk remains unfixed. Scope completion does not mean every app issue, Windows, physical hardware or live payments are certified.</p></section>
+<section>
+  <h2>Automated checks</h2>
+  <div class="grid">
+    <div class="metric"><strong>1,234</strong>Final frontend tests passed</div>
+    <div class="metric"><strong>251</strong>Final Rust tests passed</div>
+    <div class="metric"><strong>55</strong>Isolated MariaDB cases passed</div>
+    <div class="metric"><strong>0 / 0</strong>Svelte errors / warnings</div>
+  </div>
+  <p class="muted">Final frontend suite: 1,234 passed and 56 optional tests skipped (1,290 total), across 95 passed and 3 skipped files (98 total). Those skips include 54 real-database cases separately passed and 2 other optional cases not run. Rust: 251 passed, 10 cases filtered and 4 existing dead-code warnings; one filtered generic-stock database case passed separately, while 9 other optional cases were not run. The disposable MariaDB total is 55 real cases: 42 catalogue, 9 attendance, 3 stock-count SQL and 1 native generic-stock replay; 14 additional unit cases are excluded. Earlier priority-stage checks had 1,085 frontend passes and 39 real isolated MariaDB passes. These scopes are not an additive total.</p>
+  <p>The Tauri command permission audit passed (95 frontend commands, 101 registered), <code>git diff --check</code> passed, and the final normal native debug macOS bundle built and launched without the test fault flag. An independent reviewer also ran 88 focused tests before the last compatibility changes.</p>
+  <p class="muted">Final independent release-safety spot check passed: the test fault target was absent from both native manifests; 20 QA text artifacts and 141 screenshots were checked locally for the selected sensitive-data patterns without emitting values; 203 frontend build files contained no QA artifacts/references. Stock CAS/audit/cache/conflict and metadata-replay guards remained intact. This is not an exhaustive security audit or a Windows/live-hardware verdict.</p>
+  <p class="muted">171 native observations were retained during the initial priority retest, 19:25–19:53 Europe/London. Subsequent native continuation evidence is linked separately. Observed actions are not automatically passing verdicts; scenario outcomes identify the checked successes, caught failures and test limits.</p>
+  <details><summary>Reproduce the automated checks safely</summary><pre>npm run check
+npx vitest run
+
+# src-tauri directory; excludes app/live-database-dependent tests
+env -u POS_TEST_MYSQL_URI -u LBJ_PRINTER_MODULE_TEST_PACKAGE cargo test --offline --locked --lib -- --skip real_mariadb --skip live_snapshot_is_consistent_and_schema_lock_is_connection_scoped --skip validates_a_package_created_by_the_javascript_packager_when_supplied --test-threads=2
+
+# Only a separately initialized disposable server, not configured shop credentials
+POS_TEST_CATALOGUE_SOCKET=/tmp/pos-EXAMPLE/mysql.sock POS_ATTENDANCE_TEST_SOCKET=/tmp/pos-EXAMPLE/mysql.sock npx vitest run src/lib/catalogueIntegrity.integration.test.ts src/lib/stores/attendanceMariaDb.test.ts
+
+npm run tauri build -- --debug --bundles app</pre></details>
+</section>
+<section id="age">
+  <h2>1. Age-restricted cached scan bypass</h2>
+  <p><code>OPS-NATIVE-CACHED-SCAN-AGE-GATE-BYPASS</code> · <span class="status">Native regression passed</span></p>
+  <p>Enter is consumed before product lookup, including the synchronous cached path. The dialog starts on a neutral heading. A keyboard guard rejects inherited/held Enter or Space and further scanner bursts; a new deliberate approval remains available.</p>
+  <ul>
+    <li>First scan of restricted mock barcode 4343 opened the age gate; Do Not Add left the trolley empty.</li>
+    <li>Cached rescan with Return held for 700 ms still opened the gate without adding an item.</li>
+    <li>A second scan while the dialog was open did not approve it, including while the approval button had focus.</li>
+    <li>A deliberate pointer approval, and a separate fresh keyboard approval, each added exactly one £6.99 item. Approved test items were removed without a sale.</li>
+    <li>The final incremental bundle was rechecked: cancellation and cached scan with held Return again kept the item behind the age gate.</li>
+  </ul>
+  <p class="muted">Native checks used the 1024×768 window. These are keyboard-wedge and pointer tests, not certification of every physical scanner, weighed item or conditional quick-add route.</p>
+  <details><summary>Native screenshots</summary>
+    <figure><img loading="lazy" src="screenshots/02-age-cached-scan-blocked.png" alt="Age gate remains open after a cached scan"><figcaption>Cached/held scanner terminator did not approve the item.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/03-age-keyboard-approved-one-item.png" alt="Exactly one restricted item after explicit keyboard approval"><figcaption>Separate deliberate keyboard approval added one item.</figcaption></figure>
+  </details>
+</section>
+<section id="financial">
+  <h2>2. Pending Pay Later timeout and recovery</h2>
+  <p><code>OPS-NATIVE-PAY-LATER-POOL-TIMEOUT-RECOVERY</code> · <span class="status">Native healthy sale and timeout recovery passed</span></p>
+  <p>Cold MariaDB acquisition has a bounded five-second budget instead of the overly short connection budget. Stage diagnostics identify the failed step without logging credentials. An uncertain financial operation retains its immutable journal and reserved receipt; it is explicitly pending, not falsely cancelled or declared unsaved.</p>
+  <p>Persistent Review/Recover controls show the exact receipt, amount and sale lines. Recovery checks the receipt identity and current staff authority and replays that same operation. Replacement sales and account transactions are blocked while an intent remains unresolved. Scans cannot operate checkout behind the recovery modal.</p>
+  <ul>
+    <li>During the earlier healthy-flow test, the native Pay Later sale for the existing mock customer completed once: receipt <strong>1000084</strong>, £1.69. The trolley cleared and the account increased by exactly £1.69.</li>
+    <li>That healthy-flow test's normal native £1.69 cash repayment returned the account to £0.00. Points remained zero; the original Pay Later hold setting was restored.</li>
+    <li>Isolated Rust tests used a genuinely stalled TCP acquisition, retained the exact journal/receipt and rejected a replacement operation. Replay and permission checks have automated coverage.</li>
+    <li>In the subsequent native failure-path test, acquisition timed out after <strong>5,003 ms</strong> and the uncertain Pay Later operation retained reserved receipt <strong>1000085</strong>. The alert and persistent Review/Recover banner explicitly said pending verification, not cancelled, and warned against charging or refunding again.</li>
+    <li>Native Review displayed that exact receipt, the original £1.69 amount, mock customer and one original item. Recover this receipt then confirmed <strong>1000085</strong> completed and verified, with no new transaction created; the pending banner cleared and checkout returned empty and Synced.</li>
+    <li>Database proof confirmed exactly one sale and one 169p account charge for receipt 1000085, with no pending financial journal. After a normal native 169p cash repayment, the mock account returned to £0.00 and status On hold, with the positive Allow Pay Later purchases option unchecked. The additional sale and repayment remain audit evidence, rather than being erased.</li>
+  </ul>
+  <p class="muted">These Pay Later tests did not submit a card charge. The first screenshot named “05-pay-later-completed” actually shows an intermediate Saving Sale state and is not used as completion evidence or a timing benchmark. The later controlled native recovery test validates this saved-operation path, not every network failure or crash point.</p>
+  <details><summary>Native screenshots</summary>
+    <figure><img loading="lazy" src="screenshots/06-pay-later-confirmed-success.png" alt="Native completed Pay Later receipt"><figcaption>Actual completed native Pay Later sale, not the intermediate saving state.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/08-mock-account-restored-clear.png" alt="Mock account balance restored to zero"><figcaption>Repayment recorded and original account hold setting restored.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/31-financial-timeout-pending-alert.png" alt="Native pending verification warning for reserved receipt 1000085"><figcaption>Native failure-path warning retains the reserved receipt and says it is not cancelled.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/32-financial-review-original-receipt.png" alt="Native review of the original receipt 1000085 for one £1.69 item"><figcaption>Review shows the exact saved receipt, amount, customer and original sale line.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/33-recovered-original-receipt-completed.png" alt="Native recovery confirmed original receipt 1000085 completed with no new transaction"><figcaption>Original receipt completed and verified; no replacement transaction was created.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/34-recovery-account-restored.png" alt="Recovered mock customer account clear and back on hold"><figcaption>Normal repayment restored the mock balance to £0.00 and the original hold setting.</figcaption></figure>
+  </details>
+</section>
+<section id="attendance">
+  <h2>3. Overlapping attendance</h2>
+  <p><code>OPS-NATIVE-ATTENDANCE-OVERLAP</code> · <span class="status">Native valid/invalid saves passed</span></p>
+  <p>SQLite interval checks are atomic. Shared attendance uses a pinned transaction, ordered employee locks, authoritative interval checks and record-version checks. Adjacent intervals are allowed; an existing open session conflicts with later overlapping records. Legacy unguarded clients fail closed instead of bypassing interval safety.</p>
+  <p>Attendance writes now await native commit or rollback rather than racing an uncancellable frontend timeout. The live staff lookup keeps an indexed exact-identity comparison that works with older General CI employee identifiers and Unicode CI trigger variables.</p>
+  <ul>
+    <li>Native overlapping Alan record was rejected with the conflicting open record and its dates identified. No new attendance or audit row was created for the failed attempt.</li>
+    <li>A genuinely changed clock-out date of 13 October was rejected as future attendance. The related <code>OPS-SOURCE-ATTENDANCE-FUTURE</code> finding is covered by the new two-minute clock-skew allowance and server-time validation.</li>
+    <li>A valid Arda shift, 12 October 11:40–19:40 local, saved once. The list showed 8 hours, 8 total sessions and “Attendance record added”.</li>
+    <li>Isolated MariaDB tests covered five overlapping races between different managers: exactly one save won each race. Adjacent sessions, self-correction, stale versions and permission rejection were also checked.</li>
+  </ul>
+  <p class="notice">Existing overlapping historical records were deliberately not rewritten. Alan still has an old open session and the earlier audit's conflicting completed record; review that mock history before trying to close it. All shared tills need the updated attendance code before using the new guards.</p>
+  <details><summary>Native screenshots</summary>
+    <figure><img loading="lazy" src="screenshots/13-attendance-valid-save-confirmed.png" alt="Saved non-overlapping Arda attendance record"><figcaption>Valid save after correcting the mixed-collation issue.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/14-attendance-overlap-final-build.png" alt="Overlapping attendance rejected"><figcaption>Conflicting open interval is shown; no duplicate record saved.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/15-attendance-future-final-build.png" alt="Future attendance rejected"><figcaption>Tomorrow's clock-out was rejected.</figcaption></figure>
+  </details>
+</section>
+<section id="catalogue">
+  <h2>4. Category and tax deletion integrity</h2>
+  <p><code>AUDIT-01</code> · <span class="status">Native protections and fixture deletion passed</span></p>
+  <p>Usage-query failure stops deletion rather than treating usage as zero. Shared deletion is server-first, with transactional guards against active/inactive item references, default settings, concurrent assignments, stale tombstones and resurrection. Local user deletion remains guarded; only server-confirmed cache tombstones can bypass stale local usage during sync.</p>
+  <p>Trigger comparisons use each indexed column's installed collation on the right-hand value, preserving older case-insensitive identities without rewriting the shop's parent columns or converting point locks into table scans. The category count query explicitly casts MariaDB aggregates to native-decodable integers.</p>
+  <ul>
+    <li>Native DRINKS deletion was refused with the correct count: 50 items.</li>
+    <li>Native default GROCERY deletion was refused without changing the default.</li>
+    <li>A newly created unused “QA Priority Delete 12 Oct” category deleted successfully and vanished from the list. Exactly one tombstone was present.</li>
+    <li>Native Standard VAT deletion was refused because 34,747 items use it.</li>
+    <li>A newly created non-default “QA Priority Tax 12 Oct” rate deleted successfully. Exactly one tombstone was present; the existing default rate remained unchanged.</li>
+    <li>Thirty isolated catalogue cases passed across current and mixed legacy collations, including inactive usage, case-insensitive identities, default protection, concurrent assignments in both orders and nested delete/tombstone behavior without MariaDB error 1442.</li>
+  </ul>
+  <p class="muted">Category/tax native captures used 1024×768. The two-client races used the isolated server, not two physical tills. The temporary fixtures alone were deleted; both have retained audit entries and sync tombstones.</p>
+  <details><summary>Native screenshots</summary>
+    <figure><img loading="lazy" src="screenshots/17-used-category-rejected.png" alt="Used category deletion blocked with exact usage count"><figcaption>Used category refused with 50-item count.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/18-default-category-rejected.png" alt="Default category deletion blocked"><figcaption>Default category remains protected.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/19-unused-category-deleted.png" alt="Disposable unused category deleted"><figcaption>Unused mock category successfully deleted.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/20-used-tax-rejected.png" alt="Used tax-rate deletion refused"><figcaption>Used tax rate refused with its authoritative count.</figcaption></figure>
+    <figure><img loading="lazy" src="screenshots/21-unused-tax-deleted.png" alt="Disposable unused tax rate deleted"><figcaption>Temporary non-default tax fixture removed; existing rates retained.</figcaption></figure>
+  </details>
+</section>
+<section>
+  <h2>Native testing caught—and fixed—additional failures</h2>
+  <div class="scroll"><table><thead><tr><th>Failure observed</th><th>Correction</th><th>Verification</th></tr></thead><tbody>
+    <tr><td>Valid attendance save failed with MariaDB 1267 mixed collations.</td><td>Indexed exact actor lookup tolerates legacy employee identifiers; bumped common schema and attendance migration markers.</td><td>Mixed-collation isolated tests passed; valid native Arda save passed.</td></tr>
+    <tr><td>Category usage showed Unavailable; delete failed safely.</td><td>Cast SUM/COUNT to integral SQL types supported by Tauri's MySQL decoder.</td><td>Native usage counts loaded; used/default refusals and unused deletion passed.</td></tr>
+    <tr><td>An incremental native bundle opened blank after frontend-only changes.</td><td>Fresh package build restored startup. Added an explicit build-directory dependency for embedded frontend assets.</td><td>Final incremental bundle rebuilt and native startup rechecked; source/database were not cleared.</td></tr>
+  </tbody></table></div>
+  <p class="muted">The blank startup is consistent with stale embedded assets; a complete forensic WebKit-cache diagnosis was not performed. Only generated Rust package build artifacts were cleared, and they can be rebuilt. Early screenshots 10, 12 and 16 are not passing evidence: 10 was still an overlap alert, 12 showed the collation failure, and 16 missed the usage-error alert.</p>
+</section>
+<section id="continuation">
+  <h2>The remaining 36 findings</h2>
+  <p>The 20 P2 and 16 P3 findings now have source fixes, automated or source evidence, and separately recorded native results in <a href="CONTINUATION.html">the one-by-one continuation report</a>: 19 explicit native scenario passes, 13 partial observations, four automated/source-only findings and zero planned native retests pending. Partial and automated-only coverage is not promoted to a blanket native PASS.</p>
+  <ul>
+    <li>Native schema validation completed and its button returned to an enabled state.</li>
+    <li>Configured setup Cancel returned to Advanced Settings. Test Connection and Save &amp; Reconnect Only completed without entering import, forced-upload or cache-rebuild UI; order, customer and tax-rate counts remained 91, 855 and 2 across those connection checks.</li>
+    <li>A native font change saved, then the original Legacy selection was restored. The unchecked barcode fixture <code>2312345002502</code> displayed Not checked without changing its saved rule.</li>
+    <li>Native 0EGGS stock save counted 0 → 1, then restored 1 → 0 and item tracking off, preserving its 169p price. Exactly two normal stock-count audit rows remained; queues, conflicts and financial intents were clear. Stale/error branches have separate automated coverage, so this is a partial native verdict.</li>
+    <li>Final native 1024×768 Back Office scale layout showed all tested fruit/tomato/watermelon price rows fully, with toolbar actions visible and page chips independently scrolling.</li>
+  </ul>
+  <p class="muted">Final automated suites and planned native scenarios are complete. These observed success paths do not certify injected provider/disk failures, every maintenance action, Windows installs or physical hardware. Counted stock uses CAS plus audit in an atomic local batch or guarded shared transaction; generic existing-product metadata replay cannot overwrite authoritative stock. Full source/test proof is linked in the continuation report.</p>
+  <p><a href="CONTINUATION.html">Read all 36 implementations, native evidence and limits</a> · <a href="continuation-findings.json">Machine-readable implementation tracker</a></p>
+</section>
+<section id="handoff">
+  <h2>Data and handoff</h2>
+  <p class="notice">Final handoff verified: normal no-fault Tauri bundle open on Checkout as Alan, trolley empty / £0.00 / Synced; offline queue, financial intents, conflicts and active terminal attempts all zero. Final counts: 91 orders, 855 customers, 95 categories, two tax rates and eight attendance records. Historical fixtures and evidence below remain retained.</p>
+  <ul>
+    <li>The initial priority retest ended with native checkout empty and Synced, without an unresolved financial intent or pending offline uploads. The later original-receipt recovery also returned checkout empty and Synced.</li>
+    <li>Orders: 89 before the initial priority retest, 90 afterward, then 91 after the continuation's recovered Pay Later receipt. Both £1.69 mock sales and their matching repayments remain visible for audit.</li>
+    <li>The earlier healthy sale left the mock customer at £0.00, zero points and its original Pay Later hold setting, with statement entries increasing from 4 to 6. The subsequent recovery test again restored the account to £0.00 and on hold.</li>
+    <li>Attendance: 7 before, 8 afterward. The new eight-hour Arda fixture is explicitly labelled “QA PRIORITY FIX 2026-10-12: valid non-overlapping attendance test fixture”. Existing records were not silently repaired or erased.</li>
+    <li>Categories: 95; tax rates: 2. Both temporary unused fixtures were removed normally. Audit entries and one tombstone each remain.</li>
+    <li>No provider payments, refunds, wipe, history deletion, full restore or Z-close were run in the initial four-priority retest. Later sandbox-provider scenarios and retained mock fixtures are documented separately in the continuation report; no live card-payment certification is claimed.</li>
+    <li>A private SQLite backup was made before these tests. It is not included in this repository or report. No byte-for-byte database rollback is claimed.</li>
+    <li>Final restored settings: global stock tracking off; 0EGGS stock 0, item tracking off, price 169p; Zero default tax on and Standard off. Both QA customers had £0.00 balances, zero points and Allow Pay Later purchases disabled/status On hold. Dojo saved keys/configuration stayed unchanged: Sandbox TIP0, Dedicated mode.</li>
+    <li>478 native observations were retained as count/timestamp metadata only, from 2026-10-12 18:25:37 UTC through 19:52:23 UTC. Observation counts are not additional test verdicts; raw accessibility values were not placed in these reports.</li>
+  </ul>
+  <p class="notice">All 41 original findings have implementations; consult <a href="CONTINUATION.html">individual evidence and limits</a> before treating every workflow as fully verified. Planned native timeout recovery, stock restoration and final square-screen scale checks completed. Windows installation/update, real hardware, physical multi-till concurrency and destructive maintenance still require separate checks. These local changes are not installed on Windows tills and were not committed, pushed or deployed.</p>
+  <p><a href="progress.json">Machine-readable all-41 fix status</a> · <a href="CONTINUATION.html">36-finding continuation</a> · <a href="../audit-2026-10-12/REPORT.html#findings">All original findings and historical evidence</a></p>
+  <figure><img loading="lazy" src="screenshots/24-final-incremental-empty-synced.png" alt="Initial priority retest native checkout empty and synced"><figcaption>End of the earlier priority retest: rebuilt Tauri app signed in, empty and Synced. Later continuation evidence is recorded separately.</figcaption></figure>
+  <figure><img loading="lazy" src="screenshots/66-final-checkout-empty-synced.png" alt="Final normal native Tauri checkout empty and synced"><figcaption>Final continuation handoff: normal no-fault bundle, Alan signed in, empty trolley, £0.00 and Synced.</figcaption></figure>
+</section>
+</main></body></html>

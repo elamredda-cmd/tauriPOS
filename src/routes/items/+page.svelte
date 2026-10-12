@@ -35,6 +35,9 @@
     import { randomTileColor } from "$lib/tileColors";
     import { getDefaultProductCategoryId } from "$lib/categoryDefaults";
     import { deviceOperatingMode } from "$lib/deviceMode";
+    import { modalFocusTrap } from "$lib/actions/modalFocusTrap";
+    import { getProductsByIds } from "$lib/stores/database";
+    import { nativeQaEnabled, nativeQaCheckpoint } from "$lib/nativeQa";
 
     let showModal = false;
     let isEditing = false;
@@ -49,6 +52,13 @@
     let goodsMenuSearchTimer: ReturnType<typeof setTimeout> | null = null;
     let goodsMenuLoadToken = 0;
     let previousGoodsMenuSearch = "";
+    let savingItem = false;
+    let savingGoods = false;
+    let generatingPlu = false;
+    let imageUploading = false;
+    let itemDraftVersion = 0;
+    let itemSaveWarning = "";
+    let itemActionBusy = "";
     $: stockTrackingEnabled = ($settingsDB.find((setting) => setting.key === "stock_tracking_enabled")?.value ?? "true") !== "false";
 
     let currentItem: Partial<Product> = {};
@@ -93,16 +103,27 @@
     let priceString = "";
     let desktopPriceString = "0.00";
     let pricePadDialog: HTMLDivElement | null = null;
+    let pricePadOpener: HTMLButtonElement | null = null;
     let productImageInput: HTMLInputElement | null = null;
     let imageUploadError = "";
 
     function closeItemEditor() {
+        if (savingItem || imageUploading) return;
+        itemDraftVersion += 1;
         showModal = false;
         showPricePad = false;
     }
 
-    function closePricePad() {
+    async function closePricePad() {
+        const opener = pricePadOpener;
+        const draftVersion = itemDraftVersion;
         showPricePad = false;
+        // Let the nested focus scope remove its inert references first. Its
+        // parent fallback then preserves this exact opener, not the Name field.
+        await tick();
+        if (showModal && !showPricePad && draftVersion === itemDraftVersion && opener?.isConnected) {
+            opener.focus({ preventScroll: true });
+        }
     }
 
     async function openPricePad() {
@@ -142,6 +163,8 @@
     }
 
     function closeGoodsMenu() {
+        if (savingGoods) return;
+        goodsMenuLoadToken += 1;
         showGoodsMenu = false;
     }
 
@@ -281,6 +304,10 @@
     }
 
     function openAddModal() {
+        if (savingItem) return;
+        itemDraftVersion += 1;
+        generatingPlu = false;
+        itemSaveWarning = "";
         const cats = $categoriesDB.filter((category) => category.isActive);
         const taxes = $taxRatesDB;
         currentItem = {
@@ -318,6 +345,10 @@
     }
 
     async function openEditModal(item: Product) {
+        if (savingItem) return;
+        const draftVersion = ++itemDraftVersion;
+        generatingPlu = false;
+        itemSaveWarning = "";
         currentItem = { ...item, isAgeRestricted: !!item.isAgeRestricted, image: item.image || "" };
         originalItem = { ...item };
         priceString = item.price.toString();
@@ -328,7 +359,8 @@
         showModal = true;
         try {
             const image = await getProductImage(item.id);
-            if (showModal && isEditing && currentItem.id === item.id) {
+            if (nativeQaEnabled) await nativeQaCheckpoint('items.image-read');
+            if (draftVersion === itemDraftVersion && showModal && isEditing && currentItem.id === item.id) {
                 currentItem = { ...currentItem, image };
                 originalItem = originalItem ? { ...originalItem, image } : originalItem;
             }
@@ -338,9 +370,15 @@
     }
 
     async function generateScalePlu() {
+        if (generatingPlu || savingItem) return;
         const length = selectedPluLength || configuredPluLengths[0] || 5;
+        const draftVersion = itemDraftVersion;
+        const itemId = currentItem.id || "";
+        generatingPlu = true;
         try {
-            const candidate = await findNextAvailableScalePlu(length, currentItem.id || "");
+            const candidate = await findNextAvailableScalePlu(length, itemId);
+            if (nativeQaEnabled) await nativeQaCheckpoint('items.generate-plu');
+            if (!showModal || draftVersion !== itemDraftVersion || currentItem.id !== itemId) return;
             if (!candidate) {
                 toast(`No unused ${length}-digit PLU is available`, "error");
                 return;
@@ -349,7 +387,9 @@
             currentItem = { ...currentItem };
             toast(`Generated unique PLU ${candidate}`, "success");
         } catch (error) {
-            toast(`Could not generate PLU: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+            if (draftVersion === itemDraftVersion) toast(`Could not generate PLU: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            if (draftVersion === itemDraftVersion) generatingPlu = false;
         }
     }
 
@@ -400,18 +440,24 @@
     }
 
     async function handleProductImageChange(event: Event) {
+        if (savingItem || imageUploading) return;
         const input = event.currentTarget as HTMLInputElement;
         const file = input.files?.[0];
         if (!file) return;
+        const draftVersion = itemDraftVersion;
+        imageUploading = true;
         imageUploadError = "";
         try {
-            currentItem.image = await compressProductImage(file);
+            const image = await compressProductImage(file);
+            if (!showModal || draftVersion !== itemDraftVersion) return;
+            currentItem.image = image;
             currentItem = { ...currentItem };
             toast("Image added to item", "success");
         } catch (error) {
             imageUploadError = String(error).replace(/^Error:\s*/, "");
             toast(imageUploadError, "error");
         } finally {
+            if (draftVersion === itemDraftVersion) imageUploading = false;
             input.value = "";
         }
     }
@@ -424,6 +470,7 @@
     }
 
     async function saveItem() {
+        if (savingItem || imageUploading || generatingPlu) return;
         if ($deviceOperatingMode === "back_office") normalizeDesktopPrice();
         const missing: string[] = [];
         if (!currentItem.name?.trim()) missing.push("Item Name");
@@ -462,34 +509,68 @@
 
         currentItem.updatedAt = now();
 
+        const submitted = { ...currentItem };
+        const expected = originalItem ? { ...originalItem } : null;
+        const wasEditing = isEditing;
+        savingItem = true;
+        itemSaveWarning = "";
+        let detailsSaved = false;
         try {
-            if (isEditing) {
-                const desiredStock = currentItem.stockLevel ?? originalItem?.stockLevel ?? 0;
-                const { stockLevel: _stockLevel, createdAt: _createdAt, ...productPatch } = currentItem;
-                const { stockLevel: _originalStock, createdAt: _originalCreatedAt, ...expectedProduct } = originalItem || {};
+            if (nativeQaEnabled) await nativeQaCheckpoint('items.save');
+            if (wasEditing) {
+                const desiredStock = submitted.stockLevel ?? expected?.stockLevel ?? 0;
+                const { stockLevel: _stockLevel, createdAt: _createdAt, ...productPatch } = submitted;
+                const { stockLevel: _originalStock, createdAt: _originalCreatedAt, ...expectedProduct } = expected || {};
                 await updateProductFields(productPatch, expectedProduct);
-                if (desiredStock !== originalItem?.stockLevel && currentItem.id) {
-                    await setStockLevel(currentItem.id, desiredStock, originalItem?.stockLevel ?? desiredStock);
+                detailsSaved = true;
+                if (desiredStock !== expected?.stockLevel && submitted.id) {
+                    await setStockLevel(submitted.id, desiredStock, expected?.stockLevel ?? desiredStock);
                 }
             } else {
-                await addProduct(currentItem);
+                await addProduct(submitted);
             }
             showModal = false;
-            toast(isEditing ? "Item updated" : "Item added");
+            toast(wasEditing ? "Item updated" : "Item added");
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
-            toast(String(error).replace(/^Error:\s*/, ""), "error");
+            const message = String(error).replace(/^Error:\s*/, "");
+            if (detailsSaved && submitted.id) {
+                // Details are already durable. Never invite a blind retry against
+                // the old editor baseline when the separate stock step failed.
+                itemSaveWarning = `Item details were saved, but the stock change was not confirmed: ${message}. Review the refreshed stock before saving again.`;
+                try {
+                    const rows = await getProductsByIds([submitted.id], false, false) as Product[];
+                    const refreshed = rows.find(item => item.id === submitted.id);
+                    if (!refreshed) throw new Error("Item snapshot is unavailable");
+                    currentItem = { ...refreshed, image: submitted.image || "" };
+                    originalItem = { ...currentItem } as Product;
+                    priceString = String(refreshed.price);
+                    desktopPriceString = toPounds(refreshed.price).toFixed(2);
+                } catch {
+                    showModal = false;
+                    itemSaveWarning += " Reopen this item to load its saved values before retrying.";
+                }
+                toast(itemSaveWarning, "error");
+                await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
+            } else {
+                toast(message, "error");
+            }
+        } finally {
+            savingItem = false;
         }
     }
 
     let showDelConfirm = false;
     let idToDelete = "";
     function deleteItem(id: string) {
+        if (itemActionBusy || savingItem) return;
         idToDelete = id;
         showDelConfirm = true;
     }
     async function confirmDeactivate() {
+        if (itemActionBusy || savingItem || !idToDelete) return;
         const id = idToDelete;
+        itemActionBusy = id;
         try {
             await deleteProduct(id);
             toast("Item deactivated", "info");
@@ -497,10 +578,14 @@
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not deactivate item: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            itemActionBusy = "";
         }
     }
 
     async function reactivateItem(item: Product) {
+        if (itemActionBusy || savingItem) return;
+        itemActionBusy = item.id;
         try {
             const stamp = now();
             await updateProductFields(
@@ -511,6 +596,8 @@
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not reactivate item: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            itemActionBusy = "";
         }
     }
 
@@ -521,7 +608,7 @@
             priceString = priceString.length > 1 ? priceString.slice(0, -1) : "0";
         } else if (key === "ENTER") {
             currentItem.price = parseInt(priceString) || 0;
-            showPricePad = false;
+            void closePricePad();
         } else if (key === "00") {
             if (priceString !== "0" && priceString.length < MAX_ITEM_PRICE_DIGITS) {
                 priceString = `${priceString}00`.slice(0, MAX_ITEM_PRICE_DIGITS);
@@ -613,6 +700,7 @@
     }
 
     function toggleGoodsMenuItem(item: Product) {
+        if (savingGoods || goodsMenuLoading) return;
         if (item.showInGoods) {
             goodsMenuSelected = goodsMenuSelected.filter((selected) => selected.id !== item.id);
             const availableItem = { ...item, showInGoods: false, goodsSortOrder: 0 };
@@ -634,6 +722,7 @@
     }
 
     function moveGoodsMenuItem(idx: number, dir: number) {
+        if (savingGoods || goodsMenuLoading) return;
         const j = idx + dir;
         if (j < 0 || j >= goodsMenuSelected.length) return;
         const next = [...goodsMenuSelected];
@@ -642,6 +731,7 @@
     }
 
     async function saveGoodsMenu() {
+        if (savingGoods || goodsMenuLoading) return;
         normalizeGoodsMenuOrder();
         const selectedMap = new Map(goodsMenuSelected.map((item) => [item.id, item]));
         const changes = Array.from(goodsMenuOriginal.entries())
@@ -660,13 +750,17 @@
             return;
         }
 
+        savingGoods = true;
         try {
+            if (nativeQaEnabled) await nativeQaCheckpoint('items.goods-save');
             await batchUpdateGoodsMenu(changes);
             showGoodsMenu = false;
             toast(`Goods Menu updated (${changes.length} items)`);
             await Promise.all([loadItemsPage(), refreshGoodsMenuCount()]);
         } catch (error) {
             toast(`Could not save Goods Menu: ${String(error).replace(/^Error:\s*/, "")}`, "error");
+        } finally {
+            savingGoods = false;
         }
     }
 </script>
@@ -757,17 +851,17 @@
                     <tr>
                         <td class="items-col-actions">
                             <div class="act-row">
-                                <button class="btn-icon act-btn" title="Edit item" aria-label="Edit item" on:click={() => openEditModal(item)}>
+                                <button class="btn-icon act-btn" disabled={Boolean(itemActionBusy)} title="Edit item" aria-label="Edit item" on:click={() => openEditModal(item)}>
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
                                         ><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                                 </button>
                                 {#if item.isActive}
-                                    <button class="btn-icon act-btn danger" title="Deactivate item" aria-label="Deactivate item" on:click={() => deleteItem(item.id)}>
+                                    <button class="btn-icon act-btn danger" disabled={Boolean(itemActionBusy)} title="Deactivate item" aria-label="Deactivate item" on:click={() => deleteItem(item.id)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16"
                                             ><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                                     </button>
                                 {:else}
-                                    <button class="btn-icon act-btn !text-success" title="Reactivate item" aria-label="Reactivate item" on:click={() => reactivateItem(item)}>
+                                    <button class="btn-icon act-btn !text-success" disabled={Boolean(itemActionBusy)} title="Reactivate item" aria-label="Reactivate item" on:click={() => reactivateItem(item)}>
                                         ↻
                                     </button>
                                 {/if}
@@ -843,19 +937,21 @@
         on:click={(event) => handleBackdropClick(event, closeItemEditor)}
         on:keydown={(event) => handleBackdropKeydown(event, closeItemEditor)}
     >
-        <div class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[calc(100dvh-2rem)] overflow-hidden" class:back-office={$deviceOperatingMode === 'back_office'} role="dialog" aria-modal="true" aria-label={isEditing ? "Edit item" : "Add item"}>
+        <div use:modalFocusTrap={{ dismiss: closeItemEditor, dismissDisabled: savingItem || imageUploading }} class="item-editor-panel flat-panel w-full max-w-[900px] rounded-md flex flex-col gap-0 bg-bg-card max-h-[calc(100dvh-2rem)] overflow-hidden" class:back-office={$deviceOperatingMode === 'back_office'} role="dialog" aria-modal="true" aria-busy={savingItem} aria-label={isEditing ? "Edit item" : "Add item"}>
             <div class="item-modal-header flex justify-between items-center border-b border-border-flat p-4 shrink-0">
                 <h2>{isEditing ? "Edit Item" : "Add New Item"}</h2>
                 <button
                     class="btn-icon"
-                    on:click={() => {
-                        showModal = false;
-                        showPricePad = false;
-                    }}>✕</button
+                    aria-label="Close item editor"
+                    disabled={savingItem || imageUploading}
+                    on:click={closeItemEditor}>✕</button
                 >
             </div>
 
-            <div class="item-form-grid form-grid overflow-y-auto p-4">
+            <fieldset disabled={savingItem || imageUploading} class="item-form-grid form-grid overflow-y-auto p-4">
+                {#if itemSaveWarning}
+                    <p class="span-2 item-save-warning" role="alert">{itemSaveWarning}</p>
+                {/if}
                 <div class="field span-2">
                     <label for="name">Item Name *</label>
                     <div class="relative">
@@ -863,6 +959,7 @@
                             class="min-w-0 !pr-12"
                             type="text"
                             id="name"
+                            data-modal-initial-focus
                             data-touch-keyboard="button"
                             bind:value={currentItem.name}
                             placeholder="e.g. Coca Cola"
@@ -946,7 +1043,7 @@
                             <input class="min-w-0 !pr-12" type="text" id="scalePlu" data-touch-keyboard="button" bind:value={currentItem.scalePlu} inputmode="numeric" placeholder="Enter manually or generate" />
                             <TouchKeyboardButton targetId="scalePlu" label="Open PLU keyboard" embedded />
                         </div>
-                        <button type="button" class="btn btn-secondary shrink-0" on:click={generateScalePlu}>Generate</button>
+                        <button type="button" class="btn btn-secondary shrink-0" disabled={generatingPlu} on:click={generateScalePlu}>{generatingPlu ? 'Generating...' : 'Generate'}</button>
                     </div>
                     <small class="text-text-muted">You can keep the generated PLU or type your own unique number.</small>
                 </div>
@@ -977,6 +1074,7 @@
                     {:else}
                         <button
                             id="price"
+                            bind:this={pricePadOpener}
                             type="button"
                             class="bg-bg-panel border border-border-flat rounded-sm px-3 py-2.5 flex justify-between items-center cursor-pointer text-[1.1rem] font-serif text-success hover:border-accent-primary"
                             on:click={openPricePad}
@@ -1044,11 +1142,11 @@
                         <TouchToggle bind:checked={currentItem.isWeighable} label="Weighable (Scale)" />
                     </div>
                 </section>
-            </div>
+            </fieldset>
 
             <div class="item-modal-actions flex justify-end gap-3 p-4 border-t border-border-flat shrink-0 bg-bg-card">
-                <button class="btn btn-secondary" on:click={() => (showModal = false)}>Cancel</button>
-                <button class="btn btn-primary" on:click={saveItem}>Save Item</button>
+                <button class="btn btn-secondary" disabled={savingItem || imageUploading} on:click={closeItemEditor}>Cancel</button>
+                <button class="btn btn-primary" disabled={savingItem || imageUploading || generatingPlu} on:click={saveItem}>{savingItem ? 'Saving...' : 'Save Item'}</button>
             </div>
         </div>
     </div>
@@ -1063,6 +1161,7 @@
         >
             <div
                 bind:this={pricePadDialog}
+                use:modalFocusTrap={{ dismiss: closePricePad }}
                 class="item-price-pad-panel flat-panel"
                 role="dialog"
                 aria-modal="true"
@@ -1136,13 +1235,15 @@
     <div class="modal-overlay" role="presentation" on:click={(event) => handleBackdropClick(event, closeGoodsMenu)} on:keydown={(event) => handleBackdropKeydown(event, closeGoodsMenu)}>
         <div
             class="goods-menu-panel flat-panel w-full max-w-[800px] p-6 rounded-md flex flex-col gap-4 bg-bg-card max-h-[90vh] overflow-hidden"
+            use:modalFocusTrap={{ dismiss: closeGoodsMenu, dismissDisabled: savingGoods }}
             role="dialog"
             aria-modal="true"
+            aria-busy={savingGoods}
             aria-label="Goods Menu Manager"
         >
             <div class="flex justify-between items-center border-b border-border-flat pb-4 shrink-0">
                 <h2>Goods Menu Manager</h2>
-                <button class="btn-icon" on:click={() => (showGoodsMenu = false)}>✕</button>
+                <button class="btn-icon" aria-label="Close Goods Menu Manager" disabled={savingGoods} on:click={closeGoodsMenu}>✕</button>
             </div>
             <p class="text-text-muted shrink-0">
                 Select up to 10 active items to appear in the Goods menu.
@@ -1153,6 +1254,7 @@
                     id="goods-menu-search"
                     placeholder="Search name, SKU, barcode, PLU..."
                     bind:value={goodsMenuSearch}
+                    disabled={savingGoods}
                     ariaLabel="Search available Goods Menu items"
                     keyboardLabel="Open Goods Menu search keyboard"
                     clearLabel="Clear Goods Menu search"
@@ -1169,7 +1271,7 @@
                         {#each availableGoodsDraft as item}
                             <button
                                 class="flex items-center gap-3 p-3 bg-bg-card border border-border-flat rounded-sm text-left hover:bg-bg-card-hover transition-colors disabled:opacity-50 shrink-0"
-                                disabled={goodsMenuSelected.length >= 10}
+                                disabled={savingGoods || goodsMenuLoading || goodsMenuSelected.length >= 10}
                                 on:click={() => toggleGoodsMenuItem(item)}
                             >
                                 <div class="w-4 h-4 rounded border border-border-flat shrink-0 {goodsMenuSelected.length >= 10 ? '' : 'hover:border-accent-primary'}"></div>
@@ -1195,16 +1297,17 @@
                                 <span class="flex-1 font-medium">{item.name}</span>
                                 <button
                                     class="w-8 h-8 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center disabled:opacity-30"
-                                    disabled={i === 0}
+                                    disabled={savingGoods || goodsMenuLoading || i === 0}
                                     on:click={() => moveGoodsMenuItem(i, -1)}>↑</button
                                 >
                                 <button
                                     class="w-8 h-8 rounded-md bg-bg-panel border border-border-flat hover:bg-bg-card-hover transition-colors flex items-center justify-center disabled:opacity-30"
-                                    disabled={i === goodsMenuSelected.length - 1}
+                                    disabled={savingGoods || goodsMenuLoading || i === goodsMenuSelected.length - 1}
                                     on:click={() => moveGoodsMenuItem(i, 1)}>↓</button
                                 >
                                 <button
                                     class="w-8 h-8 rounded-md bg-danger/10 border border-danger/30 text-danger hover:bg-danger hover:text-white transition-colors flex items-center justify-center"
+                                    disabled={savingGoods || goodsMenuLoading}
                                     on:click={() => toggleGoodsMenuItem(item)}>✕</button
                                 >
                             </div>
@@ -1216,8 +1319,8 @@
                 </div>
             </div>
             <div class="flex justify-end gap-3 pt-4 border-t border-border-flat shrink-0">
-                <button class="btn btn-secondary" on:click={() => (showGoodsMenu = false)}>Cancel</button>
-                <button class="btn btn-primary" on:click={saveGoodsMenu}>Save Goods Menu</button>
+                <button class="btn btn-secondary" disabled={savingGoods} on:click={closeGoodsMenu}>Cancel</button>
+                <button class="btn btn-primary" disabled={savingGoods || goodsMenuLoading} on:click={saveGoodsMenu}>{savingGoods ? 'Saving...' : 'Save Goods Menu'}</button>
             </div>
         </div>
     </div>
@@ -1384,6 +1487,33 @@
 
     .goods-menu-panel {
         max-width: min(800px, calc(100vw - 1.5rem));
+        height: min(700px, calc(100dvh - 2rem));
+        padding: .9rem !important;
+        gap: .65rem !important;
+    }
+
+    .goods-menu-panel > p {
+        margin: 0;
+    }
+
+    .goods-menu-panel > div:first-child,
+    .goods-menu-panel > div:last-child {
+        padding-block: .5rem !important;
+    }
+
+    .item-form-grid {
+        margin: 0;
+        border: 0;
+        min-width: 0;
+    }
+
+    .item-save-warning {
+        margin: 0;
+        padding: .7rem;
+        border: 1px solid var(--warning);
+        border-radius: .4rem;
+        color: var(--text-main);
+        background: color-mix(in srgb, var(--warning) 10%, var(--bg-card));
     }
 
     .goods-menu-columns {

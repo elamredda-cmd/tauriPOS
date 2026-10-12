@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-12",
+  "status": "IMPLEMENTATION_AND_FOCUSED_REGRESSIONS_PASSED",
+  "scope": "Additional final-review stock-synchronization blocker associated with catalogue saves. This does not add another finding to the remaining-36 count.",
+  "finding": "The local product-patch outbox stores a full cached product snapshot. Generic existing-product replay previously accepted its stockLevel, allowing a later price/name/Goods metadata save to overwrite stock reduced by a sale on another till. Generic timestamp conflict detection does not replace expected-stock CAS when the metadata edit has a newer timestamp.",
+  "fix": "Native generic existing-product UPDATE excludes stockLevel. Existing stock changes are owned by dedicated stock operations; new-product INSERT still keeps opening stock. Other product metadata fields, other tables, dedicated sale and stock-receipt code paths are unchanged by this guard.",
+  "source": {
+    "file": "src-tauri/src/commerce.rs",
+    "predicate": "generic_mysql_existing_row_field_allowed",
+    "wiredTo": "mysql_epoch_fenced_outbox_upsert_with_customer_base existing-row UPDATE pair selection"
+  },
+  "tests": [
+    {
+      "name": "commerce::tests::generic_existing_product_snapshot_never_updates_counted_stock",
+      "type": "Rust mandatory unit regression",
+      "result": "PASS",
+      "passed": 1,
+      "evidence": "Existing product stockLevel and identity are excluded; name, price, costPrice, Goods flags/order and updatedAt remain writable. Other tables retain the prior non-identity field behavior.",
+      "command": "cargo test --offline --locked --lib commerce::tests::generic_existing_product_snapshot_never_updates_counted_stock -- --exact"
+    },
+    {
+      "name": "commerce::tests::real_mariadb_product_snapshot_preserves_sales_stock_when_configured",
+      "type": "Actual native generic-upsert MariaDB regression",
+      "result": "PASS_WITH_CONFIGURED_DISPOSABLE_SOCKET_SERVER",
+      "passed": 1,
+      "evidence": "Real mysql_epoch_fenced_outbox_upsert inserts opening stock 7; an actual SQL sale-style decrement changes it to 6. A fresh metadata snapshot with stock 99 updates name and price to 169p but retains stock 6. The transaction rolls back and asserts zero residual product fixtures.",
+      "command": "POS_TEST_MYSQL_URI=<disposable socket-only test schema> cargo test --offline --locked --lib commerce::tests::real_mariadb_product_snapshot_preserves_sales_stock_when_configured -- --exact",
+      "server": "Fresh socket-only scratch MariaDB under /tmp/pos-catalogue-stock.fFapED; skip-networking; generated pos_stock_regression schema; no shop URI or credentials used. Cleanly shut down after companion count tests completed; daemon exited 0 and its socket was absent. Temporary datadir retained, not deleted.",
+      "optionalCaseNote": "This optional Rust case returns early without POS_TEST_MYSQL_URI. Only the explicitly configured actual database run reported here counts as real-MariaDB coverage."
+    }
+  ],
+  "otherRegressionChecks": {
+    "command": "npx vitest run src/lib/catalogueDesignWorkflows.test.ts src/lib/catalogueIntegrity.test.ts src/lib/stores/catalogueHistoryPersistence.test.ts",
+    "result": "58 tests passed across 3 files",
+    "note": "These overlap the full frontend suite and must not be added again to its total."
+  },
+  "warnings": "4 existing Rust dead-code warnings unchanged; git diff --check passed.",
+  "independentReview": "The companion counted-stock fix was reviewed read-only: standalone native CAS plus audit in one transaction; shared online-only pinned close/restore/epoch-fenced product CAS plus audit; stock-only cache mirror guarded by original version, dataset epoch and pending sale/receipt/product intents; uncertain COMMIT explicitly warns not to repeat. That companion fix and its tests are owned by the customer/Dojo agent and root.",
+  "limits": [
+    "No native Tauri UI verdict is claimed by this subagent; root owns the native stock-count retest.",
+    "This guard does not establish field-level concurrency CAS for all other product metadata edits.",
+    "Actual shared counted-stock transaction tests are separately owned by the companion agent; they are not included in this artifact's one-case database count.",
+    "Final combined-suite and native-app results are recorded by root."
+  ]
+}

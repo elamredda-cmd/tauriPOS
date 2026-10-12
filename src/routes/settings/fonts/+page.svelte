@@ -1,8 +1,7 @@
 <script lang="ts">
     import MgmtPage from '$lib/components/MgmtPage.svelte';
-    import { settingsDB, now, type Setting } from '$lib/stores/db';
-    import { upsert } from '$lib/stores/database';
-    import { toast } from '$lib/stores/toast';
+    import { settingsDB, type Setting } from '$lib/stores/db';
+    import { saveSetting } from '$lib/savedSettings';
     import {
         appFontFamily,
         appFontOptions,
@@ -24,6 +23,8 @@
     };
 
     let pendingSettings: Record<string, string> = {};
+    $: savingChoices = Object.keys(pendingSettings).length > 0;
+    const settingVersions = new Map<string, number>();
 
     function settingValue(settings: Setting[], pending: Record<string, string>, key: string, fallback = ''): string {
         return pending[key] ?? settings.find((item) => item.key === key)?.value ?? fallback;
@@ -122,33 +123,14 @@
         pendingSettings = next;
     }
 
-    function restorePreviousSetting(key: string, previous: Setting | undefined) {
-        settingsDB.update((settings) => {
-            if (!previous) return settings.filter((item) => item.key !== key);
-            const index = settings.findIndex((item) => item.key === key);
-            if (index >= 0) return settings.map((item) => item.key === key ? previous : item);
-            return [...settings, previous];
-        });
-    }
-
     async function updateSetting(key: string, value: string) {
-        const previous = $settingsDB.find((item) => item.key === key);
-        const row = { key, value, updatedAt: now() };
+        const version = (settingVersions.get(key) ?? 0) + 1;
+        settingVersions.set(key, version);
         markPending(key, value);
-        settingsDB.update((settings) => {
-            const index = settings.findIndex((item) => item.key === key);
-            if (index >= 0) return settings.map((item) => item.key === key ? row : item);
-            return [...settings, row];
-        });
-
         try {
-            await upsert('settings', row, 'key');
-        } catch (error) {
-            console.error(`Could not save ${key}:`, error);
-            restorePreviousSetting(key, previous);
-            toast('Could not save the font setting', 'error');
+            await saveSetting(key, value);
         } finally {
-            clearPending(key);
+            if (settingVersions.get(key) === version) clearPending(key);
         }
     }
 </script>
@@ -165,9 +147,9 @@
                     </p>
                 </div>
                 <div class="rounded-lg border border-accent-primary bg-accent-primary/10 px-4 py-3 text-sm">
-                    <span class="block text-xs font-black uppercase tracking-[0.14em] text-accent-primary">Currently used</span>
+                    <span class="block text-xs font-black uppercase tracking-[0.14em] text-accent-primary">{savingChoices ? 'Saving selection…' : 'Currently used'}</span>
                     <strong class="mt-1 block text-text-main">{selectedFontOption.label}</strong>
-                    <span class="text-text-muted">The highlight follows this selected option.</span>
+                    <span class="text-text-muted">{savingChoices ? 'The latest choice will be saved in order.' : 'The highlight follows this saved option.'}</span>
                 </div>
             </div>
         </section>

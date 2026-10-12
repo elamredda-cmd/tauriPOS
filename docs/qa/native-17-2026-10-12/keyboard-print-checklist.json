@@ -1,0 +1,130 @@
+{
+  "scope": "Native Tauri follow-up plan for AUDIT-06, AUDIT-11, AUDIT-13 and AUDIT-21",
+  "status": "PLANNED_NOT_NATIVE_VERIFIED",
+  "controller": "Root agent only; this checklist records expectations, not test results",
+  "safety": [
+    "Use the isolated native QA application and cloned mock SQLite profile. Do not wipe the original app or change its payment credentials/providers.",
+    "Sign in through the normal staff PIN flow. Preserve app_identity and normal licence enforcement; do not renew a trial or bypass a licence.",
+    "Save a baseline of changed printer settings and restore the exact values after tests. Never send a physical print job or cash-drawer pulse.",
+    "Use real native AX/keyboard observations. A source test, injected DOM assertion or accessibility opener click alone is not a native keyboard-focus PASS.",
+    "The macOS native print promise confirms invocation, not dialog dismissal or a successfully printed document. Capture the actual OS preview and cancel it before recording success."
+  ],
+  "scenarios": [
+    {
+      "id": "NATIVE-FOCUS-GOODS",
+      "findingIds": ["AUDIT-11"],
+      "steps": [
+        "Navigate to Item Management and use hardware Tab to place keyboard focus on Goods Menu. Press Return to open it; do not use AX.click as the focus proof.",
+        "Observe initial focus on Close Goods Menu Manager. Press Shift+Tab and observe Save Goods Menu, then Tab and observe Close again.",
+        "Tab through the search and item controls; confirm focus stays inside the dialog and background page controls are inaccessible while the modal is active.",
+        "Press Escape without saving. Press Return immediately; the originating Goods Menu button must reopen the dialog, proving opener-focus restoration.",
+        "Press Escape to leave unchanged."
+      ],
+      "requiredEvidence": ["Native AX focus at initial, last, wrapped-first and reopened states", "Screenshot of dialog plus background inertness observation"],
+      "passCondition": "Full forward/reverse boundary wrap, no background focus leakage and keyboard opener restoration observed; Goods selection/order unchanged"
+    },
+    {
+      "id": "NATIVE-FOCUS-ITEM-NESTED-PAD",
+      "findingIds": ["AUDIT-11"],
+      "mode": "Checkout (Back Office uses a normal selling-price field)",
+      "steps": [
+        "Hardware Tab to Add Item and Return. Initial focus must be Item Name.",
+        "From Name press Shift+Tab to Close item editor, then Shift+Tab to the final Save Item control, then Tab to Close item editor. Confirm background is inert.",
+        "Hardware Tab to the Selling Price button and Return. Observe nested Selling Price pad.",
+        "At its Close button, Shift+Tab must wrap to Confirm selling price; Tab must wrap back to Close. Traverse the numbered keys without activating them.",
+        "Escape must close only the nested pad. Immediate Return must reopen it from restored Selling Price focus.",
+        "Escape closes pad, then Escape closes item editor. Immediate Return must reopen Add Item from restored opener focus.",
+        "Escape again; do not Save a new item or alter an existing price."
+      ],
+      "requiredEvidence": ["Native focus snapshots at both modal boundaries and both restored openers", "Screenshot of nested pad and editor after pad-only dismissal"],
+      "passCondition": "Nested top-modal focus is isolated, parent is not dismissed by one nested Escape, both openers restore correctly, and no product is created"
+    },
+    {
+      "id": "NATIVE-TOUCH-ATTENDANCE-CLOSE",
+      "findingIds": ["AUDIT-21"],
+      "mode": "Checkout",
+      "steps": [
+        "Attendance → Add Record. Focus Correction note to open the automatic global touch keyboard.",
+        "Close the attendance dialog while the keyboard is still shown, using its native close action. Do not Save Record.",
+        "Observe that both dialog and keyboard disappear, and the attendance record count is unchanged.",
+        "Reopen, focus Correction note, press Escape once to close only the touch keyboard and Escape again to close the editor."
+      ],
+      "requiredEvidence": ["AX/screenshot with keyboard attached to the note field", "AX/screenshot after form removal", "Before/after attendance count"],
+      "passCondition": "No orphan keyboard after target removal; intentional first-Escape keyboard / second-Escape modal order works"
+    },
+    {
+      "id": "NATIVE-TOUCH-DESIGN-NAVIGATION",
+      "findingIds": ["AUDIT-21"],
+      "mode": "Checkout",
+      "steps": [
+        "Receipt Design → focus header or footer textarea, opening the global touch keyboard. Do not edit or Save.",
+        "Use a native navigation action to another page while the keyboard is open.",
+        "Verify no keyboard remains over the new page. Return to Receipt Design and confirm the saved text is unchanged.",
+        "Do not count Scale Add Page as a keyboard scenario: Page name is explicitly button-only and currently has no touch-keyboard opener."
+      ],
+      "requiredEvidence": ["Before navigation AX keyboard attachment", "New-page AX/screenshot without keyboard", "Unchanged saved design baseline"],
+      "passCondition": "Route-change cleanup removes the old keyboard without modifying removed design inputs"
+    },
+    {
+      "id": "NATIVE-TOUCH-ITEM-REMOVAL",
+      "findingIds": ["AUDIT-21"],
+      "mode": "Checkout",
+      "steps": [
+        "Add Item → Open item name keyboard; observe attachment to the name field.",
+        "Close item editor while touch keyboard is visible; do not Save.",
+        "Verify the editor and keyboard are absent, and the original product count is unchanged."
+      ],
+      "requiredEvidence": ["Attached keyboard snapshot", "Editor-removal snapshot", "Unchanged product count"],
+      "passCondition": "Disconnected target cleanup leaves neither a keyboard nor a delayed refocus on the removed field"
+    },
+    {
+      "id": "NATIVE-LABEL-OS-CANCEL",
+      "findingIds": ["AUDIT-13"],
+      "steps": [
+        "In the QA profile only, snapshot label_printer_enabled, label_printer_connection and label_printer_protocol. Enable Labels and choose System driver (protocol System).",
+        "Quick Label Print → scan/find 0EGGS (barcode 5020379111201) and select one copy.",
+        "Press Print 1 Label. The actual macOS print dialog must appear and its preview must show the selected item/price rather than a blank sheet or stale receipt.",
+        "Cancel the OS dialog without choosing Print or saving a PDF.",
+        "Return to the app: the selected item, quantity 1 and Print 1 Label action must still exist. No toast may claim a successful print.",
+        "Explicit Clear must remove selection and the retained bounded print snapshot. Restore all three printer settings to their exact baseline."
+      ],
+      "requiredEvidence": ["Actual OS dialog preview", "Cancelled-dialog selected-label state", "Explicit Clear state", "Printer settings restoration"],
+      "passCondition": "Real OS cancellation retains the mock label job; rendering is nonempty; only explicit Clear removes it",
+      "hardwareLimit": "No physical printer required. Physical print/Windows driver certification is outside this cancellation test."
+    },
+    {
+      "id": "NATIVE-HARDWARE-SINGLE-FLIGHT",
+      "findingIds": ["AUDIT-06"],
+      "steps": [
+        "Use a debug-only scoped native pause at printer.network / device / system or drawer.network before transport, and safe loopback or rejected QA transport only.",
+        "For each receipt test, label test and drawer action: trigger once, observe Sending/Opening and disabled button, attempt a second native action while the first remains pending.",
+        "Record exactly one pending native checkpoint/transport invocation. Release to safe loopback success or reject; observe busy state cleared and retry action available.",
+        "For Items, Goods Menu, Suppliers and Tax Rates, use the same pending-save pattern. Observe one submission and disabled edit/dismissal controls; cancel or restore any mock fixtures after completion."
+      ],
+      "requiredEvidence": ["Pending native UI busy state", "One native checkpoint/invocation despite repeated action", "Completion/failure clears busy state", "Exact fixture/config restoration"],
+      "passCondition": "Actual native UI rejects duplicate pending actions and recovers after error without sending physical jobs/pulses",
+      "hardwareLimit": "A loopback TCP socket alone cannot reliably delay tiny writes because production does not wait for a printer ACK. Sequential clicks after completion may legitimately send two jobs; do not misclassify them."
+    }
+  ],
+  "evidenceTemplate": {
+    "scenarioId": "",
+    "nativeRetest": "PENDING",
+    "appIdentifier": "",
+    "appBuild": "",
+    "operatingMode": "",
+    "viewport": "",
+    "observations": [],
+    "screenshots": [],
+    "beforeAfterCounts": {},
+    "restoration": [],
+    "limits": []
+  },
+  "profileCloneSafety": {
+    "preserve": ["app_identity with original signed licence/trial timestamp", "employees and PIN hashes", "role permissions", "registered-till count used by normal licence enforcement"],
+    "doNotCopy": ["WebKit/browser storage", "device-secrets.json", "device-secrets.lock", "dojo.json", "sumup.json"],
+    "stripSettingKeysInCloneOnly": ["mysql_config", "owner_cloud_reporter_password", "owner_cloud_pairing_code", "owner_cloud_reporter_email"],
+    "safeSettingValuesInCloneOnly": {"pos_mode":"single", "owner_cloud_enabled":"false", "cctv_pos_enabled":"false", "receipt_printer_auto_print_after_payment":"false", "receipt_printer_open_drawer_after_payment":"false", "cash_drawer_enabled":"false", "label_printer_enabled":"false"},
+    "warning": "QA startup must skip legacy Keychain migration. Its service name is constant com.elamreda.tauri-app, so a different app identifier alone does not prevent importing the original provider secrets. Normal licence/auth code must remain enabled.",
+    "sources": ["src-tauri/src/licensing.rs", "src-tauri/src/secret_store.rs", "src-tauri/src/lib.rs", "src/lib/stores/session.ts", "src/lib/ownerCloudConfig.ts", "src/lib/stores/connection.ts"]
+  }
+}

@@ -428,9 +428,9 @@
     .attendance-button, .role-permissions-button, .add-staff-button { min-height: 48px; display: inline-flex; align-items: center; gap: .55rem; }
     .attendance-button svg, .role-permissions-button svg, .add-staff-button svg { width: 20px; height: 20px; }
     .staff-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-    .staff-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--border-flat); background: var(--border-flat); }
+    .staff-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-bottom: 1px solid var(--border-flat); background: var(--border-flat); }
     .staff-summary > div { min-width: 0; padding: .8rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: .75rem; background: var(--bg-card); }
-    .staff-summary span { overflow: hidden; color: var(--text-muted); font-size: .72rem; font-weight: 850; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+    .staff-summary span { min-width: 0; color: var(--text-muted); font-size: .72rem; font-weight: 850; text-transform: uppercase; white-space: normal; overflow-wrap: anywhere; }
     .staff-summary strong { color: var(--text-main); font-size: 1.3rem; }
     .staff-summary small { color: var(--text-muted); font-size: .7rem; font-weight: 700; }
     .staff-table-wrap { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }

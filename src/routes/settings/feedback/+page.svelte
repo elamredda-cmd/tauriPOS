@@ -1,8 +1,8 @@
 <script lang="ts">
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
-    import { now, settingsDB } from '$lib/stores/db';
-    import { upsert } from '$lib/stores/database';
+    import { settingsDB } from '$lib/stores/db';
+    import { saveSetting } from '$lib/savedSettings';
     import { BadgeCheck, MousePointerClick, ScanBarcode, ShoppingBasket, Vibrate } from '@lucide/svelte';
     import {
         playCartButtonFeedback,
@@ -51,23 +51,14 @@
         ].join(' ');
     }
 
-    async function updateSetting(key: string, value: string) {
-        const row = { key, value, updatedAt: now() };
-        settingsDB.update(settings => {
-            const index = settings.findIndex(item => item.key === key);
-            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
-            return [...settings, row];
-        });
-        await upsert('settings', row, 'key');
-    }
+    const updateSetting = saveSetting;
 
     function setFeedbackSetting(key: string, enabled: boolean) {
         updateSetting(key, enabled ? 'true' : 'false');
     }
 
-    function selectBarcodeErrorSound(style: string) {
-        updateSetting('barcode_error_sound', style);
-        if (style !== 'silent') setTimeout(playErrorSound, 0);
+    async function selectBarcodeErrorSound(style: string) {
+        if (await updateSetting('barcode_error_sound', style) && style !== 'silent') setTimeout(playErrorSound, 0);
     }
 </script>
 

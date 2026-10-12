@@ -1,6 +1,22 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=LBJ_NATIVE_QA");
+    println!("cargo:rustc-check-cfg=cfg(native_qa)");
+    if std::env::var("LBJ_NATIVE_QA").as_deref() == Ok("1")
+        && std::env::var_os("CARGO_FEATURE_NATIVE_QA").is_some()
+        && std::env::var("PROFILE").as_deref() == Ok("debug")
+    {
+        println!("cargo:rustc-cfg=native_qa");
+    }
+    // A frontend-only rebuild changes hashed assets without changing Rust
+    // source. Invalidate embedded assets as well, including library context
+    // generation, so incremental bundles cannot contain stale entry points.
+    println!("cargo:rerun-if-changed=../build");
     let app_manifest = tauri_build::AppManifest::new().commands(&[
         "greet",
+        "native_qa_arm",
+        "native_qa_checkpoint",
+        "native_qa_release",
+        "native_qa_status",
         "import_customer_display_media",
         "remove_customer_display_media",
         "send_cctv_pos_text",
@@ -57,6 +73,7 @@ fn main() {
         "cash_control_context",
         "cash_control_save",
         "dojo_cancel_expired_sandbox_payment",
+        "dojo_recover_legacy_sandbox_payments",
         "dojo_retry_payment",
         "dojo_review_expired_payment",
         "replace_mariadb_from_local_restore",

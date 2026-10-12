@@ -31,3 +31,17 @@ export function getScaleSaleDisplay(
 export function formatKilograms(kilograms: number): string {
     return kilograms.toFixed(3).replace(/\.?0+$/, "");
 }
+
+/** A weighed line stores its calculated whole-line price in unitPrice. */
+export function hasActualPriceOverride(line: {
+    notes?: string; quantity: number; unitPrice: number; originalPrice: number; isPriceOverride?: boolean;
+}): boolean {
+    if (!line.isPriceOverride) return false;
+    const display = getScaleSaleDisplay(line.notes, line.quantity, line.unitPrice, line.originalPrice);
+    if (display.kind === 'weight') {
+        return line.unitPrice !== Math.round(Math.abs(display.kilograms) * line.originalPrice);
+    }
+    // A price-encoded scale label is not a cashier edit of the per-kg catalogue rate.
+    if (display.kind === 'price') return line.unitPrice !== line.originalPrice;
+    return true;
+}

@@ -50,8 +50,19 @@ export function createStockReceiptPreview() {
     const lineIds = new Set<string>();
     const logIds = new Set<string>();
     const auditIds = new Set<string>();
+    const receiptLines = new Map<string, StockReceiptBundle['lines']>();
 
     return {
+        history(options: { query?: string; supplierId?: string; limit?: number; offset?: number } = {}) {
+            const query = (options.query || '').trim().toLocaleLowerCase();
+            const matches = [...receipts.values()].filter(receipt => (!options.supplierId || receipt.supplierId === options.supplierId)
+                && (!query || `${receipt.reference} ${receipt.notes}`.toLocaleLowerCase().includes(query)))
+                .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+            const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+            const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit) || 20)));
+            return { total: matches.length, rows: matches.slice(offset, offset + limit).map(receipt => ({ ...receipt })) };
+        },
+        lines(receiptId: string) { return (receiptLines.get(receiptId) || []).map(line => ({ ...line })); },
         recent(limit = 20): StockReceipt[] {
             const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
             return [...receipts.values()]
@@ -100,6 +111,7 @@ export function createStockReceiptPreview() {
                 audit: { ...bundle.audit },
             };
             receipts.set(bundle.receipt.id, { ...bundle.receipt });
+            receiptLines.set(bundle.receipt.id, bundle.lines.map(line => ({ ...line })));
             bundle.lines.forEach((line) => { lineIds.add(line.id); logIds.add(line.inventoryLogId); });
             auditIds.add(bundle.audit.id);
             return result;

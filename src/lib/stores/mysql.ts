@@ -30,8 +30,15 @@ import {
 } from './db';
 import { assertTerminalAccountingEnrichment, terminalAttemptUpdatePredecessors } from '../terminalAttemptState';
 import { effectiveReportMarkerScopes } from '../reportMarkers';
-import { ATTENDANCE_CORRECTION_CONFLICT_CODE } from '../attendance';
+import {
+    ATTENDANCE_CORRECTION_CONFLICT_CODE,
+    attendanceOverlapError,
+    findAttendanceOverlap,
+    validateClosedAttendance,
+    type AttendanceInterval,
+} from '../attendance';
 import { withMysqlSession } from './mysqlSession';
+import { CATALOGUE_INTEGRITY_MIGRATION, catalogueTaxDefaultInitializationSql, catalogueIntegrityCollationQuery, catalogueIntegritySchemaSql, catalogueIntegrityTriggerSql, type CatalogueIntegrityColumn } from '../catalogueIntegrity';
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
@@ -131,7 +138,7 @@ const CUSTOMER_ACCOUNT_SCHEMA_MIGRATION = '2026-07-customer-account-schema-v4';
 export const MYSQL_IDENTIFIER_COLLATION_MIGRATION = '2026-07-relational-identifier-collation-v2';
 const MYSQL_ACCOUNT_GUARD_MIGRATION = '2026-07-account-ledger-guards-binary-v1';
 const MYSQL_CUSTOMER_GUARD_MIGRATION = '2026-07-customer-anti-resurrection-guards-collation-v2';
-const MYSQL_ATTENDANCE_ROLE_GUARD_MIGRATION = '2026-08-attendance-only-role-guards-v13';
+const MYSQL_ATTENDANCE_ROLE_GUARD_MIGRATION = '2026-10-attendance-interval-guards-v15';
 const MYSQL_IDENTIFIER_CHARSET = 'utf8mb4';
 const MYSQL_IDENTIFIER_COLLATION = 'utf8mb4_bin';
 const MYSQL_FRESH_CUSTOMER_COLLATION = 'utf8mb4_unicode_ci';
@@ -1297,6 +1304,16 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
             expiresAt DATETIME(3) NOT NULL
         ) ENGINE=InnoDB
     `);
+    // A marker exists only inside the pinned, employee-serialized write
+    // transaction. Older pooled writes fail closed instead of bypassing the
+    // overlap check during a rolling upgrade.
+    await d.execute(`
+        CREATE TABLE IF NOT EXISTS pos_attendance_write_authority (
+            connectionId BIGINT PRIMARY KEY,
+            attendanceId VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            employeeId VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL
+        ) ENGINE=InnoDB
+    `);
     const restoreWriteAuthority = `EXISTS (
           SELECT 1 FROM pos_restore_gate
            WHERE id = 1 AND isActive = 1 AND ownerTillId <> ''
@@ -1319,6 +1336,17 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
              AND BINARY token = BINARY COALESCE(@lbj_pos_attendance_audit_import, '')
         )
     )`;
+    const attendanceIntervalAuthorityCheck = `
+        IF NOT EXISTS (
+          SELECT 1 FROM pos_attendance_write_authority
+           WHERE connectionId = CONNECTION_ID()
+             AND BINARY attendanceId = BINARY NEW.id
+             AND BINARY employeeId = BINARY NEW.employeeId
+        ) THEN
+          SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'ATTENDANCE_INTERVAL_AUTHORITY_REQUIRED: update this till to safely change attendance';
+        END IF;
+    `;
     const attendanceActorPermissionCheck = (requiresManage: string) => `
         SET attendanceActorActive = 0;
         SET attendanceActorRole = '';
@@ -1326,7 +1354,7 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
         SELECT COALESCE(isActive, 0), TRIM(COALESCE(role, ''))
           INTO attendanceActorActive, attendanceActorRole
           FROM employees
-         WHERE BINARY id = BINARY attendanceActorId
+         WHERE id = BINARY attendanceActorId
          LIMIT 1 FOR UPDATE;
         IF attendanceActorActive = 0
            OR attendanceActorRole NOT IN ('admin', 'manager', 'supervisor', 'cashier', 'attendance') THEN
@@ -1342,7 +1370,7 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
             SET attendanceRolePermissions = '';
             SELECT COALESCE(value, '') INTO attendanceRolePermissions
               FROM settings
-             WHERE BINARY \`key\` = BINARY 'role_permissions'
+             WHERE \`key\` = 'role_permissions' AND BINARY \`key\` = BINARY 'role_permissions'
              LIMIT 1 FOR UPDATE;
             IF attendanceRolePermissions = '' OR JSON_VALID(attendanceRolePermissions) = 0 THEN
               SET attendanceCanManage = IF(attendanceActorRole = 'manager', 1, 0);
@@ -1568,6 +1596,7 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
                DECLARE attendanceCanManage INT DEFAULT 0;
                DECLARE attendanceRolePermissions LONGTEXT DEFAULT '';
                IF NOT ${attendanceWriteBypass} THEN
+                 ${attendanceIntervalAuthorityCheck}
                  IF NEW.status NOT IN ('open', 'closed') THEN
                    SIGNAL SQLSTATE '45000'
                      SET MESSAGE_TEXT = 'ATTENDANCE_STATUS_INVALID: attendance must be open or closed';
@@ -1604,6 +1633,7 @@ export async function ensureAttendanceOnlyRoleGuards(d: Database): Promise<void>
                DECLARE attendanceCanManage INT DEFAULT 0;
                DECLARE attendanceRolePermissions LONGTEXT DEFAULT '';
                IF NOT ${attendanceWriteBypass} THEN
+                 ${attendanceIntervalAuthorityCheck}
                  IF NOT (BINARY NEW.id = BINARY OLD.id)
                     OR NOT (BINARY NEW.createdByEmployeeId = BINARY OLD.createdByEmployeeId)
                     OR NOT (BINARY NEW.createdAt = BINARY OLD.createdAt) THEN
@@ -1785,7 +1815,7 @@ export async function ensureMysqlSchemaOnDatabase(d: Database): Promise<void> {
             name VARCHAR(191) PRIMARY KEY, appliedAt VARCHAR(40) NOT NULL)`);
         // Bump this marker when the schema or a required data repair changes.
         // The native connection owns GET_LOCK until this whole operation ends.
-        const version = 'pos_schema_2026_09_28_dojo_review_v1';
+        const version = 'pos_schema_2026_10_12_integrity_v3';
         const applied: any[] = await d.select('SELECT name FROM pos_schema_migrations WHERE name = ?', [version]);
         if (applied.length) return;
         await initializeMysqlSchema(d);
@@ -2691,6 +2721,7 @@ async function initializeMysqlSchema(d: Database): Promise<void> {
     await cleanupDuplicatePromotionMemberships(d);
     await cleanupDuplicateOpenShifts(d);
     await ensureDeleteTombstoneTriggers(d);
+    await ensureCatalogueIntegrity(d);
     await ensureSyncChangeTriggers(d);
     if (Number(imageMigrationResult?.rowsAffected || 0) > 0) {
         await d.execute(
@@ -2866,6 +2897,15 @@ async function ensureDeleteTombstoneTriggers(d: Database): Promise<void> {
         );
     }
     await ensureCustomerAntiResurrectionTriggers(d);
+}
+
+/** The same server guards cover current tills, old outboxes and other clients. */
+export async function ensureCatalogueIntegrity(d: Database): Promise<void> {
+    for (const sql of catalogueIntegritySchemaSql) await d.execute(sql);
+    const columns = await d.select<CatalogueIntegrityColumn[]>(catalogueIntegrityCollationQuery);
+    await installVersionedMysqlTriggers(d, CATALOGUE_INTEGRITY_MIGRATION,
+        mysqlTriggerDefinitions(catalogueIntegrityTriggerSql(columns)));
+    await d.execute(catalogueTaxDefaultInitializationSql);
 }
 
 /**
@@ -3500,6 +3540,73 @@ export async function mysqlGetEmployeeAttendanceById(id: string): Promise<Employ
     return rows[0] || null;
 }
 
+/** The supplied database MUST be a pinned session, never the pooled SQL plugin. */
+export async function mysqlAttendanceTransactionOnDatabase<T>(
+    d: Database,
+    employeeId: string,
+    actorId: string,
+    operation: (database: Database, serverNow: string) => Promise<T>,
+): Promise<T> {
+    await d.execute('START TRANSACTION');
+    try {
+        // All writes for the subject serialize even when no attendance rows
+        // exist yet. Lock actor and subject in stable order before permission
+        // triggers run; do not use employee_attendance as its own trigger's
+        // locking source (MariaDB rejects that with error 1442).
+        const employeeIds = [...new Set([employeeId, actorId])].sort();
+        for (const id of employeeIds) {
+            const rows = await d.select<Array<{ id: string }>>(
+                'SELECT id FROM employees WHERE id = ? LIMIT 1 FOR UPDATE', [id],
+            );
+            if (!rows.length) throw new Error('This staff account no longer exists');
+        }
+        const stamps = await d.select<Array<{ stamp: string }>>(
+            `SELECT CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z') AS stamp`,
+        );
+        const saved = await operation(d, stamps[0].stamp);
+        await d.execute('DELETE FROM pos_attendance_write_authority WHERE connectionId = CONNECTION_ID()');
+        await d.execute('COMMIT');
+        return saved;
+    } catch (error) {
+        await d.execute('ROLLBACK').catch(() => undefined);
+        throw error;
+    }
+}
+
+async function withAttendanceTransaction<T>(
+    employeeId: string,
+    actorId: string,
+    operation: (database: Database, serverNow: string) => Promise<T>,
+): Promise<T> {
+    const config = get(connectionState).mysqlConfig;
+    if (!config) throw new Error('MariaDB configuration is unavailable');
+    return withMysqlSession(buildMysqlUri(config), 'attendance', (d) =>
+        mysqlAttendanceTransactionOnDatabase(d, employeeId, actorId, operation));
+}
+
+export async function mysqlAuthorizeAttendanceIntervalOnDatabase(d: Database, row: AttendanceInterval): Promise<void> {
+    // Locking reads see the latest committed rows even if this transaction had
+    // an earlier REPEATABLE READ snapshot. Parsing in one shared helper also
+    // handles historical ISO timestamps with differing UTC offsets/precision.
+    const records = await d.select<EmployeeAttendance[]>(
+        `SELECT CAST(a.id AS CHAR CHARACTER SET utf8mb4) AS id,
+                CAST(a.employeeId AS CHAR CHARACTER SET utf8mb4) AS employeeId,
+                a.clockInAt, a.clockOutAt, a.status
+         FROM employee_attendance a
+         WHERE a.employeeId = ? AND a.id <> ? FOR UPDATE`,
+        [row.employeeId, row.id],
+    );
+    // MariaDB follows the installed parent identifier collation. The WHERE
+    // already established subject identity, including case-insensitive legacy
+    // schemas; do not accidentally discard those rows in the JS comparison.
+    const conflict = findAttendanceOverlap(row, records.map(record => ({ ...record, employeeId: row.employeeId })));
+    if (conflict) throw attendanceOverlapError(conflict);
+    await d.execute(
+        `INSERT INTO pos_attendance_write_authority (connectionId, attendanceId, employeeId)
+         VALUES (CONNECTION_ID(), ?, ?)`, [row.id, row.employeeId],
+    );
+}
+
 export async function mysqlInsertOpenEmployeeAttendanceOnDatabase(
     d: Database,
     id: string,
@@ -3507,8 +3614,10 @@ export async function mysqlInsertOpenEmployeeAttendanceOnDatabase(
     tillId: string,
     actorEmployeeId: string,
     notes = '',
+    clockInAt?: string,
 ): Promise<EmployeeAttendance> {
-    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    const stamp = clockInAt ? '?' : `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
+    const stampParams = clockInAt ? [clockInAt] : [];
     try {
         const result: any = await d.execute(
             `INSERT INTO employee_attendance (
@@ -3516,7 +3625,7 @@ export async function mysqlInsertOpenEmployeeAttendanceOnDatabase(
                 status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
              )
              VALUES (?, ?, ${stamp}, '', ?, '', 'open', ?, ?, ?, ${stamp}, ${stamp})`,
-            [id, employeeId, tillId, notes, actorEmployeeId, actorEmployeeId],
+            [id, employeeId, ...stampParams, tillId, notes, actorEmployeeId, actorEmployeeId, ...stampParams, ...stampParams],
         );
         if (Number(result?.rowsAffected || 0) !== 1) {
             throw new Error('ATTENDANCE_EMPLOYEE_INACTIVE');
@@ -3546,14 +3655,12 @@ export async function mysqlInsertOpenEmployeeAttendance(
     actorEmployeeId: string,
     notes = '',
 ): Promise<EmployeeAttendance> {
-    return mysqlInsertOpenEmployeeAttendanceOnDatabase(
-        await getDb(),
-        id,
-        employeeId,
-        tillId,
-        actorEmployeeId,
-        notes,
-    );
+    return withAttendanceTransaction(employeeId, actorEmployeeId, async (d, stamp) => {
+        await mysqlAuthorizeAttendanceIntervalOnDatabase(d, {
+            id, employeeId, clockInAt: stamp, clockOutAt: '', status: 'open',
+        });
+        return mysqlInsertOpenEmployeeAttendanceOnDatabase(d, id, employeeId, tillId, actorEmployeeId, notes, stamp);
+    });
 }
 
 export const EMPLOYEE_PROFILE_CONFLICT_CODE = 'EMPLOYEE_PROFILE_CONFLICT';
@@ -3707,22 +3814,25 @@ export async function mysqlCloseOpenEmployeeAttendance(
     tillId: string,
     actorEmployeeId: string,
 ): Promise<EmployeeAttendance> {
-    const d = await getDb();
-    const stamp = `CONCAT(LEFT(DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ'), 23), 'Z')`;
-    const result: any = await d.execute(
-        `UPDATE employee_attendance
-         SET clockOutAt = ${stamp}, clockOutTillId = ?, status = 'closed',
-             updatedByEmployeeId = ?, updatedAt = ${stamp}
-         WHERE id = ? AND employeeId = ? AND status = 'open'`,
-        [tillId, actorEmployeeId, attendanceId, employeeId],
-    );
-    if (Number(result?.rowsAffected || 0) !== 1) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
-    const rows = await d.select<EmployeeAttendance[]>(
-        `${MYSQL_ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
-        [attendanceId],
-    );
-    if (!rows[0]) throw new Error('Could not confirm the attendance clock-out');
-    return rows[0];
+    return withAttendanceTransaction(employeeId, actorEmployeeId, async (d, stamp) => {
+        const current = await mysqlGetOpenEmployeeAttendanceOnDatabase(d, employeeId);
+        if (!current || current.id !== attendanceId) throw new Error('ATTENDANCE_SESSION_CHANGED');
+        await mysqlAuthorizeAttendanceIntervalOnDatabase(d, { ...current, status: 'closed', clockOutAt: stamp });
+        const result: any = await d.execute(
+            `UPDATE employee_attendance
+             SET clockOutAt = ?, clockOutTillId = ?, status = 'closed',
+                 updatedByEmployeeId = ?, updatedAt = ?
+             WHERE id = ? AND employeeId = ? AND status = 'open'`,
+            [stamp, tillId, actorEmployeeId, stamp, attendanceId, employeeId],
+        );
+        if (Number(result?.rowsAffected || 0) !== 1) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+        const rows = await d.select<EmployeeAttendance[]>(
+            `${MYSQL_ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
+            [attendanceId],
+        );
+        if (!rows[0]) throw new Error('Could not confirm the attendance clock-out');
+        return rows[0];
+    });
 }
 
 export async function mysqlSaveClosedEmployeeAttendanceOnDatabase(
@@ -3780,7 +3890,11 @@ export async function mysqlSaveClosedEmployeeAttendance(
     row: EmployeeAttendance,
     expectedUpdatedAt = '',
 ): Promise<EmployeeAttendance> {
-    return mysqlSaveClosedEmployeeAttendanceOnDatabase(await getDb(), row, expectedUpdatedAt);
+    return withAttendanceTransaction(row.employeeId, row.updatedByEmployeeId, async (d, stamp) => {
+        validateClosedAttendance(row.clockInAt, row.clockOutAt, new Date(stamp).getTime());
+        await mysqlAuthorizeAttendanceIntervalOnDatabase(d, row);
+        return mysqlSaveClosedEmployeeAttendanceOnDatabase(d, row, expectedUpdatedAt);
+    });
 }
 
 // ─── Generic CRUD ────────────────────────────────────────────────────────────

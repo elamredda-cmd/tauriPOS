@@ -26,6 +26,9 @@ export interface MysqlConfig {
     database: string;
 }
 
+type ConnectionSettingRow = { key: 'pos_mode' | 'mysql_config'; value: string; updatedAt?: string | null };
+export interface ConnectionSettingsSnapshot { rows: ConnectionSettingRow[] }
+
 export interface PosConnectionState {
     mode: PosMode | null; // null = not selected yet
     mysqlConfig: MysqlConfig | null;
@@ -125,27 +128,75 @@ export async function loadSavedMode(): Promise<PosMode | null> {
     return null;
 }
 
+/** Capture the durable rows, including absence and their original timestamps. */
+export async function captureConnectionSettings(): Promise<ConnectionSettingsSnapshot> {
+    const database = await localDb();
+    const rows = await database.select<ConnectionSettingRow[]>(
+        "SELECT key, value, updatedAt FROM settings WHERE key IN ('pos_mode', 'mysql_config') ORDER BY key",
+    );
+    return { rows: rows.map(row => ({ ...row })) };
+}
+
+async function persistConnectionSettings(
+    before: ConnectionSettingsSnapshot,
+    after: ConnectionSettingsSnapshot,
+    action: 'connection_configuration_saved' | 'connection_configuration_restored',
+): Promise<void> {
+    const { commitBatch } = await import('./sqlite');
+    const { currentEmployee } = await import('./session');
+    const { settingsDB } = await import('./db');
+    const keys = ['pos_mode', 'mysql_config'] as const;
+    if (after.rows.some(row => !keys.includes(row.key)) || new Set(after.rows.map(row => row.key)).size !== after.rows.length) {
+        throw new Error('Invalid saved connection snapshot');
+    }
+    const stamp = new Date().toISOString();
+    // Never duplicate connection strings, credentials, hostnames or users into
+    // audit records. Presence and mode are sufficient to explain this action.
+    const auditValue = (snapshot: ConnectionSettingsSnapshot) => {
+        const mode = snapshot.rows.find(row => row.key === 'pos_mode')?.value;
+        return JSON.stringify({
+            mode: mode === undefined ? null : mode === 'single' || mode === 'multi' ? mode : '[invalid saved mode]',
+            mysqlConfigPresent: snapshot.rows.some(row => row.key === 'mysql_config'),
+            credentials: '[redacted]',
+        });
+    };
+    await commitBatch([
+        ...keys.map(key => {
+            const row = after.rows.find(value => value.key === key);
+            return row
+                ? { table: 'settings', idKey: 'key', data: { ...row } }
+                : { table: 'settings', idKey: 'key', kind: 'remove' as const, data: { key } };
+        }),
+        { table: 'audit_logs', data: { id: crypto.randomUUID(), employeeId: get(currentEmployee)?.id || '',
+            action, entityType: 'connection', entityId: 'local_connection', oldData: auditValue(before),
+            newData: auditValue(after), createdAt: stamp, updatedAt: stamp } },
+    ]);
+    settingsDB.update(rows => [
+        ...rows.filter(row => row.key !== 'pos_mode' && row.key !== 'mysql_config'),
+        ...after.rows.map(row => ({ ...row, updatedAt: row.updatedAt ?? '' })),
+    ]);
+}
+
+/** Restore exactly what was durable before a failed reconnect, atomically. */
+export async function restoreConnectionSettings(snapshot: ConnectionSettingsSnapshot): Promise<void> {
+    const frozen = { rows: snapshot.rows.map(row => ({ ...row })) };
+    await persistConnectionSettings(await captureConnectionSettings(), frozen, 'connection_configuration_restored');
+    resetMysqlConnection();
+}
+
 /**
  * Persist the POS mode (and optional MySQL config) to the local SQLite
  * `settings` table, then update the reactive store.
  */
 export async function saveMode(mode: PosMode, config?: MysqlConfig): Promise<void> {
-    const d = await localDb();
+    const before = await captureConnectionSettings();
     const now = new Date().toISOString();
-
-    await d.execute(
-        `INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
-        ['pos_mode', mode, now]
-    );
-
-    if (config) {
-        await d.execute(
-            `INSERT INTO settings (key, value, updatedAt) VALUES (?, ?, ?)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt`,
-            ['mysql_config', JSON.stringify(config), now]
-        );
-    }
+    // Mode and credentials form one configuration; never persist half of it.
+    await persistConnectionSettings(before, { rows: [
+        { key: 'pos_mode', value: mode, updatedAt: now },
+        ...(config ? [{ key: 'mysql_config' as const, value: JSON.stringify(config), updatedAt: now }]
+            : before.rows.filter(row => row.key === 'mysql_config')),
+    ] }, 'connection_configuration_saved');
 
     // Always reconnect after saving setup choices so a changed host, database,
     // or credential set can never reuse the previous cached connection.

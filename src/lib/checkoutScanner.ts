@@ -1,3 +1,11 @@
+/** Consume the scan terminator before a synchronous lookup can open a dialog. */
+export function handleCheckoutSearchKeydown(event: KeyboardEvent, submit: () => unknown): void {
+    if (event.key !== 'Enter' || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) void submit();
+}
+
 /** A keyboard-wedge scanner sends a short burst followed by Enter. */
 export class CheckoutScannerBuffer {
     private value = '';

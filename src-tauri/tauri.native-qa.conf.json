@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "L&Bj Native QA",
+  "identifier": "com.elamreda.tauri-app.native-qa",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "L&Bj Native QA — isolated test data",
+        "width": 1024,
+        "height": 768,
+        "minWidth": 800,
+        "minHeight": 600,
+        "maximized": false
+      }
+    ]
+  }
+}

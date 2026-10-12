@@ -212,10 +212,15 @@ describe('MariaDB attendance-only role guards', () => {
         expect(attendanceActiveInsert).toContain("ELSEIF attendanceActorRole = 'attendance'");
         expect(attendanceActiveInsert).toContain("JSON_EXTRACT(attendanceRolePermissions, '$.roles') IS NOT NULL");
         expect(attendanceActiveInsert).toContain('pos_attendance_audit_import_sessions');
+        expect(attendanceActiveInsert).toContain('ATTENDANCE_INTERVAL_AUTHORITY_REQUIRED');
+        expect(attendanceActiveInsert).toContain('pos_attendance_write_authority');
+        expect(attendanceActiveInsert).toContain('BINARY attendanceId = BINARY NEW.id');
         expect(attendanceUpdateGuard).toContain('ATTENDANCE_IMMUTABLE_FIELDS');
         expect(attendanceUpdateGuard).toContain('ATTENDANCE_CLOCK_OUT_INVALID');
         expect(attendanceUpdateGuard).toContain('ATTENDANCE_MANAGER_REQUIRED');
         expect(attendanceUpdateGuard).toContain('FOR UPDATE');
+        expect(attendanceUpdateGuard).toContain('ATTENDANCE_INTERVAL_AUTHORITY_REQUIRED');
+        expect(attendanceUpdateGuard).toContain('BINARY employeeId = BINARY NEW.employeeId');
         expect(attendanceDeleteGuard).toContain('ATTENDANCE_DELETE_DISABLED');
         expect(attendanceDeleteGuard).toContain('@lbj_pos_restore_bypass');
         expect(attendanceInsertAudit).toContain('attendance_clocked_in');

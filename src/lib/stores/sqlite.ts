@@ -15,6 +15,12 @@ import {
 } from './db';
 import { effectiveReportMarkerScopes } from '../reportMarkers';
 import { attendanceQueueQuarantineSql } from '../attendanceSyncPolicy';
+import {
+    ATTENDANCE_CORRECTION_CONFLICT_CODE,
+    attendanceOverlapError,
+    findAttendanceOverlap,
+    validateClosedAttendance,
+} from '../attendance';
 
 let db: Database | null = null;
 let productSearchIndexReady = false;
@@ -1332,9 +1338,12 @@ async function runDataMigrations() {
 
     // Empty identifiers are not real identifiers. Convert them to NULL so
     // database-level unique indexes can allow many products without barcodes.
-    await d.execute(`UPDATE products SET barcode = NULL WHERE TRIM(COALESCE(barcode, '')) = ''`);
-    await d.execute(`UPDATE products SET scalePlu = NULL WHERE TRIM(COALESCE(scalePlu, '')) = ''`);
-    await d.execute(`UPDATE products SET sku = NULL WHERE TRIM(COALESCE(sku, '')) = ''`);
+    // Already-NULL identifiers need no repair. Updating them to NULL again
+    // still fires the FTS UPDATE trigger, rebuilding every empty product on
+    // each reload/restart even though no catalogue value changed.
+    await d.execute(`UPDATE products SET barcode = NULL WHERE barcode IS NOT NULL AND TRIM(barcode) = ''`);
+    await d.execute(`UPDATE products SET scalePlu = NULL WHERE scalePlu IS NOT NULL AND TRIM(scalePlu) = ''`);
+    await d.execute(`UPDATE products SET sku = NULL WHERE sku IS NOT NULL AND TRIM(sku) = ''`);
     // Keep the newest membership and open shift before adding uniqueness rules.
     await d.execute(`
         DELETE FROM promo_group_items
@@ -1554,12 +1563,16 @@ export async function upsert(table: string, obj: any, idKey: string = 'id', allo
 
 export interface LocalMutation {
     table: string;
-    kind?: 'upsert' | 'insert' | 'patch' | 'remove' | 'adjustStock' | 'queue';
+    kind?: 'upsert' | 'insert' | 'patch' | 'remove' | 'adjustStock' | 'setStock' | 'queue';
     idKey?: string;
     data: Record<string, any>;
     queueId?: string;
     serverDataEpoch?: string;
     protectPending?: boolean;
+    /** Cache-only remove after a successful authoritative category/tax deletion. Never queued. */
+    authoritativeCatalogueDelete?: boolean;
+    /** Compare the complete tax editor baseline inside the native write lock. */
+    expectedTaxRates?: Array<Record<string, any>>;
 }
 
 /** A single native transaction, including pending uploads when supplied. */
@@ -2283,6 +2296,44 @@ export async function getRecentStockReceipts(limit = 20): Promise<any[]> {
     );
 }
 
+export interface SupplierPageOptions { query?: string; limit?: number; offset?: number; }
+export async function getSuppliersPage(options: SupplierPageOptions = {}): Promise<{ rows: any[]; total: number }> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit) || 25)));
+    const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+    const query = String(options.query || '').trim();
+    const pattern = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
+    const where = query ? "WHERE name LIKE ? ESCAPE '\\' OR contactName LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\'" : '';
+    const values = query ? [pattern, pattern, pattern, pattern] : [];
+    const count: any[] = await d.select(`SELECT COUNT(*) AS total FROM suppliers ${where}`, values);
+    const rows: any[] = await d.select(`SELECT * FROM suppliers ${where} ORDER BY name COLLATE NOCASE, id LIMIT ? OFFSET ?`, [...values, limit, offset]);
+    return { rows, total: Number(count[0]?.total || 0) };
+}
+
+export interface StockReceiptHistoryOptions { query?: string; supplierId?: string; limit?: number; offset?: number; }
+export async function getStockReceiptHistory(options: StockReceiptHistoryOptions = {}): Promise<{ rows: any[]; total: number }> {
+    const d = await getDb();
+    const limit = Math.max(1, Math.min(100, Math.floor(Number(options.limit) || 20)));
+    const offset = Math.max(0, Math.floor(Number(options.offset) || 0));
+    const filters: string[] = [], values: string[] = [];
+    if (options.query?.trim()) {
+        filters.push("(reference LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\')");
+        const pattern = `%${options.query.trim().replace(/[\\%_]/g, '\\$&')}%`;
+        values.push(pattern, pattern);
+    }
+    if (options.supplierId) { filters.push('supplierId = ?'); values.push(options.supplierId); }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const count: any[] = await d.select(`SELECT COUNT(*) AS total FROM stock_receipts ${where}`, values);
+    const rows: any[] = await d.select(`SELECT * FROM stock_receipts ${where} ORDER BY createdAt DESC, id DESC LIMIT ? OFFSET ?`, [...values, limit, offset]);
+    return { rows, total: Number(count[0]?.total || 0) };
+}
+
+export async function getStockReceiptLines(receiptId: string): Promise<any[]> {
+    const d = await getDb();
+    return d.select(`SELECT l.*, COALESCE(p.name, 'Unavailable product') AS productName
+        FROM stock_receipt_lines l LEFT JOIN products p ON p.id = l.productId WHERE l.receiptId = ? ORDER BY l.id`, [receiptId]);
+}
+
 export type ProductStatusFilter = 'active' | 'deactivated' | 'all';
 
 export interface ProductPageOptions {
@@ -2602,17 +2653,97 @@ export async function getOpenEmployeeAttendance(employeeId: string): Promise<Emp
 
 export async function insertOpenEmployeeAttendance(row: EmployeeAttendance): Promise<EmployeeAttendance> {
     const d = await getDb();
-    await d.execute(
+    const result = await d.execute(
         `INSERT INTO employee_attendance (
             id, employeeId, clockInAt, clockOutAt, clockInTillId, clockOutTillId,
             status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
-         ) VALUES (?, ?, ?, '', ?, '', 'open', ?, ?, ?, ?, ?)`,
+         ) SELECT ?, ?, ?, '', ?, '', 'open', ?, ?, ?, ?, ?
+           WHERE ${SQLITE_ATTENDANCE_NO_OVERLAP}`,
         [
             row.id, row.employeeId, row.clockInAt, row.clockInTillId, row.notes,
             row.createdByEmployeeId, row.updatedByEmployeeId, row.createdAt, row.updatedAt,
+            ...attendanceIntervalParams(row),
         ],
     );
+    if (Number(result.rowsAffected || 0) !== 1) await throwAttendanceOverlap(d, row);
     return (await getOpenEmployeeAttendance(row.employeeId))!;
+}
+
+// SQLite acquires its write lock for the entire INSERT/UPDATE statement. This
+// guard and the mutation therefore cannot race another connection; a pooled
+// JS preflight or BEGIN/COMMIT pair would not provide that guarantee. Cache
+// hydration intentionally does not use this authoritative single-till path.
+export const SQLITE_ATTENDANCE_NO_OVERLAP = `NOT EXISTS (
+    SELECT 1 FROM employee_attendance a WHERE a.employeeId = ? AND a.id <> ?
+      AND (julianday(a.clockInAt) IS NULL OR (
+        (? = 'open' OR julianday(a.clockInAt) < julianday(?))
+        AND (a.status = 'open' OR COALESCE(a.clockOutAt, '') = ''
+             OR julianday(a.clockOutAt) IS NULL OR julianday(a.clockOutAt) > julianday(?))
+      ))
+)`;
+
+function attendanceIntervalParams(row: EmployeeAttendance): string[] {
+    return [row.employeeId, row.id, row.status, row.clockOutAt, row.clockInAt];
+}
+
+async function throwAttendanceOverlap(d: Database, row: EmployeeAttendance): Promise<never> {
+    const records = await d.select<EmployeeAttendance[]>(
+        'SELECT * FROM employee_attendance WHERE employeeId = ?', [row.employeeId],
+    );
+    throw attendanceOverlapError(findAttendanceOverlap(row, records));
+}
+
+export async function saveClosedEmployeeAttendanceOnDatabase(
+    d: Database,
+    row: EmployeeAttendance,
+    expectedUpdatedAt = '',
+): Promise<EmployeeAttendance> {
+    validateClosedAttendance(row.clockInAt, row.clockOutAt);
+    let result;
+    if (expectedUpdatedAt) {
+        result = await d.execute(
+            `UPDATE employee_attendance SET employeeId = ?, clockInAt = ?, clockOutAt = ?,
+                clockInTillId = ?, clockOutTillId = ?, notes = ?, updatedByEmployeeId = ?, updatedAt = ?
+             WHERE id = ? AND status = 'closed' AND updatedAt = ? AND ${SQLITE_ATTENDANCE_NO_OVERLAP}`,
+            [row.employeeId, row.clockInAt, row.clockOutAt, row.clockInTillId, row.clockOutTillId,
+                row.notes, row.updatedByEmployeeId, row.updatedAt, row.id, expectedUpdatedAt,
+                ...attendanceIntervalParams(row)],
+        );
+    } else {
+        try {
+            result = await d.execute(
+                `INSERT INTO employee_attendance (
+                    id, employeeId, clockInAt, clockOutAt, clockInTillId, clockOutTillId,
+                    status, notes, createdByEmployeeId, updatedByEmployeeId, createdAt, updatedAt
+                 ) SELECT ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, ?, ? WHERE ${SQLITE_ATTENDANCE_NO_OVERLAP}`,
+                [row.id, row.employeeId, row.clockInAt, row.clockOutAt, row.clockInTillId, row.clockOutTillId,
+                    row.notes, row.createdByEmployeeId, row.updatedByEmployeeId, row.createdAt, row.updatedAt,
+                    ...attendanceIntervalParams(row)],
+            );
+        } catch (error) {
+            if (String(error).toLowerCase().includes('unique')) throw new Error(ATTENDANCE_CORRECTION_CONFLICT_CODE);
+            throw error;
+        }
+    }
+    if (Number(result.rowsAffected || 0) !== 1) {
+        if (expectedUpdatedAt) {
+            const current = await d.select<EmployeeAttendance[]>(
+                'SELECT * FROM employee_attendance WHERE id = ?', [row.id],
+            );
+            if (!current[0] || current[0].status !== 'closed' || current[0].updatedAt !== expectedUpdatedAt) {
+                throw new Error(ATTENDANCE_CORRECTION_CONFLICT_CODE);
+            }
+        }
+        await throwAttendanceOverlap(d, row);
+    }
+    const rows = await d.select<EmployeeAttendance[]>(
+        'SELECT * FROM employee_attendance WHERE id = ?', [row.id],
+    );
+    return rows[0];
+}
+
+export async function saveClosedEmployeeAttendance(row: EmployeeAttendance, expectedUpdatedAt = ''): Promise<EmployeeAttendance> {
+    return saveClosedEmployeeAttendanceOnDatabase(await getDb(), row, expectedUpdatedAt);
 }
 
 export async function closeOpenEmployeeAttendance(
@@ -2620,18 +2751,26 @@ export async function closeOpenEmployeeAttendance(
     tillId: string,
     actorEmployeeId: string,
     clockOutAt: string,
+    expectedAttendanceId: string,
 ): Promise<EmployeeAttendance> {
     const current = await getOpenEmployeeAttendance(employeeId);
     if (!current) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    if (current.id !== expectedAttendanceId) throw new Error('ATTENDANCE_SESSION_CHANGED');
     const d = await getDb();
+    const candidate: EmployeeAttendance = { ...current, clockOutAt, status: 'closed' };
     const result: any = await d.execute(
         `UPDATE employee_attendance
          SET clockOutAt = ?, clockOutTillId = ?, status = 'closed',
              updatedByEmployeeId = ?, updatedAt = ?
-         WHERE id = ? AND status = 'open'`,
-        [clockOutAt, tillId, actorEmployeeId, clockOutAt, current.id],
+         WHERE id = ? AND employeeId = ? AND status = 'open' AND ${SQLITE_ATTENDANCE_NO_OVERLAP}`,
+        [clockOutAt, tillId, actorEmployeeId, clockOutAt, expectedAttendanceId, employeeId,
+            ...attendanceIntervalParams(candidate)],
     );
-    if (Number(result?.rowsAffected || 0) !== 1) throw new Error('ATTENDANCE_NOT_CLOCKED_IN');
+    if (Number(result?.rowsAffected || 0) !== 1) {
+        const open = await getOpenEmployeeAttendance(employeeId);
+        if (!open || open.id !== expectedAttendanceId) throw new Error('ATTENDANCE_SESSION_CHANGED');
+        await throwAttendanceOverlap(d, candidate);
+    }
     const rows = await d.select<EmployeeAttendance[]>(
         `${ATTENDANCE_BASE_SELECT} WHERE a.id = ? LIMIT 1`,
         [current.id],

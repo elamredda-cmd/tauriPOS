@@ -6,10 +6,11 @@
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import SearchField from '$lib/components/SearchField.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import Modal from '$lib/components/Modal.svelte';
     import StockReceivingProductPicker from '$lib/components/StockReceivingProductPicker.svelte';
     import { deviceOperatingMode } from '$lib/deviceMode';
     import { suppliersDB, formatMoney, now, uuid, type Product, type StockReceipt } from '$lib/stores/db';
-    import { commitStockReceipt, getProductsPage, getRecentStockReceipts, type StockReceiptBundle } from '$lib/stores/database';
+    import { commitStockReceipt, getProductsPage, getStockReceiptHistory, getStockReceiptLines, type StockReceiptBundle } from '$lib/stores/database';
     import { currentEmployee } from '$lib/stores/session';
     import { validateReceivingDraft, type ReceivingDraftLine } from '$lib/stockReceivingDraft';
 
@@ -25,6 +26,9 @@
     let showDiscard = false, showLeave = false, leaveUrl = '', allowNavigation = false;
     let history: StockReceipt[] = [];
     let historyLoading = false, historyError = '', historyToken = 0;
+    let historySearch = '', historySupplier = '', historyOffset = 0, historyTotal = 0;
+    let showReceipt = false, selectedReceipt: StockReceipt | null = null, receiptLines: any[] = [];
+    let receiptLoading = false, receiptError = '', receiptToken = 0;
     let availableProducts: Product[] = [];
     let productsLoading = false, productsError = '', productTotal = 0, productTotalIsCapped = false, productOffset = 0;
     let productSearchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -132,13 +136,33 @@
         const token = ++historyToken;
         historyLoading = true; historyError = '';
         try {
-            const receipts = await getRecentStockReceipts(50);
-            if (token === historyToken) history = receipts;
+            const result = await getStockReceiptHistory({ query: historySearch, supplierId: historySupplier, limit: PAGE_SIZE, offset: historyOffset });
+            if (token === historyToken) {
+                historyTotal = result.total;
+                const lastOffset = Math.max(0, Math.floor((historyTotal - 1) / PAGE_SIZE) * PAGE_SIZE);
+                if (historyOffset > lastOffset) { historyOffset = lastOffset; void loadHistory(); return; }
+                history = result.rows;
+            }
         } catch (error) {
             if (token === historyToken) historyError = `Could not load recent receipts. ${String(error)}`;
         } finally {
             if (token === historyToken) historyLoading = false;
         }
+    }
+    function findHistory() { historyOffset = 0; void loadHistory(); }
+    function pageHistory(direction: number) {
+        if (historyLoading) return;
+        historyOffset = Math.max(0, historyOffset + direction * PAGE_SIZE);
+        void loadHistory();
+    }
+    async function openReceipt(receipt: StockReceipt) {
+        const token = ++receiptToken;
+        selectedReceipt = receipt; showReceipt = true; receiptLines = []; receiptError = ''; receiptLoading = true;
+        try {
+            const result = await getStockReceiptLines(receipt.id);
+            if (token === receiptToken && showReceipt && selectedReceipt?.id === receipt.id) receiptLines = result;
+        } catch (error) { if (token === receiptToken) receiptError = `Could not load receipt lines. ${String(error)}`; }
+        finally { if (token === receiptToken) receiptLoading = false; }
     }
     async function saveReceipt() {
         if (saving) return;
@@ -240,20 +264,44 @@
                 <button class="btn btn-primary receiving-submit" disabled={saving || (!pendingSubmission && !validation.valid)} on:click={saveReceipt}>{#if saving}<RotateCw size={18} />Saving…{:else if pendingSubmission}Retry receipt{:else}<PackagePlus size={18} />Receive stock{/if}</button>
             </footer>
         {:else}
-            <section class="receiving-history" aria-label="Recent stock receipts">
-                <div class="receiving-history-heading"><div><h2>Recent receipts</h2><p>Latest 50 deliveries received into inventory.</p></div><button class="btn btn-secondary" disabled={historyLoading} on:click={loadHistory}><RotateCw size={16} />Refresh</button></div>
+            <section class="receiving-history" aria-label="Stock receipt history">
+                <div class="receiving-history-heading"><div><h2>Receipt history</h2><p>Search completed deliveries, including older receipts.</p></div><button class="btn btn-secondary" disabled={historyLoading} on:click={loadHistory}><RotateCw size={16} />Refresh</button></div>
+                <div class="search-controls receiving-history-filters">
+                    <SearchField id="receipt-history-search" bind:value={historySearch} placeholder="Reference or notes…" ariaLabel="Search stock receipt history" onKeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); findHistory(); } }} onClear={() => { historySearch = ''; findHistory(); }} />
+                    <CustomSelect bind:value={historySupplier} options={[{ label: 'All suppliers', value: '' }, ...supplierOptions.filter(option => option.value)]} />
+                    <button class="btn btn-primary" disabled={historyLoading} on:click={findHistory}>Find</button>
+                </div>
                 {#if historyError}<div class="receiving-notice error" role="alert">{historyError}</div>{/if}
                 <div class="receiving-history-list" aria-busy={historyLoading}>
                     {#if historyLoading && !history.length}<p class="receiving-empty">Loading receipts…</p>
-                    {:else if !history.length && !historyError}<div class="receiving-empty"><PackagePlus size={32} /><h3>No receipts yet</h3><p>Completed deliveries will appear here.</p></div>
+                    {:else if !history.length && !historyError}<div class="receiving-empty"><PackagePlus size={32} /><h3>{historySearch.trim() || historySupplier ? 'No matching receipts' : 'No receipts yet'}</h3><p>{historySearch.trim() || historySupplier ? 'Try another reference or supplier.' : 'Completed deliveries will appear here.'}</p></div>
                     {:else}{#each history as receipt (receipt.id)}
-                        <article class="receiving-history-row"><div><h3>{receipt.reference || 'Stock receipt'}</h3><p>{supplierName(receipt.supplierId)} · {receiptDate(receipt.createdAt)}</p>{#if receipt.notes}<p class="receiving-history-note">{receipt.notes}</p>{/if}</div><div class="receiving-history-amount"><strong>{formatMoney(receipt.totalCost ?? 0)}</strong><span class:voided={receipt.status === 'voided'}>{receipt.status === 'voided' ? 'Voided' : 'Received'}</span></div></article>
+                        <article class="receiving-history-row"><div><h3>{receipt.reference || 'Stock receipt'}</h3><p>{supplierName(receipt.supplierId)} · {receiptDate(receipt.createdAt)}</p>{#if receipt.notes}<p class="receiving-history-note">{receipt.notes}</p>{/if}<button class="btn btn-secondary" on:click={() => openReceipt(receipt)}>View delivery lines</button></div><div class="receiving-history-amount"><strong>{formatMoney(receipt.totalCost ?? 0)}</strong><span class:voided={receipt.status === 'voided'}>{receipt.status === 'voided' ? 'Voided' : 'Received'}</span></div></article>
                     {/each}{/if}
                 </div>
+                <nav class="receiving-history-pagination" aria-label="Stock receipt pages">
+                    <button class="btn btn-secondary" disabled={historyLoading || historyOffset === 0} on:click={() => pageHistory(-1)}>Newer</button>
+                    <span>{historyTotal ? `${historyOffset + 1}–${Math.min(historyOffset + PAGE_SIZE, historyTotal)} of ${historyTotal}` : '0 receipts'}</span>
+                    <button class="btn btn-secondary" disabled={historyLoading || historyOffset + PAGE_SIZE >= historyTotal} on:click={() => pageHistory(1)}>Older</button>
+                </nav>
             </section>
         {/if}
     </div>
     <svelte:fragment slot="modal">
+        <Modal bind:show={showReceipt} title={selectedReceipt?.reference || 'Delivery details'} width="800px">
+            {#if selectedReceipt}
+                <p>{supplierName(selectedReceipt.supplierId)} · {receiptDate(selectedReceipt.createdAt)}</p>
+                <p>Total cost: <strong>{formatMoney(selectedReceipt.totalCost)}</strong> · {selectedReceipt.status}</p>
+                {#if selectedReceipt.notes}<p>{selectedReceipt.notes}</p>{/if}
+                {#if receiptError}<div role="alert">{receiptError}<button class="btn btn-secondary" on:click={() => selectedReceipt && openReceipt(selectedReceipt)}>Retry</button></div>
+                {:else if receiptLoading}<p>Loading delivery lines…</p>
+                {:else}<div class="overflow-auto"><table class="tbl"><thead><tr><th>Product (current name)</th><th>Quantity</th><th>Unit cost</th><th>Line cost</th></tr></thead><tbody>
+                    {#each receiptLines as line (line.id)}<tr><td>{line.productName}</td><td>{line.quantity}</td><td>{formatMoney(line.unitCost)}</td><td>{formatMoney(line.quantity * line.unitCost)}</td></tr>{/each}
+                    {#if !receiptLines.length}<tr><td colspan="4">No lines available for this receipt.</td></tr>{/if}
+                </tbody></table></div>{/if}
+            {/if}
+            <svelte:fragment slot="footer"><button class="btn btn-primary" on:click={() => showReceipt = false}>Close</button></svelte:fragment>
+        </Modal>
         {#if isBackOffice}<StockReceivingProductPicker bind:show={showProductPicker} disabled={locked} quantities={deliveryQuantities} message={feedbackIsSuccess ? '' : feedback} on:add={(event) => addProduct(event.detail)} />{/if}
         <ConfirmDialog bind:show={showDiscard} title="Clear this delivery?" message={pendingSubmission ? 'Check Recent receipts before clearing an unconfirmed delivery. Clearing only removes this draft; it does not reverse any stock already received.' : 'Remove all products, the reference and notes from this unsaved delivery? Your stock will not change.'} confirmText="Clear draft" variant="danger" on:confirm={discardDraft} />
         <ConfirmDialog bind:show={showLeave} title="Leave this delivery?" message={pendingSubmission ? 'This receipt has not been confirmed. Retry it or check Recent receipts before leaving. Leaving loses the draft, but does not reverse any stock already received.' : 'Your delivery has not been received. Leave and discard the unsaved draft?'} confirmText="Leave page" cancelText="Keep editing" variant="danger" on:confirm={leavePage} />
@@ -261,6 +309,9 @@
 </MgmtPage>
 
 <style>
+    .receiving-history-filters { display: grid; grid-template-columns: minmax(180px,1fr) minmax(140px,.7fr) auto; gap: 8px; flex: none; }
+    .receiving-history-pagination { display:flex; align-items:center; justify-content:space-between; gap:8px; flex:none; border-top:1px solid var(--border-flat); padding-top:8px; }
+    .receiving-history-pagination span { font-size:.8rem; color:var(--text-muted); }
     .receiving-workspace { height:100%; min-height:0; min-width:0; display:flex; flex-direction:column; gap:12px; padding:16px; overflow:hidden; }
     .receiving-tabs { display:flex; gap:4px; flex:none; border-bottom:1px solid var(--border-flat); }
     .receiving-tabs button { min-height:42px; padding:8px 16px; border:0; border-bottom:3px solid transparent; color:var(--text-muted); font-size:.9rem; font-weight:700; background:transparent; }

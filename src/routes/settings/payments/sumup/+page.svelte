@@ -6,6 +6,7 @@
     import { connectionState } from '$lib/stores/connection';
     import { toast } from '$lib/stores/toast';
     import { loadDojoConfig, saveDojoConfig } from '$lib/dojo';
+    import { switchCardProvider } from '$lib/settingsWriteQueue';
     import {
         clearSumupSecrets,
         getSumupReaderStatus,
@@ -37,11 +38,15 @@
     let pairingCode = '';
     let pairingName = 'Shop Solo';
     let loading = true;
+    let loadFailed = false;
     let saving = false;
+    let switching = false;
     let readerBusy = false;
     let pairingBusy = false;
     let removingSecrets = false;
     let showRemoveSecretsConfirm = false;
+    $: providerBusy = loading || loadFailed || saving || switching || readerBusy || pairingBusy || removingSecrets;
+    function operationBusy() { return loading || loadFailed || saving || switching || readerBusy || pairingBusy || removingSecrets; }
 
     $: readerOptions = [
         ...(!readers.some((reader) => reader.id === config.readerId) && config.readerId
@@ -61,15 +66,19 @@
         && (affiliateKey.trim() || config.affiliateKeyConfigured),
     );
 
-    onMount(async () => {
+    async function refreshConfiguration() {
+        loading = true;
         try {
             config = await loadSumupConfig();
+            loadFailed = false;
         } catch (error) {
+            loadFailed = true;
             toast(`Could not load SumUp settings: ${error}`, 'error');
         } finally {
             loading = false;
         }
-    });
+    }
+    onMount(refreshConfiguration);
 
     function selectReader(readerId: string) {
         const reader = readers.find((entry) => entry.id === readerId);
@@ -82,7 +91,7 @@
     }
 
     async function saveConfiguration(enabled = config.enabled, showToast = true): Promise<boolean> {
-        if (saving) return false;
+        if (loading || loadFailed || saving || switching || removingSecrets) return false;
         saving = true;
         try {
             config = await saveSumupConfig({
@@ -109,6 +118,7 @@
     }
 
     async function findReaders() {
+        if (operationBusy()) return;
         if (!(await saveConfiguration(config.enabled, false))) return;
         readerBusy = true;
         readerStatus = null;
@@ -128,6 +138,7 @@
     }
 
     async function pairReader() {
+        if (operationBusy()) return;
         if (!(await saveConfiguration(config.enabled, false))) return;
         pairingBusy = true;
         try {
@@ -145,6 +156,7 @@
     }
 
     async function testReader() {
+        if (operationBusy()) return;
         if (!(await saveConfiguration(config.enabled, false))) return;
         readerBusy = true;
         try {
@@ -163,6 +175,7 @@
     }
 
     async function toggleEnabled() {
+        if (operationBusy()) return;
         if (config.enabled) {
             await saveConfiguration(false);
             return;
@@ -171,10 +184,18 @@
             toast('Complete the credentials and choose a reader before enabling SumUp', 'error');
             return;
         }
+        switching = true;
+        const submitted = { enabled: true, merchantCode: config.merchantCode, readerId: config.readerId,
+            readerName: config.readerName, currency: config.currency, affiliateAppId: config.affiliateAppId,
+            terminalOwnership: config.terminalOwnership, apiKey, affiliateKey };
+        const previousEnabled = config.enabled;
         try {
-            const dojo = await loadDojoConfig().catch(() => null);
-            if (dojo?.enabled) {
-                await saveDojoConfig({
+            const dojo = await loadDojoConfig();
+            config = await switchCardProvider({
+                enableTarget: () => saveSumupConfig(submitted),
+                disablePrevious: async () => {
+                    if (!dojo.enabled) return;
+                    await saveDojoConfig({
                     enabled: false,
                     terminalOwnership: dojo.terminalOwnership,
                     terminalId: dojo.terminalId,
@@ -182,16 +203,24 @@
                     currency: dojo.currency,
                     softwareHouseId: dojo.softwareHouseId,
                     resellerId: dojo.resellerId,
-                });
-            }
-            await saveConfiguration(true);
+                    });
+                },
+                getPreviousEnabled: async () => (await loadDojoConfig()).enabled,
+                restoreTarget: () => saveSumupConfig({ ...submitted, enabled: previousEnabled }),
+            });
+            apiKey = '';
+            affiliateKey = '';
+            toast('SumUp Solo is enabled on this till', 'success');
         } catch (error) {
             toast(`Could not switch the card provider to SumUp: ${error}`, 'error');
+            try { config = await loadSumupConfig(); } catch { /* Visible failure already explains recovery. */ }
+        } finally {
+            switching = false;
         }
     }
 
     async function confirmRemoveSecrets() {
-        if (removingSecrets) return;
+        if (operationBusy()) return;
         removingSecrets = true;
         try {
             config = await clearSumupSecrets();
@@ -209,15 +238,16 @@
 
 <MgmtPage title="SumUp" backFallback="/settings/payments">
     <div slot="actions" class="flex flex-wrap gap-3">
-        <button class="btn btn-secondary" disabled={loading || readerBusy || !config.readerId} on:click={testReader}>
+        <button class="btn btn-secondary" disabled={providerBusy || !config.readerId} on:click={testReader}>
             {readerBusy ? 'Checking...' : 'Test Reader'}
         </button>
-        <button class="btn btn-primary" disabled={loading || saving} on:click={() => saveConfiguration()}>
+        <button class="btn btn-primary" disabled={providerBusy} on:click={() => saveConfiguration()}>
             {saving ? 'Saving...' : 'Save Settings'}
         </button>
     </div>
 
     <div class="settings-page-shell">
+        {#if loadFailed}<section class="settings-section" role="alert"><p>Saved SumUp settings could not be loaded. They have not been replaced.</p><button class="btn btn-secondary" disabled={loading} on:click={refreshConfiguration}>Retry loading settings</button></section>{/if}
         <section class="settings-hero">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -230,7 +260,7 @@
                         <span class="h-3 w-3 rounded-full {config.enabled ? 'bg-success' : 'bg-text-muted'}"></span>
                         {config.enabled ? 'Enabled' : 'Disabled'}
                     </span>
-                    <button class="btn {config.enabled ? 'btn-danger' : 'btn-success'}" disabled={loading || saving} on:click={toggleEnabled}>
+                    <button class="btn {config.enabled ? 'btn-danger' : 'btn-success'}" disabled={providerBusy} on:click={toggleEnabled}>
                         {config.enabled ? 'Disable SumUp' : 'Enable SumUp'}
                     </button>
                 </div>
@@ -307,7 +337,7 @@
                     <h3 class="settings-section-title">Solo reader</h3>
                     <p class="text-sm text-text-muted">In dedicated mode, select a different Solo on each till. Shared mode uses MariaDB to reserve a reader between tills.</p>
                 </div>
-                <button class="btn btn-secondary" disabled={readerBusy || saving} on:click={findReaders}>
+                <button class="btn btn-secondary" disabled={providerBusy} on:click={findReaders}>
                     {readerBusy ? 'Finding...' : 'Find My Readers'}
                 </button>
             </div>
@@ -355,10 +385,10 @@
                 </div>
             </div>
             <div class="mt-4 flex flex-wrap justify-between gap-3">
-                <button class="btn btn-danger" disabled={removingSecrets || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretsConfirm = true}>
+                <button class="btn btn-danger" disabled={providerBusy || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretsConfirm = true}>
                     {removingSecrets ? 'Removing...' : 'Remove Saved Keys'}
                 </button>
-                <button class="btn btn-primary" disabled={pairingBusy || pairingCode.trim().length < 8} on:click={pairReader}>
+                <button class="btn btn-primary" disabled={providerBusy || pairingCode.trim().length < 8} on:click={pairReader}>
                     {pairingBusy ? 'Pairing...' : 'Pair Reader'}
                 </button>
             </div>

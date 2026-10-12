@@ -76,6 +76,20 @@ describe('Dojo session monitoring shared by checkout and account payments', () =
         expect(retry).not.toHaveBeenCalled();
     });
 
+    it('does not retry a declined card after the operator also requested cancellation', async () => {
+        let cancelled = false;
+        const options = setup({ shouldCancel: () => cancelled });
+        options.getSession.mockResolvedValue(session('Declined'));
+        options.getPayment.mockResolvedValue(payment('Created'));
+        const retry = vi.fn();
+        const result = monitorDojoSession({ ...options, retry, onDeclined: decide => {
+            decide(true);
+            cancelled = true;
+        } });
+        expect(await result).toEqual({ outcome: 'failed', status: 'Declined' });
+        expect(retry).not.toHaveBeenCalled();
+    });
+
     it('waits through signature acceptance and authorization until the intent captures', async () => {
         const options = setup();
         options.getSession

@@ -51,7 +51,7 @@
         type Product,
     } from "$lib/stores/db";
     import { toast, toasts, isBlockingToast, isScanDismissibleToast, dismissSaleCompletionOnScan } from "$lib/stores/toast";
-    import { CheckoutScannerBuffer } from "$lib/checkoutScanner";
+    import { CheckoutScannerBuffer, handleCheckoutSearchKeydown } from "$lib/checkoutScanner";
     import CheckoutCustomerForm from '$lib/components/CheckoutCustomerForm.svelte';
     import CartDiscountSummary from '$lib/components/CartDiscountSummary.svelte';
     import { newCheckoutCustomerDraft, registerCheckoutCustomer, type CheckoutCustomerDraft } from '$lib/checkoutCustomer';
@@ -66,6 +66,9 @@
         getTillName,
         triggerSync,
         commitSale,
+        pendingOnlineFinancialIntent,
+        pendingOnlineFinancialReadError,
+        refreshPendingOnlineFinancialIntent,
         commitPreparedTerminalSale,
         ensureOpenShift,
         findOpenShiftForRegister,
@@ -84,6 +87,7 @@
         claimHeldOrder,
         prepareHeldOrderClaim,
         heldRecoverySaleCompleted,
+        checkoutDraftDisposition,
         saveHeldOrderBundle,
         assertHeldOrderUploadComplete,
         saveCustomerProfile,
@@ -93,8 +97,12 @@
         type SaleBundle,
     } from "$lib/stores/database";
     import { evaluateCart, type CartEvaluation } from "$lib/utils/discountEngine";
+    import { OnlineFinancialPendingError, pendingOnlineFinancialMessage, shouldDetachPendingTrolley } from '$lib/onlineFinancialRecovery';
+    import { onlineFinancialReviewOpen } from '$lib/stores/onlineFinancialRecoveryUi';
     import { nextPromotionRefreshDelay, promotionEvaluationTime } from '$lib/promotionClock';
     import { loadHeldRecovery, persistHeldRecovery, type HeldRecovery } from '$lib/heldOrderRecovery';
+    import { loadCheckoutDraft, persistCheckoutDraft, flushCheckoutDraft, type CheckoutDraft } from '$lib/checkoutDraft';
+    import { nativeQaCheckpoint } from '$lib/nativeQa';
     import { calculateCartTotals, calculateTaxLine } from "$lib/utils/commerceMath";
     import { SequentialQueue } from "$lib/utils/sequentialQueue";
     import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -122,6 +130,7 @@
     import { formatScaleReading, getScaleHardwareConfig, readScaleWeight, type ScaleWeightReading } from "$lib/scaleHardware";
     import { requireManualSaleAccess } from "$lib/licensing";
     import { requiresAgeVerification } from "$lib/ageRestriction";
+    import { AgeVerificationKeyboardGuard } from "$lib/ageVerificationKeyboard";
     import { canAccessPath, hasPermission, permissionForPath, permissionLabels, roleLabels, type PermissionKey } from "$lib/permissions";
     import { deviceOperatingMode, deviceOperatingModeLabel } from "$lib/deviceMode";
     import {
@@ -147,6 +156,7 @@
     import {
         acquireDojoLock,
         cancelDojoTerminalSession,
+        cancelExpiredSandboxDojoPaymentIntent,
         createDojoPayment,
         dojoConfig as dojoConfigStore,
         dojoTerminalKey,
@@ -164,6 +174,7 @@
         type DojoPaymentIntentStatus,
     } from "$lib/dojo";
     import { monitorDojoSession } from "$lib/dojoSessionFlow";
+    import { editPriceDigits } from '$lib/pricePad';
     import { retryDojoPayment } from '$lib/dojo';
     import DojoRetryDialog from '$lib/components/DojoRetryDialog.svelte';
     import DojoExpiryReview from '$lib/components/DojoExpiryReview.svelte';
@@ -234,6 +245,122 @@
     let activeHeldRecovery: HeldRecovery | null = null;
     let pendingHeldRecovery: HeldRecovery | null = null;
     let heldRecoveryWriteError = '';
+    let checkoutDraftReady = false;
+    let checkoutDraftLoading = false;
+    let checkoutDraftRecoveryError = '';
+    let checkoutDraftWriteError = '';
+    let checkoutDraftId = '';
+    let checkoutDraftSaleIds: string[] = [];
+    let checkoutDraftHoldId = '';
+    let lastScheduledCheckoutDraft = '';
+    let checkoutDraftWriteToken = 0;
+    $: checkoutDraftBlocked = !checkoutDraftReady || checkoutDraftLoading || Boolean(checkoutDraftRecoveryError)
+        || Boolean(pendingHeldRecovery && !activeHeldRecovery);
+    $: if (checkoutDraftReady && !posDestroyed && $deviceOperatingMode !== 'back_office') {
+        saveCurrentCheckoutDraft(cart, selectedCustomerId, selectedManualDiscountId, selectedCartIndex,
+            activeHeldRecovery, pendingHeldRecovery, tillId, checkoutDraftSaleIds, checkoutDraftHoldId);
+    }
+
+    function checkoutSnapshot(lines: typeof cart, customerId: string, discountId: string, index: number,
+        recovered: HeldRecovery | null, pending: HeldRecovery | null, registerId: string,
+        saleIds: string[], holdId: string): CheckoutDraft | null {
+        // Retrieved holds already have a claim-aware journal. Never create a
+        // second, chargeable ordinary draft for the same trolley.
+        if (!lines.length || recovered || pending) return null;
+        if (!checkoutDraftId) checkoutDraftId = uuid();
+        return { version: 1, id: checkoutDraftId, tillId: registerId, cart: lines,
+            customerId, discountId, selectedCartIndex: Math.max(0, Math.min(index, lines.length - 1)),
+            saleIds, pendingHoldId: holdId };
+    }
+
+    function saveCurrentCheckoutDraft(...args: Parameters<typeof checkoutSnapshot>) {
+        // Empty held carts also end a checkout identity, even if the last
+        // persisted ordinary value was already a null tombstone.
+        if (!args[0].length) {
+            if (checkoutDraftId) checkoutDraftId = '';
+            if (checkoutDraftSaleIds.length) checkoutDraftSaleIds = [];
+            if (checkoutDraftHoldId) checkoutDraftHoldId = '';
+        }
+        const draft = checkoutSnapshot(...args);
+        const signature = JSON.stringify(draft);
+        if (signature === lastScheduledCheckoutDraft) return;
+        lastScheduledCheckoutDraft = signature;
+        const token = ++checkoutDraftWriteToken;
+        void persistCheckoutDraft(draft).then(() => {
+            if (token === checkoutDraftWriteToken && !posDestroyed) checkoutDraftWriteError = '';
+        }).catch(() => {
+            if (token === checkoutDraftWriteToken && !posDestroyed) {
+                checkoutDraftWriteError = 'Trolley recovery could not be saved. Check free storage and retry before taking payment.';
+            }
+        });
+    }
+
+    async function saveCheckoutBoundary() {
+        const draft = checkoutSnapshot(cart, selectedCustomerId, selectedManualDiscountId, selectedCartIndex,
+            activeHeldRecovery, pendingHeldRecovery, tillId, checkoutDraftSaleIds, checkoutDraftHoldId);
+        await persistCheckoutDraft(draft);
+        await flushCheckoutDraft();
+        lastScheduledCheckoutDraft = JSON.stringify(draft);
+        checkoutDraftWriteError = '';
+    }
+
+    async function restoreCheckoutDraft() {
+        if (checkoutDraftLoading || posDestroyed) return;
+        checkoutDraftLoading = true;
+        checkoutDraftReady = false;
+        checkoutDraftRecoveryError = '';
+        try {
+            const [held, draft] = await Promise.all([loadHeldRecovery(), loadCheckoutDraft()]);
+            const registerId = isTauri() ? await getOrCreateTillId() : 'browser-preview-till';
+            if (posDestroyed) return;
+            pendingHeldRecovery = held;
+            if (draft) {
+                if (draft.tillId && draft.tillId !== registerId) {
+                    throw new Error('This saved trolley belongs to a different till registration. Restore the original till registration before recovering it.');
+                }
+                const result = await checkoutDraftDisposition(draft.saleIds, draft.pendingHoldId);
+                if (posDestroyed) return;
+                if (result.state === 'review') throw new Error(result.message || 'Review the interrupted payment before recovering this trolley. Do not charge again.');
+                if (result.state === 'consumed') {
+                    await persistCheckoutDraft(null);
+                } else {
+                    if (held) throw new Error('An interrupted held trolley also needs recovery. Review recovery before restoring another trolley.');
+                    cart = draft.cart;
+                    selectedCartIndex = draft.selectedCartIndex;
+                    selectedCustomerId = draft.customerId;
+                    selectedManualDiscountId = $discountsDB.some(discount => discount.id === draft.discountId
+                        && discount.kind === 'manual_percent' && discount.isActive) ? draft.discountId : '';
+                    checkoutDraftId = draft.id;
+                    checkoutDraftSaleIds = draft.saleIds;
+                    checkoutDraftHoldId = draft.pendingHoldId;
+                    // Current customer balances, offers and taxes are evaluated
+                    // again. Tender, redemption and payment UI never resume.
+                    useLoyaltyCredit = false;
+                    amountTenderedString = '0';
+                    showPaymentModal = false;
+                    showTrolleyFeedback('Unfinished trolley restored on this till.', 'success');
+                }
+            }
+            tillId = registerId;
+            checkoutDraftReady = true;
+        } catch (error) {
+            if (!posDestroyed) checkoutDraftRecoveryError = String(error).replace(/^Error:\s*/, '');
+        } finally {
+            if (!posDestroyed) checkoutDraftLoading = false;
+        }
+    }
+
+    function checkpointCheckoutOnExit() {
+        if (!checkoutDraftReady || $deviceOperatingMode === 'back_office') return;
+        saveCurrentCheckoutDraft(cart, selectedCustomerId, selectedManualDiscountId, selectedCartIndex,
+            activeHeldRecovery, pendingHeldRecovery, tillId, checkoutDraftSaleIds, checkoutDraftHoldId);
+        void flushCheckoutDraft().catch(() => undefined);
+    }
+
+    async function retryCheckoutSave() {
+        try { await saveCheckoutBoundary(); }
+        catch { checkoutDraftWriteError = 'Trolley recovery could not be saved. Check free storage before taking payment.'; }
+    }
     $: if (activeHeldRecovery) persistRecoveredTrolley(cart, selectedCustomerId, selectedManualDiscountId);
 
     async function persistRecoveredTrolley(lines: typeof cart, customerId: string, discountId: string) {
@@ -269,7 +396,8 @@
     let showDiscountModal = false;
     let showAppliedDiscounts = false;
     let pendingAgeRestrictedAdd: PendingAgeRestrictedAdd | null = null;
-    let ageRestrictedConfirmButton: HTMLButtonElement;
+    let ageRestrictedDialogTitle: HTMLHeadingElement;
+    const ageVerificationKeyboard = new AgeVerificationKeyboardGuard();
     let selectedManualDiscountId = "";
     let paymentMethod: "cash" | "card" | "account" = "cash";
     let amountTenderedString = "0";
@@ -341,6 +469,8 @@
             ? ($sumupConfigStore.readerName || "SumUp Solo")
             : "Card terminal";
     $: paymentCompleteDisabled =
+        checkoutDraftBlocked ||
+        Boolean($pendingOnlineFinancialIntent || $pendingOnlineFinancialReadError) ||
         cashShortcutBusy || loyaltyCreditBusy ||
         showNewPaymentCustomer || newPaymentCustomerSaving ||
         isCompletingSale ||
@@ -432,10 +562,10 @@
             }
         });
     }
-    $: if (pendingAgeRestrictedAdd && ageRestrictedConfirmButton) {
+    $: if (pendingAgeRestrictedAdd && ageRestrictedDialogTitle) {
         void tick().then(() => {
-            if (pendingAgeRestrictedAdd && ageRestrictedConfirmButton?.isConnected) {
-                ageRestrictedConfirmButton.focus({ preventScroll: true });
+            if (pendingAgeRestrictedAdd && ageRestrictedDialogTitle?.isConnected) {
+                ageRestrictedDialogTitle.focus({ preventScroll: true });
             }
         });
     }
@@ -553,6 +683,8 @@
     function scannerFocusBlocked(allowCompletedSaleScan = false): boolean {
         if (typeof document === "undefined") return true;
         return !$currentEmployee ||
+            checkoutDraftBlocked ||
+            $onlineFinancialReviewOpen ||
             attendanceClockOpen ||
             $toasts.some(item => isBlockingToast(item) && !(allowCompletedSaleScan && isScanDismissibleToast(item))) ||
             showNumpad ||
@@ -611,6 +743,12 @@
     }
 
     function handleGlobalScannerKeydown(event: KeyboardEvent) {
+        if (ageVerificationKeyboard.keydown(event)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            clearScannerBuffer();
+            return;
+        }
         // A completed-sale prompt is the only overlay a new scan can dismiss.
         // Buffer the entire code before removing it so the first character is
         // not lost while the dialog restores focus to the checkout input.
@@ -643,6 +781,17 @@
         event.stopImmediatePropagation();
         if (scannerBufferTimer) clearTimeout(scannerBufferTimer);
         scannerBufferTimer = setTimeout(clearScannerBuffer, 350);
+    }
+
+    function handleGlobalScannerKeyup(event: KeyboardEvent) {
+        if (!ageVerificationKeyboard.keyup(event.key)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    }
+
+    function handleScannerWindowBlur() {
+        ageVerificationKeyboard.releaseKeys();
+        clearScannerBuffer();
     }
 
     function handlePosPointerUp(event: PointerEvent) {
@@ -1104,8 +1253,8 @@
         // start on a computer configured only for Back Office work.
         const checkoutDevice = $deviceOperatingMode !== 'back_office';
         if (checkoutDevice) {
-            void loadHeldRecovery().then(draft => { if (!posDestroyed) pendingHeldRecovery = draft; })
-                .catch(error => toast(String(error), 'error'));
+            void restoreCheckoutDraft();
+            window.addEventListener('beforeunload', checkpointCheckoutOnExit);
         }
         if (isTauri() && checkoutDevice) {
             void Promise.allSettled([loadSumupConfig(), loadDojoConfig()])
@@ -1127,6 +1276,8 @@
         if (checkoutDevice) {
             document.addEventListener("pointerup", handlePosPointerUp);
             document.addEventListener("keydown", handleGlobalScannerKeydown, true);
+            document.addEventListener("keyup", handleGlobalScannerKeyup, true);
+            window.addEventListener("blur", handleScannerWindowBlur);
             focusScannerSoon();
         }
         document.addEventListener("fullscreenchange", handleFullscreenChange);
@@ -1138,16 +1289,20 @@
             if (promotionTimer) clearTimeout(promotionTimer);
             window.removeEventListener('focus', refreshPromotionClock);
             document.removeEventListener('visibilitychange', refreshPromotionClock);
+            window.removeEventListener('beforeunload', checkpointCheckoutOnExit);
             if (scannerFocusTimer) clearTimeout(scannerFocusTimer);
             clearScannerBuffer();
             document.removeEventListener("pointerup", handlePosPointerUp);
             document.removeEventListener("keydown", handleGlobalScannerKeydown, true);
+            document.removeEventListener("keyup", handleGlobalScannerKeyup, true);
+            window.removeEventListener("blur", handleScannerWindowBlur);
             document.removeEventListener("fullscreenchange", handleFullscreenChange);
             window.removeEventListener(POS_HELD_ORDERS_CHANGED_EVENT, handleHeldOrdersChanged);
         };
     });
 
     onDestroy(() => {
+        checkpointCheckoutOnExit();
         posDestroyed = true;
         dismissDojoSignatureDecision();
         if (trolleyMessageTimeout) clearTimeout(trolleyMessageTimeout);
@@ -1569,6 +1724,7 @@
     }
 
     function commitAddToCart(product: AddToCartProduct, feedback: "item" | "scan" = "item"): boolean {
+        if (checkoutDraftBlocked) return false;
         const existing = product.forceSeparateLine ? -1 : cart.findIndex((i) => i.id === product.id);
         if (existing >= 0) {
             if (cart[existing].quantity >= MAX_CART_QUANTITY) {
@@ -1604,8 +1760,10 @@
         feedback: "item" | "scan" = "item",
         onAdded?: () => void,
     ): boolean {
+        if (checkoutDraftBlocked) return false;
         const catalogProduct = $productById.get(product.id) || product;
         if (requiresAgeVerification(catalogProduct, $settingsDB)) {
+            ageVerificationKeyboard.begin();
             pendingAgeRestrictedAdd = { product, feedback, onAdded };
             playErrorSound();
             return false;
@@ -1618,6 +1776,7 @@
     function confirmAgeRestrictedAdd() {
         const pending = pendingAgeRestrictedAdd;
         pendingAgeRestrictedAdd = null;
+        ageVerificationKeyboard.end();
         if (!pending) return;
         const added = commitAddToCart(pending.product, pending.feedback);
         if (added) pending.onAdded?.();
@@ -1625,6 +1784,7 @@
 
     function cancelAgeRestrictedAdd() {
         pendingAgeRestrictedAdd = null;
+        ageVerificationKeyboard.end();
     }
 
     function scaleInputFromReading(reading: ScaleWeightReading): string {
@@ -1961,10 +2121,11 @@
         }
     }
     function handleSearchKeydown(e: KeyboardEvent) {
-        if (e.key === "Enter") handleSearch();
+        handleCheckoutSearchKeydown(e, handleSearch);
     }
 
     function confirmClear() {
+        if (checkoutDraftBlocked) return;
         if (cart.length > 0) {
             sendCctvAction({
                 action: "CLEAR TROLLEY",
@@ -1980,6 +2141,7 @@
     }
 
     async function openHeldOrders() {
+        if (checkoutDraftBlocked) return;
         try { pendingHeldRecovery = activeHeldRecovery ? null : await loadHeldRecovery(); }
         catch (error) { toast(String(error), 'error'); }
         heldOrderView = "this";
@@ -1987,6 +2149,8 @@
     }
 
     async function recoverInterruptedTrolley() {
+        // A pending held trolley blocks new entry, not its own recovery action.
+        if (!checkoutDraftReady || checkoutDraftLoading || checkoutDraftRecoveryError) return;
         if (cart.length || retrievingHeldOrderId) {
             toast('Finish or hold the current trolley before recovering another one.', 'error');
             return;
@@ -2025,7 +2189,7 @@
     }
 
     async function holdOrder() {
-        if (isHoldingOrder) return;
+        if (isHoldingOrder || checkoutDraftBlocked) return;
         if (cart.length === 0) {
             toast("Cart is empty", "error");
             return;
@@ -2086,9 +2250,20 @@
                 updatedAt: timestamp,
             };
         });
+        let holdBundleStarted = false;
         try {
             isHoldingOrder = true;
+            // Keep the destination identity through a re-hold too: after the
+            // held journal transfers ownership, ordinary autosave may run
+            // while the completed hold is still waiting for sync/UI cleanup.
+            checkoutDraftHoldId = orderId;
+            if (!activeHeldRecovery) {
+                await saveCheckoutBoundary();
+            }
+            await nativeQaCheckpoint('checkout.before-hold-commit');
+            holdBundleStarted = true;
             await saveHeldOrderBundle(newOrder, lines, !!activeHeldRecovery);
+            await nativeQaCheckpoint('checkout.after-hold-commit');
             activeHeldRecovery = null;
             pendingHeldRecovery = null;
             heldRecoveryWriteError = '';
@@ -2123,10 +2298,13 @@
                 "success",
             );
         } catch (error) {
-            try {
-                await removeSql("orders", orderId);
-            } catch (cleanupError) {
-                console.error("Could not clean up failed held order:", cleanupError);
+            // The bundle is atomic. Deleting a never-created hold would create
+            // a tombstone and falsely consume the ordinary recovery draft.
+            // Only a failure before invocation proves the hold never started.
+            if (!holdBundleStarted) {
+                checkoutDraftHoldId = '';
+                try { await saveCheckoutBoundary(); }
+                catch { checkoutDraftWriteError = 'Trolley recovery could not be saved. Check free storage before taking payment.'; }
             }
             console.error("Could not hold order:", error);
             toast("Could not hold this order. The trolley has been kept.", "error");
@@ -2136,7 +2314,7 @@
     }
 
     async function retrieveOrder(orderId: string) {
-        if (retrievingHeldOrderId) return;
+        if (retrievingHeldOrderId || checkoutDraftBlocked) return;
         if (cart.length > 0) {
             toast(
                 "Cannot retrieve while trolley has items. Please clear trolley first.",
@@ -2258,23 +2436,9 @@
     }
 
     function handleChangePriceKey(key: string) {
-        if (key === "C") {
-            changePriceString = "0";
-            hasStartedTypingPrice = true;
-        } else if (key === "00") {
-            if (!hasStartedTypingPrice) {
-                changePriceString = "0";
-                hasStartedTypingPrice = true;
-            }
-            if (changePriceString !== "0" && changePriceString.length <= 7) changePriceString += "00";
-        } else if (changePriceString.length < 9) {
-            if (!hasStartedTypingPrice || changePriceString === "0") {
-                changePriceString = key;
-                hasStartedTypingPrice = true;
-            } else {
-                changePriceString += key;
-            }
-        }
+        const edited = editPriceDigits(changePriceString, hasStartedTypingPrice, key);
+        changePriceString = edited.value;
+        hasStartedTypingPrice = edited.started;
     }
 
     function changePriceOnce() {
@@ -2508,6 +2672,8 @@
     let recentLoadToken = 0;
     const RECENT_RECEIPT_LIMIT = 10;
     $: scannerOverlayOpen =
+        checkoutDraftBlocked ||
+        $onlineFinancialReviewOpen ||
         $toasts.some(isBlockingToast) ||
         showNumpad ||
         showChangePricePad ||
@@ -2962,6 +3128,10 @@
         let managedRefundApproved: "sumup" | "dojo" | null = null;
         try {
             isReversingOrder = true;
+            if (isTauri()) {
+                const pending = await refreshPendingOnlineFinancialIntent();
+                if (pending) throw new OnlineFinancialPendingError(pending);
+            }
             if (sumupRefundAmount > 0 || dojoRefundAmount > 0) {
                 await requireManualSaleAccess();
             }
@@ -3035,6 +3205,10 @@
                 }).catch(() => undefined);
                 toast(`${managedRefundApproved === "dojo" ? "Dojo" : "SumUp"} accepted the card refund. The POS record will save automatically when the database is ready. Do not refund it again.`, "error");
                 setTimeout(() => void (managedRefundApproved === "dojo" ? recoverApprovedDojoSales() : recoverApprovedSumupSales()), 2_000);
+            } else if (e instanceof OnlineFinancialPendingError) {
+                toast(e.message, 'error', false, undefined, { persistent: true });
+            } else if (String(e).includes('ONLINE_FINANCIAL_INTENT_PENDING') || $pendingOnlineFinancialReadError) {
+                toast(`Reversal outcome needs review. Do not refund again. ${String(e)}`, 'error', false, undefined, { persistent: true });
             } else {
                 toast(`Reversal failed: ${e}`, "error");
             }
@@ -3110,6 +3284,7 @@
     }
 
     async function openPayment() {
+        if (checkoutDraftBlocked) return;
         if (cart.length === 0) {
             toast("Cart is empty", "error");
             return;
@@ -3287,6 +3462,14 @@
 
     function handleModalKeydown(event: KeyboardEvent) {
         if (handleLoginKeydown(event)) return;
+        if (showChangePricePad && !event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.altKey
+            && !(event.target as HTMLElement | null)?.matches("input, textarea, select, [contenteditable='true']")) {
+            if (/^\d$/.test(event.key) || event.key === 'Backspace' || event.key === 'Delete') {
+                event.preventDefault();
+                handleChangePriceKey(event.key === 'Backspace' || event.key === 'Delete' ? '⌫' : event.key);
+                return;
+            }
+        }
         if (
             showPaymentModal &&
             !showNewPaymentCustomer && !newPaymentCustomerSaving &&
@@ -3744,6 +3927,7 @@
                 getPayment: () => getDojoPaymentIntentStatus(paymentIntentId),
                 submitSignature: (accepted) => respondToDojoSignature(terminalSessionId, accepted),
                 cancel: () => cancelDojoTerminalSession(terminalSessionId),
+                cancelExpiredSandboxPayment: () => cancelExpiredSandboxDojoPaymentIntent(reference),
                 refreshLease: () => refreshDojoLock(config, tillId, reference),
                 shouldCancel: () => terminalCancelRequested,
                 isDisposed: () => posDestroyed,
@@ -4299,6 +4483,11 @@
     }
 
     async function completeSale() {
+        if (checkoutDraftBlocked) return;
+        if ($pendingOnlineFinancialIntent) {
+            toast(pendingOnlineFinancialMessage($pendingOnlineFinancialIntent), 'error', false, undefined, { persistent: true });
+            return;
+        }
         if (showNewPaymentCustomer || newPaymentCustomerSaving || loyaltyCreditBusy) return;
         if (isCompletingSale || refreshingSaleQuote) return;
         if (!$currentEmployee || !$currentShiftId || !tillId) {
@@ -4367,7 +4556,13 @@
         isCompletingSale = true;
         let approvedManagedBundle: SaleBundle | null = null;
         let approvedManagedProvider: "sumup" | "dojo" | null = null;
+        let submittedOrderId = '';
+        let submittedCartSnapshot = '';
         try {
+            if (isTauri()) {
+                const pending = await refreshPendingOnlineFinancialIntent();
+                if (pending) throw new OnlineFinancialPendingError(pending);
+            }
             const activeSumupConfig = get(sumupConfigStore);
             const activeDojoConfig = get(dojoConfigStore);
 
@@ -4584,6 +4779,8 @@
                 accountChanges,
                 audit,
             };
+            submittedOrderId = saleBundle.order.id;
+            submittedCartSnapshot = JSON.stringify(cart);
 
             if (trainingModeEnabled) {
                 cart = [];
@@ -4616,6 +4813,11 @@
                     discountId: selectedManualDiscountId, saleIds: [...activeHeldRecovery.saleIds, orderId] };
                 await persistHeldRecovery(activeHeldRecovery);
                 if (heldRecoveryWriteError) throw new Error(heldRecoveryWriteError);
+            } else {
+                // Persist the receipt identity BEFORE any charge/commit. A
+                // restart after commit but before UI clear must not repay it.
+                checkoutDraftSaleIds = [...checkoutDraftSaleIds, orderId];
+                await saveCheckoutBoundary();
             }
 
             if (!isTauri()) {
@@ -4675,6 +4877,7 @@
                     journalScope: (await refreshPaymentTerminalAttempt(approvedManagedProvider, saleBundle.order.id)).journalScope,
                 })
                 : await commitSale(saleBundle);
+            await nativeQaCheckpoint('checkout.after-sale-commit');
             const completedAccountCustomerName = selectedCustomer?.name || 'Customer';
             if (approvedManagedBundle && approvedManagedProvider) {
                 if (approvedManagedProvider === "dojo") {
@@ -4740,6 +4943,25 @@
                 useLoyaltyCredit = false;
                 toast("Card approved. The sale is safely queued and will save automatically when the database is ready. Do not charge it again.", "error");
                 setTimeout(() => void (approvedManagedProvider === "dojo" ? recoverApprovedDojoSales() : recoverApprovedSumupSales()), 2_000);
+            } else if (e instanceof OnlineFinancialPendingError) {
+                // Only remove the exact trolley captured by this durable intent.
+                // A prior receipt or any newer edits must remain untouched.
+                if (shouldDetachPendingTrolley(e.intent, submittedOrderId, submittedCartSnapshot, cart)) {
+                    cart = [];
+                    selectedCartIndex = 0;
+                    searchQuery = '';
+                    notFoundBarcode = '';
+                    customerAccountLoadToken += 1;
+                    selectedCustomerId = '';
+                    selectedCustomerAccount = null;
+                    customerAccountBusy = false;
+                    useLoyaltyCredit = false;
+                }
+                showPaymentModal = false;
+                toast(e.message, 'error', false, undefined, { persistent: true });
+            } else if (String(e).includes('ONLINE_FINANCIAL_INTENT_PENDING') || $pendingOnlineFinancialReadError) {
+                showPaymentModal = false;
+                toast(`Transaction outcome needs review. It may complete later. Do not charge again. ${String(e)}`, 'error', false, undefined, { persistent: true });
             } else if (!showCheckoutExpiryReview) {
                 toast(`Sale was not completed: ${e}`, "error");
             }
@@ -4757,6 +4979,32 @@
     on:keydown={handleModalKeydown}
     on:pointerdown={handleModalBackdropPointerDown}
 />
+
+{#if $currentEmployee && $deviceOperatingMode !== 'back_office' && checkoutDraftBlocked}
+    <div class="modal-overlay checkout-recovery-overlay">
+        <div class="checkout-recovery-dialog" role="dialog" aria-modal="true" tabindex="-1"
+            aria-labelledby="checkout-recovery-title" use:modalFocusTrap={{ dismissDisabled: true }}>
+            <h2 id="checkout-recovery-title">{checkoutDraftLoading ? 'Recovering trolley' : pendingHeldRecovery ? 'Recover interrupted trolley' : 'Saved trolley needs attention'}</h2>
+            <p role={checkoutDraftRecoveryError ? 'alert' : 'status'}>
+                {checkoutDraftRecoveryError || (pendingHeldRecovery
+                    ? 'A previously retrieved trolley is saved on this till. Recover it before starting another trolley.'
+                    : 'Checking this till’s saved trolley. Please wait before scanning.')}
+            </p>
+            {#if !checkoutDraftLoading}
+                <div class="checkout-recovery-actions">
+                    {#if pendingHeldRecovery && !checkoutDraftRecoveryError}
+                        <button class="btn-primary" disabled={!!retrievingHeldOrderId} on:click={recoverInterruptedTrolley}>
+                            {retrievingHeldOrderId ? 'Recovering…' : 'Recover saved trolley'}
+                        </button>
+                    {/if}
+                    <button class="btn-primary" on:click={restoreCheckoutDraft}>Retry recovery</button>
+                    <button class="btn-secondary" on:click={() => goto('/settings/payments')}>Review payment recovery</button>
+                </div>
+                <small>The saved trolley has been kept. No payment is started automatically.</small>
+            {/if}
+        </div>
+    </div>
+{/if}
 
 {#if !$currentEmployee && $employeesDB.length > 0}
     <div
@@ -5279,6 +5527,13 @@
                 >
             </button>
         </div>
+
+        {#if checkoutDraftWriteError}
+            <div class="checkout-save-warning" role="alert">
+                <span>{checkoutDraftWriteError}</span>
+                <button on:click={retryCheckoutSave}>Retry save</button>
+            </div>
+        {/if}
 
         <!-- Cart Items List -->
         <div class="pos-cart-items flex-1 overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 relative">
@@ -5884,6 +6139,7 @@
                 {/each}
             </div>
             <div class="change-price-actions flex flex-col gap-2 mt-2">
+                <button type="button" class="btn btn-secondary" aria-label="Delete last new price digit" on:click={() => handleChangePriceKey('⌫')}>⌫ Delete last digit</button>
                 <button
                     class="btn btn-primary w-full h-14"
                     on:click={changePriceOnce}
@@ -6964,7 +7220,13 @@
                 </span>
                 <div class="min-w-0 flex-1">
                     <span class="text-[0.72rem] font-black uppercase tracking-[0.14em] text-warning">18+ item</span>
-                    <h2 id="age-restriction-dialog-title" class="m-0 mt-1 text-2xl font-black leading-tight">Age verification required</h2>
+                    <h2
+                        bind:this={ageRestrictedDialogTitle}
+                        id="age-restriction-dialog-title"
+                        tabindex="-1"
+                        data-modal-initial-focus
+                        class="m-0 mt-1 text-2xl font-black leading-tight"
+                    >Age verification required</h2>
                     <p id="age-restriction-dialog-description" class="mb-0 mt-3 leading-relaxed text-text-muted">
                         Check valid photo ID and confirm the customer is aged 18 or over before adding this item.
                     </p>
@@ -6981,10 +7243,9 @@
                     Do Not Add
                 </button>
                 <button
-                    bind:this={ageRestrictedConfirmButton}
                     type="button"
-                    data-modal-initial-focus
                     class="btn btn-primary h-14"
+                    on:pointerdown={() => ageVerificationKeyboard.pointerdown()}
                     on:click={confirmAgeRestrictedAdd}
                 >
                     ID Checked — Add Item
@@ -7113,6 +7374,15 @@
 />
 
 <style>
+    .checkout-recovery-dialog { width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--color-border-flat); border-radius: 16px; background: var(--color-bg-panel); color: var(--color-text-main); box-shadow: 0 12px 40px #0002; }
+    .checkout-recovery-dialog h2 { margin: 0 0 12px; font-size: 22px; font-weight: 800; }
+    .checkout-recovery-dialog p { margin: 0 0 18px; overflow-wrap: anywhere; line-height: 1.5; }
+    .checkout-recovery-dialog small { display: block; margin-top: 16px; color: var(--color-text-muted); }
+    .checkout-recovery-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .checkout-recovery-actions button { min-height: 44px; flex: 1 1 180px; }
+    .checkout-save-warning { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 10px 12px; background: #fff3cd; color: #684900; font-size: 12px; line-height: 1.4; }
+    .checkout-save-warning span { flex: 1; min-width: 0; }
+    .checkout-save-warning button { padding: 8px; border: 1px solid currentColor; border-radius: 6px; font-weight: 700; }
     .device-back-office-shell-hidden {
         display: none;
     }

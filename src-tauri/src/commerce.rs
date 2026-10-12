@@ -11,7 +11,7 @@ use std::{
     fs,
     path::PathBuf,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 
@@ -739,12 +739,29 @@ fn restore_source_path(source_path: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(trimmed))
 }
 
+// A fresh native pool includes DNS, TCP and authentication in acquisition.
+// 650 ms was too short for a cold connection. Keep a finite, visible budget;
+// failed financial work remains in its immutable journal for explicit recovery.
+const MYSQL_POS_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const ONLINE_FINANCIAL_REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn connect_mysql_for_pos(mysql_uri: &str) -> Result<MySqlPool, sqlx::Error> {
     MySqlPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_millis(650))
+        .acquire_timeout(MYSQL_POS_ACQUIRE_TIMEOUT)
         .connect(mysql_uri)
         .await
+}
+
+fn financial_stage_error(stage: &str, started: Instant, error: sqlx::Error) -> sqlx::Error {
+    let elapsed_ms = started.elapsed().as_millis();
+    // Log timing and stage only: never connection URIs, credentials or payloads.
+    eprintln!("POS financial stage={stage} elapsed_ms={elapsed_ms} outcome=error");
+    account_protocol_error(format!("FINANCIAL_STAGE[{stage}] after {elapsed_ms}ms: {error}"))
+}
+
+fn financial_stage_completed(stage: &str, started: Instant) {
+    eprintln!("POS financial stage={stage} elapsed_ms={} outcome=ok", started.elapsed().as_millis());
 }
 
 const MYSQL_WHOLE_SYSTEM_CLOSE_METADATA_TIMEOUT_SQL: &str = "SET SESSION lock_wait_timeout = 5";
@@ -3238,6 +3255,7 @@ fn is_restore_pushable_setting_key(key: &str) -> bool {
             | "mysql_config"
             | "device_operating_mode"
             | "held_order_recovery_v1"
+            | "checkout_draft_v1"
             | "till_id"
             | "till_name"
             | "till_name_manual"
@@ -4561,9 +4579,9 @@ fn validate_account_change_shape(change: &CustomerAccountChange) -> Result<(), s
                 "Customer account payments and refunds must reduce the amount owed",
             ));
         }
-        "adjustment" if change.description.trim().is_empty() => {
+        "adjustment" | "opening_balance" if change.description.trim().is_empty() => {
             return Err(account_protocol_error(
-                "Customer account adjustments require a reason",
+                "Customer account adjustments and opening balances require a reason",
             ));
         }
         "reversal" if change.reverses_entry_id.trim().is_empty() => {
@@ -4615,7 +4633,9 @@ fn validate_account_balance_change(
             "Payment exceeds the amount this customer owes",
         ));
     }
-    if change.amount_pence > 0 && change.entry_type != "reversal" {
+    // Hold status and the purchase limit govern new purchases, not a manager's
+    // historical debt import/correction. Those entries must not enable buying.
+    if change.entry_type == "charge" {
         if !account.is_enabled {
             return Err(account_protocol_error(
                 "This customer's Pay Later account is not enabled",
@@ -7466,14 +7486,26 @@ async fn insert_mysql_bundle_with_intent_epoch(
     bundle: &SaleBundle,
     intent_epoch: Option<&str>,
 ) -> Result<SaleBundle, sqlx::Error> {
+    insert_mysql_bundle_with_recovery_actor(pool, bundle, intent_epoch, None).await
+}
+
+async fn insert_mysql_bundle_with_recovery_actor(
+    pool: &MySqlPool,
+    bundle: &SaleBundle,
+    intent_epoch: Option<&str>,
+    recovery: Option<&FinancialRecoveryAuthorization>,
+) -> Result<SaleBundle, sqlx::Error> {
     // Guard installation is schema maintenance, not a transaction retry step.
     // Verify/install it once so lock contention never multiplies metadata and
     // DDL work for a Pay Later checkout.
     if !bundle.account_changes.is_empty() {
-        ensure_mysql_account_ledger_guards(pool).await?;
+        let started = Instant::now();
+        ensure_mysql_account_ledger_guards(pool).await
+            .map_err(|error| financial_stage_error("account-guard-preflight", started, error))?;
+        financial_stage_completed("account-guard-preflight", started);
     }
     for attempt in 0..MYSQL_TRANSACTION_RETRY_ATTEMPTS {
-        match insert_mysql_bundle_once_with_intent_epoch(pool, bundle, intent_epoch).await {
+        match insert_mysql_bundle_once_with_intent_epoch(pool, bundle, intent_epoch, recovery).await {
             Ok(committed) => return Ok(committed),
             Err(error)
                 if attempt + 1 < MYSQL_TRANSACTION_RETRY_ATTEMPTS
@@ -7491,11 +7523,18 @@ async fn insert_mysql_bundle_once_with_intent_epoch(
     pool: &MySqlPool,
     bundle: &SaleBundle,
     intent_epoch: Option<&str>,
+    recovery: Option<&FinancialRecoveryAuthorization>,
 ) -> Result<SaleBundle, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let started = Instant::now();
+    let mut tx = pool.begin().await
+        .map_err(|error| financial_stage_error("transaction-acquire", started, error))?;
+    financial_stage_completed("transaction-acquire", started);
     // This takes the close-barrier lock before the restore gate or any
     // customer row. The captured epoch therefore cannot change until commit.
     let current_epoch = assert_mysql_restore_writes_allowed(&mut tx).await?;
+    if let Some(recovery) = recovery {
+        authorize_mysql_financial_recovery(&mut tx, bundle, recovery).await?;
+    }
     let expected_server_epoch = intent_epoch.unwrap_or(&bundle.server_data_epoch);
     assert_mysql_server_data_epoch(&mut tx, expected_server_epoch).await?;
     let mut committed = bundle.clone();
@@ -8388,12 +8427,112 @@ async fn cache_sqlite_customer_loyalty_adjustment(
     tx.commit().await
 }
 
+fn configured_role_can_adjust_customer_account(role: &str, raw: Option<&str>) -> bool {
+    let role = role.trim();
+    if role == "admin" {
+        return true;
+    }
+    if !matches!(role, "manager" | "supervisor" | "cashier") {
+        return false;
+    }
+    let default_allowed = role == "manager";
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return default_allowed;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return default_allowed;
+    };
+    let roles = value.get("roles").unwrap_or(&value);
+    match roles.get(role) {
+        Some(serde_json::Value::Array(permissions)) => permissions
+            .iter()
+            .any(|permission| permission.as_str() == Some("adjust_customer_account")),
+        Some(_) | None => default_allowed,
+    }
+}
+
+async fn authorize_sqlite_manual_account_adjustment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    change: &CustomerAccountChange,
+) -> Result<(), sqlx::Error> {
+    if !matches!(change.entry_type.as_str(), "opening_balance" | "adjustment") {
+        return Ok(());
+    }
+    let actor: Option<(String, i64)> = sqlx::query_as(
+        "SELECT COALESCE(role, ''), COALESCE(isActive, 0) FROM employees WHERE id = ? LIMIT 1",
+    )
+    .bind(&change.employee_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let permissions: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'role_permissions' LIMIT 1")
+            .fetch_optional(&mut **tx)
+            .await?;
+    if !actor.is_some_and(|(role, active)| {
+        active != 0 && configured_role_can_adjust_customer_account(&role, permissions.as_deref())
+    }) {
+        return Err(account_protocol_error(
+            "This staff member is not authorized to adjust customer accounts",
+        ));
+    }
+    Ok(())
+}
+
+async fn authorize_mysql_manual_account_adjustment(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    change: &CustomerAccountChange,
+) -> Result<(), sqlx::Error> {
+    if !matches!(change.entry_type.as_str(), "opening_balance" | "adjustment") {
+        return Ok(());
+    }
+    let actor = select_employee_profile_for_update(tx, &change.employee_id).await?;
+    let permissions: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4)
+         FROM settings WHERE `key` = 'role_permissions' LIMIT 1 FOR UPDATE",
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    if !actor.is_some_and(|actor| {
+        actor.is_active
+            && configured_role_can_adjust_customer_account(&actor.role, permissions.as_deref())
+    }) {
+        return Err(account_protocol_error(
+            "This staff member is not authorized to adjust customer accounts",
+        ));
+    }
+    Ok(())
+}
+
 async fn post_sqlite_customer_account_entry(
     pool: &SqlitePool,
     input: &CustomerAccountChange,
 ) -> Result<CustomerAccountMutationResult, sqlx::Error> {
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut change = input.clone();
+    validate_account_change_shape(&change)?;
+    authorize_sqlite_manual_account_adjustment(&mut tx, &change).await?;
+    let customer_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM customers WHERE id = ? LIMIT 1")
+            .bind(&change.customer_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if customer_exists.is_none() {
+        return Err(account_protocol_error("Customer was not found"));
+    }
+    // First explicit ledger action creates its default account in the same
+    // transaction. A failed entry rolls this back; reads stay side-effect-free.
+    let stamp = utc_stamp();
+    sqlx::query(
+        "INSERT INTO customer_accounts
+         (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+         VALUES (?, ?, 0, 0, 0, ?, ?) ON CONFLICT(customerId) DO NOTHING",
+    )
+    .bind(&change.customer_id)
+    .bind(&change.customer_id)
+    .bind(&stamp)
+    .bind(&stamp)
+    .execute(&mut *tx)
+    .await?;
     let result = apply_sqlite_account_change(&mut tx, &mut change).await?;
     tx.commit().await?;
     Ok(result)
@@ -8415,11 +8554,34 @@ async fn post_mysql_customer_account_entry(
         )));
     }
     lock_mysql_customer_for_write(&mut tx, &input.customer_id).await?;
+    validate_account_change_shape(input)?;
+    authorize_mysql_manual_account_adjustment(&mut tx, input).await?;
     let stamp: String =
         sqlx::query_scalar("SELECT DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%s.%fZ')")
             .fetch_one(&mut *tx)
             .await?;
     let account_authority = grant_mysql_account_write_authority(&mut tx).await?;
+    // The customer identity lock serializes first writers across tills. Never
+    // replace an existing account's hold, limit, balance or original timestamp.
+    let existing_account: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM customer_accounts WHERE customerId = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(&input.customer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if existing_account.is_none() {
+        sqlx::query(
+            "INSERT INTO customer_accounts
+             (id, customerId, isEnabled, creditLimitPence, balancePence, createdAt, updatedAt)
+             VALUES (?, ?, 0, 0, 0, ?, ?)",
+        )
+        .bind(&input.customer_id)
+        .bind(&input.customer_id)
+        .bind(&stamp)
+        .bind(&stamp)
+        .execute(&mut *tx)
+        .await?;
+    }
     let mut change = input.clone();
     let result = apply_mysql_account_change(&mut tx, &mut change, &stamp).await?;
     revoke_mysql_account_write_authority(&mut tx, &account_authority).await?;
@@ -9088,6 +9250,10 @@ fn generic_mysql_outbox_id_key_allowed(table: &str, id_key: &str) -> bool {
     }
 }
 
+fn generic_mysql_existing_row_field_allowed(table: &str, column: &str, id_key: &str) -> bool {
+    column != id_key && !(table == "products" && column == "stockLevel")
+}
+
 fn generic_tombstone_target_allowed(table: &str) -> bool {
     (generic_mysql_outbox_table_allowed(table)
         && !matches!(table, "settings" | "tombstones" | "app_identity"))
@@ -9604,7 +9770,11 @@ async fn mysql_epoch_fenced_outbox_upsert_with_customer_base(
         let update_pairs = columns
             .iter()
             .zip(values.iter())
-            .filter(|(column, _)| column.as_str() != id_key)
+            // Metadata patches carry a full cached snapshot in the outbox.
+            // Its stock is not authoritative after a sale on another till:
+            // existing inventory is changed only by dedicated stock operations.
+            // New-product INSERT below still keeps its opening stock.
+            .filter(|(column, _)| generic_mysql_existing_row_field_allowed(table, column, id_key))
             .collect::<Vec<_>>();
         if update_pairs.is_empty() {
             return Ok(());
@@ -11167,36 +11337,115 @@ pub async fn commit_mysql_stock_receipt(
         .map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinancialRecoveryAuthorization {
+    expected_order_id: String,
+    employee_id: String,
+    employee_updated_at: String,
+}
+
+fn configured_role_can_recover_financial(
+    role: &str,
+    permission: &str,
+    raw: Option<&str>,
+) -> bool {
+    if role == "admin" { return true; }
+    if !matches!(role, "manager" | "supervisor" | "cashier") { return false; }
+    let default_allowed = permission == "charge_customer_account"
+        || (permission == "refund_void" && matches!(role, "manager" | "supervisor"));
+    let Some(value) = raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) else {
+        return default_allowed;
+    };
+    match value.get("roles").unwrap_or(&value).get(role).and_then(serde_json::Value::as_array) {
+        Some(permissions) => permissions.iter().any(|value| value.as_str() == Some(permission)),
+        None => default_allowed,
+    }
+}
+
+async fn authorize_mysql_financial_recovery(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    bundle: &SaleBundle,
+    recovery: &FinancialRecoveryAuthorization,
+) -> Result<(), sqlx::Error> {
+    if recovery.expected_order_id != bundle.order.id || recovery.employee_updated_at.is_empty() {
+        return Err(account_protocol_error("FINANCIAL_RECOVERY_REVIEW_CHANGED: review the saved receipt and sign in again"));
+    }
+    let actor = select_employee_profile_for_update(tx, &recovery.employee_id).await?
+        .ok_or_else(|| account_protocol_error("FINANCIAL_RECOVERY_ACTOR_REQUIRED: sign in again"))?;
+    if !actor.is_active || actor.updated_at != recovery.employee_updated_at
+        || !employee_has_valid_runtime_pin(&actor)
+        || !matches!(actor.role.as_str(), "admin" | "manager" | "supervisor" | "cashier") {
+        return Err(account_protocol_error("FINANCIAL_RECOVERY_ACTOR_STALE: staff access changed; sign in again"));
+    }
+    let permission_json: Option<String> = sqlx::query_scalar(
+        "SELECT CAST(value AS CHAR CHARACTER SET utf8mb4) FROM settings WHERE `key` = 'role_permissions' LIMIT 1 FOR UPDATE",
+    ).fetch_optional(&mut **tx).await?;
+    let allowed = if bundle.order.order_type == "return" {
+        configured_role_can_recover_financial(&actor.role, "refund_void", permission_json.as_deref())
+    } else if !bundle.account_changes.is_empty() {
+        configured_role_can_recover_financial(&actor.role, "charge_customer_account", permission_json.as_deref())
+    } else {
+        actor.id == bundle.order.employee_id || matches!(actor.role.as_str(), "admin" | "manager")
+    };
+    if !allowed {
+        return Err(account_protocol_error("FINANCIAL_RECOVERY_ACTOR_FORBIDDEN: this staff member cannot recover this transaction"));
+    }
+    Ok(())
+}
+
 async fn replay_reserved_online_financial_intent(
     local_pool: &SqlitePool,
     mysql_pool: &MySqlPool,
     operation: &str,
     reserved: &SaleBundle,
     server_data_epoch: &str,
+    recovery: Option<&FinancialRecoveryAuthorization>,
 ) -> Result<SaleBundle, sqlx::Error> {
+    let started = Instant::now();
+    // A stalled query/lock must also return control to the operator. Dropping
+    // the future does NOT mean cancelled: a remote COMMIT response may be lost,
+    // so retain the same intent and verify it relationally on explicit replay.
+    let replay = tokio::time::timeout(
+        ONLINE_FINANCIAL_REPLAY_TIMEOUT,
+        insert_mysql_bundle_with_recovery_actor(mysql_pool, reserved, Some(server_data_epoch), recovery),
+    ).await.unwrap_or_else(|_| Err(account_protocol_error(
+        "FINANCIAL_REPLAY_TIMEOUT: authoritative verification exceeded 30 seconds; outcome remains pending",
+    )));
     let committed =
-        match insert_mysql_bundle_with_intent_epoch(mysql_pool, reserved, Some(server_data_epoch))
-            .await
+        match replay
         {
             Ok(bundle) => bundle,
             Err(error) => {
+                let error = financial_stage_error("authoritative-replay", started, error);
                 let _ = record_sqlite_online_financial_intent_error(local_pool, &error).await;
                 return Err(error);
             }
         };
+    financial_stage_completed("authoritative-replay", started);
+    let started = Instant::now();
     if let Err(error) =
         update_sqlite_online_financial_intent_bundle(local_pool, operation, &committed).await
     {
+        let error = financial_stage_error("save-authoritative-intent", started, error);
         let _ = record_sqlite_online_financial_intent_error(local_pool, &error).await;
         return Err(error);
     }
+    let started = Instant::now();
     if let Err(error) =
         insert_sqlite_bundle_with_account_authority(local_pool, &committed, true, None).await
     {
+        let error = financial_stage_error("local-financial-mirror", started, error);
         let _ = record_sqlite_online_financial_intent_error(local_pool, &error).await;
         return Err(error);
     }
-    clear_sqlite_online_financial_intent(local_pool, operation, &committed.order.id).await?;
+    financial_stage_completed("local-financial-mirror", started);
+    let started = Instant::now();
+    if let Err(error) = clear_sqlite_online_financial_intent(local_pool, operation, &committed.order.id).await {
+        let error = financial_stage_error("clear-completed-intent", started, error);
+        let _ = record_sqlite_online_financial_intent_error(local_pool, &error).await;
+        return Err(error);
+    }
     Ok(committed)
 }
 
@@ -11226,27 +11475,81 @@ async fn commit_new_online_financial_intent(
             "Online financial intent changed before MariaDB replay",
         ));
     }
-    let mysql_pool = match connect_mysql_for_pos(mysql_uri).await {
-        Ok(pool) => pool,
-        Err(error) => {
-            let _ = record_sqlite_online_financial_intent_error(&local_pool, &error).await;
-            return Err(error);
-        }
-    };
+    let pending_error = |error| account_protocol_error(format!(
+        "{ONLINE_FINANCIAL_INTENT_PENDING_CODE}: reserved receipt {} is pending verification, not cancelled; do not charge again. {error}",
+        reserved.order.order_number,
+    ));
+    // Native QA only: exercise the real bounded connector after durable reservation,
+    // without stopping the shop database or changing saved connection details.
+    // No release build or IPC caller can enable this compile-time one-shot fixture.
+    #[cfg(debug_assertions)]
+    let qa_stalled_uri = native_qa_financial_stalled_uri(&local_pool, operation, &reserved).await?;
+    #[cfg(debug_assertions)]
+    let connect_uri = qa_stalled_uri.as_deref().unwrap_or(mysql_uri);
+    #[cfg(not(debug_assertions))]
+    let connect_uri = mysql_uri;
+    let mysql_pool = connect_mysql_for_financial_intent(&local_pool, connect_uri).await.map_err(&pending_error)?;
     replay_reserved_online_financial_intent(
         &local_pool,
         &mysql_pool,
         operation,
         &reserved,
         &server_data_epoch,
+        None,
     )
     .await
+    .map_err(pending_error)
+}
+
+#[cfg(debug_assertions)]
+async fn native_qa_financial_stalled_uri(
+    local_pool: &SqlitePool, operation: &str, bundle: &SaleBundle,
+) -> Result<Option<String>, sqlx::Error> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static USED: AtomicBool = AtomicBool::new(false);
+    let Some(target) = option_env!("LBJ_QA_FINANCIAL_TIMEOUT_CUSTOMER") else { return Ok(None); };
+    if target.is_empty() || operation != "customer_account_sale" || bundle.order.customer_id != target {
+        return Ok(None);
+    }
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM customers WHERE id = ?")
+        .bind(target).fetch_optional(local_pool).await?;
+    if !name.as_deref().map(|name| name.starts_with("QA ")).unwrap_or(false)
+        || USED.swap(true, Ordering::SeqCst) { return Ok(None); }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await
+        .map_err(|error| account_protocol_error(format!("QA stalled connector could not start: {error}")))?;
+    let address = listener.local_addr().map_err(|error| account_protocol_error(error.to_string()))?;
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            drop(socket);
+        }
+    });
+    Ok(Some(format!("mysql://qa_fixture:unused@{address}/qa_fixture")))
+}
+
+async fn connect_mysql_for_financial_intent(
+    local_pool: &SqlitePool,
+    mysql_uri: &str,
+) -> Result<MySqlPool, sqlx::Error> {
+    let started = Instant::now();
+    match connect_mysql_for_pos(mysql_uri).await {
+        Ok(pool) => {
+            financial_stage_completed("connect-mariadb", started);
+            Ok(pool)
+        }
+        Err(error) => {
+            let error = financial_stage_error("connect-mariadb", started, error);
+            let _ = record_sqlite_online_financial_intent_error(local_pool, &error).await;
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn recover_online_financial_intent(
     app: AppHandle,
     mysql_uri: String,
+    recovery: Option<FinancialRecoveryAuthorization>,
 ) -> Result<Option<CommitSaleResult>, String> {
     let local_uri = format!("sqlite://{}?mode=rwc", local_db_path(&app)?.display());
     let local_pool = SqlitePool::connect(&local_uri)
@@ -11267,7 +11570,10 @@ pub async fn recover_online_financial_intent(
             "Unknown online financial intent operation: {operation}"
         ));
     }
-    let mysql_pool = connect_mysql_for_pos(&mysql_uri)
+    if recovery.as_ref().is_some_and(|actor| actor.expected_order_id != reserved.order.id) {
+        return Err("FINANCIAL_RECOVERY_REVIEW_CHANGED: review the current saved receipt before recovery".into());
+    }
+    let mysql_pool = connect_mysql_for_financial_intent(&local_pool, &mysql_uri)
         .await
         .map_err(|error| error.to_string())?;
     let bundle = replay_reserved_online_financial_intent(
@@ -11276,6 +11582,7 @@ pub async fn recover_online_financial_intent(
         &operation,
         &reserved,
         &server_data_epoch,
+        recovery.as_ref(),
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -11499,11 +11806,29 @@ async fn purge_sqlite_transactions_before(
         tx.rollback().await?;
         return Err(account_protocol_error("forced transaction purge failure"));
     }
-    sqlx::query(
+    // Confirmed sandbox recovery journals must outlive receipt history. They
+    // anchor the local proof used to reject/acknowledge stale shared attempts
+    // when MariaDB reconnects; removing them would resurrect resolved tests.
+    let has_sandbox_receipts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'dojo_sandbox_recovery_receipts'",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let retain_sandbox_proof = if has_sandbox_receipts > 0 {
+        " AND NOT EXISTS (
+            SELECT 1 FROM dojo_sandbox_recovery_receipts receipt
+            WHERE receipt.attemptId = payment_terminal_attempts.id
+              AND TRIM(COALESCE(receipt.confirmedAt, '')) <> ''
+          )"
+    } else {
+        ""
+    };
+    sqlx::query(&format!(
         "DELETE FROM payment_terminal_attempts
          WHERE status NOT IN ('prepared','started','uncertain','approved','commit_failed','completion_pending')
-           AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?)",
-    )
+           AND (createdAt IS NULL OR createdAt = '' OR createdAt <= ?){retain_sandbox_proof}"
+    ))
     .bind(marker)
     .execute(&mut *tx)
     .await?;
@@ -14412,6 +14737,7 @@ pub async fn create_local_backup(
     app: AppHandle,
     backup_directory: Option<String>,
 ) -> Result<String, String> {
+    crate::native_qa::checkpoint(&app, "maintenance.backup").await?;
     let source = local_db_path(&app)?;
     if !source.exists() {
         return Err("Local database does not exist yet".into());
@@ -14592,6 +14918,7 @@ async fn sanitize_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
         for table in [
             "local_payment_terminal_locks",
             "local_payment_terminal_dispatches",
+            "dojo_sandbox_recovery_receipts",
             "payment_terminal_attempts",
             "payments",
             "order_lines",
@@ -14658,6 +14985,7 @@ async fn validate_automatic_setup_backup(target: &PathBuf) -> Result<(), String>
             "order_lines",
             "payments",
             "payment_terminal_attempts",
+            "dojo_sandbox_recovery_receipts",
             "local_payment_terminal_locks",
             "local_payment_terminal_dispatches",
             "shifts",
@@ -16409,6 +16737,7 @@ mod tests {
         for key in [
             "mysql_config",
             "device_operating_mode",
+            "checkout_draft_v1",
             "till_id",
             "receipt_printer_name",
             "restore_pending_mariadb_replace",
@@ -16630,6 +16959,56 @@ mod tests {
         assert!(!generic_mysql_outbox_id_key_allowed("settings", "id"));
         assert!(generic_mysql_outbox_id_key_allowed("products", "id"));
         assert!(!generic_mysql_outbox_id_key_allowed("products", "barcode"));
+    }
+
+    #[test]
+    fn generic_existing_product_snapshot_never_updates_counted_stock() {
+        for field in ["name", "price", "costPrice", "showInGoods", "goodsSortOrder", "updatedAt"] {
+            assert!(generic_mysql_existing_row_field_allowed("products", field, "id"), "{field}");
+        }
+        assert!(!generic_mysql_existing_row_field_allowed("products", "stockLevel", "id"));
+        assert!(!generic_mysql_existing_row_field_allowed("products", "id", "id"));
+        assert!(generic_mysql_existing_row_field_allowed("suppliers", "stockLevel", "id"));
+        assert!(!generic_mysql_existing_row_field_allowed("settings", "key", "key"));
+    }
+
+    #[test]
+    fn real_mariadb_product_snapshot_preserves_sales_stock_when_configured() {
+        let Ok(uri) = std::env::var("POS_TEST_MYSQL_URI") else {
+            return;
+        };
+        let _serial = REAL_MARIADB_TEST_LOCK.lock().unwrap();
+        tauri::async_runtime::block_on(async {
+            let pool = MySqlPool::connect(&uri).await.unwrap();
+            ensure_real_mariadb_test_base_schema(&pool).await.unwrap();
+            let product_id = format!("stock-upsert-{:016x}", rand::random::<u64>());
+            let mut tx = pool.begin().await.unwrap();
+            let opening = serde_json::json!({
+                "id": product_id, "name": "Opening stock regression", "price": 100,
+                "stockLevel": 7, "createdAt": utc_stamp(), "updatedAt": "2030-01-01T00:00:00.000Z"
+            });
+            mysql_epoch_fenced_outbox_upsert(&mut tx, "products", &opening, "id", true).await.unwrap();
+            let initial: i64 = sqlx::query_scalar("SELECT stockLevel FROM products WHERE id = ?")
+                .bind(&product_id).fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(initial, 7, "initial INSERT must keep the opening stock");
+            sqlx::query("UPDATE products SET stockLevel = stockLevel - 1 WHERE id = ?")
+                .bind(&product_id).execute(&mut *tx).await.unwrap();
+            // A later metadata edit timestamp does not make its stale cached
+            // stock authoritative. Replay must keep the sale's stock value.
+            let edited = serde_json::json!({
+                "id": product_id, "name": "Metadata edit survived", "price": 169,
+                "stockLevel": 99, "updatedAt": "2030-01-01T00:00:01.000Z"
+            });
+            mysql_epoch_fenced_outbox_upsert(&mut tx, "products", &edited, "id", true).await.unwrap();
+            let state: (String, i64, i64) = sqlx::query_as("SELECT name, price, stockLevel FROM products WHERE id = ?")
+                .bind(&product_id).fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(state, ("Metadata edit survived".into(), 169, 6));
+            tx.rollback().await.unwrap();
+            let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE id = ?")
+                .bind(&product_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(remaining, 0);
+            pool.close().await;
+        });
     }
 
     #[test]
@@ -17274,6 +17653,7 @@ mod tests {
                 "CREATE TABLE order_lines (id TEXT PRIMARY KEY, orderId TEXT)",
                 "CREATE TABLE payments (id TEXT PRIMARY KEY, orderId TEXT)",
                 "CREATE TABLE payment_terminal_attempts (id TEXT PRIMARY KEY)",
+                "CREATE TABLE dojo_sandbox_recovery_receipts (attemptId TEXT PRIMARY KEY, confirmedAt TEXT NOT NULL)",
                 "CREATE TABLE local_payment_terminal_locks (terminalKey TEXT PRIMARY KEY, paymentReference TEXT)",
                 "CREATE TABLE local_payment_terminal_dispatches (attemptId TEXT, requestKey TEXT)",
                 "CREATE TABLE shifts (id TEXT PRIMARY KEY)",
@@ -17296,6 +17676,7 @@ mod tests {
                 "INSERT INTO order_lines VALUES ('line-1', 'order-1')",
                 "INSERT INTO payments VALUES ('payment-1', 'order-1')",
                 "INSERT INTO payment_terminal_attempts VALUES ('terminal-attempt-1')",
+                "INSERT INTO dojo_sandbox_recovery_receipts VALUES ('terminal-attempt-1', '2026-07-10T12:00:00.000Z')",
                 "INSERT INTO local_payment_terminal_locks VALUES ('dojo:test:terminal', 'terminal-attempt-1')",
                 "INSERT INTO local_payment_terminal_dispatches VALUES ('terminal-attempt-1', 'create')",
                 "INSERT INTO shifts VALUES ('shift-1')",
@@ -17339,6 +17720,22 @@ mod tests {
             assert!(invalid_recreated);
             validate_automatic_setup_backup(&first).await.unwrap();
 
+            let contaminated =
+                SqlitePool::connect(&format!("sqlite://{}?mode=rw", first.display()))
+                    .await
+                    .unwrap();
+            sqlx::query(
+                "INSERT INTO dojo_sandbox_recovery_receipts VALUES ('source-proof', '2026-07-10T12:00:00.000Z')",
+            )
+            .execute(&contaminated)
+            .await
+            .unwrap();
+            contaminated.close().await;
+            let evidence_error = validate_automatic_setup_backup(&first).await.unwrap_err();
+            assert!(evidence_error.contains("dojo_sandbox_recovery_receipts"));
+            sanitize_automatic_setup_backup(&first).await.unwrap();
+            validate_automatic_setup_backup(&first).await.unwrap();
+
             let manual_backup = create_local_backup_in_dir(&source, &backup_dir)
                 .await
                 .unwrap();
@@ -17348,6 +17745,7 @@ mod tests {
                     .unwrap();
             for table in [
                 "payment_terminal_attempts",
+                "dojo_sandbox_recovery_receipts",
                 "local_payment_terminal_locks",
                 "local_payment_terminal_dispatches",
             ] {
@@ -17382,6 +17780,7 @@ mod tests {
                 "order_lines",
                 "payments",
                 "payment_terminal_attempts",
+                "dojo_sandbox_recovery_receipts",
                 "local_payment_terminal_locks",
                 "local_payment_terminal_dispatches",
                 "shifts",
@@ -17419,8 +17818,14 @@ mod tests {
                 .fetch_one(&source_pool)
                 .await
                 .unwrap();
+            let source_receipts: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM dojo_sandbox_recovery_receipts")
+                    .fetch_one(&source_pool)
+                    .await
+                    .unwrap();
             source_pool.close().await;
             assert_eq!(source_orders, 1, "the live source must not be modified");
+            assert_eq!(source_receipts, 1, "the live recovery proof must remain");
             fs::remove_dir_all(dir).unwrap();
         });
     }
@@ -17458,6 +17863,14 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        install_loyalty_adjustment_test_actor(
+            &pool,
+            "employee",
+            "manager",
+            true,
+            "2026-07-27T12:00:00.000Z",
+        )
+        .await;
         pool
     }
 
@@ -18531,7 +18944,7 @@ mod tests {
             service_charge_amount: 0,
             cashback_amount: 0,
             reference: String::new(),
-            description: if entry_type == "adjustment" {
+            description: if matches!(entry_type, "adjustment" | "opening_balance") {
                 "Test adjustment".into()
             } else {
                 String::new()
@@ -18684,6 +19097,67 @@ mod tests {
     }
 
     #[test]
+    fn online_financial_recovery_permissions_match_operation_and_custom_matrix() {
+        assert!(configured_role_can_recover_financial("cashier", "charge_customer_account", None));
+        assert!(!configured_role_can_recover_financial("cashier", "refund_void", None));
+        assert!(configured_role_can_recover_financial("supervisor", "refund_void", None));
+        assert!(!configured_role_can_recover_financial("attendance", "charge_customer_account", None));
+        assert!(!configured_role_can_recover_financial("unknown", "charge_customer_account", None));
+        let denied = r#"{"version":7,"roles":{"cashier":[],"admin":[]}}"#;
+        assert!(!configured_role_can_recover_financial("cashier", "charge_customer_account", Some(denied)));
+        assert!(configured_role_can_recover_financial("admin", "charge_customer_account", Some(denied)));
+        let allowed = r#"{"version":7,"roles":{"cashier":["refund_void"]}}"#;
+        assert!(configured_role_can_recover_financial("cashier", "refund_void", Some(allowed)));
+    }
+
+    #[test]
+    fn online_financial_intent_cold_connection_timeout_retains_exact_receipt() {
+        // A private loopback listener deliberately never sends a MySQL greeting.
+        // Exercise the real native factory, without touching the configured shop
+        // server, changing its credentials, or adding a production fault switch.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (_connection, _) = listener.accept().unwrap();
+            let _ = held.recv_timeout(Duration::from_secs(10));
+        });
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let mut request = bundle("timed-out-intent", "", "timed-out-payment");
+            request.order.order_number = 0;
+            request.order.receipt_key.clear();
+            let reserved = reserve_sqlite_online_financial_intent(&pool, "loyalty_sale", &request, false).await.unwrap();
+            let uri = format!("mysql://test:unlogged-test-secret@{address}/isolated");
+            let started = Instant::now();
+            let error = connect_mysql_for_financial_intent(&pool, &uri).await.unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(elapsed >= Duration::from_secs(4), "cold connection must not retain the 650 ms deadline");
+            assert!(elapsed < Duration::from_secs(8), "acquisition must remain bounded: {elapsed:?}");
+            let message = error.to_string();
+            assert!(message.contains("FINANCIAL_STAGE[connect-mariadb]"));
+            assert!(message.contains("pool timed out"));
+            assert!(!message.contains("unlogged-test-secret"));
+            let (operation, saved, _) = load_sqlite_online_financial_intent(&pool).await.unwrap().unwrap();
+            assert_eq!(operation, "loyalty_sale");
+            assert_eq!(saved.order, reserved.order);
+            assert_eq!(saved.payment, reserved.payment);
+            let persisted_error: String = sqlx::query_scalar("SELECT lastError FROM _online_financial_intent WHERE id = 1").fetch_one(&pool).await.unwrap();
+            assert_eq!(persisted_error, message);
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders").fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0, "timed-out connection must not masquerade as a completed local sale");
+            let replay = reserve_sqlite_online_financial_intent(&pool, "loyalty_sale", &request, false).await.unwrap();
+            assert_eq!(replay.order.receipt_key, reserved.order.receipt_key);
+            let mut replacement = request.clone();
+            replacement.order.id = "replacement-must-not-charge".into();
+            assert!(reserve_sqlite_online_financial_intent(&pool, "loyalty_sale", &replacement, false).await.unwrap_err().to_string().contains(ONLINE_FINANCIAL_INTENT_PENDING_CODE));
+            pool.close().await;
+        });
+        let _ = release.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
     fn online_financial_intent_reservation_and_local_replay_are_idempotent() {
         tauri::async_runtime::block_on(async {
             let pool = test_pool().await;
@@ -18806,6 +19280,72 @@ mod tests {
     }
 
     #[test]
+    fn local_transaction_purge_retains_confirmed_sandbox_recovery_journals() {
+        tauri::async_runtime::block_on(async {
+            let pool = purge_test_pool().await;
+            for sql in [
+                "CREATE TABLE dojo_sandbox_recovery_receipts (attemptId TEXT PRIMARY KEY, confirmedAt TEXT NOT NULL)",
+                "INSERT INTO payment_terminal_attempts VALUES ('confirmed-test', 'cancelled', '2026-06-07T12:00:00.000Z')",
+                "INSERT INTO payment_terminal_attempts VALUES ('unconfirmed-test', 'cancelled', '2026-06-07T12:00:00.000Z')",
+                "INSERT INTO payment_terminal_attempts VALUES ('ordinary-completed', 'completed', '2026-06-07T12:00:00.000Z')",
+                "INSERT INTO payment_terminal_attempts VALUES ('active-test', 'uncertain', '2026-06-07T12:00:00.000Z')",
+                "INSERT INTO payment_terminal_attempts VALUES ('new-cancelled', 'cancelled', '2026-06-09T12:00:00.000Z')",
+                "INSERT INTO dojo_sandbox_recovery_receipts VALUES ('confirmed-test', '2026-06-07T12:01:00.000Z')",
+                "INSERT INTO dojo_sandbox_recovery_receipts VALUES ('unconfirmed-test', '')",
+            ] {
+                sqlx::query(sql).execute(&pool).await.unwrap();
+            }
+            let marker = "2026-06-08T00:00:00.000Z";
+            assert!(purge_sqlite_transactions_before(&pool, marker, &[], true)
+                .await
+                .is_err());
+            let after_failure: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM payment_terminal_attempts")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                after_failure, 5,
+                "a failed purge must preserve every journal"
+            );
+
+            purge_sqlite_transactions_before(&pool, marker, &[], false)
+                .await
+                .unwrap();
+            let retained: Vec<String> =
+                sqlx::query_scalar("SELECT id FROM payment_terminal_attempts ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                retained,
+                vec!["active-test", "confirmed-test", "new-cancelled"]
+            );
+            let receipts: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM dojo_sandbox_recovery_receipts")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                receipts, 2,
+                "receipt history purge must not alter recovery evidence"
+            );
+            // Repeating the purge cannot remove the retained proof's journal.
+            purge_sqlite_transactions_before(&pool, marker, &[], false)
+                .await
+                .unwrap();
+            let confirmed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM payment_terminal_attempts WHERE id = 'confirmed-test'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(confirmed, 1);
+            pool.close().await;
+        });
+    }
+
+    #[test]
     fn local_transaction_purge_rolls_back_failure_and_preserves_account_ledger() {
         tauri::async_runtime::block_on(async {
             let pool = purge_test_pool().await;
@@ -18823,6 +19363,14 @@ mod tests {
             sale.account_changes[0].created_at = sale.order.created_at.clone();
             sale.account_changes[0].updated_at = sale.order.updated_at.clone();
             insert_sqlite_bundle(&pool, &sale).await.unwrap();
+            sqlx::query(
+                "INSERT INTO payment_terminal_attempts (id, status, createdAt)
+                 VALUES ('ordinary-old', 'cancelled', '2026-06-07T12:00:00.000Z'),
+                        ('ordinary-active', 'uncertain', '2026-06-07T12:00:00.000Z')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
 
             let marker = "2026-06-08T00:00:00.000Z";
             assert!(purge_sqlite_transactions_before(&pool, marker, &[], true)
@@ -18847,6 +19395,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(result.till_numbers, vec!["till-1"]);
+            let retained_attempts: Vec<String> =
+                sqlx::query_scalar("SELECT id FROM payment_terminal_attempts ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                retained_attempts,
+                vec!["ordinary-active"],
+                "old databases without a sandbox receipt table still purge only final attempts"
+            );
             for table in ["orders", "payments"] {
                 let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                     .fetch_one(&pool)
@@ -19867,10 +20425,113 @@ mod tests {
     }
 
     #[test]
+    fn first_manual_customer_entry_creates_a_held_account_atomically() {
+        tauri::async_runtime::block_on(async {
+            for (kind, amount) in [("opening_balance", 200), ("adjustment", 200), ("adjustment", -200)] {
+                let pool = test_pool().await;
+                let change = account_change("first-ledger", "", kind, amount, "");
+                let first = post_sqlite_customer_account_entry(&pool, &change).await.unwrap();
+                assert!(!first.account.is_enabled);
+                assert_eq!(first.account.credit_limit_pence, 0);
+                assert_eq!(first.account.balance_pence, amount);
+                assert!(!first.account.created_at.is_empty());
+                let replay = post_sqlite_customer_account_entry(&pool, &change).await.unwrap();
+                assert_eq!(replay.entry.id, first.entry.id);
+                assert_eq!(replay.account.balance_pence, amount);
+                assert_eq!(replay.account.created_at, first.account.created_at);
+                let counts: (i64, i64) = sqlx::query_as(
+                    "SELECT (SELECT COUNT(*) FROM customer_accounts),
+                            (SELECT COUNT(*) FROM customer_account_entries)",
+                ).fetch_one(&pool).await.unwrap();
+                assert_eq!(counts, (1, 1));
+            }
+        });
+    }
+
+    #[test]
+    fn historical_debt_keeps_hold_and_purchase_limit_unchanged() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            enable_test_account(&pool, 50).await;
+            sqlx::query("UPDATE customer_accounts SET isEnabled = 0")
+                .execute(&pool).await.unwrap();
+            let opening = account_change("held-opening", "", "opening_balance", 200, "");
+            let first = post_sqlite_customer_account_entry(&pool, &opening).await.unwrap();
+            assert_eq!(first.account.balance_pence, 200);
+            let correction = account_change("held-correction", "", "adjustment", 100, "");
+            let adjusted = post_sqlite_customer_account_entry(&pool, &correction).await.unwrap();
+            assert_eq!(adjusted.account.balance_pence, 300);
+            assert!(!adjusted.account.is_enabled);
+            assert_eq!(adjusted.account.credit_limit_pence, 50);
+            let charge = account_change("held-purchase", "", "charge", 1, "");
+            assert!(post_sqlite_customer_account_entry(&pool, &charge).await.unwrap_err()
+                .to_string().contains("not enabled"));
+            sqlx::query("UPDATE customer_accounts SET isEnabled = 1")
+                .execute(&pool).await.unwrap();
+            assert!(post_sqlite_customer_account_entry(&pool, &charge).await.unwrap_err()
+                .to_string().contains("credit limit"));
+        });
+    }
+
+    #[test]
+    fn first_manual_customer_entry_rolls_back_invalid_or_unauthorized_actions() {
+        tauri::async_runtime::block_on(async {
+            for scenario in ["missing_customer", "no_reason", "cashier", "inactive", "custom_denial", "payment", "charge"] {
+                let pool = test_pool().await;
+                let mut change = account_change("rejected-first", "", "opening_balance", 200, "");
+                match scenario {
+                    "missing_customer" => change.customer_id = "unknown".into(),
+                    "no_reason" => change.description = "  ".into(),
+                    "cashier" => { sqlx::query("UPDATE employees SET role = 'cashier'").execute(&pool).await.unwrap(); }
+                    "inactive" => { sqlx::query("UPDATE employees SET isActive = 0").execute(&pool).await.unwrap(); }
+                    "custom_denial" => { sqlx::query("INSERT INTO settings (key, value) VALUES ('role_permissions', '{\"roles\":{\"manager\":[]}}')").execute(&pool).await.unwrap(); }
+                    "payment" => change = account_change("overpayment", "", "payment", -1, "cash"),
+                    "charge" => change = account_change("held-charge", "", "charge", 1, ""),
+                    _ => unreachable!(),
+                }
+                assert!(post_sqlite_customer_account_entry(&pool, &change).await.is_err(), "{scenario}");
+                let counts: (i64, i64) = sqlx::query_as(
+                    "SELECT (SELECT COUNT(*) FROM customer_accounts),
+                            (SELECT COUNT(*) FROM customer_account_entries)",
+                ).fetch_one(&pool).await.unwrap();
+                assert_eq!(counts, (0, 0), "{scenario}");
+            }
+        });
+    }
+
+    #[test]
+    fn first_manual_customer_entry_idempotency_conflict_does_not_leave_an_account() {
+        tauri::async_runtime::block_on(async {
+            let pool = test_pool().await;
+            let first = account_change("opening-original", "", "opening_balance", 200, "");
+            post_sqlite_customer_account_entry(&pool, &first).await.unwrap();
+            sqlx::query("INSERT INTO customers (id, loyaltyPoints) VALUES ('customer-2', 0)")
+                .execute(&pool).await.unwrap();
+            let mut conflict = first;
+            conflict.customer_id = "customer-2".into();
+            assert!(post_sqlite_customer_account_entry(&pool, &conflict).await.unwrap_err()
+                .to_string().contains("idempotency conflict"));
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM customer_accounts WHERE customerId = 'customer-2'",
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0);
+        });
+    }
+
+    #[test]
+    fn manual_customer_account_permission_policy_matches_custom_roles() {
+        assert!(configured_role_can_adjust_customer_account("admin", Some(r#"{"roles":{"admin":[]}}"#)));
+        assert!(configured_role_can_adjust_customer_account("manager", None));
+        assert!(!configured_role_can_adjust_customer_account("cashier", None));
+        assert!(!configured_role_can_adjust_customer_account("manager", Some(r#"{"roles":{"manager":[]}}"#)));
+        assert!(configured_role_can_adjust_customer_account("supervisor", Some(r#"{"roles":{"supervisor":["adjust_customer_account"]}}"#)));
+        assert!(!configured_role_can_adjust_customer_account("attendance", Some(r#"{"roles":{"attendance":["adjust_customer_account"]}}"#)));
+    }
+
+    #[test]
     fn opening_balance_is_atomic_and_can_only_be_posted_once() {
         tauri::async_runtime::block_on(async {
             let pool = test_pool().await;
-            enable_test_account(&pool, 500).await;
             let first = account_change("opening-one", "", "opening_balance", 100, "");
             let second = account_change("opening-two", "", "opening_balance", 100, "");
             let first_pool = pool.clone();

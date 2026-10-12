@@ -62,6 +62,7 @@
     import {
         acquireDojoLock,
         cancelDojoTerminalSession,
+        cancelExpiredSandboxDojoPaymentIntent,
         createDojoPayment,
         dojoConfig as dojoConfigStore,
         dojoTerminalKey,
@@ -172,6 +173,9 @@
     let accountManagedServerDataEpoch: string | undefined;
     let accountManagedCardExtras = { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 };
     let accountTerminalStatus = '';
+    let accountDojoMonitoring = false;
+    let accountTerminalCancelRequested = false;
+    let accountTerminalUncertain = false;
     let accountPrintingEntryId = '';
     let accountCardConfigState: 'loading' | 'loaded' | 'error' = isTauri() ? 'loading' : 'loaded';
     let accountCardFlow: 'external' | 'sumup' | 'dojo' | 'unavailable' | '' = '';
@@ -704,6 +708,8 @@
         accountCustomerId = customer.id;
         accountCustomerSnapshot = customer;
         customerAccount = null;
+        accountEnabledDraft = false;
+        accountLimitDraft = '';
         accountEntries = [];
         accountEntryTotal = 0;
         accountHistoryLoadRun += 1;
@@ -856,11 +862,19 @@
         accountManagedCardExtras = { tipsAmount: 0, serviceChargeAmount: 0, cashbackAmount: 0 };
         accountCardFlow = '';
         accountTerminalStatus = '';
+        accountTerminalCancelRequested = false;
+        accountTerminalUncertain = false;
         showAccountEntry = true;
     }
 
+    function requestAccountTerminalCancellation() {
+        if (!accountSaving || !accountDojoMonitoring || accountTerminalCancelRequested) return;
+        accountTerminalCancelRequested = true;
+        accountTerminalStatus = 'Cancellation requested. Keep this payment open while Dojo confirms the result; do not retry the card.';
+    }
+
     function selectAccountPaymentMethod(method: Exclude<CustomerAccountPaymentMethod, ''>) {
-        if (accountSaving) return;
+        if (accountSaving || accountManagedCardApproved || accountTerminalUncertain) return;
         if (method === 'card' && accountCardConfigState !== 'loaded') {
             toast(
                 accountCardConfigState === 'loading'
@@ -1085,11 +1099,14 @@
                 clientTransactionId: paymentIntentId,
                 terminalSessionId,
             });
+            accountDojoMonitoring = true;
+            accountTerminalCancelRequested = false;
             const result = await monitorDojoSession({
                 paymentIntentId,
                 terminalSessionId,
                 apiEnvironment: config.apiEnvironment,
                 retry: async () => {
+                    accountTerminalCancelRequested = false;
                     const retried = await retryDojoPayment(reference, terminalSessionId);
                     terminalSessionId = retried.terminalSessionId;
                     return terminalSessionId;
@@ -1100,6 +1117,8 @@
                 getPayment: () => getDojoPaymentIntentStatus(paymentIntentId),
                 submitSignature: (accepted) => respondToDojoSignature(terminalSessionId, accepted),
                 cancel: () => cancelDojoTerminalSession(terminalSessionId),
+                cancelExpiredSandboxPayment: () => cancelExpiredSandboxDojoPaymentIntent(reference),
+                shouldCancel: () => accountTerminalCancelRequested,
                 refreshLease: () => refreshDojoLock(config, tillNumber, reference),
                 isDisposed: () => !customersMounted,
                 onSignatureRequired: (decide) => {
@@ -1116,6 +1135,9 @@
                     error: `Dojo status: ${result.status}`,
                 });
                 finalized = true;
+                accountTerminalStatus = result.outcome === 'cancelled'
+                    ? 'Dojo cancelled. No account payment was recorded.'
+                    : 'Dojo did not approve the card payment. No account payment was recorded.';
                 throw new Error(result.outcome === 'cancelled' ? 'The Dojo payment was cancelled' : 'The card payment was not approved');
             }
             const status = result.payment;
@@ -1140,6 +1162,10 @@
             return providerReference;
         } catch (error) {
             if (!approved && !finalized) {
+                if (networkStarted) {
+                    accountTerminalUncertain = true;
+                    accountTerminalStatus = 'The Dojo result is uncertain. Do not take this payment again. Ask an administrator to open Reports → Payment checks and review the existing payment.';
+                }
                 await updateDojoAttempt(reference, networkStarted ? 'uncertain' : 'cancelled', {
                     clientTransactionId: paymentIntentId,
                     terminalSessionId,
@@ -1149,6 +1175,7 @@
             }
             throw error;
         } finally {
+            accountDojoMonitoring = false;
             dismissDojoSignatureDecision();
             if (lockHeld) {
                 await releaseDojoLock(config, tillNumber, reference).catch((error) => {
@@ -1174,6 +1201,10 @@
 
     async function saveAccountEntry() {
         if (!customerAccount || !$currentEmployee || accountSaving) return;
+        if (accountTerminalUncertain) {
+            toast('Review the existing terminal payment in Reports → Payment checks before taking another payment.', 'error');
+            return;
+        }
         if (accountEntryMode === 'payment' && $deviceOperatingMode === 'back_office') {
             toast('Customer payments must be taken on a Checkout Till', 'error');
             return;
@@ -1929,9 +1960,9 @@
             </div>
             <div class="account-settings-grid">
                 <label class="account-status-control" class:checked={accountEnabledDraft}>
-                    <input type="checkbox" bind:checked={accountEnabledDraft} disabled={!canAdjustCustomerAccount || accountSaving} />
+                    <input type="checkbox" bind:checked={accountEnabledDraft} aria-labelledby="customer-account-pay-later-label" aria-describedby="customer-account-pay-later-help" disabled={!canAdjustCustomerAccount || accountSaving} />
                     <span class="account-switch" aria-hidden="true"><i></i></span>
-                    <span><b>{accountEnabledDraft ? 'Pay Later active' : 'Account on hold'}</b><small>{accountEnabledDraft ? 'New purchases can be charged to this account.' : 'Existing activity is kept, but new charges are blocked.'}</small></span>
+                    <span><b id="customer-account-pay-later-label">Allow Pay Later purchases</b><small id="customer-account-pay-later-help">{accountEnabledDraft ? 'Pay Later active. New purchases can be charged to this account.' : 'Account on hold. Existing activity is kept, but new charges are blocked.'}</small></span>
                 </label>
                 <div class="field account-limit-field">
                     <label for="customer-account-limit">Account limit (£)</label>
@@ -2033,20 +2064,20 @@
         <div class="account-entry-form">
             <div class="field">
                 <label for="account-entry-amount">Amount (£) *</label>
-                <div class="money-input"><span>£</span><input id="account-entry-amount" type="text" inputmode="decimal" placeholder="0.00" bind:value={accountAmountDraft} disabled={accountSaving || accountManagedCardApproved || (accountPaymentMethod === 'card' && accountExternalCardConfirmed)} /></div>
+                <div class="money-input"><span>£</span><input id="account-entry-amount" type="text" inputmode="decimal" placeholder="0.00" bind:value={accountAmountDraft} disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain || (accountPaymentMethod === 'card' && accountExternalCardConfirmed)} /></div>
             </div>
 
             {#if accountEntryMode === 'payment'}
                 <fieldset class="payment-method-field">
                     <legend>Payment method *</legend>
                     <div class="payment-method-options">
-                        <button type="button" disabled={accountSaving || accountManagedCardApproved} class:active={accountPaymentMethod === 'cash'} aria-pressed={accountPaymentMethod === 'cash'} on:click={() => selectAccountPaymentMethod('cash')}>
+                        <button type="button" disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain} class:active={accountPaymentMethod === 'cash'} aria-pressed={accountPaymentMethod === 'cash'} on:click={() => selectAccountPaymentMethod('cash')}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"></rect><circle cx="12" cy="12" r="2"></circle><path d="M7 9h.01M17 15h.01"></path></svg>
                             Cash
                         </button>
                         <button
                             type="button"
-                            disabled={accountSaving || accountManagedCardApproved || accountCardConfigState !== 'loaded'}
+                            disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain || accountCardConfigState !== 'loaded'}
                             title={accountCardConfigState === 'loading'
                                 ? 'Loading card-terminal settings'
                                 : accountCardConfigState === 'error'
@@ -2059,7 +2090,7 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 10h18M7 15h3"></path></svg>
                             Card
                         </button>
-                        <button type="button" disabled={accountSaving || accountManagedCardApproved} class:active={accountPaymentMethod === 'other'} aria-pressed={accountPaymentMethod === 'other'} on:click={() => selectAccountPaymentMethod('other')}>
+                        <button type="button" disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain} class:active={accountPaymentMethod === 'other'} aria-pressed={accountPaymentMethod === 'other'} on:click={() => selectAccountPaymentMethod('other')}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M6 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"></path><path d="M8 12h8M8 16h5"></path></svg>
                             Other
                         </button>
@@ -2110,7 +2141,7 @@
                     rows="3"
                     placeholder={accountEntryMode === 'payment' ? 'Optional payment note' : 'Explain why this balance is changing'}
                     bind:value={accountReasonDraft}
-                    disabled={accountSaving || accountManagedCardApproved}
+                    disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain}
                 ></textarea>
             </div>
             <div class="field">
@@ -2131,7 +2162,7 @@
                             ? 'Bank transfer, cheque, or other reference'
                         : 'Optional internal reference'}
                     bind:value={accountReferenceDraft}
-                    disabled={accountSaving || accountManagedCardApproved || (accountEntryMode === 'payment'
+                    disabled={accountSaving || accountManagedCardApproved || accountTerminalUncertain || (accountEntryMode === 'payment'
                         && accountPaymentMethod === 'card'
                         && (accountCardFlow === 'sumup' || accountCardFlow === 'dojo' || accountCardFlow === 'unavailable'))}
                 />
@@ -2140,6 +2171,7 @@
             {#if accountEntryMode !== 'payment'}
                 <div class="append-only-note">
                     This does not edit previous entries. A new, permanent adjustment will be added to the statement.
+                    Historical balances and corrections do not enable Pay Later or change its purchase limit.
                     {accountEntryMode === 'reduce' ? ' Any amount beyond what is owed becomes customer credit.' : ''}
                 </div>
             {/if}
@@ -2147,9 +2179,15 @@
     {/if}
     <svelte:fragment slot="footer">
         <button class="btn btn-secondary" disabled={accountSaving || accountManagedCardApproved} on:click={() => showAccountEntry = false}>Cancel</button>
+        {#if accountSaving && accountDojoMonitoring && !accountManagedCardApproved}
+            <button class="btn btn-secondary" disabled={accountTerminalCancelRequested} on:click={requestAccountTerminalCancellation}>
+                {accountTerminalCancelRequested ? 'Cancellation Requested' : 'Cancel Terminal'}
+            </button>
+        {/if}
         <button
             class="btn btn-primary"
             disabled={accountSaving
+                || accountTerminalUncertain
                 || (accountEntryMode === 'payment'
                     ? !canTakeAccountPayment
                         || !$currentShiftId
@@ -2159,7 +2197,8 @@
             on:click={saveAccountEntry}
         >
             {accountSaving
-                ? accountTerminalStatus || 'Recording...'
+                ? accountDojoMonitoring ? 'Checking Dojo…' : 'Recording...'
+                : accountTerminalUncertain ? 'Payment Needs Review'
                 : accountEntryMode === 'payment'
                     && accountPaymentMethod === 'card'
                     && (accountCardFlow === 'sumup' || accountCardFlow === 'dojo')

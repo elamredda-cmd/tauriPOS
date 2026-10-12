@@ -6,6 +6,7 @@ mod licensing;
 mod local_batch;
 mod local_terminal;
 mod mysql_session;
+mod native_qa;
 mod printer_modules;
 mod secret_store;
 mod sumup;
@@ -1107,12 +1108,15 @@ fn send_raw_printer_data_blocking(
 
 #[tauri::command]
 async fn send_raw_printer_data(
+    app: tauri::AppHandle,
     queues: State<'_, PrinterJobQueues>,
     host: String,
     port: u16,
     data: Vec<u8>,
     timeout_ms: Option<u64>,
 ) -> Result<PrinterWriteResult, String> {
+    native_qa::restrict_printer_network(&app, &host)?;
+    native_qa::checkpoint(&app, "printer.network").await?;
     let target = format!("network:{}:{port}", host.trim().to_ascii_lowercase());
     let queue = queues.queue_for(target)?;
     run_queued_printer_job(queue, move || {
@@ -1161,12 +1165,14 @@ fn send_device_printer_data_blocking(
 
 #[tauri::command]
 async fn send_device_printer_data(
+    app: tauri::AppHandle,
     queues: State<'_, PrinterJobQueues>,
     device_path: String,
     data: Vec<u8>,
     baud_rate: Option<u32>,
     timeout_ms: Option<u64>,
 ) -> Result<PrinterWriteResult, String> {
+    native_qa::checkpoint(&app, "printer.device").await?;
     let target = format!("device:{}", device_path.trim().to_ascii_lowercase());
     let queue = queues.queue_for(target)?;
     run_queued_printer_job(queue, move || {
@@ -1294,11 +1300,13 @@ fn send_system_printer_data_blocking(
 
 #[tauri::command]
 async fn send_system_printer_data(
+    app: tauri::AppHandle,
     queues: State<'_, PrinterJobQueues>,
     printer_name: String,
     data: Vec<u8>,
     document_name: Option<String>,
 ) -> Result<PrinterWriteResult, String> {
+    native_qa::checkpoint(&app, "printer.system").await?;
     let target = format!("system:{}", printer_name.trim().to_ascii_lowercase());
     let queue = queues.queue_for(target)?;
     run_queued_printer_job(queue, move || {
@@ -1352,6 +1360,7 @@ fn open_cash_drawer_blocking(
 
 #[tauri::command]
 async fn open_cash_drawer(
+    app: tauri::AppHandle,
     queues: State<'_, PrinterJobQueues>,
     host: String,
     port: u16,
@@ -1360,6 +1369,8 @@ async fn open_cash_drawer(
     pulse_off_ms: Option<u16>,
     timeout_ms: Option<u64>,
 ) -> Result<(), String> {
+    native_qa::restrict_printer_network(&app, &host)?;
+    native_qa::checkpoint(&app, "drawer.network").await?;
     let target = format!("network:{}:{port}", host.trim().to_ascii_lowercase());
     let queue = queues.queue_for(target)?;
     run_queued_printer_job(queue, move || {
@@ -1375,6 +1386,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            native_qa::validate_startup(app.handle()).map_err(std::io::Error::other)?;
             app.manage(PrinterJobQueues::default());
             if let Err(error) = commerce::apply_pending_restore_on_startup(app.handle()) {
                 eprintln!("Could not apply pending database restore: {error}");
@@ -1405,6 +1417,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            #[cfg(native_qa)]
+            native_qa::enabled::native_qa_arm,
+            #[cfg(native_qa)]
+            native_qa::enabled::native_qa_checkpoint,
+            #[cfg(native_qa)]
+            native_qa::enabled::native_qa_release,
+            #[cfg(native_qa)]
+            native_qa::enabled::native_qa_status,
             customer_media::import_customer_display_media,
             customer_media::remove_customer_display_media,
             greet,
@@ -1490,6 +1510,7 @@ pub fn run() {
             dojo::dojo_payment_intent_by_reference,
             dojo::dojo_cancel_terminal_session,
             dojo::dojo_cancel_expired_sandbox_payment,
+            dojo::dojo_recover_legacy_sandbox_payments,
             dojo::dojo_retry_payment,
             dojo::dojo_review_expired_payment,
             dojo::dojo_respond_signature,

@@ -1,14 +1,17 @@
 <script lang="ts">
     import { onDestroy, onMount, tick } from 'svelte';
+    import { isTauri } from '@tauri-apps/api/core';
+    import { clearSystemPrintSnapshot } from '$lib/systemPrint';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ProductLabel from '$lib/components/ProductLabel.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import SearchField from '$lib/components/SearchField.svelte';
-    import { settingsDB, storeDB, formatMoney, type Product } from '$lib/stores/db';
+    import { settingsDB, storeDB, formatMoney, type Product, type Store } from '$lib/stores/db';
     import { getProductsPage } from '$lib/stores/database';
-    import { getLabelDesign } from '$lib/labels';
+    import { getLabelDesign, type LabelDesign } from '$lib/labels';
     import { toast } from '$lib/stores/toast';
     import { getLabelPrinterConfig, printProductLabels } from '$lib/printers';
+    import { nativeQaEnabled, nativeQaCheckpoint } from '$lib/nativeQa';
 
     let search = '';
     let searchInput: HTMLInputElement | null = null;
@@ -18,10 +21,17 @@
     let productLoadError = '';
     let productSearchTimer: ReturnType<typeof setTimeout> | null = null;
     let productLoadToken = 0;
+    const PRODUCT_PAGE_SIZE = 100;
+    let productPage = 0;
+    let productTotal = 0;
+    let productTotalCapped = false;
+    let searchSelectionToken = 0;
+    $: productsHaveMore = productTotalCapped ? matches.length === PRODUCT_PAGE_SIZE : (productPage + 1) * PRODUCT_PAGE_SIZE < productTotal;
     let mounted = false;
     let printingLabels = false;
     let printCancellation: { cancelled: boolean } | null = null;
     let printSheetProducts: Product[] = [];
+    let printSheetContext: { store: Store; design: LabelDesign } | null = null;
     let showLargePrintConfirm = false;
     const LARGE_PRINT_THRESHOLD = 50;
     $: design = getLabelDesign($settingsDB);
@@ -29,8 +39,8 @@
     $: selectedProducts = Array.from(selected.values());
     $: systemPrintMode = labelPrinter.connection === 'system' || labelPrinter.protocol === 'system';
     $: totalLabels = selectedProducts.reduce((sum, item) => sum + item.quantity, 0);
-    $: printPageWidth = Math.max(15, Math.min(210, Number(design.widthMm) || 50));
-    $: printPageHeight = Math.max(15, Math.min(297, Number(design.heightMm) || 30));
+    $: printPageWidth = Math.max(15, Math.min(210, Number((printSheetContext?.design || design).widthMm) || 50));
+    $: printPageHeight = Math.max(15, Math.min(297, Number((printSheetContext?.design || design).heightMm) || 30));
     $: printerModeLabel = systemPrintMode
         ? 'System print dialog'
         : labelPrinter.connection === 'module'
@@ -68,15 +78,18 @@
     onDestroy(() => {
         mounted = false;
         productLoadToken += 1;
+        searchSelectionToken += 1;
         if (productSearchTimer) clearTimeout(productSearchTimer);
     });
 
     function scheduleProductSearch(query: string, delay = 160) {
+        productLoadToken += 1;
+        productsLoading = true;
         if (productSearchTimer) clearTimeout(productSearchTimer);
         productSearchTimer = setTimeout(() => void loadProductMatches(query), delay);
     }
 
-    async function loadProductMatches(query: string): Promise<Product[]> {
+    async function loadProductMatches(query: string, page = productPage): Promise<Product[]> {
         const token = ++productLoadToken;
         productsLoading = true;
         productLoadError = '';
@@ -84,11 +97,16 @@
             const result = await getProductsPage({
                 query: query.trim(),
                 status: 'active',
-                limit: 100,
-                offset: 0,
+                limit: PRODUCT_PAGE_SIZE,
+                offset: page * PRODUCT_PAGE_SIZE,
             });
+            if (nativeQaEnabled) await nativeQaCheckpoint('label.suggestions');
             const rows = result.rows as Product[];
-            if (mounted && token === productLoadToken) matches = rows;
+            if (mounted && token === productLoadToken) {
+                matches = rows;
+                productTotal = result.total;
+                productTotalCapped = Boolean(result.totalIsCapped);
+            }
             return rows;
         } catch (error) {
             if (mounted && token === productLoadToken) {
@@ -102,21 +120,28 @@
     }
 
     function handleSearchInput(event: Event) {
+        searchSelectionToken += 1;
+        productPage = 0;
         search = (event.currentTarget as HTMLInputElement).value;
         scheduleProductSearch(search);
     }
 
     function clearProductSearch() {
+        searchSelectionToken += 1;
+        productPage = 0;
         search = '';
         scheduleProductSearch('', 0);
     }
 
     function selectProduct(product: Product) {
+        if (printingLabels) return;
+        searchSelectionToken += 1;
         const next = new Map(selected);
         const current = next.get(product.id);
         next.set(product.id, { product, quantity: Math.min(500, (current?.quantity || 0) + 1) });
         selected = next;
         search = '';
+        productPage = 0;
         scheduleProductSearch('', 0);
         tick().then(() => searchInput?.focus({ preventScroll: true }));
     }
@@ -134,6 +159,8 @@
 
     function clearSelected() {
         selected = new Map();
+        printSheetProducts = [];
+        printSheetContext = null;
         void tick().then(() => searchInput?.focus({ preventScroll: true }));
     }
 
@@ -144,11 +171,14 @@
     }
 
     async function handleSearchKeydown(event: KeyboardEvent) {
-        if (event.key !== 'Enter') return;
+        if (event.key !== 'Enter' || printingLabels || event.repeat) return;
         event.preventDefault();
         if (productSearchTimer) clearTimeout(productSearchTimer);
         const query = search.trim().toLowerCase();
-        const currentMatches = await loadProductMatches(query);
+        const token = ++searchSelectionToken;
+        productPage = 0;
+        const currentMatches = await loadProductMatches(query, 0);
+        if (!mounted || token !== searchSelectionToken || printingLabels) return;
         const exact = currentMatches.find(product => product.isActive && [
             product.barcode, product.sku, product.scalePlu
         ].some(value => String(value || '').toLowerCase() === query));
@@ -158,6 +188,7 @@
     }
 
     function requestPrintLabels() {
+        if (printingLabels) return;
         if (totalLabels > LARGE_PRINT_THRESHOLD) {
             showLargePrintConfirm = true;
             return;
@@ -177,22 +208,30 @@
         if (!labelPrinter.enabled) { toast('Label printing is disabled in Printer Setup', 'error'); return; }
         if (!printerReady) { toast('Finish the label printer setup before printing', 'error'); return; }
 
-        const jobs = selectedProducts.map((item) => ({ ...item }));
+        const jobs = selectedProducts.map((item) => ({ ...item, product: { ...item.product } }));
         const requestedTotal = totalLabels;
         if (systemPrintMode) {
             printingLabels = true;
-            printSheetProducts = jobs.flatMap(item =>
-                Array.from({ length: item.quantity }, () => item.product)
-            );
+            const retainNativeSnapshot = isTauri();
             try {
+                clearSystemPrintSnapshot();
+                printSheetContext = structuredClone({ store: $storeDB, design });
+                printSheetProducts = jobs.flatMap(item =>
+                    Array.from({ length: item.quantity }, () => item.product)
+                );
                 await tick();
-                window.print();
-                clearSelected();
-                toast('Label print dialog closed and selection cleared', 'success');
+                await Promise.resolve(window.print());
+                // Browser/system printing reports no printed/cancelled result.
+                // Keep the complete job until the operator explicitly clears it.
+                toast('Print dialog requested. Selected labels were kept; use Clear after printing.', 'info');
             } catch (error) {
+                printSheetProducts = [];
+                printSheetContext = null;
                 toast(`Could not open the label print dialog: ${error}`, 'error');
             } finally {
-                printSheetProducts = [];
+                // Native invocation does not report sheet dismissal. Retain
+                // this bounded immutable print sheet until Clear/next print.
+                if (!retainNativeSnapshot) { printSheetProducts = []; printSheetContext = null; }
                 printingLabels = false;
             }
             return;
@@ -232,6 +271,13 @@
             printCancellation = null;
             void tick().then(() => searchInput?.focus({ preventScroll: true }));
         }
+    }
+
+    function changeProductPage(direction: number) {
+        if (productsLoading || printingLabels) return;
+        searchSelectionToken += 1;
+        productPage = Math.max(0, productPage + direction);
+        void loadProductMatches(search);
     }
 </script>
 
@@ -310,6 +356,10 @@
                 {#if matches.length === 0}<p class="p-6 text-center text-text-muted">No matching items.</p>{/if}
                 {/if}
             </div>
+            <div class="label-search-pagination">
+                <small>Showing {matches.length ? productPage * PRODUCT_PAGE_SIZE + 1 : 0}–{matches.length ? productPage * PRODUCT_PAGE_SIZE + matches.length : 0} of {productTotal}{productTotalCapped ? '+' : ''} matches. Search or use Next for more.</small>
+                <div><button class="btn btn-secondary" disabled={productsLoading || printingLabels || productPage === 0} on:click={() => changeProductPage(-1)}>Previous</button><button class="btn btn-secondary" disabled={productsLoading || printingLabels || !productsHaveMore} on:click={() => changeProductPage(1)}>Next</button></div>
+            </div>
         </section>
 
         <section class="settings-section flex min-h-0 flex-col max-[850px]:min-h-[420px]">
@@ -358,10 +408,13 @@
 />
 
 <div class="quick-label-print-sheet">
-    {#each printSheetProducts as product}<ProductLabel {product} store={$storeDB} {design} />{/each}
+    {#if printSheetContext}{#each printSheetProducts as product}<ProductLabel {product} store={printSheetContext.store} design={printSheetContext.design} />{/each}{/if}
 </div>
 
 <style>
+    .label-search-pagination { flex:0 0 auto; display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.5rem; padding-top:.5rem; }
+    .label-search-pagination small { color:var(--text-muted); font-size:.75rem; }
+    .label-search-pagination > div { display:flex; gap:.4rem; }
     .quick-label-print-sheet { display: none; }
     @media print {
         :global(.management-page), :global(.fullscreen-toggle), :global(.toast-pop), :global(.touch-input-backdrop) { display: none !important; }

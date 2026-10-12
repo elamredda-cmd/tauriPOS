@@ -659,6 +659,9 @@ fn load_legacy_keychain(account: &str) -> Result<Option<String>, String> {
 /// One bounded compatibility pass for releases that previously used Keychain
 /// or Credential Manager. Normal load/save/delete calls are strictly file-only.
 pub fn migrate_legacy_keychain_once(app: &AppHandle) -> Result<(), String> {
+    // The isolated QA identifier must never import the normal till's legacy
+    // keychain service. All other credential operations are app-path-local.
+    if app.config().identifier == crate::native_qa::APP_IDENTIFIER { return Ok(()); }
     let path = secret_file_path(app)?;
     let _process_guard = secret_file_lock();
     let _cross_process_guard = lock_secret_file_across_processes(&path)?;

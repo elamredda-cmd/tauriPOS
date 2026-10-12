@@ -25,8 +25,8 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
-    import { now, settingsDB } from '$lib/stores/db';
-    import { upsert } from '$lib/stores/database';
+    import { settingsDB } from '$lib/stores/db';
+    import { saveSetting, saveSettingsValues } from '$lib/savedSettings';
     import { toast } from '$lib/stores/toast';
     import {
         getLabelPrinterConfig,
@@ -81,6 +81,9 @@
     let receiptTestStatus = '';
     let labelTestStatus = '';
     let drawerTestStatus = '';
+    let testingReceipt = false;
+    let testingLabel = false;
+    let testingDrawer = false;
     let findingPrinters = false;
     let foundPrinters: SystemPrinterInfo[] = [];
     let printerModules: PrinterModuleInfo[] = [];
@@ -125,6 +128,7 @@
     }
 
     async function refreshPrinterModules(quiet = false) {
+        if (modulesLoading) return;
         modulesLoading = true;
         try {
             printerModules = await listPrinterModules();
@@ -137,6 +141,7 @@
     }
 
     async function installModule() {
+        if (moduleBusyId) return;
         if (!isTauri()) {
             toast('Printer modules can be installed from the desktop POS app', 'info');
             return;
@@ -160,6 +165,7 @@
     }
 
     async function toggleModule(module: PrinterModuleInfo) {
+        if (moduleBusyId) return;
         moduleBusyId = module.id;
         try {
             await setPrinterModuleEnabled(module.id, !module.enabled);
@@ -177,6 +183,7 @@
     }
 
     function requestRemoveModule(module: PrinterModuleInfo) {
+        if (moduleBusyId) return;
         if (moduleInUse(module.id)) {
             toast('Switch the receipt and label printers away from this module first', 'error');
             return;
@@ -207,6 +214,7 @@
     }
 
     async function testModule(module: PrinterModuleInfo) {
+        if (moduleBusyId) return;
         moduleBusyId = module.id;
         try {
             const result = await executePrinterModule(module.id, 'healthCheck');
@@ -218,26 +226,15 @@
         }
     }
 
-    async function updateSetting(key: string, value: string) {
-        const row = { key, value, updatedAt: now() };
-        settingsDB.update((settings) => {
-            const index = settings.findIndex((item) => item.key === key);
-            if (index >= 0) return settings.map((item, itemIndex) => itemIndex === index ? row : item);
-            return [...settings, row];
-        });
-        await upsert('settings', row, 'key');
-    }
+    const updateSetting = saveSetting;
 
     function settingValue(key: string, fallback = '') {
         return $settingsDB.find((item) => item.key === key)?.value ?? fallback;
     }
 
     async function useReceiptPrinterForDrawer() {
-        await updateSetting('cash_drawer_printer_host', '');
-        await updateSetting('cash_drawer_printer_name', '');
-        await updateSetting('cash_drawer_printer_device_path', '');
-        await updateSetting('cash_drawer_module_id', '');
-        await updateSetting('cash_drawer_module_device_id', '');
+        if (!(await saveSettingsValues({ cash_drawer_printer_host: '', cash_drawer_printer_name: '',
+            cash_drawer_printer_device_path: '', cash_drawer_module_id: '', cash_drawer_module_device_id: '' }))) return;
         drawerTargetEditorOpen = false;
         drawerTestStatus = 'Drawer will use the configured receipt printer.';
         toast('Drawer set to receipt printer', 'success');
@@ -245,52 +242,47 @@
 
     async function toggleStarTsp100Preset() {
         if (receipt.model === 'star_tsp100') {
-            await updateSetting('receipt_printer_model', 'generic_escpos');
+            if (!(await updateSetting('receipt_printer_model', 'generic_escpos'))) return;
             receiptTestStatus = 'Star TSP100 preset removed. Receipt printer is now set to Generic ESC/POS.';
             toast('Star TSP100 preset removed', 'success');
             return;
         }
-        await updateSetting('receipt_printer_model', 'star_tsp100');
-        await updateSetting('receipt_printer_connection', 'usb_raw');
-        await updateSetting('receipt_printer_paper_width', '80mm');
-        await updateSetting('receipt_printer_encoding', 'latin1');
-        await updateSetting('receipt_printer_cut_paper', 'true');
-        await updateSetting('receipt_printer_cut_feed_lines', '0');
-        await updateSetting('receipt_printer_open_drawer_after_payment', 'false');
+        if (!(await saveSettingsValues({ receipt_printer_model: 'star_tsp100', receipt_printer_connection: 'usb_raw',
+            receipt_printer_paper_width: '80mm', receipt_printer_encoding: 'latin1', receipt_printer_cut_paper: 'true',
+            receipt_printer_cut_feed_lines: '0', receipt_printer_open_drawer_after_payment: 'false' }))) return;
         void findSystemPrinters({ quiet: true });
         receiptTestStatus = 'Star TSP100 preset applied.';
         toast('Star TSP100 preset applied', 'success');
     }
 
     async function selectReceiptConnection(connection: PrinterConnectionType) {
-        await updateSetting('receipt_printer_connection', connection);
+        const values: Record<string, string> = { receipt_printer_connection: connection };
+        if (connection === 'module' && !receipt.moduleId && activeModules[0]) values.receipt_printer_module_id = activeModules[0].id;
+        if (!(await saveSettingsValues(values))) return;
         if (connection === 'usb_raw') void findSystemPrinters({ quiet: true });
-        if (connection === 'module' && !receipt.moduleId && activeModules[0]) {
-            await updateSetting('receipt_printer_module_id', activeModules[0].id);
-        }
     }
 
     async function selectLabelConnection(connection: PrinterConnectionType) {
-        await updateSetting('label_printer_connection', connection);
+        const values: Record<string, string> = { label_printer_connection: connection };
         if (connection === 'system') {
-            await updateSetting('label_printer_protocol', 'system');
+            values.label_printer_protocol = 'system';
         } else if (label.protocol === 'system') {
-            await updateSetting('label_printer_protocol', 'escpos');
+            values.label_printer_protocol = 'escpos';
         }
+        if (connection === 'module' && !label.moduleId && activeModules[0]) values.label_printer_module_id = activeModules[0].id;
+        if (!(await saveSettingsValues(values))) return;
         if (connection === 'usb_raw') void findSystemPrinters({ quiet: true });
-        if (connection === 'module' && !label.moduleId && activeModules[0]) {
-            await updateSetting('label_printer_module_id', activeModules[0].id);
-        }
     }
 
     async function selectLabelProtocol(protocol: LabelPrinterProtocol) {
-        await updateSetting('label_printer_protocol', protocol);
+        const values: Record<string, string> = { label_printer_protocol: protocol };
         if (protocol === 'system') {
-            await updateSetting('label_printer_connection', 'system');
+            values.label_printer_connection = 'system';
         } else if (label.connection === 'system') {
-            await updateSetting('label_printer_connection', 'usb_raw');
-            void findSystemPrinters({ quiet: true });
+            values.label_printer_connection = 'usb_raw';
         }
+        if (!(await saveSettingsValues(values))) return;
+        if (values.label_printer_connection === 'usb_raw') void findSystemPrinters({ quiet: true });
     }
 
     async function handleDrawerPrinterSelect(value: string) {
@@ -303,71 +295,82 @@
 
     async function setSeparateDrawerTarget(kind: 'network' | 'printer' | 'device', value: string) {
         const trimmed = value.trim();
-        await updateSetting('cash_drawer_module_id', '');
-        await updateSetting('cash_drawer_module_device_id', '');
+        const values: Record<string, string> = { cash_drawer_module_id: '', cash_drawer_module_device_id: '' };
         if (kind === 'network') {
-            await updateSetting('cash_drawer_printer_host', trimmed);
+            values.cash_drawer_printer_host = trimmed;
             if (trimmed) {
-                await updateSetting('cash_drawer_printer_name', '');
-                await updateSetting('cash_drawer_printer_device_path', '');
+                values.cash_drawer_printer_name = '';
+                values.cash_drawer_printer_device_path = '';
             }
-            return;
-        }
-        if (kind === 'printer') {
-            await updateSetting('cash_drawer_printer_name', trimmed);
+        } else if (kind === 'printer') {
+            values.cash_drawer_printer_name = trimmed;
             if (trimmed) {
-                await updateSetting('cash_drawer_printer_host', '');
-                await updateSetting('cash_drawer_printer_device_path', '');
+                values.cash_drawer_printer_host = '';
+                values.cash_drawer_printer_device_path = '';
             }
-            return;
+        } else {
+            values.cash_drawer_printer_device_path = trimmed;
+            if (trimmed) {
+                values.cash_drawer_printer_host = '';
+                values.cash_drawer_printer_name = '';
+            }
         }
-        await updateSetting('cash_drawer_printer_device_path', trimmed);
-        if (trimmed) {
-            await updateSetting('cash_drawer_printer_host', '');
-            await updateSetting('cash_drawer_printer_name', '');
-        }
+        await saveSettingsValues(values);
     }
 
     async function setSeparateDrawerModule(moduleId: string) {
-        await updateSetting('cash_drawer_module_id', moduleId.trim());
-        await updateSetting('cash_drawer_printer_host', '');
-        await updateSetting('cash_drawer_printer_name', '');
-        await updateSetting('cash_drawer_printer_device_path', '');
+        await saveSettingsValues({ cash_drawer_module_id: moduleId.trim(), cash_drawer_printer_host: '',
+            cash_drawer_printer_name: '', cash_drawer_printer_device_path: '' });
     }
 
     async function testReceiptPrinter() {
+        if (testingReceipt) return;
+        testingReceipt = true;
+        const submitted = { ...receipt };
         receiptTestStatus = 'Sending test receipt...';
         try {
-            await sendReceiptPrinterTest(receipt);
+            await sendReceiptPrinterTest(submitted);
             receiptTestStatus = 'Test sent. Check the receipt printer.';
             toast('Printer test sent', 'success');
         } catch (error) {
             receiptTestStatus = `Test failed: ${error}`;
             toast(`Printer test failed: ${error}`, 'error');
+        } finally {
+            testingReceipt = false;
         }
     }
 
     async function testLabelPrinter() {
+        if (testingLabel) return;
+        testingLabel = true;
+        const submitted = { ...label };
         labelTestStatus = 'Sending test label...';
         try {
-            await sendLabelPrinterTest(label);
+            await sendLabelPrinterTest(submitted);
             labelTestStatus = 'Test sent. Check the label printer.';
             toast('Label printer test sent', 'success');
         } catch (error) {
             labelTestStatus = `Test failed: ${error}`;
             toast(`Label printer test failed: ${error}`, 'error');
+        } finally {
+            testingLabel = false;
         }
     }
 
     async function testDrawer() {
+        if (testingDrawer) return;
+        testingDrawer = true;
+        const submitted = { ...drawer };
         drawerTestStatus = 'Opening drawer...';
         try {
-            await openCashDrawer(drawer);
+            await openCashDrawer(submitted);
             drawerTestStatus = 'Drawer pulse sent.';
             toast('Drawer opened', 'success');
         } catch (error) {
             drawerTestStatus = `Drawer failed: ${error}`;
             toast(`Drawer failed: ${error}`, 'error');
+        } finally {
+            testingDrawer = false;
         }
     }
 
@@ -547,7 +550,7 @@
                         >
                             {receipt.model === 'star_tsp100' ? 'Cancel Star preset' : 'Star TSP100 preset'}
                         </button>
-                        <button class="btn btn-secondary" on:click={testReceiptPrinter} disabled={!receipt.enabled}>
+                        <button class="btn btn-secondary" on:click={testReceiptPrinter} disabled={!receipt.enabled || testingReceipt}>
                             <Play size={17} /> Test Receipt
                         </button>
                         <button
@@ -641,7 +644,7 @@
                         <p>{labelMode?.label || label.connection}</p>
                     </div>
                     <div class="printer-panel-actions">
-                        <button class="btn btn-secondary" on:click={testLabelPrinter} disabled={!label.enabled || label.connection === 'system' || label.protocol === 'system'}><Play size={17} /> Test Label</button>
+                        <button class="btn btn-secondary" on:click={testLabelPrinter} disabled={testingLabel || !label.enabled || label.connection === 'system' || label.protocol === 'system'}><Play size={17} /> {testingLabel ? 'Sending…' : 'Test Label'}</button>
                         <button class="compact-switch" class:enabled={label.enabled} role="switch" aria-checked={label.enabled} on:click={() => updateSetting('label_printer_enabled', label.enabled ? 'false' : 'true')}><span>Labels</span><i><b></b></i></button>
                     </div>
                 </header>
@@ -701,7 +704,7 @@
                         <p>{drawerUsesReceiptPrinter ? 'Receipt printer' : drawerTarget || 'No target selected'}</p>
                     </div>
                     <div class="printer-panel-actions">
-                        <button class="btn btn-secondary" on:click={testDrawer} disabled={!drawerManualEnabled || !drawerTarget}><Play size={17} /> Open Drawer</button>
+                        <button class="btn btn-secondary" on:click={testDrawer} disabled={testingDrawer || !drawerManualEnabled || !drawerTarget}><Play size={17} /> {testingDrawer ? 'Opening…' : 'Open Drawer'}</button>
                         <button class="compact-switch" class:enabled={drawerManualEnabled} role="switch" aria-checked={drawerManualEnabled} on:click={() => updateSetting('cash_drawer_enabled', drawerManualEnabled ? 'false' : 'true')}><span>Drawer</span><i><b></b></i></button>
                     </div>
                 </header>
@@ -773,9 +776,9 @@
                                 <small class:ready={module.enabled}>{module.status}</small>
                             </div>
                             <div class="module-actions">
-                                <button title="Check module" aria-label={`Check ${module.name}`} disabled={!module.enabled || moduleBusyId === module.id} on:click={() => testModule(module)}><Stethoscope size={18} /></button>
-                                <button title={module.enabled ? 'Disable module' : 'Enable module'} aria-label={`${module.enabled ? 'Disable' : 'Enable'} ${module.name}`} disabled={!module.trusted || moduleBusyId === module.id} on:click={() => toggleModule(module)}><Power size={18} class={module.enabled ? 'text-success' : 'text-text-muted'} /></button>
-                                <button class="danger" title={moduleInUse(module.id) ? 'Switch printers away from this module first' : 'Uninstall module'} aria-label={`Uninstall ${module.name}`} disabled={moduleInUse(module.id) || moduleBusyId === module.id} on:click={() => requestRemoveModule(module)}><Trash2 size={18} /></button>
+                                <button title="Check module" aria-label={`Check ${module.name}`} disabled={!module.enabled || Boolean(moduleBusyId)} on:click={() => testModule(module)}><Stethoscope size={18} /></button>
+                                <button title={module.enabled ? 'Disable module' : 'Enable module'} aria-label={`${module.enabled ? 'Disable' : 'Enable'} ${module.name}`} disabled={!module.trusted || Boolean(moduleBusyId)} on:click={() => toggleModule(module)}><Power size={18} class={module.enabled ? 'text-success' : 'text-text-muted'} /></button>
+                                <button class="danger" title={moduleInUse(module.id) ? 'Switch printers away from this module first' : 'Uninstall module'} aria-label={`Uninstall ${module.name}`} disabled={moduleInUse(module.id) || Boolean(moduleBusyId)} on:click={() => requestRemoveModule(module)}><Trash2 size={18} /></button>
                             </div>
                         </article>
                     {/each}

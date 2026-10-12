@@ -1,12 +1,16 @@
 <script lang="ts">
     import { onDestroy } from 'svelte';
+    import { beforeNavigate, goto } from '$app/navigation';
     import AdminPageHeader from '$lib/components/AdminPageHeader.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import SearchField from '$lib/components/SearchField.svelte';
     import TouchColorPicker from '$lib/components/TouchColorPicker.svelte';
+    import Modal from '$lib/components/Modal.svelte';
+    import { modalFocusTrap } from '$lib/actions/modalFocusTrap';
     import { formatMoney, now, settingsDB, type Product, uuid } from '$lib/stores/db';
     import { getProductsByIds, getProductsPage, upsert } from '$lib/stores/database';
     import { toast } from '$lib/stores/toast';
+    import { nativeQaEnabled, nativeQaCheckpoint } from '$lib/nativeQa';
 
     type ScaleTilePage = { id: string; name: string; color: string; productIds: string[] };
 
@@ -30,6 +34,7 @@
     let selectedLoading = false;
     let selectedLoadSignature = '';
     let selectedLoadVersion = 0;
+    let selectedError = '';
 
     let search = '';
     let availableProducts: Product[] = [];
@@ -37,6 +42,15 @@
     let availableError = '';
     let availableSearchTimer: ReturnType<typeof setTimeout> | undefined;
     let availableLoadVersion = 0;
+    const AVAILABLE_PAGE_SIZE = 100;
+    let availablePage = 0;
+    let availableTotal = 0;
+    let availableTotalCapped = false;
+    let availableRawCount = 0;
+    $: availableHasMore = availableTotalCapped ? availableRawCount === AVAILABLE_PAGE_SIZE : (availablePage + 1) * AVAILABLE_PAGE_SIZE < availableTotal;
+    let showUnsavedDialog = false;
+    let pendingExit: { kind: 'navigate'; url: string } | { kind: 'reload' } | null = null;
+    let allowNavigation = false;
 
     let showPageDialog = false;
     let pageDialogMode: 'add' | 'rename' = 'add';
@@ -102,7 +116,7 @@
         const signature = selectedProductsSignature(activePageId, selectedIds, pages);
         if (signature !== selectedLoadSignature) {
             selectedLoadSignature = signature;
-            void loadSelectedProducts(selectedIds);
+            void loadSelectedProducts(selectedIds, activePageId);
             scheduleAvailableSearch(0);
         }
     }
@@ -112,29 +126,45 @@
         return `${pageId}:${productIds.join('|')}:all:${allAssignedIds.join('|')}`;
     }
 
-    async function loadSelectedProducts(ids: string[]) {
+    async function loadSelectedProducts(ids: string[], pageId: string) {
         const version = ++selectedLoadVersion;
         selectedLoading = true;
+        selectedProducts = [];
+        selectedError = '';
         try {
             const rows = await getProductsByIds(ids, false, false) as Product[];
-            if (version !== selectedLoadVersion) return;
+            if (nativeQaEnabled) await nativeQaCheckpoint('scale.selected-products');
+            if (version !== selectedLoadVersion || pageId !== activePageId) return;
             const byId = new Map(rows.map((product) => [product.id, product]));
             selectedProducts = ids.map((id) => byId.get(id)).filter((product): product is Product => Boolean(product));
         } catch (error) {
             console.error('Scale tile products were not loaded:', error);
-            if (version === selectedLoadVersion) selectedProducts = [];
+            if (version === selectedLoadVersion) {
+                selectedProducts = [];
+                selectedError = 'Assigned items could not be loaded. Retry before editing this page.';
+            }
         } finally {
             if (version === selectedLoadVersion) selectedLoading = false;
         }
     }
 
     function scheduleAvailableSearch(delay = 180) {
+        availableLoadVersion += 1;
+        availableLoading = true;
         if (availableSearchTimer) clearTimeout(availableSearchTimer);
         availableSearchTimer = setTimeout(() => void loadAvailableProducts(), delay);
     }
 
     function clearAvailableSearch() {
         search = '';
+        availablePage = 0;
+        scheduleAvailableSearch(0);
+    }
+
+    function searchAvailable() { availablePage = 0; scheduleAvailableSearch(); }
+    function changeAvailablePage(direction: number) {
+        if (availableLoading) return;
+        availablePage = Math.max(0, availablePage + direction);
         scheduleAvailableSearch(0);
     }
 
@@ -147,16 +177,19 @@
                 query: search,
                 status: 'active',
                 weighableOnly: true,
-                limit: 100,
-                offset: 0,
+                limit: AVAILABLE_PAGE_SIZE,
+                offset: availablePage * AVAILABLE_PAGE_SIZE,
             });
+            if (nativeQaEnabled) await nativeQaCheckpoint('scale.available-products');
             if (version !== availableLoadVersion) return;
-            availableProducts = (result.rows as Product[])
-                .filter((product) => !assignedProductIds.has(product.id))
-                .slice(0, 60);
+            availableRawCount = result.rows.length;
+            availableTotal = result.total;
+            availableTotalCapped = Boolean(result.totalIsCapped);
+            availableProducts = (result.rows as Product[]).filter((product) => !assignedProductIds.has(product.id));
         } catch (error) {
             if (version !== availableLoadVersion) return;
             availableProducts = [];
+            availableRawCount = 0;
             availableError = String(error);
         } finally {
             if (version === availableLoadVersion) availableLoading = false;
@@ -170,10 +203,11 @@
             return false;
         }
         saveBusy = true;
-        const setting = { key: SETTING_KEY, value: JSON.stringify(nextPages), updatedAt: now() };
+        const submittedPages = nextPages.map(page => ({ ...page, productIds: [...page.productIds] }));
+        const setting = { key: SETTING_KEY, value: JSON.stringify(submittedPages), updatedAt: now() };
         try {
             await upsert('settings', setting, 'key');
-            pages = nextPages;
+            pages = submittedPages;
             lastLoadedSettingValue = setting.value;
             dirty = false;
             externalUpdatePending = false;
@@ -188,38 +222,43 @@
         }
     }
 
-    function commitSelectedProducts(nextProducts: Product[]) {
-        const productIds = nextProducts.map((product) => product.id);
+    function commitSelectedIds(productIds: string[], pageId = activePageId) {
+        if (saveBusy || selectedLoading || selectedError || pageId !== activePageId) return;
         const nextPages = pages.map((page) => (
-            page.id === activePageId ? { ...page, productIds } : page
+            page.id === pageId ? { ...page, productIds: [...productIds] } : page
         ));
-        selectedProducts = nextProducts;
-        selectedLoadSignature = selectedProductsSignature(activePageId, productIds, nextPages);
         pages = nextPages;
         dirty = true;
         scheduleAvailableSearch(0);
     }
 
     function add(product: Product) {
+        if (saveBusy || selectedLoading || selectedError || !activePage) return;
         if (pages.some((page) => page.productIds.includes(product.id))) {
             toast('This product is already assigned to another Scale page', 'info');
             scheduleAvailableSearch(0);
             return;
         }
         availableProducts = availableProducts.filter((item) => item.id !== product.id);
-        commitSelectedProducts([...selectedProducts, product]);
+        commitSelectedIds([...activePage.productIds, product.id]);
     }
 
     function remove(id: string) {
-        commitSelectedProducts(selectedProducts.filter((product) => product.id !== id));
+        if (!activePage) return;
+        commitSelectedIds(activePage.productIds.filter(productId => productId !== id));
     }
 
     function move(index: number, direction: number) {
         const target = index + direction;
         if (target < 0 || target >= selectedProducts.length) return;
-        const nextProducts = [...selectedProducts];
-        [nextProducts[index], nextProducts[target]] = [nextProducts[target], nextProducts[index]];
-        commitSelectedProducts(nextProducts);
+        const productId = selectedProducts[index]?.id;
+        const targetId = selectedProducts[target]?.id;
+        if (!activePage || !productId || !targetId) return;
+        const productIds = [...activePage.productIds];
+        const sourceIndex = productIds.indexOf(productId);
+        const targetIndex = productIds.indexOf(targetId);
+        [productIds[sourceIndex], productIds[targetIndex]] = [productIds[targetIndex], productIds[sourceIndex]];
+        commitSelectedIds(productIds);
     }
 
     async function saveTrackedChanges() {
@@ -228,13 +267,39 @@
     }
 
     function reloadLatestLayout() {
+        if (saveBusy) return;
+        if (dirty) { pendingExit = { kind: 'reload' }; showUnsavedDialog = true; return; }
+        applyLatestLayout();
+    }
+
+    function applyLatestLayout() {
         dirty = false;
         externalUpdatePending = false;
         lastLoadedSettingValue = $settingsDB.find((setting) => setting.key === SETTING_KEY)?.value;
         pages = readPages();
     }
 
+    beforeNavigate(navigation => {
+        if (allowNavigation || (!dirty && !saveBusy)) return;
+        navigation.cancel();
+        if (saveBusy || navigation.willUnload || !navigation.to) return;
+        pendingExit = { kind: 'navigate', url: navigation.to.url.href };
+        showUnsavedDialog = true;
+    });
+
+    function cancelExit() { if (saveBusy) return; showUnsavedDialog = false; pendingExit = null; }
+    async function finishExit(saveFirst: boolean) {
+        if (saveBusy || !pendingExit) return;
+        const action = pendingExit;
+        if (saveFirst && !(await save(pages, 'Scale layout saved'))) return;
+        showUnsavedDialog = false;
+        pendingExit = null;
+        if (action.kind === 'reload') applyLatestLayout();
+        else { dirty = false; allowNavigation = true; await goto(action.url); }
+    }
+
     function openAddPage() {
+        if (saveBusy) return;
         if (pages.length >= 8) {
             toast('Maximum 8 Scale pages allowed', 'error');
             return;
@@ -254,6 +319,7 @@
     }
 
     async function savePageDialog() {
+        if (saveBusy) return;
         const name = pageName.trim();
         if (!name) {
             toast('Enter a page name', 'error');
@@ -295,6 +361,8 @@
     }
 
     onDestroy(() => {
+        selectedLoadVersion += 1;
+        availableLoadVersion += 1;
         if (availableSearchTimer) clearTimeout(availableSearchTimer);
     });
 </script>
@@ -321,20 +389,21 @@
                     <button
                         type="button"
                         class:active={page.id === activePageId}
+                        disabled={saveBusy}
                         style="--page-colour: {page.color}"
                         on:click={() => activePageId = page.id}
                     >
                         <i></i><span>{page.name}</span>
                     </button>
                 {/each}
+            </div>
+            <div class="scale-page-actions">
                 {#if pages.length < 8}
-                    <button type="button" class="add-scale-page" on:click={openAddPage}>
+                    <button type="button" class="add-scale-page" disabled={saveBusy} on:click={openAddPage}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
                         Add Page
                     </button>
                 {/if}
-            </div>
-            <div class="scale-page-actions">
                 {#if externalUpdatePending}
                     <button type="button" class="reload-layout" disabled={saveBusy} on:click={reloadLatestLayout}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"></path><path d="M20 4v6h-6"></path></svg>
@@ -366,6 +435,8 @@
                 <div class="current-list">
                     {#if selectedLoading}
                         <div class="column-empty">Loading assigned products...</div>
+                    {:else if selectedError}
+                        <div class="column-empty error-state"><span>{selectedError}</span><button type="button" on:click={() => loadSelectedProducts(selectedIds, activePageId)}>Retry assigned items</button></div>
                     {:else if selectedProducts.length}
                         {#each selectedProducts as product, index}
                             <article class="current-product" style="--product-colour: {product.color || '#3b82f6'}">
@@ -375,13 +446,13 @@
                                     <small>{formatMoney(product.price)} / kg{product.scalePlu ? ` | PLU ${product.scalePlu}` : ''}</small>
                                 </div>
                                 <div class="product-actions">
-                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || index === 0} aria-label={`Move ${product.name} earlier`} title="Move earlier" on:click={() => move(index, -1)}>
+                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || selectedLoading || Boolean(selectedError) || index === 0} aria-label={`Move ${product.name} earlier`} title="Move earlier" on:click={() => move(index, -1)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 15 6-6 6 6"></path></svg>
                                     </button>
-                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || index === selectedProducts.length - 1} aria-label={`Move ${product.name} later`} title="Move later" on:click={() => move(index, 1)}>
+                                    <button type="button" data-feedback-silent="true" disabled={saveBusy || selectedLoading || Boolean(selectedError) || index === selectedProducts.length - 1} aria-label={`Move ${product.name} later`} title="Move later" on:click={() => move(index, 1)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
                                     </button>
-                                    <button type="button" class="remove" disabled={saveBusy} aria-label={`Remove ${product.name}`} title="Remove tile" on:click={() => remove(product.id)}>
+                                    <button type="button" class="remove" disabled={saveBusy || selectedLoading || Boolean(selectedError)} aria-label={`Remove ${product.name}`} title="Remove tile" on:click={() => remove(product.id)}>
                                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path></svg>
                                     </button>
                                 </div>
@@ -407,7 +478,7 @@
                             ariaLabel="Search weighable products"
                             keyboardLabel="Open weighable product search keyboard"
                             clearLabel="Clear weighable product search"
-                            onInput={() => scheduleAvailableSearch()}
+                            onInput={searchAvailable}
                             onClear={clearAvailableSearch}
                         />
                     </div>
@@ -419,15 +490,19 @@
                         <div class="column-empty error-state"><span>Product search failed.</span><button type="button" on:click={loadAvailableProducts}>Try Again</button></div>
                     {:else if availableProducts.length}
                         {#each availableProducts as product}
-                            <button type="button" class="available-product" disabled={saveBusy} style="--product-colour: {product.color || '#3b82f6'}" on:click={() => add(product)}>
+                            <button type="button" class="available-product" disabled={saveBusy || selectedLoading || Boolean(selectedError)} style="--product-colour: {product.color || '#3b82f6'}" on:click={() => add(product)}>
                                 <i></i>
                                 <span><strong>{product.name}</strong><small>{formatMoney(product.price)} / kg{product.scalePlu ? ` | PLU ${product.scalePlu}` : ''}</small></span>
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
                             </button>
                         {/each}
                     {:else}
-                        <div class="column-empty">No other weighable products match this search.</div>
+                        <div class="column-empty">No unassigned items on this result page. Try Next or narrow the search.</div>
                     {/if}
+                </div>
+                <div class="available-pagination">
+                    <small>Catalogue matches {availableRawCount ? availablePage * AVAILABLE_PAGE_SIZE + 1 : 0}–{availableRawCount ? availablePage * AVAILABLE_PAGE_SIZE + availableRawCount : 0} of {availableTotal}{availableTotalCapped ? '+' : ''}. Assigned items are hidden.</small>
+                    <div><button type="button" disabled={availableLoading || availablePage === 0} on:click={() => changeAvailablePage(-1)}>Previous</button><button type="button" disabled={availableLoading || !availableHasMore} on:click={() => changeAvailablePage(1)}>Next</button></div>
                 </div>
             </section>
         </div>
@@ -436,26 +511,38 @@
 
 {#if showPageDialog}
     <div class="modal-overlay">
-        <form class="scale-dialog" aria-labelledby="scale-dialog-title" on:submit|preventDefault={savePageDialog}>
+        <div use:modalFocusTrap={{ dismiss: closePageDialog, dismissDisabled: saveBusy }} role="dialog" aria-modal="true" aria-labelledby="scale-dialog-title">
+        <form class="scale-dialog" on:submit|preventDefault={savePageDialog}>
             <header>
                 <div>
                     <span>{pageDialogMode === 'add' ? 'New classification' : 'Page settings'}</span>
                     <h2 id="scale-dialog-title">{pageDialogMode === 'add' ? 'Add Scale Page' : 'Edit Scale Page'}</h2>
                 </div>
-                <button type="button" class="dialog-close" aria-label="Close Scale page editor" on:click={closePageDialog}>
+                <button type="button" class="dialog-close" disabled={saveBusy} aria-label="Close Scale page editor" on:click={closePageDialog}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12"></path><path d="M18 6 6 18"></path></svg>
                 </button>
             </header>
             <label for="scale-page-name">Page name</label>
-            <input id="scale-page-name" bind:value={pageName} maxlength="24" placeholder="For example: Vegetables" data-touch-keyboard="button" />
-            <TouchColorPicker bind:value={pageColor} label="Page colour" />
+            <input id="scale-page-name" bind:value={pageName} disabled={saveBusy} data-modal-initial-focus maxlength="24" placeholder="For example: Vegetables" data-touch-keyboard="button" />
+            <fieldset disabled={saveBusy} style="border:0;padding:0;margin:0"><TouchColorPicker bind:value={pageColor} label="Page colour" /></fieldset>
             <footer>
                 <button type="button" class="btn btn-secondary" disabled={saveBusy} on:click={closePageDialog}>Cancel</button>
                 <button type="submit" class="btn btn-primary" disabled={saveBusy}>{saveBusy ? 'Saving...' : pageDialogMode === 'add' ? 'Add Page' : 'Save Page'}</button>
             </footer>
         </form>
+        </div>
     </div>
 {/if}
+
+<Modal bind:show={showUnsavedDialog} title="Unsaved Scale layout" width="480px" dismissDisabled={saveBusy}>
+    <p>Your tile changes have not been saved. {pendingExit?.kind === 'reload' ? 'Reloading latest will discard this draft.' : 'Choose what to do before leaving.'}</p>
+    {#if externalUpdatePending}<p class="text-warning">Another till has changed this layout. Keep editing to review it, or discard your draft and reload latest.</p>{/if}
+    <svelte:fragment slot="footer">
+        <button class="btn btn-secondary" disabled={saveBusy} on:click={cancelExit}>Cancel</button>
+        <button class="btn btn-danger" disabled={saveBusy} on:click={() => finishExit(false)}>Discard</button>
+        <button class="btn btn-primary" disabled={saveBusy || externalUpdatePending} on:click={() => finishExit(true)}>{saveBusy ? 'Saving...' : 'Save Changes'}</button>
+    </svelte:fragment>
+</Modal>
 
 <ConfirmDialog
     bind:show={showDeletePageConfirm}
@@ -468,14 +555,14 @@
 <style>
     .scale-page { width: 100vw; height: 100vh; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-base); color: var(--text-main); font-size: var(--font-size-management); }
     .column-header span, .scale-dialog header span { display: block; color: var(--success); font-size: .68rem; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
-    .scale-main { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-rows: 58px minmax(0,1fr); gap: .65rem; }
+    .scale-main { flex: 1; min-height: 0; padding: 0 var(--app-page-gutter, 1.5rem) var(--app-page-gutter, 1.5rem); display: grid; grid-template-rows: auto minmax(0,1fr); gap: .65rem; }
     .scale-page-bar { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .65rem; border-bottom: 1px solid var(--border-flat); }
     .scale-tabs { min-width: 0; flex: 1; display: flex; gap: .45rem; overflow-x: auto; padding-bottom: .35rem; }
     .scale-tabs button { min-height: 44px; padding: 0 .7rem; display: flex; align-items: center; gap: .45rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); color: var(--text-muted); font-weight: 850; white-space: nowrap; }
     .scale-tabs button.active { border-color: var(--page-colour); color: var(--text-main); background: color-mix(in srgb, var(--page-colour) 10%, var(--bg-card)); }
     .scale-tabs i { width: .7rem; height: .7rem; border-radius: 50%; background: var(--page-colour); }
     .scale-tabs span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
-    .scale-tabs .add-scale-page { border-style: dashed; color: var(--success); }
+    .scale-page-actions .add-scale-page { border-style: dashed; color: var(--success); }
     .add-scale-page svg { width: 18px; height: 18px; }
     .scale-page-actions { flex: 0 0 auto; display: flex; gap: .4rem; padding-bottom: .35rem; }
     .scale-page-actions button { min-height: 44px; padding: 0 .7rem; display: flex; align-items: center; gap: .4rem; border: 1px solid var(--border-flat); border-radius: .45rem; background: var(--bg-card); color: var(--text-main); font-weight: 850; }
@@ -487,7 +574,12 @@
     .scale-columns { min-height: 0; display: grid; grid-template-columns: minmax(0,.95fr) minmax(0,1.05fr); border: 1px solid var(--border-flat); border-radius: .5rem; overflow: hidden; background: var(--bg-panel); }
     .scale-column { min-width: 0; min-height: 0; padding: .85rem; display: grid; grid-template-rows: auto minmax(0,1fr); gap: .65rem; }
     .scale-column + .scale-column { border-left: 1px solid var(--border-flat); }
-    .available-column { grid-template-rows: auto 48px minmax(0,1fr); }
+    .available-column { grid-template-rows: auto 48px minmax(0,1fr) auto; }
+    .available-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.35rem; }
+    .available-pagination small { color:var(--text-muted); font-size:.72rem; }
+    .available-pagination > div { display:flex; gap:.35rem; }
+    .available-pagination button { min-height:36px; padding:.3rem .6rem; border:1px solid var(--border-flat); border-radius:.35rem; background:var(--bg-card); }
+    .available-pagination button:disabled { opacity:.4; }
     .column-header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
     .column-header h2 { margin: .12rem 0 0; font-size: 1.15rem; letter-spacing: 0; }
     .column-header b { padding: .3rem .5rem; border-radius: .35rem; background: color-mix(in srgb, var(--success) 12%, var(--bg-card)); color: var(--success); font-size: .75rem; white-space: nowrap; }
@@ -528,11 +620,13 @@
         outline: 3px solid color-mix(in srgb, var(--accent-primary) 38%, transparent);
         outline-offset: 2px;
     }
-    :global(.back-office-route) .scale-main { padding: 0 .7rem .7rem; grid-template-rows: 46px minmax(0, 1fr); gap: .5rem; }
+    :global(.back-office-route) .scale-main { padding: 0 .7rem .7rem; grid-template-rows: auto minmax(0, 1fr); gap: .5rem; }
     :global(.back-office-route) :where(.scale-tabs button, .scale-page-actions button) { min-height: 38px; padding-inline: .55rem; }
     :global(.back-office-route) .scale-column { padding: .65rem; gap: .5rem; }
-    :global(.back-office-route) .current-product { min-height: 54px; }
-    :global(.back-office-route) .available-list { grid-auto-rows: 54px; }
+    :global(.back-office-route) .current-product { min-height: calc(3.2em + .9rem); flex-shrink: 0; }
+    :global(.back-office-route) .product-copy { line-height: 1.3; }
+    :global(.back-office-route) .available-list { grid-auto-rows: minmax(calc(3.2em + .9rem), auto); }
+    :global(.back-office-route) .available-product span { line-height: 1.3; }
     @media (min-width: 761px) and (max-width: 900px) {
         :global(.back-office-route) .scale-main { grid-template-rows: auto minmax(0, 1fr); }
         :global(.back-office-route) .scale-page-bar { align-items: stretch; flex-direction: column; gap: .35rem; padding-bottom: .4rem; }
@@ -540,6 +634,6 @@
         :global(.back-office-route) .scale-page-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding-bottom: 0; }
         :global(.back-office-route) .scale-page-actions button { justify-content: center; }
     }
-    @media (max-height: 680px) and (min-width: 761px) { .scale-main { grid-template-rows: 52px minmax(0,1fr); } .scale-page-actions button, .scale-tabs button { min-height: 40px; } .current-product { min-height: 58px; } .available-list { grid-auto-rows: 58px; } }
+    @media (max-height: 680px) and (min-width: 761px) { .scale-main { grid-template-rows: auto minmax(0,1fr); } .scale-page-actions button, .scale-tabs button { min-height: 40px; } .current-product { min-height: 58px; } .available-list { grid-auto-rows: 58px; } }
     @media (max-width: 760px) { .scale-page { overflow-y: auto; } .scale-main { display: flex; flex-direction: column; } .scale-page-bar { align-items: stretch; flex-direction: column; } .scale-columns { display: flex; flex-direction: column; overflow: visible; } .scale-column { min-height: 430px; } .scale-column + .scale-column { border-top: 1px solid var(--border-flat); border-left: 0; } }
 </style>

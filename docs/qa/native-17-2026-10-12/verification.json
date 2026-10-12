@@ -1,0 +1,1563 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-12",
+  "timezone": "Europe/London",
+  "status": "NATIVE_RETEST_COMPLETE_WITH_LIMITS",
+  "scope": "The 13 prior partial checks and 4 prior automated-only findings, retested through the native Tauri application",
+  "controller": "Root agent controls native UI; recorder only incorporates explicit controller observations",
+  "app": {
+    "identifier": "com.elamreda.tauri-app.native-qa",
+    "profile": "Isolated cloned mock SQLite profile",
+    "mode": "Standalone initially",
+    "authentication": "Normal staff sign-in; no authentication or licence bypass",
+    "inventoryReportedByController": {
+      "seededProducts": 1105,
+      "suppliers": 125,
+      "stockReceiptHistory": 67,
+      "seededStockReceiptHistory": 65,
+      "scope": "Products number is the labeled QA fixture count, not the cloned database's total catalogue size."
+    },
+    "credentialSafety": "Original provider keys/configuration and browser storage were not copied. QA provider values are dummy-only and external payment API calls are forbidden.",
+    "isolationValidation": {
+      "status": "PASS",
+      "controllerEvidence": "Read-only QA SQLite confirmed pos_mode=single and mysql_config setting absent",
+      "secretsReadOrPrinted": false
+    }
+  },
+  "originalAppProtection": {
+    "originalNativeAppLeftOpen": true,
+    "trolleyItems": 16,
+    "trolleyTotalGbp": "103.83",
+    "unchangedAsReportedByController": false,
+    "note": "Earlier initial trolley protection was an intent/controller-reported state, not successful final preservation proof. Final mismatch is recorded honestly.",
+    "preservationStatus": "NOT_CONFIRMED",
+    "originalDatabaseIntentionallyModified": false,
+    "credentialsOrProvidersIntentionallyModified": false,
+    "finalTrolleyItems": 0,
+    "finalTrolleyTotalGbp": "0.00",
+    "finalEvidence": [
+      "screenshots/64-original-trolley-preserved.png"
+    ],
+    "finalObservation": "The original app remained running without restart during isolated QA. It was on Admin; root only clicked Back to POS and the final native screen showed 0 items / £0.00, not the earlier reported16/£103.83. No original clear, payment, hold, order-history or data-write action was performed in this scope. Cause is unexplained; preservation is not confirmed and no trolley was reconstructed by guessing."
+  },
+  "limits": [
+    "Controlled native QA checkpoints exercise real application handlers and transactions but simulate delay/rejection; they are not physical hardware faults.",
+    "A native print-dialog invocation is not a successful print or proof of cancellation. Actual OS preview/cancellation observations are recorded separately when performed.",
+    "No live payment, physical printer job or cash-drawer pulse is authorized by this report.",
+    "Do not interpret a scoped scenario PASS as coverage of every operating mode, data-size edge case, fault branch or Windows hardware combination."
+  ],
+  "summary": {
+    "total": 17,
+    "nativePass": 17,
+    "planned": 0,
+    "inProgress": 0,
+    "blocked": 0,
+    "failed": 0,
+    "historicalInitialFailures": 2,
+    "historicalInitialFailuresFixedAndNativeRetested": 2,
+    "activeFailedScenarios": 0,
+    "priorScopedNativePasses": 19,
+    "combinedScopedNativeFindingPasses": 36
+  },
+  "findings": [
+    {
+      "id": "AUDIT-21",
+      "title": "Touch keyboard remains after its form closes and across page navigation",
+      "routes": [
+        "/customers",
+        "/attendance",
+        "/design",
+        "/"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Attendance Correction note opened its touch keyboard; closing the native dialog removed the keyboard.",
+        "Receipt Header opened its touch keyboard; native Go Back navigation removed it from the new page.",
+        "Item Name touch keyboard was open when the native item editor closed; the keyboard disappeared with its removed target.",
+        "No attendance record or receipt design was saved during these scenarios."
+      ],
+      "scenarios": [
+        {
+          "id": "TOUCH-ATTENDANCE-FORM-REMOVAL",
+          "status": "PASS",
+          "boundary": "Actual native Correction note touch keyboard and dialog closure",
+          "observed": "Closed attendance dialog left no orphan keyboard; no record saved",
+          "evidence": [
+            "screenshots/19-attendance-closed-no-orphan-keyboard.png"
+          ]
+        },
+        {
+          "id": "TOUCH-DESIGN-NAVIGATION",
+          "status": "PASS",
+          "boundary": "Actual native Receipt Header keyboard and Go Back navigation",
+          "observed": "Route exit left no orphan keyboard; no design saved",
+          "evidence": [
+            "screenshots/20-design-navigation-no-orphan-keyboard.png"
+          ]
+        },
+        {
+          "id": "TOUCH-ITEM-EDITOR-REMOVAL",
+          "status": "PASS",
+          "boundary": "Actual native Item Name keyboard and editor closure",
+          "observed": "Removed item editor left no orphan keyboard; no item saved",
+          "evidence": [
+            "screenshots/21-item-closed-no-orphan-keyboard.png"
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/19-attendance-closed-no-orphan-keyboard.png",
+        "screenshots/20-design-navigation-no-orphan-keyboard.png",
+        "screenshots/21-item-closed-no-orphan-keyboard.png"
+      ],
+      "priorLimits": "Customer form-save path only. Attendance/design modal closure and cross-page navigation are covered by source/target-eligibility fixtures but were not individually native verified.",
+      "remainingLimits": [
+        "These native target-removal/navigation cases supplement the prior customer form-save check; not every input/modal combination or all hardware keyboard devices."
+      ],
+      "durableValidation": {
+        "observed": "Read-only attendance recordCount=8 equals the controller-reported clone baseline; correctionAuditRowsSince20Utc=0. No private staff fields read or printed.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA snapshot; WAL-aware CLI transaction. No original database/private staff values read."
+      }
+    },
+    {
+      "id": "AUDIT-02",
+      "title": "A failed card-provider switch can disable the working provider",
+      "routes": [
+        "/settings/payments/dojo",
+        "/settings/payments/sumup"
+      ],
+      "priorNativeRetest": "AUTOMATED_ONLY",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Controlled target SumUp save rejection retained the previous Dojo provider unchanged and displayed an error.",
+        "After a real isolated QA SumUp enabled save, controlled rejection while disabling the previous Dojo provider triggered a fresh read that confirmed Dojo remained Enabled. The target was rolled back to disabled and the previous-provider-retained message appeared.",
+        "After OK, payment overview showed Dojo Enabled and SumUp Configured but Disabled.",
+        "Read-only isolated QA provider metadata confirmed Dojo enabled=true and SumUp enabled=false. Only enable flags were published; no raw API key or complete configuration was read into this report."
+      ],
+      "scenarios": [
+        {
+          "id": "TARGET-PROVIDER-ENABLE-SAVE-REJECTED",
+          "status": "PASS",
+          "boundary": "Controlled native target provider local settings save rejection",
+          "expected": "Existing working Dojo provider is not disabled if new target cannot be saved",
+          "observed": "SumUp save failed; old Dojo remained unchanged and error displayed",
+          "evidence": [
+            "screenshots/33-provider-target-enable-rejected.png"
+          ],
+          "limits": [
+            "Controlled native checkpoint; no real provider API/terminal failure."
+          ]
+        },
+        {
+          "id": "PREVIOUS-PROVIDER-DISABLE-REJECTED-ROLLBACK",
+          "status": "PASS",
+          "boundary": "Actual isolated QA SumUp enabled save, controlled Dojo disable-save rejection, actual reread and target rollback",
+          "expected": "Freshly confirmed working previous provider retained; new target rolled back",
+          "observed": "Fresh read confirmed Dojo Enabled; SumUp target rolled back to Disabled and previous provider retained message shown",
+          "evidence": [
+            "screenshots/34-provider-previous-disable-rejected.png"
+          ],
+          "limits": [
+            "Recoverable multi-step switching, not an atomic cross-provider filesystem transaction."
+          ]
+        },
+        {
+          "id": "PROVIDER-OVERVIEW-POST-ROLLBACK",
+          "status": "PASS",
+          "boundary": "Actual native payment overview after dismissing rollback alert",
+          "expected": "Dojo Enabled, SumUp Configured but Disabled",
+          "observed": "Dojo Enabled and SumUp Configured/Disabled shown",
+          "evidence": [
+            "screenshots/35-working-dojo-retained-sumup-disabled.png"
+          ],
+          "limits": [
+            "Only dummy QA local configuration enable booleans were published; no raw key values were recorded."
+          ],
+          "databaseValidation": "catalogue-durable-evidence.json providerMetadataOnly: dojoEnabled=true, sumupEnabled=false, workingProviderPreserved=true.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/33-provider-target-enable-rejected.png",
+        "screenshots/34-provider-previous-disable-rejected.png",
+        "screenshots/35-working-dojo-retained-sumup-disabled.png"
+      ],
+      "priorLimits": "Recoverable two-provider sequence, not an atomic cross-provider transaction. Before rollback, production rereads the prior provider after an ambiguous write failure; mocked tests cover confirmed-enabled, confirmed-disabled and unreadable outcomes. Native filesystem faults/failed-save branches are not a native PASS; uncertain configurations require reload/confirmation.",
+      "remainingLimits": [
+        "Recoverable sequence, not an atomic cross-provider transaction.",
+        "Ambiguous read and confirmed-disabled branches retain prior automated evidence rather than native claims.",
+        "No live payment, real terminal or real provider credential was used."
+      ]
+    },
+    {
+      "id": "AUDIT-07",
+      "title": "An older failed font save can undo a newer successful selection",
+      "routes": [
+        "/settings/fonts"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "With the native settings.font checkpoint delayed, L&Bj default was selected and Windows native was selected while the first save remained pending.",
+        "After release, CURRENTLY USED identified Windows native, the newest queued choice.",
+        "A second native overlap case delayed and rejected L&Bj default while System default was selected before completion.",
+        "After the controlled rejection was dismissed, CURRENTLY USED identified System default; native proof recorded settings.font rejection #3 and four checkpoint calls after the newer queued save.",
+        "The QA font was restored to Legacy (POS crisp). Original app settings were not modified."
+      ],
+      "scenarios": [
+        {
+          "id": "FONT-PENDING-NEWEST-CHOICE",
+          "status": "PASS",
+          "boundary": "Controlled native settings.font delay",
+          "expected": "Newest queued selection wins without stale rollback or premature confirmed publication",
+          "observed": "Windows native displayed as CURRENTLY USED after delayed L&Bj default then queued Windows native completed",
+          "evidence": [
+            "screenshots/03-font-new-choice-pending.png",
+            "screenshots/04-font-latest-choice-saved.png"
+          ],
+          "limits": [
+            "The delay was injected in the isolated native QA application, not produced by a real filesystem or MariaDB slowdown."
+          ]
+        },
+        {
+          "id": "FONT-OLDER-REJECTION-NEWEST-RETAINED",
+          "status": "PASS",
+          "boundary": "Controlled native settings.font delay then rejection",
+          "expected": "An older failed selection cannot undo the newer successful queued choice",
+          "observed": "Older L&Bj default was rejected; System default remained CURRENTLY USED after its queued save; QA font then restored to Legacy (POS crisp)",
+          "evidence": [
+            "screenshots/05-font-older-rejection-newest-retained.png"
+          ],
+          "databaseValidation": "PASS: root read-only QA SQLite confirmed ui_font_family=legacy",
+          "limits": [
+            "Native UI/save queue ordering and durable restored QA value were observed; this does not certify every physical persistence-failure mode."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/03-font-new-choice-pending.png",
+        "screenshots/04-font-latest-choice-saved.png",
+        "screenshots/05-font-older-rejection-newest-retained.png"
+      ],
+      "priorLimits": "Healthy font saves/restoration were observed. Older-save rejection, rapid overlapping choice order and durable audit failure were simulated in isolated fixtures, not injected into native Tauri.",
+      "remainingLimits": [
+        "Controlled native delay/rejection is not a real storage-device or MariaDB outage."
+      ],
+      "durableValidation": {
+        "observed": "Read-only QA fontFamily=legacy, confirming restoration.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA snapshot; WAL-aware CLI transaction. No original database/private staff values read."
+      }
+    },
+    {
+      "id": "AUDIT-13",
+      "title": "Canceling the OS label print dialog still clears the selected labels",
+      "routes": [
+        "/label-print"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "The actual macOS print dialog opened for one selected mock label.",
+        "Initial actual native preview showed Page1 of1 completely white: an actual failure. The source correction was rebuilt and later one/two-label native previews passed.",
+        "Canceling the actual OS print dialog returned to the app with selected quantity 1 retained.",
+        "Root delegated the blank native preview defect for correction and a new native rendering/cancellation retest.",
+        "After the rebuilt native app, the actual macOS print preview contained QA Native17 Weighable 0101, £2.49 and its barcode rather than a white page.",
+        "Actual OS Cancel retained quantity 1. Adding 0102 and requesting two labels produced two actual OS preview pages, both containing the corresponding label, price and barcode.",
+        "Cancel retained both labels; only explicit Clear removed the selection. No Printer Selected with the physical Print action disabled; no physical print job was sent."
+      ],
+      "scenarios": [
+        {
+          "id": "LABEL-OS-CANCEL-RETAINS-SELECTION",
+          "status": "PASS",
+          "boundary": "Actual macOS OS print sheet; no physical job sent",
+          "expected": "Cancel does not clear selected label quantity",
+          "observed": "One mock label and quantity 1 remained after OS Cancel",
+          "evidence": [
+            "screenshots/08-os-cancel-retains-label.png"
+          ],
+          "limits": [
+            "Initial one-label selection-retention result; rebuilt one- and two-label cancellation results are recorded separately below."
+          ]
+        },
+        {
+          "id": "LABEL-OS-PREVIEW-CORRECT-DOCUMENT",
+          "status": "FAIL_CORRECTED_BY_NATIVE_RETEST",
+          "boundary": "Actual macOS OS print-sheet preview",
+          "expected": "Preview contains the selected mock label, price and barcode rather than a blank page",
+          "observed": "Page 1 of 1 was completely white",
+          "evidence": [
+            "screenshots/07-macos-label-print-preview.png"
+          ],
+          "limits": [
+            "Historical actual failure; the rebuilt native preview retest below passed after the receipt print CSS scope correction."
+          ]
+        },
+        {
+          "id": "REBUILT-LABEL-OS-PREVIEW-ONE-LABEL",
+          "status": "PASS",
+          "boundary": "Actual macOS OS print-sheet preview in the rebuilt Tauri QA app",
+          "expected": "Preview contains selected QA label 0101, price and barcode",
+          "observed": "QA Native17 Weighable 0101, £2.49 and barcode visible in the real OS preview",
+          "evidence": [
+            "screenshots/27-rebuilt-native-label-preview-visible.png"
+          ],
+          "limits": [
+            "OS preview is not confirmation of successful hardware printing."
+          ]
+        },
+        {
+          "id": "REBUILT-LABEL-OS-CANCEL-ONE-LABEL",
+          "status": "PASS",
+          "boundary": "Actual macOS OS print sheet Cancel",
+          "expected": "Selected quantity 1 remains after Cancel",
+          "observed": "Selected quantity 1 retained after actual Cancel",
+          "evidence": [
+            "screenshots/28-rebuilt-cancel-retains-selection.png"
+          ],
+          "limits": [
+            "No configured printer; no hardware print job."
+          ]
+        },
+        {
+          "id": "REBUILT-LABEL-OS-TWO-PAGES-AND-CLEAR",
+          "status": "PASS",
+          "boundary": "Actual macOS OS two-page preview, Cancel, then explicit app Clear",
+          "expected": "Two labels on separate preview pages; Cancel keeps 2; explicit Clear changes selection to 0",
+          "observed": "Two actual OS pages showed labels 0101 and 0102, each with price and barcode. Cancel retained 2; explicit Clear produced 0.",
+          "evidence": [
+            "screenshots/29-two-label-native-preview.png"
+          ],
+          "limits": [
+            "No Printer Selected; physical Print was disabled. No Windows or printer-driver verification."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/07-macos-label-print-preview.png",
+        "screenshots/08-os-cancel-retains-label.png",
+        "screenshots/27-rebuilt-native-label-preview-visible.png",
+        "screenshots/28-rebuilt-cancel-retains-selection.png",
+        "screenshots/29-two-label-native-preview.png"
+      ],
+      "priorLimits": "No native OS print dialog opened, so OS cancellation retention is automated-only. Native selection and explicit Clear were observed; no physical label print was sent.",
+      "remainingLimits": [
+        "No physical printer or Windows driver was tested.",
+        "Tauri print invocation completion is not an OS dismissal/printed-success signal; this result is based on actual OS previews and explicit Cancel controls."
+      ]
+    },
+    {
+      "id": "OPS-SOURCE-SETUP-RECONNECT-DATA-ACTIONS",
+      "title": "Connect on an existing till reruns bootstrap data actions without an explicit reconnect-only path",
+      "routes": [
+        "/setup"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Baseline isolated local mode was single with no mysql_config row; products77362/orders94/suppliers126/customers855/employees4.",
+        "Confirmed no listener on loopback127.0.0.1:65154. Actual native Test Connection failed inline Could Not Connect; Save Reconnect Only remained disabled.",
+        "Fresh loopback candidate127.0.0.1:65153 had zero tables before testing. Actual normal Test Connection passed. Save Reconnect Only ran schema preparation and genuine identity handling, without selecting import, forced upload or cache replacement.",
+        "Controlled setup.after-reconnect-save #23 entered after the real candidate configuration durable save, then rejected. Actual native UI reached Connection failed100%; Cancel/Back returned to Advanced Settings.",
+        "Screenshot60 was an initial running state, not failure proof; screenshot61 is the actual final rejection.",
+        "Read-only candidate check showed49 prepared tables and one signed-present identity row; all listed business tables remained empty. No identity/signature values were read.",
+        "Read-only local durable proof after rejected reconnect confirmed mode single, mysql_config rows0; all five baseline row counts unchanged and queued mutations/conflicts/online financial intents all0.",
+        "After failed reconnect rollback, native Advanced Settings showed MariaDB offline / local SQLite-only mode (screenshot62); final quit/reopen persistence test remains part of handoff validation.",
+        "After the disposable MariaDB server was stopped, the isolated QA app was quit/relaunched using normal staff sign-in. Advanced Settings again showed MariaDB offline / SQLite-only local mode after actual restart (screenshot63)."
+      ],
+      "scenarios": [
+        {
+          "id": "NATIVE-UNREACHABLE-CANDIDATE-FAILS-CLOSED",
+          "status": "PASS",
+          "boundary": "Actual native Test Connection to verified non-listening loopback127.0.0.1:65154",
+          "expected": "Inline connection error; reconnect save disabled",
+          "observed": "Could Not Connect displayed; Save Reconnect Only disabled",
+          "evidence": [
+            "screenshots/59-reconnect-unreachable-candidate.png.png"
+          ],
+          "limits": [
+            "Controlled unreachable loopback port, not a real remote-server outage or identity mismatch."
+          ]
+        },
+        {
+          "id": "NATIVE-POST-DURABLE-RECONNECT-FAILURE-ROLLBACK",
+          "status": "PASS",
+          "boundary": "Real native schema/identity preparation and durable reconnect config save to fresh loopbackMariaDB; controlled setup.after-reconnect-save rejection#23",
+          "expected": "Failure restores old local config/mode; no first-time business-data import/upload/cache replacement",
+          "observed": "Healthy Test Connection followed by reconnect-only save; after real durable save #23 Entered/Rejected, actual Connection failed100%, then Cancel/Back Advanced. Candidate49tables/identity metadata1, all business rows0.",
+          "databaseValidation": "reconnectRollbackDurableCheck confirms single/mysqlConfigRows0, all five counts unchanged, queues/conflicts/financial intents0.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ],
+          "evidence": [
+            "screenshots/61-reconnect-durable-save-rejected-rollback.png.png"
+          ],
+          "excludedEvidence": [
+            {
+              "file": "screenshots/60-reconnect-post-durable-save-result.png.png",
+              "reason": "Initial running state, not actual final failure or rollback proof."
+            }
+          ],
+          "limits": [
+            "Schema and signed-identity metadata preparation are expected; no identity values/signatures read.",
+            "Native changed-server-identity mismatch and restore branches were not tested.",
+            "Not successful production-server connectivity certification."
+          ]
+        },
+        {
+          "id": "NATIVE-LOCAL-MODE-AFTER-ROLLBACK",
+          "status": "PASS",
+          "boundary": "Actual native Advanced Settings after Cancel/Back from rejected reconnect",
+          "expected": "Local SQLite mode remains active instead of saved unavailable MariaDB config",
+          "observed": "MariaDB offline/local SQLite-only mode shown",
+          "evidence": [
+            "screenshots/62-local-mode-after-reconnect-rollback.png.png"
+          ],
+          "limits": [
+            "Cold native restart later verified independently in screenshot63."
+          ]
+        },
+        {
+          "id": "NATIVE-COLD-RESTART-PERSISTS-LOCAL-MODE",
+          "status": "PASS",
+          "boundary": "Actual native QA quit/relaunch after disposable MariaDB shutdown; normal sign-in without auth/licence bypass",
+          "expected": "No saved failed candidate dependency; local SQLite-only mode persists with MariaDB unavailable",
+          "observed": "Advanced Settings showed MariaDB offline/local SQLite-only mode after restart",
+          "evidence": [
+            "screenshots/63-restart-durable-local-mode-no-MariaDB.png.png"
+          ],
+          "limits": [
+            "Isolated QA standalone profile, not another shop/till Windows restart."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/59-reconnect-unreachable-candidate.png.png",
+        "screenshots/61-reconnect-durable-save-rejected-rollback.png.png",
+        "screenshots/62-local-mode-after-reconnect-rollback.png.png",
+        "screenshots/63-restart-durable-local-mode-no-MariaDB.png.png"
+      ],
+      "priorLimits": "Observed healthy same-target reconnect preserved data counts. Failed candidate, post-save failure/rollback, changed-server identity and restore branches were isolated/source tests, not native failures; absence of destructive UI is not a full tracing claim for every server operation.",
+      "remainingLimits": [
+        "Unreachable candidate and controlled post-durable-save rollback are native scoped passes, not every reconnect/server-identity/restore branch.",
+        "Candidate schema and identity metadata were prepared, but no business rows imported/uploaded and no local cache counts replaced.",
+        "No real shop MariaDB server or remote network was touched."
+      ],
+      "durableValidation": {
+        "observed": "Local durable mode single, mysql_config absent, products77362/orders94/suppliers126/customers855/employees4 unchanged, queued mutations0/conflicts0/online financial intents0 after controlled post-save rejection.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only WAL-aware isolated QA profile after actual native post-durable-save failure. Fresh loopback server only; original app/server untouched."
+      },
+      "sourceCorrection": {
+        "id": "SOURCE-DURABLE-CONNECTION-SETTING-ROLLBACK",
+        "discovery": "SOURCE_INSPECTION_BEFORE_NATIVE_RETEST",
+        "files": [
+          "src/lib/stores/connection.ts",
+          "src/routes/setup/+page.svelte"
+        ],
+        "description": "Reconnect now snapshots exact durable pos_mode/mysql_config rows, including absence and original updatedAt, before save. A post-save failure restores both rows atomically, removes any newly introduced config row when previously absent, restores reactive state and resets cached MySQL connection. Audit records contain only redacted presence/mode metadata.",
+        "nativeVerification": "Actual native post-durable-save rejection, read-only rollback proof and cold restart without MariaDB passed. This correction was source-caught first, not represented as a newly observed native UI defect."
+      }
+    },
+    {
+      "id": "AUDIT-03",
+      "title": "Failed settings saves can still appear saved",
+      "routes": [
+        "/settings/feedback",
+        "/settings/scale",
+        "/settings/printers",
+        "/settings/advanced"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Advanced settings initially showed shop-wide Stock tracking off.",
+        "One native Stock tracking save was rejected at the scoped settings.before-audit checkpoint.",
+        "The app displayed Could not save feedback; dismissing it left the Stock tracking switch off and status Tracking off.",
+        "Native QA proof showed one checkpoint invocation, Entered #1 and Rejected #1; the checkpoint was consumed and no armed checkpoint remained.",
+        "Root read-only QA SQLite also confirmed zero audit records committed for the rejected stock-setting save."
+      ],
+      "scenarios": [
+        {
+          "id": "SETTINGS-ATOMIC-AUDIT-REJECTION",
+          "status": "PASS",
+          "boundary": "Controlled rejection inside the actual native settings transaction before its audit write",
+          "expected": "Rollback the setting and retain the prior confirmed UI state, rather than showing a failed save as saved",
+          "observed": "Prior off value and Tracking off UI restored after rejection; one invocation and consumed checkpoint observed",
+          "evidence": [
+            "screenshots/01-settings-audit-rejected-restored.png",
+            "screenshots/02-settings-native-rejection-proof.png"
+          ],
+          "databaseValidation": "PASS: root read-only QA SQLite confirmed stock_tracking_enabled=false and zero audit records committed for the rejected stock-setting save",
+          "limits": [
+            "This is a controlled debug-only native rejection, not a real storage-device failure or MariaDB outage.",
+            "This representative Advanced setting test does not certify every scale/feedback/printer setting or every native fault branch."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/01-settings-audit-rejected-restored.png",
+        "screenshots/02-settings-native-rejection-proof.png"
+      ],
+      "priorLimits": "Native healthy save paths observed. Seven production-function VM tests execute batching/audit policy with mocked transaction boundaries; before-read failure, atomic commit rejection, audit sanitization and publication ordering were not native fault injected. Scale/printer/tax failure paths are not blanket native PASS.",
+      "remainingLimits": [
+        "One representative Advanced setting rejected at the native audit boundary; other settings-write fault branches retain prior automated evidence unless explicitly retested."
+      ],
+      "durableValidation": {
+        "observed": "Read-only QA stockTrackingEnabled=false; root confirmed zero audit rows committed for the rejected stock setting save.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA snapshot; WAL-aware CLI transaction. No original database/private staff values read."
+      }
+    },
+    {
+      "id": "AUDIT-09",
+      "title": "Generate PLU can write into a different item draft",
+      "routes": [
+        "/items"
+      ],
+      "priorNativeRetest": "AUTOMATED_ONLY",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Controlled native items.generate-plu delay #7 began for product 0001. Root closed the editor and reopened the same product ID, then entered newer manual draft PLU 98765.",
+        "The old result released automatically after 30 seconds. The new draft retained 98765; QA events showed Entered #7 and Released #7 with no pending checkpoint.",
+        "Controlled native items.image-read delay #8 began for old product 0001 editor. Root closed/reopened the same ID, used the actual native file chooser to select the local logo, and the newer image draft remained after the old blank reader released.",
+        "No item Save was performed: the manual PLU and uploaded draft image were not persisted."
+      ],
+      "scenarios": [
+        {
+          "id": "SAME-ID-REOPEN-PLU-GENERATION-RACE",
+          "status": "PASS",
+          "boundary": "Native Tauri delayed items.generate-plu #7, same-ID editor close/reopen and real draft typing",
+          "expected": "Old asynchronous PLU result cannot replace the newer same-ID draft",
+          "observed": "New draft PLU 98765 retained before and after old 30-second release; Entered #7/Released #7, no pending checkpoint",
+          "evidence": [
+            "screenshots/36-plu-new-draft-old-result-pending.png.png",
+            "screenshots/37-plu-old-result-does-not-overwrite-new-draft.png.png"
+          ],
+          "limits": [
+            "Controlled native delay; draft-only, no Save and no real provider/network operation."
+          ]
+        },
+        {
+          "id": "SAME-ID-REOPEN-IMAGE-READ-RACE",
+          "status": "PASS",
+          "boundary": "Native Tauri delayed items.image-read #8 plus actual native file chooser and same-ID editor reuse",
+          "expected": "Old image reader cannot clear/replace the new editor's uploaded image draft",
+          "observed": "Local logo and Remove Image control remained after old blank image-read release",
+          "evidence": [
+            "screenshots/38-new-image-draft-after-old-reader.png.png",
+            "screenshots/40-new-image-retained-after-old-reader.png.png"
+          ],
+          "limits": [
+            "No Save; only the isolated QA editor draft was changed."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/36-plu-new-draft-old-result-pending.png.png",
+        "screenshots/37-plu-old-result-does-not-overwrite-new-draft.png.png",
+        "screenshots/38-new-image-draft-after-old-reader.png.png",
+        "screenshots/40-new-image-retained-after-old-reader.png.png"
+      ],
+      "priorLimits": "Native close/reopen, same-ID editor reuse and image-read races remain unobserved. Automated stale-generation proof is not a native UI PASS.",
+      "remainingLimits": [
+        "Native representative same-ID PLU and image-read races passed; every asynchronous draft field and timing combination is not certified.",
+        "No generated PLU or image draft was saved."
+      ]
+    },
+    {
+      "id": "AUDIT-11",
+      "title": "Item and Goods Menu dialogs lack the shared keyboard-focus handling",
+      "routes": [
+        "/items"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Root reported native parent item-dialog/Goods focus handling and keyboard opener restoration passed.",
+        "Nested selling-price pad Escape restored Item Name rather than the originating Selling Price button.",
+        "In the initial failed test, immediate Return did not reopen the pad; the defect was later fixed and verified in the rebuilt native app.",
+        "Rebuilt nested Price per KG pad used genuine keyboard focus: from PLU, Tab three times focused Price per KG; Return opened the pad with initial Close focus. Shift+Tab wrapped to Confirm, Escape restored the exact Price per KG opener, and immediate Return reopened the pad. Confirm restored the same opener.",
+        "While the nested pad was open, parent item fields were absent from the accessible active dialog, establishing native parent inertness for this case.",
+        "Rebuilt parent Item dialog opened from keyboard-focused Add using Search → Shift+Tab → Add → Return; initial focus was Name. Shift+Tab reached Close then Save, Tab wrapped to Close, Escape restored Add, and Return reopened.",
+        "The rebuilt final Goods keyboard cycle, opener restoration and reopen passed; its exact observed sequence and limits are recorded below.",
+        "Final Goods Menu keyboard retest passed: keyboard-focused Add, Shift+Tab to Goods, Return opened initial Close; Shift+Tab moved off the first control to the final focusable target, Tab wrapped back to Close; Escape restored the Goods opener and immediate Return reopened.",
+        "The final offscreen Goods focus target could not be positively named from the accessibility snapshot amid the large virtualized catalogue. No explicit Save-focus claim is made."
+      ],
+      "scenarios": [
+        {
+          "id": "ITEM-AND-GOODS-PARENT-FOCUS-RESTORATION",
+          "status": "PASS",
+          "boundary": "Actual native keyboard opening/focus/dismissal",
+          "observed": "Parent item and Goods focus/opener restoration passed as reported by native controller",
+          "evidence": [],
+          "limits": [
+            "No additional screenshot was supplied for these focus observations; do not infer unsupported full traversal/viewport coverage."
+          ]
+        },
+        {
+          "id": "NESTED-PRICE-PAD-OPENER-RESTORATION",
+          "status": "FAIL_CORRECTED_BY_NATIVE_RETEST",
+          "boundary": "Actual native nested pad Escape and immediate Return",
+          "expected": "Closing only the nested pad restores Selling Price opener so Return can reopen it",
+          "observed": "Focus moved to Item Name instead, preventing Return reopen",
+          "evidence": [],
+          "limits": [
+            "Historical nested opener restoration failure was corrected and retested below."
+          ]
+        },
+        {
+          "id": "REBUILT-NESTED-PRICE-PAD-FOCUS-CYCLE-AND-INERTNESS",
+          "status": "PASS",
+          "boundary": "Actual native physical-keyboard navigation in rebuilt item editor and nested price pad",
+          "expected": "Pad wraps focus, leaves parent inert, restores exact opener and supports immediate reopen",
+          "observed": "PLU + Tab three times → Price per KG; Return → Close; Shift+Tab → Confirm; Escape → Price per KG; Return reopens; Confirm restores Price per KG. Parent item fields absent from active accessible dialog.",
+          "evidence": [
+            "screenshots/39-nested-pad-focus-restored.png.png"
+          ],
+          "limits": [
+            "Representative native nested Price per KG pad; not every pad/viewport."
+          ]
+        },
+        {
+          "id": "REBUILT-ITEM-PARENT-KEYBOARD-CYCLE-OPENER",
+          "status": "PASS",
+          "boundary": "Actual native keyboard-focused Add opener and parent Item editor",
+          "expected": "Initial Name, wrapping focus and Escape restoring Add; immediate Return reopens",
+          "observed": "Search Shift+Tab → Add; Return → Name; Shift+Tab → Close then Save; Tab wraps Close; Escape restores Add; Return reopens",
+          "evidence": [],
+          "limits": [
+            "Controller-observed keyboard sequence; no separate screenshot supplied for this parent cycle."
+          ]
+        },
+        {
+          "id": "REBUILT-GOODS-KEYBOARD-CYCLE-AND-OPENER",
+          "status": "PASS",
+          "boundary": "Actual native physical-keyboard Goods Menu cycle and Escape/reopen",
+          "expected": "Initial Close, wrapping cycle, Escape restores keyboard-focused Goods opener, Return reopens",
+          "observed": "Add → Shift+Tab → Goods → Return initial Close; Shift+Tab moves to final target; Tab wraps Close; Escape restores Goods; Return reopens",
+          "evidence": [
+            "screenshots/41-goods-keyboard-reopened.png.png"
+          ],
+          "limits": [
+            "Final offscreen target not positively named from AX; no explicit Goods Save-focus assertion.",
+            "Representative keyboard sequence rather than all 100 virtualized button focus states."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/39-nested-pad-focus-restored.png.png",
+        "screenshots/41-goods-keyboard-reopened.png.png"
+      ],
+      "priorLimits": "Initial focus, traversal and dismissal observed. Accessibility clicks on openers did not establish keyboard focus, so opener-focus restoration was not native verified; nested pad and full focus-cycle/inertness checks remain source/isolated coverage.",
+      "remainingLimits": [
+        "Scoped native Item, nested Price per KG and Goods keyboard cases passed; this is not every viewport, pad or all large-catalogue focus combinations.",
+        "Goods last focus target was observed indirectly via wrap back to Close; it was not positively identified as Save in the accessible snapshot."
+      ]
+    },
+    {
+      "id": "AUDIT-05",
+      "title": "Item fields can save while the stock change fails",
+      "routes": [
+        "/items"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Controlled native stock.before-audit rejection displayed the explicit partial-save message: item details saved, stock not confirmed.",
+        "Cost£1.77 was submitted as item details; requested stock105 from baseline100. Native refresh and subsequent durable assertions verified explicit partial save/stock rollback.",
+        "Screenshot 42 was an earlier healthy Delay/busy state, not rejection proof. Screenshot 43 is the actual rejected-stock partial-save alert.",
+        "After the earlier rejected audit, editor refresh showed stock 100 with saved cost £1.77 (screenshot 44).",
+        "For the passing CAS race, real Save requested 105 from expected baseline 100 and paused before count at checkpoint #12. A guarded isolated QA SQLite competing writer changed stock 100 → 107 exactly once.",
+        "After the bounded 30-second release, the actual SQLite conditional count rejected STOCK_COUNT_CONFLICT. The partial-save alert appeared, and after OK the editor refreshed to stock 107 with cost £1.77.",
+        "Screenshot 45 was the first missed race/pending attempt, not the passing CAS proof. Screenshots 46/47 are the actual conflict and refreshed 107 evidence.",
+        "Read-only durable proof confirmed four preliminary healthy count audits and no fifth audit from the rejected/stale attempts. Later healthy restoration legitimately added its own fifth audit.",
+        "Read-only durable stockCasNativeCheck confirmed persisted stock 107, cost 177p, price 249p, tracking enabled, four own stock-count audit rows unchanged from the reported baseline, and zero count audits after the competing write.",
+        "The four audit rows are earlier healthy count/restore actions, not a zero-total-audit claim. The rejected stale count did not add a false fifth audit.",
+        "Root completed healthy isolated native UI restoration to stock100/cost175p; later durable snapshot confirmed those values, price249/tracking1 and the one legitimate restoration audit.",
+        "Later itemAndGoodsSaveDurableCheck confirmed healthy fixture restoration stock100/cost175, price249 and tracking1. Audit count became5 because of one real healthy restoration; the stale/rejected attempts had not added an audit."
+      ],
+      "scenarios": [
+        {
+          "id": "DETAILS-COMMIT-STOCK-REJECTION-PARTIAL-WORDING",
+          "status": "PASS",
+          "boundary": "Actual native item details save plus controlled stock.before-audit transaction rejection",
+          "expected": "Truthful partial-save alert, details retained, stock remains baseline with no rejected audit row",
+          "observed": "Actual rejected-stock alert explicitly said details saved but stock not confirmed. After OK/refresh, stock remained100 and cost£1.77 was saved. Subsequent read-only durable assertions verified the rollback/audit evidence.",
+          "evidence": [
+            "screenshots/43-stock-audit-rejection-details-durable.png.png",
+            "screenshots/44-stock-rollback-refreshed-baseline.png.png"
+          ],
+          "excludedEvidence": [
+            {
+              "file": "screenshots/42-stock-audit-failure-partial-save.png.png",
+              "reason": "Earlier healthy delay/busy state; not a stock rejection/error proof."
+            }
+          ],
+          "limits": [
+            "Details and stock are separate commits; the explicit partial-save outcome is intentional.",
+            "Controlled native audit rejection, not actual disk loss/cache failure."
+          ],
+          "databaseValidation": "Native refresh confirmed rejected stock kept 100 and details cost 177p; later read-only proof retained four preliminary healthy audits with no false rejected-count audit.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        },
+        {
+          "id": "NATIVE-SQLITE-CONCURRENT-COUNT-CAS-REJECTION",
+          "status": "PASS",
+          "boundary": "Real native Save and SQLite CAS with controlled pre-count delay #12; actual guarded competing writer in isolated QA profile",
+          "expected": "Stale expected 100 cannot overwrite competing stock 107 with requested 105; refresh preserves current stock",
+          "observed": "Competing writer changed 100 → 107 once; after release actual SQLite CAS returned STOCK_COUNT_CONFLICT and truthful partial-save alert; after OK editor showed 107 and cost £1.77",
+          "evidence": [
+            "screenshots/46-stock-CAS-conflict-rejected.png.png",
+            "screenshots/47-stock-CAS-refresh-preserves-107.png.png"
+          ],
+          "excludedEvidence": [
+            {
+              "file": "screenshots/45-stock-CAS-pending.png.png",
+              "reason": "First missed race/pending attempt, not actual successful conflict-proof attempt."
+            }
+          ],
+          "limits": [
+            "Actual SQLite conflict in isolated QA, not MySQL uncertain COMMIT/cache fault.",
+            "Competing writer was a guarded synthetic fixture update, not a real sale or another physical till."
+          ],
+          "databaseValidation": "stockCasNativeCheck: stock=107, costPence=177, pricePence=249, tracking=1; own stock_counted audits baseline=4/after=4; zero count audits after competing write.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/43-stock-audit-rejection-details-durable.png.png",
+        "screenshots/44-stock-rollback-refreshed-baseline.png.png",
+        "screenshots/46-stock-CAS-conflict-rejected.png.png",
+        "screenshots/47-stock-CAS-refresh-preserves-107.png.png"
+      ],
+      "priorLimits": "Native healthy count/save and exact restoration passed; native stale-count races, audit failure, cache failure and uncertain COMMIT were not injected. Actual production SQL and native batch/CAS/generic-replay tests cover those boundaries separately. Details and stock remain separate commits with explicit partial-success handling. Shared counted-stock writes intentionally require online authority; legacy queued absolute counts need review/recount, not blind replay.",
+      "remainingLimits": [
+        "Actual isolated SQLite CAS and native audit rejection passed representative paths; MySQL uncertain COMMIT/cache failure are not natively certified.",
+        "Synthetic competing write and healthy restoration were isolated QA operations, not real sales or physical-till concurrency."
+      ],
+      "durableValidation": {
+        "observed": "At the CAS-conflict snapshot: persisted stock107/cost177/price249/tracking1, four earlier healthy count audits unchanged and zero audits after the competing write. Later healthy restoration snapshot: stock100/cost175/price249/tracking1 and five audits, the additional one being the actual healthy restoration. Rejected/stale attempts added no false count audit.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only WAL-aware isolated QA SQLite transaction; actual SQLite CAS, controlled native delay, guarded synthetic competing write."
+      }
+    },
+    {
+      "id": "AUDIT-06",
+      "title": "Repeated clicks can overlap saves and hardware tests",
+      "routes": [
+        "/items",
+        "/suppliers",
+        "/tax-rates",
+        "/settings/printers"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "At native item-save delay#13, a second Saving click and Escape were ignored; fields/Cancel/Close/Save disabled. The completed one-invocation and durable result are recorded below.",
+        "Item Save delay #13 released after 30 seconds, closed normally and left the product stock at 100. items.save checkpoint calls increased 7 → 8 only, with Entered #13/Released #13; duplicate Saving click and Escape did not invoke another save.",
+        "Goods Save made one real isolated QA selection change (added product 0001; one prior selection became two). During pending save, a second Saving click and Escape were ignored and controls were disabled. After release, native Goods Menu showed 2/10; items.goods-save calls increased 0 → 1, Entered #14/Released #14.",
+        "Goods Menu updated (1 items) describes one changed product, not the total selected count of two.",
+        "At supplier delay-then-reject#15, duplicate Saving/Escape were ignored for the labeled QA draft. Completed draft-retention/retry and exactly-one-row proof are recorded below.",
+        "Supplier rejected save #15 retained the QA Native17 Save Guard / QA-only draft and restored an enabled Save control. The transient rejection toast had expired before the next accessibility poll; no visible-error-feedback claim is made.",
+        "Read-only supplier count while pending was 0 for this new draft. Healthy retry displayed Supplier added and the actual supplier list total became 126. supplier.save checkpoint calls were 2 from baseline0: one rejected attempt and one healthy retry; #15 Entered/Rejected recorded.",
+        "At tax.atomic delay#16, name-only QA Standard VAT20 retained rate20%/defaultOFF; duplicate Saving/Escape ignored with disabled form. Completed one-invocation/save and healthy restoration proof are recorded below.",
+        "Tax name-only atomic save #16 completed with one tax.atomic call (0 → 1), after duplicate Saving/Escape were ignored. Native UI kept the 20% rate/default OFF and zero-rated 0% default ON. Healthy UI restored Standard VAT (20%); agent CLI confirmed the restored rate/default flags.",
+        "Actual native receipt, label and cash-drawer test commands used a loopback-only TCP sink at 127.0.0.1:65097, never a physical printer or drawer. Duplicate Test Receipt / Sending / Opening actions were disabled during their respective native delays.",
+        "Receipt #17 calls0→1: no receiver connection while pending, then exactly connection1 with 446 bytes. Label #18 calls1→2: receiver stayed at prior1 while pending, then connection2 with12024 bytes. Drawer #19 calls2→3: receiver stayed at prior2 while pending, then connection3 with5 bytes.",
+        "Controlled Drawer #20 rejection showed the actual error and created no fourth connection; healthy retry produced connection4 with5 bytes. Controlled Receipt #21 error was visible; OK then retry produced connection5 with446 bytes. Controlled Label #22 error was visible; OK then retry produced connection6 with12024 bytes.",
+        "Total printer.network checkpoint calls9 represented three delayed originals, three rejected attempts and three healthy retries. Rejected attempts emitted no receiver payload. These are per-action guards, not a global cross-action mutex."
+      ],
+      "scenarios": [
+        {
+          "id": "NATIVE-ITEM-SAVE-SINGLE-FLIGHT",
+          "status": "PASS",
+          "boundary": "Actual native item Save with controlled save delay #13",
+          "expected": "Second invocation blocked; Escape and close cannot interrupt pending save; exactly one commit",
+          "observed": "Second Saving click/Escape ignored and controls disabled. After bounded 30-second release, editor closed normally, product stock100; items.save calls7→8 (+1) with Entered#13/Released#13.",
+          "evidence": [
+            "screenshots/48-item-save-duplicate-disabled.png.png"
+          ],
+          "limits": [
+            "Exactly one native checkpoint invocation observed; read-only durable product state confirms restoration.",
+            "Controlled native delay, not physical disk latency."
+          ],
+          "databaseValidation": "itemAndGoodsSaveDurableCheck: exactly one matching synthetic product row, stock100/cost175/price249/tracking1; five count audits include the one healthy stock restoration, with no extra count audit from duplicate save.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        },
+        {
+          "id": "NATIVE-GOODS-SAVE-SINGLE-FLIGHT",
+          "status": "PASS",
+          "boundary": "Actual native Goods selection mutation/save with controlled delay #14",
+          "expected": "Duplicate save/close/Escape blocked; one real save invocation",
+          "observed": "Added QA product0001 to existing selection1 →2; duplicate Saving/Escape ignored, controls disabled; release showed2/10 and items.goods-save checkpoint calls0→1 (+1), Entered#14/Released#14",
+          "evidence": [
+            "screenshots/49-goods-save-duplicate-disabled.png.png"
+          ],
+          "limits": [
+            "Success toast count1 is one changed product, not total selected count2.",
+            "Isolated QA Goods selection only; original configuration untouched."
+          ],
+          "databaseValidation": "itemAndGoodsSaveDurableCheck: QA product0001 showInGoods=true/order2 and total selected2.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        },
+        {
+          "id": "NATIVE-SUPPLIER-SAVE-REJECT-RETRY-SINGLE-FLIGHT",
+          "status": "PASS",
+          "boundary": "Native new QA supplier draft save with controlled delay-then-reject #15",
+          "expected": "Duplicate save blocked; rejection permits safe retry without duplicate records",
+          "observed": "Pending duplicate/Escape ignored; after rejection draft name/contact retained with Save enabled. Pending SQL draft count0; healthy retry showed Supplier added, list126; calls0→2 represent rejected attempt+retry, with Entered/Rejected#15.",
+          "evidence": [
+            "screenshots/50-supplier-save-duplicate-disabled.png.png",
+            "screenshots/51-supplier-save-rejected.png.png"
+          ],
+          "limits": [
+            "Transient rejection toast was not caught before expiry; no native visible-error-feedback claim for that toast.",
+            "Exactly one new QA supplier row was confirmed read-only after healthy retry."
+          ],
+          "databaseValidation": "supplierSaveDurableCheck: exactly one matching QA supplier row, total126=125seeded+one new.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        },
+        {
+          "id": "NATIVE-TAX-ATOMIC-SAVE-SINGLE-FLIGHT",
+          "status": "PASS",
+          "boundary": "Actual native tax.atomic name-only Save with controlled delay #16",
+          "expected": "Duplicate submission/close/Escape blocked until one atomic save completes",
+          "observed": "Duplicate Saving/Escape ignored while form disabled; one tax.atomic call0→1 completed name-only save. Native rates/defaults20%OFF and0%ON retained. Healthy UI restored Standard VAT(20%); agent CLI confirmed0.2/OFF and zero0/ON.",
+          "evidence": [
+            "screenshots/52-tax-save-duplicate-disabled.png.png"
+          ],
+          "limits": [
+            "Name-only atomic native save, not every default-switch/failure/concurrent tax case."
+          ],
+          "databaseValidation": "taxNameOnlySaveRestoredDurableCheck: restored Standard VAT(20%) rate0.2/defaultfalse; zero VAT rate0/defaulttrue.",
+          "databaseEvidence": [
+            "catalogue-durable-evidence.json"
+          ]
+        },
+        {
+          "id": "NATIVE-RECEIPT-TEST-SINGLE-FLIGHT",
+          "expected": "Only one payload after release; pending duplicate disabled",
+          "observed": "Test Receipt duplicate disabled; printer.network calls0→1. Pending receiver0; release connection1,446bytes at2026-10-12T20:42:51.565Z.",
+          "evidence": [
+            "screenshots/53-receipt-test-duplicate-disabled.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        },
+        {
+          "id": "NATIVE-LABEL-TEST-SINGLE-FLIGHT",
+          "expected": "Only one label payload after release; pending duplicate disabled",
+          "observed": "Repeated Sending disabled; calls1→2. Pending receiver remained prior1; release connection2,12024bytes at2026-10-12T20:43:36.401Z.",
+          "evidence": [
+            "screenshots/54-label-test-duplicate-disabled.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        },
+        {
+          "id": "NATIVE-DRAWER-TEST-SINGLE-FLIGHT",
+          "expected": "Only one five-byte drawer command after release; no hardware pulse",
+          "observed": "Repeated Opening disabled; calls2→3. Pending receiver remained prior2; release connection3,5bytes at2026-10-12T20:44:02.473Z.",
+          "evidence": [
+            "screenshots/55-drawer-test-duplicate-disabled.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        },
+        {
+          "id": "NATIVE-DRAWER-REJECTION-RESET-RETRY",
+          "expected": "Rejected native send creates no payload; busy resets for retry",
+          "observed": "Actual #20 error visible; no fourth connection on rejection; retry produced connection4,5bytes at2026-10-12T20:44:34.608Z.",
+          "evidence": [
+            "screenshots/56-drawer-test-rejected-reset.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        },
+        {
+          "id": "NATIVE-RECEIPT-REJECTION-RESET-RETRY",
+          "expected": "Rejected native send creates no payload; after OK retry works",
+          "observed": "Actual #21 error visible; rejected request emitted no payload; after OK retry connection5,446bytes at2026-10-12T20:44:43.273Z.",
+          "evidence": [
+            "screenshots/57-receipt-test-rejected-reset.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        },
+        {
+          "id": "NATIVE-LABEL-REJECTION-RESET-RETRY",
+          "expected": "Rejected native send creates no payload; after OK retry works",
+          "observed": "Actual #22 error visible; rejected request emitted no payload; after OK retry connection6,12024bytes at2026-10-12T20:44:51.823Z.",
+          "evidence": [
+            "screenshots/58-label-test-rejected-reset.png.png"
+          ],
+          "status": "PASS",
+          "boundary": "Actual native printer.network command/formatter and loopback-only TCP sink127.0.0.1:65097; controlled native delay/rejection",
+          "limits": [
+            "No physical printer job or cash-drawer pulse. Payload contents not recorded.",
+            "Per-action duplicate guards, not a global cross-action mutex; no device/USB/system driver certification."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/48-item-save-duplicate-disabled.png.png",
+        "screenshots/49-goods-save-duplicate-disabled.png.png",
+        "screenshots/50-supplier-save-duplicate-disabled.png.png",
+        "screenshots/51-supplier-save-rejected.png.png",
+        "screenshots/52-tax-save-duplicate-disabled.png.png",
+        "screenshots/53-receipt-test-duplicate-disabled.png.png",
+        "screenshots/54-label-test-duplicate-disabled.png.png",
+        "screenshots/55-drawer-test-duplicate-disabled.png.png",
+        "screenshots/56-drawer-test-rejected-reset.png.png",
+        "screenshots/57-receipt-test-rejected-reset.png.png",
+        "screenshots/58-label-test-rejected-reset.png.png"
+      ],
+      "priorLimits": "Actual double-click races were mocked, not native induced. Receipt/label/drawer tests are AUTOMATED_ONLY at mocked transport boundaries; no physical printer or drawer job/pulse was sent. Healthy tax saves do not prove duplicate-click or hardware safety natively.",
+      "remainingLimits": [
+        "Per-action native duplicate guards passed representative Item, Goods, Supplier, Tax, Receipt, Label and Drawer actions; no global cross-action mutex claim.",
+        "Printer/drawer tests used actual native TCP transport into an owned loopback sink, not physical hardware, USB/device driver or system printer.",
+        "Supplier transient rejection toast was not caught before expiry; no visible-toast claim. No live provider call was made."
+      ],
+      "durableValidation": {
+        "observed": "Single matching product stock100/cost175/price249 and Goods selected at order2/total2; exactly one rejected-then-retried QA supplier with total126. Root native checkpoint deltas prove no duplicate handler invocation; receiver observed six successful loopback sends and zero rejected payloads.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA SQLite product/Goods/supplier values; transport counts are explicit native-controller observations, not physical hardware results."
+      }
+    },
+    {
+      "id": "AUDIT-08",
+      "title": "Scale page Add can commit stale page selections",
+      "routes": [
+        "/design/scale"
+      ],
+      "priorNativeRetest": "AUTOMATED_ONLY",
+      "nativeRetest": "PASS",
+      "observations": [
+        "A native delayed page-B assigned-product load cleared old tiles: zero tiles, Loading assigned products, and disabled Add actions were observed.",
+        "Switching to page A while B remained pending showed its actual 100 assigned tiles. Releasing the older B load left page A selected with its own tiles.",
+        "Adding fixture item 0104 from the later available-products page and Save Changes persisted the real QA scale settings.",
+        "Root read-only SQLite confirmed page A retained item IDs 0001–0100 plus the unavailable-product ID and new 0104: 102 stored IDs / 101 rendered products. Page B remained unchanged with IDs 0101–0103."
+      ],
+      "scenarios": [
+        {
+          "id": "SCALE-OLD-PAGE-LOAD-CANNOT-REPLACE-NEW-PAGE",
+          "status": "PASS",
+          "boundary": "Actual native scale page selection with controlled delayed page-B load",
+          "expected": "Loading clears stale selections/blocks Add; a released old-page response cannot alter current page A",
+          "observed": "Loading zero-tile state/disabled Add; page A retained its 100 tiles after old B release",
+          "evidence": [
+            "screenshots/16-scale-loading-clears-old-selection.png"
+          ],
+          "limits": [
+            "Controlled native delay is not every possible database/network failure."
+          ]
+        },
+        {
+          "id": "SCALE-ADD-PRESERVES-CANONICAL-PAGE-IDS",
+          "status": "PASS",
+          "boundary": "Actual native Add and Save Changes with read-only durable QA SQLite verification",
+          "expected": "Add updates only the selected canonical page without dropping stored unavailable-product IDs or changing page B",
+          "observed": "Page A stored 0001–0100, unavailable ID and 0104; page B retained 0101–0103",
+          "evidence": [
+            "screenshots/18-scale-page-a-only-saved.png"
+          ],
+          "databaseValidation": "PASS: root read-only QA SQLite scale_tile_pages check",
+          "limits": [
+            "The added fixture is in the isolated QA profile only; original scale layout was not modified."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/16-scale-loading-clears-old-selection.png",
+        "screenshots/18-scale-page-a-only-saved.png"
+      ],
+      "priorLimits": "Native delayed loading, stale page completion and incomplete catalogue races were not induced; the protected Add path is automated-only.",
+      "remainingLimits": [
+        "Observed delayed native page-load protection and canonical Add/save passed on the seeded QA pages; this is not every scale-page size or failure mode."
+      ],
+      "durableValidation": {
+        "observed": "Read-only scale page A has 102 unique IDs: original 100, explicit missing assignment and added 0104 once; no foreign page B IDs. Page B remains exactly its three expected IDs.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA snapshot; WAL-aware CLI transaction. No original database/private staff values read."
+      }
+    },
+    {
+      "id": "AUDIT-14",
+      "title": "Some maintenance failures leave an inert or Checking state",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Native schema.validate rejection displayed Database check failed with retry guidance and left Validate ready.",
+        "A subsequent actual healthy Validate completed with schemas-ready feedback.",
+        "Native conflicts.refresh rejection retained the visible conflict row, displayed an error and left Refresh ready.",
+        "Native conflicts.dismiss rejection displayed an error alert; after OK the conflict row remained.",
+        "Healthy Refresh/Dismiss then showed No Sync Conflicts; root read-only SQLite confirmed the qa-native17-conflict row count was zero."
+      ],
+      "scenarios": [
+        {
+          "id": "SCHEMA-REJECTION-READY-RETRY",
+          "status": "PASS",
+          "boundary": "Actual native validation handler with controlled schema.validate rejection",
+          "expected": "Failure clears Checking state and provides retry guidance",
+          "observed": "Failure text and ready button followed by a successful actual validation",
+          "evidence": [
+            "screenshots/22-schema-error-retry-ready.png"
+          ],
+          "limits": [
+            "Controlled native rejection is not every malformed schema or unavailable-MariaDB case."
+          ]
+        },
+        {
+          "id": "CONFLICT-REFRESH-REJECTION-RETAINS-ROW",
+          "status": "PASS",
+          "boundary": "Actual native conflict refresh with controlled rejection",
+          "observed": "Visible fixture conflict retained; error and ready Refresh button shown",
+          "evidence": [
+            "screenshots/23-conflict-refresh-rejected-row-kept.png"
+          ]
+        },
+        {
+          "id": "CONFLICT-DISMISS-REJECTION-THEN-HEALTHY-RETRY",
+          "status": "PASS",
+          "boundary": "Actual native dismissal handler with rejection followed by healthy dismissal",
+          "observed": "Error/OK retained fixture row; healthy retry cleared it and No Sync Conflicts displayed",
+          "evidence": [
+            "screenshots/24-conflict-dismiss-rejected-row-kept.png"
+          ],
+          "databaseValidation": "PASS: root read-only QA SQLite confirmed qa-native17-conflict count 0 after healthy dismissal",
+          "limits": [
+            "Only the seeded isolated QA conflict was dismissed; original app conflicts were untouched."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/22-schema-error-retry-ready.png",
+        "screenshots/23-conflict-refresh-rejected-row-kept.png",
+        "screenshots/24-conflict-dismiss-rejected-row-kept.png"
+      ],
+      "priorLimits": "Healthy native validation observed. Schema rejection, conflict refresh/dismiss rejection and repeated pending invocation were mocked production-handler tests; failure recovery is not a native fault-injection PASS.",
+      "remainingLimits": [
+        "Native controlled schema/refresh/dismiss failure-and-retry paths passed; not every schema shape, conflict type or physical persistence failure."
+      ]
+    },
+    {
+      "id": "NATIVE-MAINTENANCE-BUSY-LABEL",
+      "title": "Creating Full Backup labels Delete History as Deleting History",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "priorNativeRetest": "AUTOMATED_ONLY",
+      "nativeRetest": "PASS",
+      "observations": [
+        "A delayed native maintenance.backup operation displayed Creating Full Backup only on its own button.",
+        "Other maintenance controls were disabled; Delete History never displayed Deleting History during backup.",
+        "Releasing the checkpoint allowed a real full backup to be created and verified in the isolated QA protected backup folder.",
+        "No history deletion, database wipe or restore was executed."
+      ],
+      "scenarios": [
+        {
+          "id": "FULL-BACKUP-OPERATION-SPECIFIC-BUSY-LABEL",
+          "status": "PASS",
+          "boundary": "Actual native full-backup handler delayed by maintenance.backup checkpoint",
+          "expected": "Backup owns its busy label; unrelated disabled actions do not claim to be running",
+          "observed": "Creating Full Backup on backup action, other controls disabled, Delete History never Deleting History",
+          "evidence": [
+            "screenshots/25-maintenance-operation-specific-busy.png",
+            "screenshots/26-full-backup-completed.png"
+          ],
+          "backupValidation": "PASS as reported by root: actual full backup created and verified in QA protected folder",
+          "limits": [
+            "No destructive history-delete/wipe/restore action was run; physical disk-failure and restore completeness are not certified by this busy-label test."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/25-maintenance-operation-specific-busy.png",
+        "screenshots/26-full-backup-completed.png"
+      ],
+      "priorLimits": "Busy-label predicate was source checked. Full backup, history deletion and destructive maintenance were not executed to verify the shared-lock visual behavior.",
+      "remainingLimits": [
+        "Native full-backup busy labeling/completion passed. History deletion/wipe/restore were intentionally not executed."
+      ],
+      "durableValidation": {
+        "observed": "Independent backup exists (54,198,272 bytes), SQLite integrityCheck=ok, contains 125 suppliers, 67 receipts, 8 attendance records, stock tracking false and legacy font.",
+        "artifact": "catalogue-durable-evidence.json",
+        "scope": "Read-only isolated QA snapshot; WAL-aware CLI transaction. No original database/private staff values read."
+      }
+    },
+    {
+      "id": "AUDIT-17",
+      "title": "Card-provider read errors are presented as Setup required",
+      "routes": [
+        "/settings/payments"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Controlled native Dojo read rejection showed Could Not Load in the payment overview, with an actual enabled Retry control instead of Setup required.",
+        "Failed Dojo detail read did not replace saved settings. Save, Test, Enable, Find terminals and Remove controls were disabled. Healthy Retry restored the isolated QA configured key flags and Enabled state.",
+        "Failed SumUp detail read also disabled write controls; healthy Retry restored the isolated QA configured flags.",
+        "No API/payment call was made, and no real provider key was copied, changed or exposed."
+      ],
+      "scenarios": [
+        {
+          "id": "PROVIDER-OVERVIEW-READ-ERROR-RETRY",
+          "status": "PASS",
+          "boundary": "Controlled native provider read rejection in actual Tauri payment overview",
+          "expected": "Read error is not presented as Setup required; Retry is available",
+          "observed": "Dojo Could Not Load and enabled Retry visible",
+          "evidence": [
+            "screenshots/30-provider-overview-read-error.png"
+          ],
+          "limits": [
+            "Simulated native checkpoint failure, not corrupted filesystem or real provider outage."
+          ]
+        },
+        {
+          "id": "DOJO-DETAIL-FAIL-CLOSED-AND-HEALTHY-RETRY",
+          "status": "PASS",
+          "boundary": "Controlled native Dojo settings read rejection, then actual healthy local read",
+          "expected": "No writes/removal based on unknown settings; healthy Retry restores stored QA flags",
+          "observed": "Save/Test/Enable/Find/Remove disabled; saved settings not overwritten; healthy Retry restored configured and Enabled state",
+          "evidence": [
+            "screenshots/31-dojo-failed-read-writes-disabled.png"
+          ],
+          "limits": [
+            "No Dojo API or live key involved."
+          ]
+        },
+        {
+          "id": "SUMUP-DETAIL-FAIL-CLOSED-AND-HEALTHY-RETRY",
+          "status": "PASS",
+          "boundary": "Controlled native SumUp settings read rejection, then actual healthy local read",
+          "expected": "Write actions disabled after failed read; Retry restores QA config",
+          "observed": "Writes disabled after rejected read; healthy Retry showed configured QA flags",
+          "evidence": [
+            "screenshots/32-sumup-failed-read-writes-disabled.png"
+          ],
+          "limits": [
+            "No SumUp API or live key involved."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/30-provider-overview-read-error.png",
+        "screenshots/31-dojo-failed-read-writes-disabled.png",
+        "screenshots/32-sumup-failed-read-writes-disabled.png"
+      ],
+      "priorLimits": "Native healthy read states observed. Read rejection/Retry and fail-closed detail save/removal protections were tested with mocks, not by corrupting or changing provider configuration; saved keys were unchanged.",
+      "remainingLimits": [
+        "Controlled read-rejection checkpoints establish native UI/fail-closed behavior, not actual disk corruption or a provider-service outage.",
+        "No physical terminal, real provider credentials or API/payment operation was used."
+      ]
+    },
+    {
+      "id": "AUDIT-19",
+      "title": "Scale/label bounded suggestions do not explain omitted results",
+      "routes": [
+        "/design/scale",
+        "/label-print"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Quick Label Print search for QA Native 17 showed 1000+ matches.",
+        "Next displayed records 101–200, including actual fixture items 0101–0200.",
+        "A native delayed label search for fixture 0001 was followed by search 0105; item 0105 was the sole result before and after releasing the older request.",
+        "Scale search initially showed the first 100 matches all already assigned, zero available items and explicit 1000+ matches guidance.",
+        "Next reached results 101–200 with 97 unassigned products, beginning at fixture 0104; fixture 0104 was added to the current page."
+      ],
+      "scenarios": [
+        {
+          "id": "LABEL-BOUNDED-CATALOGUE-NEXT-PAGE",
+          "status": "PASS",
+          "boundary": "Actual native QA UI with seeded 1105-product catalogue",
+          "expected": "Bounded suggestions explain more results and allow later-page traversal",
+          "observed": "1000+ matches displayed; Next reached actual records 101–200",
+          "evidence": [
+            "screenshots/06-label-catalogue-second-page.png"
+          ],
+          "limits": [
+            "Later native Scale bounded-page/stale-load checks also passed and are recorded under AUDIT-08/19. Capped-total edge-case matrices are not fully certified."
+          ]
+        },
+        {
+          "id": "LABEL-DELAYED-OLDER-SEARCH-DISCARDED",
+          "status": "PASS",
+          "boundary": "Actual native label search with controlled delayed query",
+          "expected": "Older delayed fixture 0001 response cannot replace the newer fixture 0105 result",
+          "observed": "Fixture 0105 remained the sole native result after old-response release",
+          "evidence": [
+            "screenshots/09-label-stale-search-ignored.png"
+          ],
+          "limits": [
+            "Representative old-label result race; the native Scale stale-page test is separately passed under AUDIT-08."
+          ]
+        },
+        {
+          "id": "SCALE-BOUNDED-LATER-UNASSIGNED-PAGE",
+          "status": "PASS",
+          "boundary": "Actual native Scale available-products search and next-page UI",
+          "expected": "Explain when the first bounded results are already assigned and expose later unassigned products",
+          "observed": "First 100 assigned / zero available / 1000+ guidance; Next showed 101–200 with 97 unassigned beginning at 0104",
+          "evidence": [
+            "screenshots/17-scale-later-unassigned-tiles.png"
+          ],
+          "limits": [
+            "Large-list behavior was observed on seeded 1105-product QA catalogue, not every capped-total/count/resolution combination."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/06-label-catalogue-second-page.png",
+        "screenshots/09-label-stale-search-ignored.png",
+        "screenshots/17-scale-later-unassigned-tiles.png"
+      ],
+      "priorLimits": "Native label next-page and displayed scale boundaries observed. Later unassigned scale pages, capped-total edge cases and stale searches remain isolated fixtures, not a full native catalogue traversal.",
+      "remainingLimits": [
+        "Native label paging/stale-query and scale later-page traversal passed on seeded large data; not a full catalogue-size or resolution matrix."
+      ]
+    },
+    {
+      "id": "AUDIT-20",
+      "title": "Stock-receipt history stops at50 without receipt-line detail",
+      "routes": [
+        "/stock-receiving"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Native stock-receipt history contained 67 receipts: 65 seeded QA receipts plus two existing cloned receipts.",
+        "All four native pages were traversed with 20, 20, 20 and 7 records; the oldest page displayed 61–67 of 67.",
+        "Submitting the INV000 reference filter with genuine Enter produced 1–1 of 1.",
+        "The actual oldest INV000 detail showed a real product with quantity 3 × £1.75 = £5.25 and an Unavailable product fallback with quantity 2 × £0.00 = £0.00; receipt total £5.25.",
+        "Screenshot 14 shows INV004 before the Enter filter was applied, not INV000; screenshot 15 records the correctly filtered oldest receipt."
+      ],
+      "scenarios": [
+        {
+          "id": "STOCK-HISTORY-BEYOND-50-ALL-PAGES",
+          "status": "PASS",
+          "boundary": "Actual native Stock Receiving history and seeded QA SQLite receipts",
+          "expected": "History can traverse beyond the prior 50-row cap",
+          "observed": "Four native pages reached all 67 receipts, including the final seven records",
+          "evidence": [
+            "screenshots/13-stock-receipts-oldest-page.png"
+          ],
+          "limits": [
+            "The 67-receipt native dataset is not every possible receipt count or resolution."
+          ]
+        },
+        {
+          "id": "STOCK-HISTORY-EXACT-REFERENCE-LINE-DETAIL",
+          "status": "PASS",
+          "boundary": "Actual native Enter filter and receipt detail modal",
+          "expected": "Reference search finds the oldest receipt and opens all line details, including missing-catalogue fallback",
+          "observed": "INV000 matched one row; detail showed £5.25 real-product line plus £0.00 missing-product line and £5.25 total",
+          "evidence": [
+            "screenshots/15-oldest-receipt-detail-filtered.png"
+          ],
+          "contextualEvidence": [
+            {
+              "file": "screenshots/14-old-receipt-missing-product-detail.png",
+              "note": "INV004 detail with the same missing-product fallback before the exact INV000 filter was applied; not oldest-receipt proof."
+            }
+          ],
+          "limits": [
+            "Product labels are current catalogue names/fallbacks, not historical product-name snapshots."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/13-stock-receipts-oldest-page.png",
+        "screenshots/15-oldest-receipt-detail-filtered.png"
+      ],
+      "priorLimits": "Native search/detail passed on the small existing history. Traversal beyond 50 receipts is actual SQLite fixture evidence, not a native >50-record scenario. Product names are current catalogue names, not historical snapshots. Final native stock count/save restoration is separately recorded under AUDIT-05.",
+      "remainingLimits": [
+        "Native >50-receipt traversal, exact reference search and missing-product detail passed. Product names remain current catalogue names/fallbacks, not historical snapshots."
+      ]
+    },
+    {
+      "id": "AUDIT-18",
+      "title": "Suppliers lack search and paging",
+      "routes": [
+        "/suppliers"
+      ],
+      "priorNativeRetest": "PARTIAL_OBSERVATION",
+      "nativeRetest": "PASS",
+      "observations": [
+        "Native Suppliers displayed 125 seeded records and all five pages were traversed; the last page displayed 101–125.",
+        "Combined search by contact for supplier 001 and by email for supplier 124 returned the expected records.",
+        "The first stale-search attempt clicked disabled Find and did not start a second search; screenshot 11 is not used as proof of stale-query protection.",
+        "The corrected native stale race used genuine Enter for both searches: delayed contact 001, then email for supplier 124 while the first request was pending.",
+        "Supplier 124 was displayed before release and remained after releasing the older response; native proof recorded Entered #6 and Released #6."
+      ],
+      "scenarios": [
+        {
+          "id": "SUPPLIER-POPULATED-SEARCH-ALL-PAGES",
+          "status": "PASS",
+          "boundary": "Actual native Suppliers UI and seeded 125-row QA SQLite data",
+          "expected": "Populated supplier search and pagination reach the full list beyond the first page",
+          "observed": "All five pages traversed, last page 101–125; contact and email searches returned expected records",
+          "evidence": [
+            "screenshots/10-suppliers-last-page-125.png"
+          ],
+          "limits": [
+            "This seeded native dataset is not every possible supplier count, text length or supported resolution."
+          ]
+        },
+        {
+          "id": "SUPPLIER-DELAYED-OLDER-SEARCH-DISCARDED",
+          "status": "PASS",
+          "boundary": "Actual native Enter submissions with scoped suppliers.load delay",
+          "expected": "Releasing an older delayed contact search cannot replace the newer email result",
+          "observed": "Supplier 124 remained after older contact 001 response was released",
+          "evidence": [
+            "screenshots/12-supplier-latest-enter-search-retained.png"
+          ],
+          "excludedEvidence": [
+            {
+              "file": "screenshots/11-supplier-stale-result-ignored.png",
+              "reason": "Disabled Find did not invoke the second request; not a stale-response race proof."
+            }
+          ],
+          "limits": [
+            "Controlled native delay, not a real storage-device slowdown; no supplier records were changed by the search scenarios."
+          ]
+        }
+      ],
+      "nativeEvidence": [
+        "screenshots/10-suppliers-last-page-125.png",
+        "screenshots/12-supplier-latest-enter-search-retained.png"
+      ],
+      "priorLimits": "Observed empty-state UI only. Populated search, large supplier paging and stale delayed searches are isolated/actual SQLite fixtures, not native large-data traversal.",
+      "remainingLimits": [
+        "Native seeded large-list, contact/email search and genuine delayed-Enter race passed; not an exhaustive data-size or resolution matrix."
+      ]
+    }
+  ],
+  "pendingFinalChecks": [],
+  "newIssues": [
+    {
+      "id": "NATIVE-PRINT-WHITE-PREVIEW",
+      "state": "FIXED_NATIVE_RETEST_PASS",
+      "relatedFindingIds": [
+        "AUDIT-13"
+      ],
+      "description": "Actual macOS print sheet opened but label preview was completely white",
+      "evidence": [
+        "screenshots/07-macos-label-print-preview.png"
+      ],
+      "note": "The original white preview remains recorded as a historical caught defect. The corrected source was rebuilt and the actual macOS OS sheet retested; no physical job was sent.",
+      "sourceFinding": "Catalogue/design agent identified unconditional receipt print CSS hiding body descendants during label printing.",
+      "sourceFix": "Receipt print-target rules are scoped to body.system-printing; print-only page overflow is unclipped and Label Designer native paper dimensions are frozen.",
+      "sourceVerification": "Catalogue/design agent reported 48 scoped tests passed and Svelte check 0 errors/warnings.",
+      "nativeRetest": "PASS",
+      "nativeResolution": "Rebuilt native one- and two-label OS previews contained the actual label text, price and barcode. Actual Cancel retained selection, and explicit Clear removed it.",
+      "retestEvidence": [
+        "screenshots/27-rebuilt-native-label-preview-visible.png",
+        "screenshots/28-rebuilt-cancel-retains-selection.png",
+        "screenshots/29-two-label-native-preview.png"
+      ]
+    },
+    {
+      "id": "NATIVE-NESTED-PAD-FOCUS-RESTORATION",
+      "state": "FIXED_NATIVE_RETEST_PASS",
+      "relatedFindingIds": [
+        "AUDIT-11"
+      ],
+      "description": "Escape closes nested selling-price pad but returns focus to Item Name rather than Selling Price opener",
+      "expected": "Immediate Return reopens pad from restored Selling Price focus",
+      "evidence": [],
+      "note": "Rebuilt Item parent, nested pad and final Goods keyboard scenarios passed with explicit limits. The initial failure remains visible for traceability.",
+      "nativeRetest": "PASS",
+      "nativeResolution": "Nested Escape and Confirm restored exact Price per KG opener, immediate Return reopened the pad and parent fields stayed inert. Final Goods cycle/keyboard opener restoration also passed.",
+      "retestEvidence": [
+        "screenshots/39-nested-pad-focus-restored.png.png",
+        "screenshots/41-goods-keyboard-reopened.png.png"
+      ]
+    },
+    {
+      "id": "ORIGINAL-TROLLEY-FINAL-STATE-MISMATCH",
+      "state": "OPEN_UNEXPLAINED_PRESERVATION_MISMATCH",
+      "relatedFindingIds": [],
+      "description": "Final original POS trolley is empty, unlike earlier reported 16 items / £103.83",
+      "expected": "Original trolley preservation must be verified rather than assumed",
+      "evidence": [
+        "screenshots/64-original-trolley-preserved.png"
+      ],
+      "note": "Despite its historical filename, screenshot64 shows an empty final trolley and is NOT preservation proof. Root performed only Back to POS in the original app, no payment/cart-clear/hold/order-history/data-write operation. The exact16→0 event remains unproven; no cause or restoration is claimed."
+    },
+    {
+      "id": "SOURCE-UNHELD-TROLLEY-RAM-PERSISTENCE-RISK",
+      "state": "SOURCE_CONFIRMED_MEDIUM_RISK_NOT_FIXED",
+      "relatedFindingIds": [],
+      "description": "Ordinary unheld checkout trolley has no durable draft persistence",
+      "priority": "MEDIUM",
+      "discovery": "Source inspection during final original-trolley mismatch investigation; not a new native reproduction of the loss event",
+      "sourceFinding": "src/routes/+page.svelte:229–240 initializes ordinary cart as component-local empty array;245–255 persists only active held-recovery carts. onDestroy1182–1194 has cleanup/cancel logic but no ordinary draft save. Staff session storage may persist across reload while the ordinary unheld trolley does not.",
+      "sourceFix": "Not implemented in this scope. A separate durable ordinary-cart draft design/recovery task is required.",
+      "note": "Admin Back to POS is ordinary navigation, not a cart-clear action. Guarded checkout Admin navigation rejects nonempty carts at2499–2519, so the exact earlier16/£103.83 → final0/£0.00 event is UNPROVEN. Do not attribute it to root/user clearing or to a specific reload. This additional source-confirmed risk is outside the17 requested follow-up findings.",
+      "evidence": [
+        "screenshots/64-original-trolley-preserved.png"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "Frontend / workflow suite",
+      "result": "1271 passed · 56 skipped",
+      "details": [
+        "99 files passed; 3 skipped; 102 total. Skipped tests are not claimed as executed.",
+        "Automated results are separate from native UI verdicts."
+      ]
+    },
+    {
+      "name": "Normal-source Rust core",
+      "result": "251 passed · 10 filtered",
+      "details": [
+        "QA environment opt-ins removed; 0 failed and 0 ignored.",
+        "Eight real MariaDB cases, one live-session case and one external printer-module case explicitly excluded in this run.",
+        "Four existing unused-restore-helper compiler warnings retained."
+      ]
+    },
+    {
+      "name": "Type and Svelte checks",
+      "result": "0 errors · 0 warnings",
+      "details": [
+        "npm run check passed."
+      ]
+    },
+    {
+      "name": "Invoke capability audit",
+      "result": "99 frontend / 105 source registrations",
+      "details": [
+        "All frontend commands permitted. Source count includes cfg-gated QA entries and is not a claim that QA commands exist in normal/release binaries."
+      ]
+    },
+    {
+      "name": "QA isolation source audit",
+      "result": "Passed with explicit build/runtime gates",
+      "details": [
+        "Normal Rust source compiled without QA opt-ins. QA implementation requires debug profile, selected native-qa Cargo feature, compile-time opt-in and the exact isolated app identifier.",
+        "Isolated startup skips legacy keychain migration; external provider calls rejected; printer/drawer network transport loopback-only.",
+        "Release artifact not compiled by this verification; no release gating binary test claim."
+      ]
+    },
+    {
+      "name": "Patch whitespace",
+      "result": "Passed",
+      "details": [
+        "git diff --check passed in the final automated verification."
+      ]
+    },
+    {
+      "name": "Normal macOS app artifact",
+      "result": "Built successfully · native QA handlers excluded",
+      "details": [
+        "Normal Tauri debug app bundle v0.1.1, arm64; no QA config override, no QA environment opt-ins and selected Cargo features[].",
+        "Build emitted desktop but not native_qa; zero enabled QA command symbols. Frontend QA gate compiledfalse/checkpointno-op.",
+        "Unreachable QA toolbar/helper strings remain bundled: controls disabled by false mount gate, not byte-absent. No total QA-byte-removal claim.",
+        "Build had0errors, four existing Rust helper warnings and Vite chunk-size warning. Normal app was not launched/restarted; original running process untouched by build.",
+        "No Windows/release artifact compiled in this check."
+      ]
+    },
+    {
+      "name": "Report artifact validation",
+      "result": "Offline structure/links passed · visual HTML blocked",
+      "details": [
+        "All17 native follow-up IDs match exactly the13 previous partial+4 previous automated-only findings; all local screenshot/artifact links are validated offline.",
+        "Local file:// report display was blocked by browser security; no workaround/alternative surface was used. Native UI evidence is separate and was already captured."
+      ]
+    }
+  ],
+  "automatedEvidence": "Final automated source verification is in ../fixes-2026-10-12/native17-automated-verification.json; this does not replace native interaction evidence.",
+  "artifactDocuments": [
+    {
+      "path": "catalogue-durable-evidence.json",
+      "title": "Read-only durable QA state and provider enable flags"
+    },
+    {
+      "path": "../fixes-2026-10-12/native17-automated-verification.json",
+      "title": "Final automated source checks and isolation gates"
+    },
+    {
+      "path": "normal-build-artifact.json",
+      "title": "Normal non-QA macOS build and compiled gating proof"
+    },
+    {
+      "path": "reconnect-candidate-metadata.json",
+      "title": "Read-only empty candidate, native schema preparation and server shutdown"
+    }
+  ],
+  "restoration": {
+    "status": "QA_RESTORATION_PASS_ORIGINAL_TROLLEY_NOT_CONFIRMED",
+    "notes": [
+      "Disposable MariaDB server shut down. The isolated QA app quit/relaunched through normal staff sign-in; actual native Advanced Settings confirmed SQLite-only mode with MariaDB unavailable, then QA app quit.",
+      "Isolated QA Stock tracking Off restored. Closed QA immutable SQLite integrity=ok; durable pos_mode=single/mysql_config rows0/stock_trackingfalse/autoReceiptfalse/labelEnabledfalse/cashDrawerEnabledfalse.",
+      "Loopback TCP receiver stopped cleanly with SIGINT exit0; no physical printer job or drawer pulse.",
+      "Original app remained running without restart and no intentional original business operation/data write occurred in this test scope. Final Back to POS showed0items/£0.00 rather than earlierreported16/£103.83; trolley preservation is NOT CONFIRMED. Cause unexplained, no guessed reconstruction.",
+      "Normal non-QA macOS debug artifact built successfully with native QA handlers excluded and frontend QA gate false. It was not launched/restarted; original running app was not replaced in this test scope. Windows/release artifact verification remains outside scope."
+    ]
+  },
+  "sourceCorrections": [
+    {
+      "id": "SOURCE-DURABLE-CONNECTION-SETTING-ROLLBACK",
+      "discovery": "SOURCE_INSPECTION_BEFORE_NATIVE_RETEST",
+      "files": [
+        "src/lib/stores/connection.ts",
+        "src/routes/setup/+page.svelte"
+      ],
+      "description": "Reconnect now snapshots exact durable pos_mode/mysql_config rows, including absence and original updatedAt, before save. A post-save failure restores both rows atomically, removes any newly introduced config row when previously absent, restores reactive state and resets cached MySQL connection. Audit records contain only redacted presence/mode metadata.",
+      "nativeVerification": "Actual native post-durable-save rejection, read-only rollback proof and cold restart without MariaDB passed. This correction was source-caught first, not represented as a newly observed native UI defect."
+    }
+  ],
+  "finalNativeScenarioVerdict": "All17 requested prior partial/automated-only findings have explicit scoped native PASS; earlier19 plus these17 make36 scoped native finding verdicts. Not app-bug-free/live-payment/physical-hardware/Windows certification.",
+  "outstandingOutsideScope": [
+    "Unexplained final original trolley mismatch: preservation NOT CONFIRMED.",
+    "Source-confirmed medium ordinary-unheld RAM trolley persistence risk, not fixed in this17-check scope."
+  ],
+  "completionScope": "The17 requested native checks and final QA/normal-artifact validation are complete. Original trolley preservation remains NOT CONFIRMED and ordinary unheld-cart RAM persistence is an additional source-confirmed unfixed risk, not hidden by this scope completion.",
+  "reportDisplayValidation": {
+    "status": "OFFLINE_STRUCTURE_AND_LINK_VALIDATION_ONLY",
+    "limitation": "Root attempted to open the local HTML report but browser security blocked file:// access. No alternate browser, localhost server or other bypass was used. Native app screenshots/tests were already completed; only visual display of this local HTML artifact was blocked.",
+    "visualHtmlReviewPerformed": false
+  }
+}

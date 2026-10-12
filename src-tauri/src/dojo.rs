@@ -9,6 +9,18 @@ use tauri::{AppHandle, Manager};
 use crate::local_terminal::{self, TerminalOwnership};
 use crate::secret_store::{self, DOJO_API_KEY};
 
+mod sandbox_recovery;
+pub use sandbox_recovery::DojoSandboxRecoveryResult;
+
+#[tauri::command]
+pub async fn dojo_recover_legacy_sandbox_payments(
+    app: AppHandle,
+    employee_id: String,
+    pin: String,
+) -> Result<DojoSandboxRecoveryResult, String> {
+    sandbox_recovery::recover(&app, &employee_id, &pin).await
+}
+
 const DOJO_API_BASE: &str = "https://api.dojo.tech";
 const DOJO_API_VERSION: &str = "2026-02-27";
 const CONFIG_FILE_NAME: &str = "dojo.json";
@@ -288,6 +300,7 @@ fn production_config_issue(config: &DojoStoredConfig) -> Option<&'static str> {
 }
 
 fn require_api_config(app: &AppHandle, require_terminal: bool) -> Result<DojoStoredConfig, String> {
+    crate::native_qa::forbid_provider_network(app)?;
     let config = load_config(app)?;
     if config.api_key.is_empty() {
         return Err("Enter the Dojo secret API key first".into());
@@ -933,7 +946,8 @@ pub async fn dojo_cancel_expired_sandbox_payment(
 }
 
 #[tauri::command]
-pub fn dojo_get_config(app: AppHandle) -> Result<DojoPublicConfig, String> {
+pub async fn dojo_get_config(app: AppHandle) -> Result<DojoPublicConfig, String> {
+    crate::native_qa::checkpoint(&app, "provider.dojo.read").await?;
     let config = load_config(&app)?;
     Ok(DojoPublicConfig::from(&config))
 }
@@ -944,6 +958,7 @@ pub async fn dojo_save_config(
     config: DojoConfigInput,
     mysql_uri: Option<String>,
 ) -> Result<DojoPublicConfig, String> {
+    crate::native_qa::checkpoint(&app, "provider.dojo.save").await?;
     let _registration = local_terminal::registration_guard(&app).await?;
     let supplied_key = config.api_key.unwrap_or_default().trim().to_string();
     let terminal_id = clean_identifier(&config.terminal_id, "Terminal ID", 128)?;
@@ -1129,6 +1144,7 @@ pub async fn dojo_create_payment(
     reference: String,
     description: String,
 ) -> Result<DojoPaymentResult, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
     // Reject new charges natively before contacting the provider. Status,
     // cancellation and signature completion remain available for recovery.
     crate::licensing::require_sale_access(&app).await?;
@@ -1337,6 +1353,7 @@ pub async fn dojo_retry_payment(
     attempt_id: String,
     terminal_session_id: String,
 ) -> Result<DojoPaymentResult, String> {
+    let _registration = local_terminal::registration_guard(&app).await?;
     crate::licensing::require_sale_access(&app).await?;
     static RETRY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = RETRY

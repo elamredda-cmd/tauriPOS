@@ -1,0 +1,95 @@
+{
+  "scope": "Customer-account ledger initialization/policy and customer/checkout Dojo monitoring integration",
+  "date": "2026-10-12",
+  "nativeUiVerdict": "NOT_RUN_BY_THIS_AGENT",
+  "findings": [
+    {
+      "id": "OPS-NATIVE-CUSTOMER-ACCOUNT-INITIALIZATION",
+      "outcome": "IMPLEMENTED_AND_SQLITE_REGRESSION_TESTED",
+      "changes": [
+        "An explicit manual ledger post validates its shape, customer and adjustment actor before creating a missing account inside the same transaction.",
+        "The default account is held, with zero purchase limit and zero initial balance; the ledger movement and account creation commit or roll back together.",
+        "MariaDB keeps the existing dataset/report/restore guards and customer identity lock, then checks/locks the account before inserting it. Existing accounts are not upserted or reconfigured on replay.",
+        "Read APIs stay side-effect-free. Checkout sale mutations retain their original account requirement and purchasing guards.",
+        "Parent native follow-up exposed misleading checkbox semantics: unchecked isEnabled=false was labelled Account on hold. The stable visible/accessibility label is now Allow Pay Later purchases, with separate held/active description. Opening another customer clears the previous enabled/limit draft before reading; no account configuration is saved implicitly."
+      ],
+      "tests": [
+        "first_manual_customer_entry_creates_a_held_account_atomically",
+        "first_manual_customer_entry_rolls_back_invalid_or_unauthorized_actions",
+        "first_manual_customer_entry_idempotency_conflict_does_not_leave_an_account",
+        "opening_balance_is_atomic_and_can_only_be_posted_once",
+        "customerAccountSettings.test.ts: disabled initial draft, enabled-to-held account switch, failed read reset, explicit save boolean mapping, and stable checkbox semantics"
+      ],
+      "limits": "Native Tauri new-customer workflow and MariaDB first-writer concurrency were not executed by this agent."
+    },
+    {
+      "id": "OPS-SOURCE-CUSTOMER-HOLD-ADJUSTMENT-POLICY",
+      "outcome": "IMPLEMENTED_AND_SQLITE_REGRESSION_TESTED",
+      "changes": [
+        "Purchase hold and credit limit apply to charge entries, not historical opening balances or manager corrections.",
+        "Native opening_balance and adjustment posts require a nonblank reason and a currently active employee with adjust_customer_account permission, using the stored role-permission matrix.",
+        "Historical entries preserve account hold, credit limit and configuration. The customer dialog explains this policy.",
+        "Parent agent owns matching database.ts preview validation changes."
+      ],
+      "tests": [
+        "historical_debt_keeps_hold_and_purchase_limit_unchanged",
+        "manual_customer_account_permission_policy_matches_custom_roles",
+        "first_manual_customer_entry_rolls_back_invalid_or_unauthorized_actions",
+        "account_limit_failure_rolls_back_the_entire_sale"
+      ],
+      "limits": "No native UI PASS claimed; MariaDB authorization/create path compiled but was not run against a disposable MariaDB database."
+    },
+    {
+      "id": "AUDIT-10",
+      "outcome": "IMPLEMENTED_AND_PRODUCTION_HANDLER_MOCK_TESTED",
+      "changes": [
+        "Customer-account Dojo monitoring exposes Cancel Terminal while the monitor is active, then disables repeated requests.",
+        "Cancellation requests feed the existing monitor; they do not dismiss the payment, record cancellation, release the lease early or authorize a new charge.",
+        "An uncertain result preserves the journal, displays a persistent do-not-retry warning and disables submission/payment-method changes in the current dialog, directing the operator to administrator Reports / Payment checks recovery.",
+        "Definitive capture still wins after an operator cancellation; the monitor never sends another card retry after a cancellation decision takes precedence.",
+        "After the final cancelled/failed journal update succeeds, the customer modal replaces temporary cancellation/decline prompts with the confirmed result and states that no account payment was recorded. Uncertain outcomes retain their recovery warning."
+      ],
+      "tests": [
+        "customerDojoIntegration.test.ts executes extracted production takeDojoAccountPayment and cancellation handlers with mock provider/native callbacks, including final cancelled and declined/Return to payment status messages",
+        "dojoSessionFlow.test.ts cancellation, late capture, lease renewal and cancellation-versus-retry cases"
+      ],
+      "limits": "The actual customer-account modal and terminal cancellation were not exercised in native Tauri by this agent. No real charge or provider call was made."
+    },
+    {
+      "id": "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION",
+      "outcome": "IMPLEMENTED_AND_ROUTE_INTEGRATION_TESTED",
+      "changes": [
+        "Customer monitoring now supplies cancelExpiredSandboxDojoPaymentIntent(reference), binding the original durable attempt ID.",
+        "The parent applied the same callback in checkout; an AST/execution regression checks both real production monitor option objects.",
+        "The existing monitor invokes cleanup only for Sandbox plus Expired plus Created, retains the lease, and obtains fresh payment-intent proof after cleanup.",
+        "Cleanup acknowledgement alone remains uncertain; a racing Captured outcome wins even when native cleanup rejects. Live and Unknown environments never invoke sandbox cleanup."
+      ],
+      "tests": [
+        "customerDojoIntegration.test.ts sandbox cancellation, uncertain acknowledgement, late capture, Live/Unknown exclusion, and both route callback bindings",
+        "dojoSessionFlow.test.ts matching provider identity, lease retention/loss, final proof and late capture",
+        "dojoExpiryReview.test.ts existing receipt review/finality safeguards"
+      ],
+      "limits": "Native TIP0 provider integration is reserved for the parent agent. These fixtures are not sandbox UAT or live-payment certification."
+    }
+  ],
+  "verification": {
+    "frontend": {
+      "command": "npx vitest run src/lib/customerDojoIntegration.test.ts src/lib/customerAccountSettings.test.ts src/lib/dojoSessionFlow.test.ts src/lib/dojoExpiryReview.test.ts",
+      "result": "64 tests passed across 4 files after the final Dojo status-message follow-up"
+    },
+    "accountSettingsFollowup": {
+      "command": "npx vitest run src/lib/customerAccountSettings.test.ts src/lib/customerDojoIntegration.test.ts src/lib/taxRateSnapshotIntegration.test.ts",
+      "result": "30 tests passed across 3 files: 6 customer settings, 8 customer Dojo integration, 16 tax snapshot orchestration. No native UI control by this agent."
+    },
+    "nativeLogic": {
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib commerce::tests -- --test-threads=1",
+      "result": "123 reported passed; zero failed. Six optional real_mariadb tests returned before execution because POS_TEST_MYSQL_URI was absent.",
+      "warnings": "Four pre-existing dead-code warnings; no compilation errors."
+    },
+    "typecheck": {
+      "command": "npm run check",
+      "result": "Full check passed both during final tax review and after the customer checkbox follow-up: 0 errors and 0 warnings; Tauri command audit passed (95 frontend commands, 101 registered commands). Earlier concurrent-work diagnostics were resolved by the owning agents."
+    },
+    "safety": "No native UI control, credential access/change, real/provider payment, database restore, production MariaDB write, or Git commit was performed by this agent."
+  }
+}

@@ -279,7 +279,7 @@
     .role-tabs button { min-width: 0; min-height: 58px; padding: .65rem .8rem; display: flex; align-items: center; justify-content: space-between; gap: .5rem; color: var(--text-main); text-align: left; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-panel); cursor: pointer; }
     .role-tabs button:hover { border-color: var(--accent-primary); }
     .role-tabs button.active { color: white; border-color: var(--accent-primary); background: var(--accent-primary); }
-    .role-tabs span { min-width: 0; overflow: hidden; font-size: .84rem; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
+    .role-tabs span { min-width: 0; font-size: .84rem; font-weight: 900; white-space: normal; overflow-wrap: anywhere; line-height: 1.25; }
     .role-tabs small { flex: 0 0 auto; opacity: .78; font-size: .67rem; font-weight: 800; }
     .role-summary { margin-top: .75rem; padding: .8rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; border: 1px solid var(--border-flat); border-radius: .4rem; background: var(--bg-card); }
     .role-summary > div { min-width: 0; display: flex; align-items: center; gap: .8rem; }

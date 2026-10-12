@@ -2,6 +2,7 @@
     import { onMount } from 'svelte';
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+    import DojoSandboxRecovery from '$lib/components/DojoSandboxRecovery.svelte';
     import CustomSelect from '$lib/components/CustomSelect.svelte';
     import { connectionState } from '$lib/stores/connection';
     import { toast } from '$lib/stores/toast';
@@ -15,6 +16,7 @@
         type DojoTerminal,
     } from '$lib/dojo';
     import { loadSumupConfig, saveSumupConfig } from '$lib/sumup';
+    import { switchCardProvider } from '$lib/settingsWriteQueue';
 
     let config: DojoConfig = {
         enabled: false,
@@ -33,10 +35,15 @@
     let terminals: DojoTerminal[] = [];
     let terminalStatus: DojoTerminal | null = null;
     let loading = true;
+    let loadFailed = false;
     let saving = false;
+    let switching = false;
     let terminalBusy = false;
     let removingSecret = false;
     let showRemoveSecretConfirm = false;
+    let showSandboxRecovery = false;
+    $: providerBusy = loading || loadFailed || saving || switching || terminalBusy || removingSecret;
+    function operationBusy() { return loading || loadFailed || saving || switching || terminalBusy || removingSecret; }
 
     $: terminalOptions = [
         ...(!terminals.some((terminal) => terminal.id === config.terminalId) && config.terminalId
@@ -54,15 +61,19 @@
         && (apiKey.trim() || config.apiKeyConfigured),
     );
 
-    onMount(async () => {
+    async function refreshConfiguration() {
+        loading = true;
         try {
             config = await loadDojoConfig();
+            loadFailed = false;
         } catch (error) {
+            loadFailed = true;
             toast(`Could not load Dojo settings: ${error}`, 'error');
         } finally {
             loading = false;
         }
-    });
+    }
+    onMount(refreshConfiguration);
 
     function selectTerminal(terminalId: string) {
         const terminal = terminals.find((entry) => entry.id === terminalId);
@@ -75,7 +86,7 @@
     }
 
     async function saveConfiguration(enabled = config.enabled, showToast = true): Promise<boolean> {
-        if (saving) return false;
+        if (loading || loadFailed || saving || switching || removingSecret) return false;
         saving = true;
         try {
             config = await saveDojoConfig({
@@ -100,6 +111,7 @@
     }
 
     async function findTerminals() {
+        if (operationBusy()) return;
         if (!(await saveConfiguration(config.enabled, false))) return;
         terminalBusy = true;
         terminalStatus = null;
@@ -119,6 +131,7 @@
     }
 
     async function testTerminal() {
+        if (operationBusy()) return;
         if (!(await saveConfiguration(config.enabled, false))) return;
         terminalBusy = true;
         try {
@@ -135,7 +148,7 @@
     }
 
     async function disableSumupIfNeeded() {
-        const sumup = await loadSumupConfig().catch(() => null);
+        const sumup = await loadSumupConfig();
         if (!sumup?.enabled) return;
         await saveSumupConfig({
             enabled: false,
@@ -149,6 +162,7 @@
     }
 
     async function toggleEnabled() {
+        if (operationBusy()) return;
         if (config.enabled) {
             await saveConfiguration(false);
             return;
@@ -157,16 +171,34 @@
             toast('Complete the Dojo credentials and choose a terminal first', 'error');
             return;
         }
+        switching = true;
+        const submitted = {
+            enabled: true, terminalId: config.terminalId, terminalName: config.terminalName,
+            currency: config.currency, softwareHouseId: config.softwareHouseId,
+            resellerId: config.resellerId, terminalOwnership: config.terminalOwnership, apiKey,
+        };
+        const previousEnabled = config.enabled;
         try {
-            await disableSumupIfNeeded();
-            await saveConfiguration(true);
+            // Fail closed if the other provider cannot be read, before any mutation.
+            await loadSumupConfig();
+            config = await switchCardProvider({
+                enableTarget: () => saveDojoConfig(submitted),
+                disablePrevious: disableSumupIfNeeded,
+                getPreviousEnabled: async () => (await loadSumupConfig()).enabled,
+                restoreTarget: () => saveDojoConfig({ ...submitted, enabled: previousEnabled }),
+            });
+            apiKey = '';
+            toast('Dojo is enabled on this till', 'success');
         } catch (error) {
             toast(`Could not switch the card provider to Dojo: ${error}`, 'error');
+            try { config = await loadDojoConfig(); } catch { /* Visible failure already explains recovery. */ }
+        } finally {
+            switching = false;
         }
     }
 
     async function confirmRemoveSecret() {
-        if (removingSecret) return;
+        if (operationBusy()) return;
         removingSecret = true;
         try {
             config = await clearDojoSecret();
@@ -183,15 +215,16 @@
 
 <MgmtPage title="Dojo" backFallback="/settings/payments">
     <div slot="actions" class="flex flex-wrap gap-3">
-        <button class="btn btn-secondary" disabled={loading || terminalBusy || !config.terminalId} on:click={testTerminal}>
+        <button class="btn btn-secondary" disabled={providerBusy || !config.terminalId} on:click={testTerminal}>
             {terminalBusy ? 'Checking...' : 'Test Terminal'}
         </button>
-        <button class="btn btn-primary" disabled={loading || saving} on:click={() => saveConfiguration()}>
+        <button class="btn btn-primary" disabled={providerBusy} on:click={() => saveConfiguration()}>
             {saving ? 'Saving...' : 'Save Settings'}
         </button>
     </div>
 
     <div class="settings-page-shell">
+        {#if loadFailed}<section class="settings-section" role="alert"><p>Saved Dojo settings could not be loaded. They have not been replaced.</p><button class="btn btn-secondary" disabled={loading} on:click={refreshConfiguration}>Retry loading settings</button></section>{/if}
         <section class="settings-hero">
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -204,7 +237,7 @@
                         <span class="h-3 w-3 rounded-full {config.enabled ? 'bg-success' : 'bg-text-muted'}"></span>
                         {config.enabled ? 'Enabled' : 'Disabled'}
                     </span>
-                    <button class="btn {config.enabled ? 'btn-danger' : 'btn-success'}" disabled={loading || saving} on:click={toggleEnabled}>
+                    <button class="btn {config.enabled ? 'btn-danger' : 'btn-success'}" disabled={providerBusy} on:click={toggleEnabled}>
                         {config.enabled ? 'Disable Dojo' : 'Enable Dojo'}
                     </button>
                 </div>
@@ -226,9 +259,17 @@
                 do not select it on another till. Internet access is still required for Dojo.
             </p>
             {#if config.terminalOwnership !== 'dedicated'}
-                <p class="mt-2 text-sm text-text-muted">To switch an existing shared terminal, reconnect MariaDB once so the app can check that no earlier payment is unfinished. New dedicated setups do not need MariaDB.</p>
+                <p class="mt-2 text-sm text-text-muted">For an existing shared sandbox terminal, use Resolve old sandbox payments below. Shared live terminals need MariaDB once to check for unfinished payments before switching.</p>
             {/if}
         </section>
+
+        {#if config.apiKeyConfigured && config.apiEnvironment === 'Sandbox'}
+            <section class="settings-section">
+                <h3 class="settings-section-title">Old sandbox payments</h3>
+                <p class="mt-2 text-sm text-text-muted">If old test payments block key removal or Dedicated mode, verify them directly with Dojo. This works without MariaDB and keeps the payment history.</p>
+                <button class="btn btn-secondary mt-3" disabled={loading || saving || terminalBusy || removingSecret} on:click={() => showSandboxRecovery = true}>Resolve old sandbox payments</button>
+            </section>
+        {/if}
 
         {#if config.terminalOwnership !== 'dedicated' && $connectionState.mode !== 'multi'}
             <div class="rounded-md border border-warning/60 bg-warning/10 p-4 text-sm font-semibold text-text-main">
@@ -282,7 +323,7 @@
                     <h3 class="settings-section-title">Assigned terminal</h3>
                     <p class="text-sm text-text-muted">Dojo returns terminals attached to the API account. Choose the physical counter terminal for this till.</p>
                 </div>
-                <button class="btn btn-secondary" disabled={terminalBusy || saving} on:click={findTerminals}>
+                <button class="btn btn-secondary" disabled={providerBusy} on:click={findTerminals}>
                     {terminalBusy ? 'Finding...' : 'Find My Terminals'}
                 </button>
             </div>
@@ -310,13 +351,15 @@
             </div>
 
             <div class="mt-4 flex justify-start">
-                <button class="btn btn-danger" disabled={removingSecret || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretConfirm = true}>
+                <button class="btn btn-danger" disabled={providerBusy || (!config.apiKeyConfigured && !apiKey.trim())} on:click={() => showRemoveSecretConfirm = true}>
                     {removingSecret ? 'Removing...' : 'Remove Saved API Key'}
                 </button>
             </div>
         </section>
     </div>
 </MgmtPage>
+
+<DojoSandboxRecovery bind:show={showSandboxRecovery} onFinished={async () => { config = await loadDojoConfig(); terminalStatus = null; }} />
 
 <ConfirmDialog
     bind:show={showRemoveSecretConfirm}

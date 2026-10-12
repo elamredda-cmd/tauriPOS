@@ -4,6 +4,8 @@ import {
     ATTENDANCE_CORRECTION_CONFLICT_CODE,
     ATTENDANCE_CORRECTION_CONFLICT_MESSAGE,
     ATTENDANCE_EXPORT_MAX_ROWS,
+    ATTENDANCE_CLOCK_SKEW_MS,
+    findAttendanceOverlap,
     attendanceCorrectionVersionMatches,
     attendanceCsvCell,
     attendanceDateRange,
@@ -61,6 +63,34 @@ describe('employee attendance helpers', () => {
             '2026-08-01T08:00:00.000Z',
             '2026-08-21T08:00:00.000Z',
         )).toThrow(/7 days/i);
+    });
+
+    it('rejects future manual times beyond the documented clock skew', () => {
+        const now = Date.parse('2026-10-12T12:00:00.000Z');
+        expect(() => validateClosedAttendance('2026-10-12T08:00:00.000Z',
+            new Date(now + ATTENDANCE_CLOCK_SKEW_MS).toISOString(), now)).not.toThrow();
+        expect(() => validateClosedAttendance('2026-10-12T08:00:00.000Z',
+            new Date(now + ATTENDANCE_CLOCK_SKEW_MS + 1).toISOString(), now)).toThrow(/future/);
+    });
+
+    it('checks every other session, treats open sessions as unbounded, and permits adjacent shifts', () => {
+        const row = { id: 'candidate', employeeId: 'worker', status: 'closed' as const,
+            clockInAt: '2026-10-12T08:00:00.000Z', clockOutAt: '2026-10-12T16:00:00.000Z' };
+        const existing = { ...row, id: 'existing' };
+        for (const [clockInAt, clockOutAt] of [
+            ['07:00', '09:00'], ['09:00', '10:00'], ['15:00', '17:00'], ['07:00', '17:00'], ['08:00', '16:00'],
+        ]) {
+            expect(findAttendanceOverlap(row, [{ ...existing,
+                clockInAt: `2026-10-12T${clockInAt}:00Z`, clockOutAt: `2026-10-12T${clockOutAt}:00Z`,
+            }])?.id).toBe('existing');
+        }
+        expect(findAttendanceOverlap(row, [row])).toBeUndefined();
+        expect(findAttendanceOverlap(row, [{ ...existing, employeeId: 'other-worker' }])).toBeUndefined();
+        expect(findAttendanceOverlap(row, [{ ...existing, clockOutAt: row.clockInAt, clockInAt: '2026-10-12T06:00:00Z' }])).toBeUndefined();
+        expect(findAttendanceOverlap(row, [{ ...existing, clockInAt: row.clockOutAt, clockOutAt: '2026-10-12T18:00:00Z' }])).toBeUndefined();
+        expect(findAttendanceOverlap(row, [{ ...existing, status: 'open', clockOutAt: '', clockInAt: '2026-09-05T08:00:00Z' }])?.id).toBe('existing');
+        expect(findAttendanceOverlap({ ...row, status: 'open', clockOutAt: '' }, [{ ...existing, clockInAt: '2026-10-13T08:00:00Z', clockOutAt: '2026-10-13T09:00:00Z' }])?.id).toBe('existing');
+        expect(findAttendanceOverlap(row, [{ ...existing, clockInAt: '2026-10-12T09:00:00+01:00' }])?.id).toBe('existing');
     });
 
     it('round-trips datetime-local values through an ISO timestamp', () => {

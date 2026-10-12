@@ -1,0 +1,519 @@
+{
+  "reportDate": "2026-10-12",
+  "scope": "Source investigation of issues reported by root during native Tauri UI audit",
+  "mutationScope": "Only audit JSON files; no app source or data edits",
+  "findings": [
+    {
+      "id": "OPS-NATIVE-ATTENDANCE-OVERLAP",
+      "severity": "high",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit",
+        "description": "Alan was already clocked in for approximately885hours since5September. Add Record defaulted Alan and now-minus8hours to now. Save Record succeeded with a completed8-hour record overlapping the still-open attendance session."
+      },
+      "title": "Manual attendance records can overlap existing sessions and double-count worked hours",
+      "sourceEvidence": [
+        {
+          "file": "src/lib/attendance.ts",
+          "line": 82,
+          "description": "Closed-record validation only checks date parsing, clock-out after clock-in and session length at most7days; no interval conflict check."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 8228,
+          "description": "Lookup checks the candidate record's own ID; a new ID does not identify another open or closed record for this employee."
+        },
+        {
+          "file": "src/lib/stores/mysql.ts",
+          "line": 3728,
+          "description": "Correction helper performs versioned update or insert without overlap query/locking."
+        },
+        {
+          "file": "src/lib/stores/mysql.ts",
+          "line": 2041,
+          "description": "Generated openEmployeeId unique index prevents two open records, but closed rows have NULL and can overlap an open row."
+        },
+        {
+          "file": "src/lib/stores/sqlite.ts",
+          "line": 774,
+          "description": "SQLite unique index protects only status=open."
+        },
+        {
+          "file": "src/lib/stores/mysql.ts",
+          "line": 3377,
+          "description": "Summary independently SUMs complete closed and current open durations, so overlapping hours can be counted twice."
+        },
+        {
+          "file": "src/lib/stores/sqlite.ts",
+          "line": 2562,
+          "description": "SQLite summary likewise independently SUMs each duration."
+        }
+      ],
+      "impact": "Worked-hours summaries and attendance exports can overstate time and lead to incorrect payroll. Optimistic record versions do not prevent inserting a separate overlapping record.",
+      "suggestedFix": "Validate candidate intervals against every other open/closed session for the same employee, exclude only the edited record ID, and enforce the check atomically in local and shared write paths. Explain the conflicting record and allow managers to correct the existing session before adding another."
+    },
+    {
+      "id": "OPS-NATIVE-WEIGHT-PRICE-LABEL",
+      "severity": "low",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit",
+        "description": "Receipt1000081 displayed Royal Gala Apples · Price changed after manual scale1.25kg at the catalog£2.49/kg. Change Price was only opened/edited then closed, never committed."
+      },
+      "title": "Order detail marks weighed items as Price changed even when their catalog price was used",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 1729,
+          "description": "Manual scale keeps originalPrice as catalog price perkg and sets isPriceOverride:true to store the computed weighted line amount."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 4484,
+          "description": "Completed order-line preserves this flag and also treats differing line amount versus unit price as an override."
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 516,
+          "description": "Order detail unconditionally appends Price changed for isPriceOverride without considering weight display kind or original rate."
+        },
+        {
+          "file": "src/lib/scaleSale.ts",
+          "line": 12,
+          "description": "Manual scale note already identifies the line as a weight sale."
+        }
+      ],
+      "impact": "The order-history detail implies the cashier changed a price, reducing confidence in audit review. The weighted amount itself is consistent with the actual rate; this finding does not show an unintended Change Price commit.",
+      "suggestedFix": "Distinguish weighed line totals from actual unit-price overrides, preferably with an explicit origin/type flag or a weight-aware presentation; retain genuine later changes."
+    },
+    {
+      "id": "OPS-NATIVE-CASH-DETAIL-LABEL",
+      "severity": "low",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit",
+        "description": "After£10 tendered on a£7.11 sale, order details show Paid£7.11, Cash£7.11 and Change£2.89."
+      },
+      "title": "Order payment breakdown does not clearly distinguish cash retained from cash received",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 4382,
+          "description": "cashAmount is intentionally paymentDue, while change is tendered minus paymentDue."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 4458,
+          "description": "Order.amountTendered preserves actual tendered money plus any loyalty amount."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 4496,
+          "description": "Payment.amount is the order total and allocations represent net payment amounts."
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 550,
+          "description": "Paid cell shows net payment.amount."
+        },
+        {
+          "file": "src/routes/orders/+page.svelte",
+          "line": 553,
+          "description": "Breakdown labels net allocation.cash as Cash and separately shows Change."
+        },
+        {
+          "file": "src/lib/receiptPayments.ts",
+          "line": 91,
+          "description": "Physical receipt tender rows reconstruct cash received as net cash allocation plus change for sales."
+        }
+      ],
+      "impact": "The totals are consistent with accounting, but the Cash label can be interpreted as cash handed over. This is a presentation ambiguity, not an observed financial mismatch.",
+      "suggestedFix": "Show Cash received£10.00, Change£2.89 and Cash retained£7.11 in order details, preserving existing net allocations for reports."
+    },
+    {
+      "id": "OPS-SOURCE-ATTENDANCE-FUTURE",
+      "severity": "medium",
+      "confirmed": false,
+      "runtimeEvidence": null,
+      "title": "Manual attendance validation has no future-date guard",
+      "sourceEvidence": [
+        {
+          "file": "src/lib/attendance.ts",
+          "line": 82,
+          "description": "Validator accepts any valid increasing pair of dates within7days regardless of current time."
+        },
+        {
+          "file": "src/routes/attendance/+page.svelte",
+          "line": 547,
+          "description": "Clock-in and clock-out datetime inputs have no max attribute."
+        },
+        {
+          "file": "src/lib/stores/mysql.ts",
+          "line": 3728,
+          "description": "Insert/correction write helper does not compare timestamps with server time."
+        }
+      ],
+      "impact": "A manager can potentially save completed work that has not happened yet, affecting summaries/exported hours.",
+      "verificationNeeded": "Enter a non-overlapping future1-hour interval for a test employee and attempt Save Record. This agent did not perform the native action.",
+      "suggestedFix": "If attendance records describe completed work, reject future clock-in/out using authoritative time while allowing a small documented clock-skew tolerance."
+    },
+    {
+      "id": "OPS-NATIVE-CUSTOMER-ACCOUNT-INITIALIZATION",
+      "severity": "medium",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit, screenshot 44",
+        "description": "A newly created QA Audit 12 October customer opened with balance £0, status On hold and no activity. Opening Balance was enabled. Posting a valid £2 opening balance with a reason failed: Customer Pay Later account was not found."
+      },
+      "title": "New customer accounts expose ledger actions before their persisted account row exists",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 439,
+          "description": "Customer creation calls saveCustomerProfile only; it does not initialize customer account configuration."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 3108,
+          "description": "Native standalone customer creation inserts a customers profile, not a customer_accounts row; shared mode likewise commits a customerProfile operation."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 3769,
+          "description": "getCustomerAccount is deliberately side-effect-free. A missing persisted row reads as a disabled zero-balance synthetic account."
+        },
+        {
+          "file": "src/lib/stores/sqlite.ts",
+          "line": 2197,
+          "description": "SQLite selects the account and normalizes an absent row rather than persisting a new account. MariaDB reads follow the same normalization pattern at mysql.ts:4952."
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1918,
+          "description": "Opening Balance, Increase Owed and Reduce / Add Credit are enabled based on permissions and saving state, without checking whether account.createdAt identifies a persisted row."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 4864,
+          "description": "Every local ledger mutation first fetches the existing persisted account; fetch_sqlite_account throws the exact runtime error when it is absent at line 4671. The shared mutation follows the same pattern at line 4949 and throws at 4699."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 7657,
+          "description": "Save Settings explicitly inserts or updates the missing account row. The shared settings path does the same at line 7695."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 20003,
+          "description": "The opening-balance atomicity test initializes and enables its account first, so it does not cover this fresh-customer UI path."
+        }
+      ],
+      "impact": "Valid opening balances and first positive/negative adjustments fail for a freshly created customer until Save Settings creates their account. The missing-row error occurs before balance updates or ledger inserts, so this observed attempt did not change the customer's balance. Browser preview automatically builds an account object during posting and can conceal the native failure.",
+      "otherEntryImpacts": [
+        "The same missing-row requirement applies to charge, adjustment, refund, reversal and payment mutations in both native storage paths.",
+        "For this fresh zero-balance customer, Take Payment is correctly disabled, so the observed initialization defect does not itself initiate a card payment or collect money.",
+        "After an existing persisted account is placed on hold, negative repayments and credit reductions still use the same row and are not blocked merely by isEnabled=false.",
+        "Saving Settings with Pay Later active creates and enables the row and is a current workaround. Saving while still On hold creates it, but positive opening/increase operations encounter the separate enablement-policy mismatch."
+      ],
+      "suggestedFix": "Keep account reads side-effect-free and create a default account atomically on the first authorized ledger action, or provide an explicit account setup step and disable unavailable actions until it completes. Do not silently enable Pay Later when merely creating the account, and preserve shared row locking, idempotency, customer existence and ledger guards. Add native tests for a newly created customer with no account row."
+    },
+    {
+      "id": "OPS-SOURCE-CUSTOMER-HOLD-ADJUSTMENT-POLICY",
+      "severity": "medium",
+      "confirmed": false,
+      "runtimeEvidence": null,
+      "title": "Account-on-hold wording and browser preview disagree with native opening/increase adjustment rules",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1918,
+          "description": "Opening Balance and Increase Owed remain enabled for held accounts."
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1934,
+          "description": "On hold is explained as blocking new charges; the settings section says it controls new account charges, while the empty state at 1964 suggests enabling Pay Later or adding an opening balance as alternatives."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 4618,
+          "description": "Native validator rejects every positive non-reversal entry on a held account, including historical opening balances and manager increases, and applies the purchase credit limit to those entries too."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 3989,
+          "description": "Browser preview only applies enablement and credit-limit restrictions to entryType=charge; historical opening balances and positive adjustments are accepted on held accounts."
+        }
+      ],
+      "impact": "A manager cannot import historical debt or correct an amount upward while keeping Pay Later purchases blocked in native Tauri, despite controls and guidance presenting these as available. A workflow that passes in browser preview can fail natively. Whether historical corrections should obey the purchasing limit is a policy choice that needs a consistent implementation and explanation.",
+      "verificationNeeded": "Save the new customer account settings while leaving On hold selected, then try the £2 Opening Balance again; expected source-backed result is Pay Later account is not enabled. Also verify Increase Owed on a held existing account. Root did not report these follow-up native attempts yet.",
+      "suggestedFix": "Choose and document one policy across native and preview: preferably let authorized historical opening balances and corrections retain the hold status, while restricting new purchase charges; otherwise disable these actions and explicitly explain the required activation and limit. Do not infer enablement from a historical debt import."
+    },
+    {
+      "id": "OPS-NATIVE-SETUP-NO-CANCEL",
+      "severity": "medium",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit, screenshot 47-database-setup",
+        "description": "An already configured till opened Settings > Maintenance > Change Setup / Database Mode. The setup screen showed Single/Multi choices and MariaDB Test Connection/Connect but no Back, Cancel or sidebar navigation. Test Connection succeeded. Native Alt+Left and Command+[ did not return to settings. Root chose a relaunch instead of committing setup changes."
+      },
+      "title": "Database setup traps an existing configured till without a non-mutating return action",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 619,
+          "description": "The maintenance action navigates directly to /setup without distinguishing initial setup from editing a working till's configuration."
+        },
+        {
+          "file": "src/routes/+layout.svelte",
+          "line": 90,
+          "description": "Back Office sidebar visibility explicitly excludes /setup, leaving the fullscreen setup view without the usual navigation."
+        },
+        {
+          "file": "src/lib/permissions.ts",
+          "line": 237,
+          "description": "An authenticated admin is permitted to remain on /setup even when an active administrator already exists; the route guard does not automatically return this maintenance visitor."
+        },
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 647,
+          "description": "Connection form actions only offer Test Connection and Connect. All rendered setup controls were inspected: none navigates back or cancels editing. Other available exits call Continue or complete setup/admin creation."
+        },
+        {
+          "file": "src/lib/stores/connection.ts",
+          "line": 177,
+          "description": "Test Connection is a one-shot SELECT 1 probe and does not save mode/configuration; succeeding does not supply a return action."
+        },
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 443,
+          "description": "The Single POS Continue exit calls saveMode('single'), so it changes the persisted operating/database mode rather than cancelling."
+        }
+      ],
+      "impact": "Merely reviewing or testing the connection prevents the operator from returning through the app's visible controls. They must relaunch or accept a setup operation. Native WebView browser-history shortcuts cannot be relied upon as the only escape.",
+      "suggestedFix": "For an already configured and authenticated till, add a clear Cancel / Back to Settings action that keeps saved mode and configuration untouched. Keep it unavailable during a committed migration or confirmed pending-restore replacement, and preserve first-run/admin-recovery guards."
+    },
+    {
+      "id": "OPS-SOURCE-SETUP-RECONNECT-DATA-ACTIONS",
+      "severity": "medium",
+      "confirmed": false,
+      "runtimeEvidence": null,
+      "title": "Connect on an existing till reruns bootstrap data actions without an explicit reconnect-only path",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 272,
+          "description": "handleConnect has no unchanged-config or existing-till shortcut. It immediately replaces reactive connection state with the draft settings, verifies identity and calls initMysqlDb before selecting a data operation."
+        },
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 159,
+          "description": "Repair is inferred from coarse product/category/customer counts and zero remote orders, not from an explicit administrator choice of data authority."
+        },
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 310,
+          "description": "Connect completes a pending confirmed restore replacement when that marker exists; otherwise it can force-push local data at 325, wipe-and-pull local data at 340, or migrate local data to an empty server at 349. Same host/database/configuration does not bypass these branches."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 11069,
+          "description": "wipeAndPullFromServer checks shop identity, maintenance and incomplete-upload safeguards, then deletes local business tables including customers, account balances/activity, attendance, orders, payments and shifts before a strict full server download. These are real cache mutations, not a connection probe."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 11032,
+          "description": "forcePushToServer is explicitly a repair operation ignoring ordinary timestamps; it validates local data and uses preserve-remote policy for server-owned authorization and corrected attendance rows, but still performs server writes."
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 9285,
+          "description": "Migration to an empty server is guarded against a populated target and uses a controlled import, so the finding does not claim those safety controls are absent."
+        },
+        {
+          "file": "src/routes/setup/+page.svelte",
+          "line": 428,
+          "description": "A failure resets the reactive mode/configuration to null and blocked rather than restoring the previously working state. Earlier schema/data actions may already have occurred; root did not execute this path."
+        }
+      ],
+      "impact": "An administrator using a seemingly ordinary Connect action merely to get out of setup or reconnect the same database can trigger schema work, local cache replacement or server repair/import. Existing identity, maintenance and restore safeguards reduce risk, but the current presentation does not disclose or confirm the selected data action in advance. No data loss or Connect failure was observed in this audit because root deliberately did not click it.",
+      "verificationNeeded": "Exercise reconnect with unchanged saved configuration in an isolated database and compare data, pending sync work and session state before/after; separately test failed connection rollback. This must not be tested against an active shop by clicking Connect just to escape the setup screen.",
+      "suggestedFix": "Separate Edit / Test / Save Connection from first-run bootstrap, repair and migration. Provide reconnect-only behavior for the same configured database, and present an explicit data-authority plan plus backup/confirmation before replacement or force-push. Keep previous configuration usable until the replacement connection succeeds, and preserve appropriate pending-restore guards."
+    },
+    {
+      "id": "OPS-NATIVE-CACHED-SCAN-AGE-GATE-BYPASS",
+      "severity": "high",
+      "priority": "P1",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native Tauri audit, screenshots 50 and 51, manually failed test entry",
+        "description": "Scanning uncached barcode 4343 for sarwhazha, marked isAgeRestricted=true, initially showed Age verification required. Clicking Do Not Add left TOTAL £0. A second scan entered 4343 into the focused scan field and pressed Return; the item appeared in the cart at £6.99 with no pending age prompt and no explicit ID Checked action. Root repeated: Delete Selected restored TOTAL £0, scan field showed value 4343 while cart was empty, then Return alone again added sarwhazha £6.99 without an approval click."
+      },
+      "title": "Rescanning a cached age-restricted product can add it without a deliberate age approval",
+      "sourceEvidence": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 1963,
+          "description": "The focused scan field's Enter handler calls handleSearch but never prevents the default keyboard action or stops propagation."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 625,
+          "description": "The global capture listener deliberately returns while the scan input already owns focus, so this path does not get the preventDefault applied to globally buffered scanner terminators."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 1743,
+          "description": "performProductSearch uses cachedProduct immediately when present; the first uncached search awaits storage. This changes whether the age modal can appear during the scanner Enter's remaining native key sequence."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 1608,
+          "description": "addToCart still checks requiresAgeVerification and sets a pending age-restricted add. Cancellation only clears the pending add; there is no deliberate exemption or remembered verification state that should authorize the second scan."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 435,
+          "description": "A reactive tick explicitly transfers focus to ageRestrictedConfirmButton as soon as a pending gate exists."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6986,
+          "description": "The ID Checked — Add Item button is also the modal's data-modal-initial-focus target and its normal click handler immediately commits the pending item."
+        },
+        {
+          "file": "src/lib/actions/modalFocusTrap.ts",
+          "line": 47,
+          "description": "Modal focus initialization prefers data-modal-initial-focus; its listeners do not implement a fresh-key-release requirement before activating the approval button."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 707,
+          "description": "Product normalization retains isAgeRestricted as a boolean, and productsDB indexing at db.ts:713–752 retains the product object. Source inspection did not find a cache path that intentionally removes the restriction."
+        }
+      ],
+      "mechanismAssessment": "The bypass is confirmed by two native reproductions. The likely mechanism is an unconsumed scan-input Enter combined with synchronous cached lookup and immediate focus on the approving button, allowing the same native keyboard sequence to trigger its default click. No explicit keyup handler confirms age in source. Whether this WebView activates on keypress or keyup was not separately instrumented, so that event-phase detail remains an inference rather than a runtime-proven cause.",
+      "impact": "A marked product can be sold without the cashier deliberately confirming an ID check. The safety gate cannot be relied on after its product has been cached; a successful first scan prompt is not sufficient coverage.",
+      "testCoverageGap": [
+        "ageRestriction.test.ts covers only enforcement settings and product flags.",
+        "checkoutScanner.test.ts covers buffer capture and interruption, not native input Enter and newly focused modal buttons.",
+        "sequentialQueue.test.ts simulates an interactive gate but does not render the age dialog or test native key/default-action sequencing."
+      ],
+      "suggestedFix": "Consume the scan input's Enter default action before starting lookup, reject repeats, and ensure scanner terminators cannot approve a dialog opened by that scan. Give the age dialog safe initial focus, such as its container or Do Not Add, and require a distinct deliberate approval gesture after the opening key sequence has ended. Add native regression coverage for first and cached scans, cancellation/rescan, held Enter, keyboard-wedge scanning, quick-add and weighed restricted items."
+    },
+    {
+      "id": "OPS-NATIVE-PAY-LATER-POOL-TIMEOUT-RECOVERY",
+      "severity": "high",
+      "confirmed": true,
+      "runtimeEvidence": {
+        "source": "Root agent native audit and read-only SQLite verification; screenshot 54 may not contain the short-lived error, so accessibility/action log text is the primary error evidence",
+        "description": "After a Tauri restart, an existing active QA customer account at £0 was selected for a £1.69 0 EGGS Pay Later sale. Confirm showed Saving, then Sale was not completed: pool timed out while waiting for an open connection. Trolley remained and account display was still £0. MariaDB process was alive, Setup Test Connection had recently succeeded, and two preceding cash sales had passed. Read-only SQLite showed no completed Pay Later order but one customer_account_sale intent for order 1019d065-746a-4cff-8921-b21dd3afda56, reserved receipt 1000083, total 169 pence, lastError matching the pool timeout; offline queue was empty. Root made no resubmission or new charge. Restarting the existing Tauri app successfully replayed the same intent: intent count became 0, order 1000083 completed at 169 pence, QA balance became 169 pence, offline queue remained 0 and checkout showed Synced with an empty trolley."
+      },
+      "title": "Pay Later can time out while reserving a sale that later completes on restart, without clearly explaining the pending outcome",
+      "sourceEvidence": [
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 5856,
+          "description": "Account-backed sales in multi mode require authoritative MariaDB completion; ordinary cash sales take the local/outbox path at 5916, so preceding cash success does not verify the same native path."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 742,
+          "description": "connect_mysql_for_pos creates a fresh native pool for each command, max_connections=1 and acquire_timeout=650ms. This is much shorter than the separate frontend Test Connection probe's 1200ms timeout and is a potential cold-connection/load sensitivity, not a proven cause of this particular timeout."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 11215,
+          "description": "commit_new_online_financial_intent commits a durable local receipt and journal before opening the native MySQL pool at 11229. A connection/replay error records lastError and preserves the intent instead of treating the operation as cancelled."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 7473,
+          "description": "Pay Later defensively verifies account/financial guards before starting its transaction. Inspection of guard helpers found sequential pool use: mysql_guarded_preflight_v4_is_current at 1843 acquires one connection and passes that same connection to *_on helpers, then returns it before further pool operations. No nested same-pool acquisition/self-deadlock was found in this inspected path."
+        },
+        {
+          "file": "src-tauri/src/commerce.rs",
+          "line": 11170,
+          "description": "Recovery replays the reserved immutable bundle idempotently, persists the authoritative result locally, then clears the journal. Existing-order relational validation protects against duplicating already committed effects."
+        },
+        {
+          "file": "src/routes/+layout.svelte",
+          "line": 259,
+          "description": "The only frontend recoverOnlineFinancialIntent call is in multi-till startup after schema, identity and epoch reconciliation. Startup replay succeeded in the native follow-up."
+        },
+        {
+          "file": "src/routes/+layout.svelte",
+          "line": 133,
+          "description": "The normal 60-second recovery schedule calls managed-terminal recovery, not customer-account/loyalty/refund online-intent recovery. A successful startup clears the startup retry loop, so a new post-startup financial failure does not automatically enter this journal replay through that timer."
+        },
+        {
+          "file": "src/routes/sync/+page.svelte",
+          "line": 11,
+          "description": "Sync Now, Retry Pending Uploads and Full Repair Sync use ordinary sync/outbox functions, not recoverOnlineFinancialIntent. There is no explicit normal-UI review/retry control for this active financial journal."
+        }
+      ],
+      "causeAssessment": "The pool timeout and pending journal are confirmed. The exact acquisition that failed was not instrumented. The 650ms fresh-pool budget is a plausible contributing factor; neither server connection exhaustion, a guard self-deadlock nor a permanent MariaDB failure was established. Shell process-list access was denied and root did not try other credentials or bypass that restriction. Restart recovery succeeding shows the operation was recoverable, not permanently lost.",
+      "impact": "A cashier sees Sale was not completed and the old £0 account display, yet the reserved sale can complete later without a new sale action. Re-entering the goods under a new attempt, clearing the visible trolley, or interpreting the message as a cancellation risks operational confusion and duplicate delivery/account expectations. The journal and same-order replay protected this observed test; no duplicate charge or permanent lost sale was observed.",
+      "recoveryOutcome": "PASS after normal app restart: receipt 1000083 completed once and the account became £1.69 owed. Original native Pay Later attempt remains a FAIL due to timeout and unclear pending-state presentation.",
+      "suggestedFix": "Add stage-specific error context and measure native connection/preflight timing before adjusting bounded pool budgets. Preserve immutable idempotent replay. Show an explicit Sale pending verification state with the reserved receipt, warn not to charge/create the sale again, and provide permission-checked Review / Recover for the existing journal from normal UI. Closing or clearing the trolley must not silently imply cancellation of durable intent. Exercise the actual native pool factory under cold startup, slow hardware and concurrency; verify initial failure, same-order recovery and account/report reconciliation."
+    },
+    {
+      "id": "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION",
+      "severity": "medium",
+      "confirmed": true,
+      "title": "Inline sandbox timeout cancellation remains uncertain and requires separate recovery because production callers omit the tested expiry-cleanup callback",
+      "runtimeEvidence": {
+        "source": "Root agent native audit followed by read-only SQLite verification",
+    "description": "A dedicated local-journal Dojo Sandbox VCMLABJTIP0 collection for £1.69 began at 09:18:29 UTC. Root pressed Cancel Terminal approximately one second after Send to Dojo. The native UI briefly displayed Cancellation unconfirmed, then Cancellation requested. Waiting for the Dojo result / Cancelling. No HTTP 411 or other visible transport error was observed. At 09:22:12 UTC, the latest Dojo attempt was still uncertain for 169 pence, updated 09:21:35, with lastError Dojo is not final (terminal Expired, payment intent Created). Local terminal locks were zero. Online financial-intent and offline-queue counts were zero; order count remained 89 and total 138956 pence, so no new completed sale was observed. The Mac had locked before this initial timeout dialog could be inspected, so that initial uncertain state was established by the read-only journal. After unlocking, separate Reports recovery and its final Canceled/cancelled outcome were verified in native Tauri and SQLite as described below."
+      },
+      "sourceEvidence": [
+        {
+          "file": "src/lib/dojoSessionFlow.ts",
+          "line": 208,
+          "description": "Expired plus Created in verified Sandbox can invoke optional cancelExpiredSandboxPayment while keeping the original lease alive. The flow then re-reads the payment intent, accepts Canceled/Reversed as cancellation, and lets a racing Captured result win. Without this callback it throws the uncertain/manual-review error at 243."
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 3730,
+          "description": "The production checkout monitor supplies environment, cancel, reads, lease and shouldCancel, but never supplies cancelExpiredSandboxPayment. The guarded inline sandbox expiry-cleanup branch cannot run here."
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1088,
+          "description": "The customer-account collection monitor also omits cancelExpiredSandboxPayment. This is a source-verified second affected caller; no customer-account card timeout was run in this audit."
+        },
+        {
+          "file": "src/lib/dojoSessionFlow.test.ts",
+          "line": 226,
+          "description": "Unit tests cover sandbox Expired/Created cleanup by supplying a mock callback through setup at 22. They do not verify that the actual route integrations pass the callback."
+        },
+        {
+          "file": "src-tauri/src/dojo.rs",
+          "line": 352,
+          "description": "Terminal cancellation uses PUT /terminal-sessions/{id}/cancel with explicit Content-Length: 0 and an empty body. The native command at 1479 confirms only successful HTTP acknowledgment, not a final Canceled payment result. The previously reported HTTP 411 framing issue is not reproduced by this test."
+        },
+        {
+          "file": "src/lib/dojoSessionFlow.ts",
+          "line": 89,
+          "description": "Cancellation sends once, continues authoritative polling and does not shorten the default 180-second deadline at 58. CancelRequested is not accepted as final cancellation; Captured always wins at 173."
+        },
+        {
+          "file": "src/lib/terminalRecovery.ts",
+          "line": 495,
+          "description": "Separate explicit sandbox recovery exists. It verifies native execution, the saved sandbox key and the unresolved durable journal; acquires a recovery lease; invokes guarded native expired-payment cancellation at 534; and leaves final journal resolution to normal recovery with separated observations. Local dedicated attempts do not require MariaDB."
+        },
+        {
+          "file": "src/routes/reports/+page.svelte",
+          "line": 1749,
+          "description": "Reports / Payment checks conditionally exposes Cancel expired test payment after verified recovery checks. Settings / Payments / Dojo also provides Resolve old sandbox payments. After the Mac was unlocked, root tested the Reports control, observed provider Canceled, waited for separated confirmation, and verified final journal cancelled with no new sale."
+        }
+      ],
+      "causeAssessment": "The production callback omission is source-confirmed and explains why the existing inline sandbox cleanup path was unavailable. Initial native cancellation was acknowledged or displayed as requested, but the provider/journal remained Expired plus Created. This does not prove that Dojo's cancellation API is unsupported or that terminal PUT transport failed; TIP0 is a simulated timeout and Created is not proof of either capture or final cancellation. Separate guarded Reports recovery subsequently succeeded. That later PASS does not resolve the omitted production integration or make the original inline cancel a PASS.",
+      "impact": "A timeout simulation leaves a durable unresolved attempt requiring separate administrator recovery even though an inline guarded cleanup implementation is covered by unit tests. A released terminal lease does not mean the payment journal is resolved. Staff must not create a fresh payment attempt merely because the initial terminal request was acknowledged or timed out.",
+      "observedOutcome": "Initial inline result: UNRESOLVED / uncertain with Expired plus Created and no completed sale. After unlocking: separate Reports > Payment checks > Check payment results > Cancel expired test payment > Cancel test payment recovery PASS. The app first received provider Canceled, waited for separated confirmation, then displayed Payment verification finished. No unresolved payments remain on this till. SQLite corroborated status cancelled, terminal Expired / payment intent Canceled, zero unresolved attempts, locks, online intents and offline queue; order count stayed 89 with sum 138956 pence. No administrator assertion of physical receipt proof or direct force-clearing was used.",
+      "screenshots": ["61-dojo-cancellation.png", "62-expired-dojo-review.png", "63-dojo-sandbox-recovered.png", "64-dojo-cancellation-confirmed.png"],
+      "additionalUiObservation": "The brief Cancellation unconfirmed label can arise from a pre-existing poll publishing waiting before shouldCancel is observed: checkout sets terminalCancelRequested and stage=cancelling at 4233, onMessage resets the stage from the monitor's cancelling flag at 3755, and label 6347 selects Cancellation unconfirmed merely from terminalCancelRequested plus non-cancelling stage. That wording alone is not proof of an API error; this event-order mechanism is an inference rather than instrumented runtime proof.",
+      "suggestedFix": "Decide explicitly whether sandbox Expired/Created cleanup should be automatic or operator-only. If automatic is intended, wire the existing guarded native callback into both route monitors using the current immutable attempt and lease, preserve final provider proof and late-capture precedence, and never extend the behavior to Live/Unknown keys. If operator-only is intended, remove or clearly document the unused integration branch and show a direct permission-checked Review existing payment action with an accurate unresolved-state explanation. Add route-level and native regression coverage for cancel acknowledgment without final proof, TIP0 expiry, recovery, no duplicate sale and absence of MariaDB in dedicated mode. Do not treat the sandbox PUT acknowledgment as a successful cancellation test."
+    }
+  ]
+}

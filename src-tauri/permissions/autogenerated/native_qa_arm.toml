@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-qa-arm"
+description = "Enables the native_qa_arm command without any pre-configured scope."
+commands.allow = ["native_qa_arm"]
+
+[[permission]]
+identifier = "deny-native-qa-arm"
+description = "Denies the native_qa_arm command without any pre-configured scope."
+commands.deny = ["native_qa_arm"]

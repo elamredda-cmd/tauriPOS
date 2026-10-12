@@ -3483,6 +3483,13 @@
 }
 
 @media print {
+    html, body {
+        height: auto !important;
+        min-height: 0 !important;
+        width: auto !important;
+        overflow: visible !important;
+        background: #fff !important;
+    }
     .back-office-route {
         --app-page-gutter: 0;
     }

@@ -239,6 +239,7 @@ fn config_is_ready(config: &SumupStoredConfig) -> bool {
 }
 
 fn require_api_config(app: &AppHandle, require_reader: bool) -> Result<SumupStoredConfig, String> {
+    crate::native_qa::forbid_provider_network(app)?;
     let config = load_config(app)?;
     if config.merchant_code.is_empty() {
         return Err("Enter the SumUp merchant code first".into());
@@ -407,7 +408,8 @@ async fn fetch_transaction(
 }
 
 #[tauri::command]
-pub fn sumup_get_config(app: AppHandle) -> Result<SumupPublicConfig, String> {
+pub async fn sumup_get_config(app: AppHandle) -> Result<SumupPublicConfig, String> {
+    crate::native_qa::checkpoint(&app, "provider.sumup.read").await?;
     let config = load_config(&app)?;
     Ok(SumupPublicConfig::from(&config))
 }
@@ -418,6 +420,7 @@ pub async fn sumup_save_config(
     config: SumupConfigInput,
     mysql_uri: Option<String>,
 ) -> Result<SumupPublicConfig, String> {
+    crate::native_qa::checkpoint(&app, "provider.sumup.save").await?;
     let _registration = local_terminal::registration_guard(&app).await?;
     let api_key = config.api_key.unwrap_or_default().trim().to_string();
     let affiliate_key = config.affiliate_key.unwrap_or_default().trim().to_string();

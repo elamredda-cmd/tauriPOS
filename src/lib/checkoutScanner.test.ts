@@ -1,5 +1,41 @@
-import { describe, expect, it } from 'vitest';
-import { CheckoutScannerBuffer } from './checkoutScanner';
+import { describe, expect, it, vi } from 'vitest';
+import { CheckoutScannerBuffer, handleCheckoutSearchKeydown } from './checkoutScanner';
+
+describe('focused checkout input keyboard submission', () => {
+    function keydown(overrides: Partial<KeyboardEvent> = {}): KeyboardEvent {
+        return {
+            key: 'Enter', repeat: false, isComposing: false,
+            preventDefault: vi.fn(), stopPropagation: vi.fn(), ...overrides,
+        } as unknown as KeyboardEvent;
+    }
+
+    it('consumes Enter before a cached lookup can synchronously open its age gate', () => {
+        const event = keydown();
+        const submit = vi.fn(() => {
+            expect(event.preventDefault).toHaveBeenCalledOnce();
+            expect(event.stopPropagation).toHaveBeenCalledOnce();
+        });
+        handleCheckoutSearchKeydown(event, submit);
+        expect(submit).toHaveBeenCalledOnce();
+    });
+
+    it('consumes repeated Enter without looking up or adding another product', () => {
+        const event = keydown({ repeat: true });
+        const submit = vi.fn();
+        handleCheckoutSearchKeydown(event, submit);
+        expect(event.preventDefault).toHaveBeenCalledOnce();
+        expect(event.stopPropagation).toHaveBeenCalledOnce();
+        expect(submit).not.toHaveBeenCalled();
+    });
+
+    it.each([{ key: '4' }, { isComposing: true }])('leaves ordinary text/IME input alone: %o', overrides => {
+        const event = keydown(overrides);
+        const submit = vi.fn();
+        handleCheckoutSearchKeydown(event, submit);
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(submit).not.toHaveBeenCalled();
+    });
+});
 
 function scan(buffer: CheckoutScannerBuffer, barcode: string, start = 0, gap = 15) {
     for (const [index, character] of [...barcode].entries()) {

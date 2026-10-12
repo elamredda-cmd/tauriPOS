@@ -14,7 +14,7 @@
         type Payment,
     } from '$lib/stores/db';
     import { getOrdersPage, getProductsByIds } from '$lib/stores/database';
-    import { getScaleSaleDisplay } from '$lib/scaleSale';
+    import { getScaleSaleDisplay, hasActualPriceOverride } from '$lib/scaleSale';
     import { getReceiptDesign } from '$lib/receipt';
     import { paymentAllocationLabels, receiptTenderBreakdown } from '$lib/receiptPayments';
     import { getReceiptPrinterConfig, printEscposReceipt } from '$lib/printers';
@@ -513,7 +513,7 @@
                                 {@const scaleDisplay = getScaleSaleDisplay(line.notes, line.quantity, line.unitPrice, line.originalPrice)}
                                 <tr>
                                     <td class="order-line-product">
-                                        <strong title={`${line.productName}${line.isPriceOverride ? ' · Price changed' : ''}`}>{line.productName}{line.isPriceOverride ? ' · Price changed' : ''}</strong>
+                                        <strong title={`${line.productName}${hasActualPriceOverride(line) ? ' · Price changed' : ''}`}>{line.productName}{hasActualPriceOverride(line) ? ' · Price changed' : ''}</strong>
                                         {#if line.notes}<small title={line.notes}>{line.notes}</small>{/if}
                                     </td>
                                     <td>{scaleDisplay.label}</td>
@@ -550,7 +550,12 @@
                                     <td class="money {payment.amount < 0 ? '!text-danger' : ''}">{formatMoney(payment.amount)}</td>
                                     <td>
                                         <div class="payment-allocation-list">
-                                            {#if allocation.cash}<span><small>Cash</small><strong>{formatMoney(allocation.cash)}</strong></span>{/if}
+                                            {#if allocation.cash}
+                                                {#if allocation.cash > 0}
+                                                    <span><small>Cash received</small><strong>{formatMoney(allocation.cash + Math.max(0, payment.changeGiven || 0))}</strong></span>
+                                                    <span><small>Cash retained</small><strong>{formatMoney(allocation.cash)}</strong></span>
+                                                {:else}<span><small>Cash refund</small><strong>{formatMoney(allocation.cash)}</strong></span>{/if}
+                                            {/if}
                                             {#if allocation.card}<span><small>Card</small><strong>{formatMoney(allocation.card)}</strong></span>{/if}
                                             {#if payment.tipsAmount}<span><small>Tip</small><strong>{formatMoney(payment.tipsAmount)}</strong></span>{/if}
                                             {#if payment.serviceChargeAmount}<span><small>Service charge</small><strong>{formatMoney(payment.serviceChargeAmount)}</strong></span>{/if}
@@ -771,7 +776,7 @@
     }
     :global(.back-office-route) .orders-table {
         width: 100% !important;
-        min-width: 560px !important;
+        min-width: 730px !important;
         display: table !important;
         table-layout: fixed;
     }
@@ -821,10 +826,10 @@
         text-overflow: ellipsis;
         white-space: nowrap;
     }
-    :global(.back-office-route) .orders-table :is(th, td):nth-child(1) { width: 8%; }
+    :global(.back-office-route) .orders-table :is(th, td):nth-child(1) { width: 112px !important; }
     :global(.back-office-route) .orders-table :is(th, td):nth-child(2) { width: 18%; }
     :global(.back-office-route) .orders-table :is(th, td):nth-child(3) { width: 14%; }
-    :global(.back-office-route) .orders-table :is(th, td):nth-child(4) { width: 26%; }
+    :global(.back-office-route) .orders-table :is(th, td):nth-child(4) { width: 21%; }
     :global(.back-office-route) .orders-table :is(th, td):nth-child(5) { width: 9%; }
     :global(.back-office-route) .orders-table :is(th, td):nth-child(6) { width: 14%; }
     :global(.back-office-route) .orders-table :is(th, td):nth-child(7) { width: 11%; }

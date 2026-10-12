@@ -184,7 +184,7 @@ export async function monitorDojoSession(options: DojoSessionFlowOptions): Promi
                                 if (active && declineDecision === null) declineDecision = retry;
                             });
                         }
-                        if (declineDecision === true) {
+                        if (declineDecision === true && !options.shouldCancel?.()) {
                             options.onDeclineDismiss?.();
                             publish('Retrying the same payment. Ask the customer to use another card.');
                             terminalSessionId = await options.retry();

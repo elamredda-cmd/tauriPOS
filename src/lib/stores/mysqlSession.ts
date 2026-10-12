@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type Database from '@tauri-apps/plugin-sql';
 
-export async function withMysqlSession<T>(mysqlUri: string, purpose: 'report' | 'schema', operation: (database: Database) => Promise<T>): Promise<T> {
+export async function withMysqlSession<T>(mysqlUri: string, purpose: 'report' | 'schema' | 'attendance' | 'catalogue', operation: (database: Database) => Promise<T>): Promise<T> {
     const token = await invoke<string>('open_mysql_session', { mysqlUri, purpose });
     const database = {
         select: async <R>(sql: string, values: unknown[] = []): Promise<R> => {

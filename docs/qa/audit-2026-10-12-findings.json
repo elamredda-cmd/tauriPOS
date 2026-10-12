@@ -1,0 +1,1273 @@
+{
+  "schemaVersion": 1,
+  "title": "Independent consolidated audit findings",
+  "auditDate": "2026-10-12",
+  "sourceRoot": "/Users/elamreda/Desktop/Tauri for Svelte POS",
+  "auditMode": "report_only; no product source, service, UI or live app-data mutations by this agent",
+  "provenance": {
+    "authorTask": "/root/audit_admin_regressions",
+    "inventories": [
+      "docs/qa/audit-2026-10-12-admin-inventory.json",
+      "docs/qa/audit-2026-10-12-operations-inventory.json",
+      "docs/qa/audit-2026-10-12-settings-inventory.json"
+    ],
+    "originalCandidates": 23,
+    "mergedPairs": [
+      [
+        "ADMIN-S01",
+        "ADMIN-S13"
+      ],
+      [
+        "ADMIN-S03",
+        "SET-SOURCE-02"
+      ]
+    ],
+    "excludedCandidates": [
+      "ADMIN-S05",
+      "ADMIN-S09"
+    ],
+    "independentlyAddedFindings": [
+      "AUDIT-09",
+      "AUDIT-21"
+    ],
+    "nativeLog": "docs/qa/audit-2026-10-12/native-actions.json",
+    "nativeEvidenceSnapshot": {
+      "entries": 149,
+      "lastEntryIndex": 148,
+      "lastAction": {
+        "index": 148,
+        "time": "2026-10-12T08:32:06.565Z",
+        "route": "tauri://localhost/",
+        "action": "RECENT TRANS",
+        "result": "observed"
+      },
+      "isFinalRun": false,
+      "note": "Parent owns native testing. This is a partial evidence snapshot, not a claim that every page/button was tested. Later native log entries supersede this snapshot."
+    },
+    "nativeAdditionalRootEvidence": {
+      "outsideSavedSnapshot": true,
+      "defect": "AUDIT-21",
+      "screenshot": "docs/qa/audit-2026-10-12/screenshots/19-orphan-customer-keyboard.png",
+      "note": "Root reported this after its current saved149-entry native log snapshot; later root evidence is authoritative."
+    }
+  },
+  "evidenceVocabulary": {
+    "source_confirmed": "The current source implements the described path/control gap. Does not by itself establish a reproduced native failure or live database outcome.",
+    "isolated_logic_confirmed": "Actual extracted TypeScript handlers or imported pure parser executed with in-memory mocks; no live DB, OS hardware, app UI or provider calls.",
+    "native_observed": "Root recorded an action and accessibility state. Only the exact visible claim may be inferred; an action alone is not PASS.",
+    "native_pass": "Root explicitly recorded PASS for the named scenario; not transferable to all buttons/routes or failure modes.",
+    "enhancement": "Intentional or missing capability requiring product prioritization, not necessarily defective behavior."
+  },
+  "coverage": {
+    "sourceRouteInventories": {
+      "admin": 17,
+      "operations": 7,
+      "settings": 19,
+      "settingsRedirects": 1
+    },
+    "controlCountsByOriginalMethod": {
+      "admin": {
+        "routes": 17,
+        "routeControlTemplates": 239,
+        "nativeRouteElementTemplates": 183,
+        "sharedComponentControlTemplates": 52,
+        "findings": 13
+      },
+      "operations": {
+        "controlFamilies": 200
+      },
+      "settings": {
+        "svelteRoutes": 19,
+        "redirectRoutes": 1,
+        "controlFamilies": 185,
+        "templateSiteTotals": {
+          "button": 164,
+          "link": 4,
+          "input": 81,
+          "nativeSelect": 7,
+          "textarea": 7,
+          "customSelect": 33,
+          "touchDigitPad": 3,
+          "touchKeyboardButton": 2,
+          "searchField": 1,
+          "details": 4
+        },
+        "countMethod": "Literal tag sites in19 +page.svelte files. Loops, inherited Back, Modal/ConfirmDialog/CustomSelect/SearchField/TouchDigitPad internals and conditionally hidden states mean runtime counts differ. A control family explicitly lists its repeated choices when fixed."
+      }
+    },
+    "note": "Control-template/family counts use different inventory methods and conditional/repeated controls; do not add them and call the result tested physical buttons."
+  },
+  "summary": {
+    "actionableFindings": 21,
+    "priorityCounts": {
+      "P1": 1,
+      "P2": 14,
+      "P3": 6
+    },
+    "isolatedLogicReproductions": 6,
+    "nativeFindingEvidence": 2,
+    "nativeFullFailureReproductions": "One orphan touch-keyboard lifecycle defect was reproduced by root in native customer and attendance/navigation scenarios. Data/write-race findings were not fault-injected against the live native database.",
+    "interpretation": "Fix transaction safety, provider switching and async save/draft issues first. UI labels, touch-pad consistency and bounded-history enhancements follow. No fixes are included in this report."
+  },
+  "automatedChecks": [
+    {
+      "command": "npm run check",
+      "status": "passed",
+      "tauriAudit": {
+        "frontendCommands": 95,
+        "registeredCommands": 101,
+        "allPermitted": true
+      },
+      "svelteErrors": 0,
+      "svelteWarnings": 0
+    },
+    {
+      "command": "npx vitest run",
+      "status": "passed",
+      "testFilesPassed": 75,
+      "testFilesSkipped": 1,
+      "testsPassed": 1018,
+      "testsSkipped": 2,
+      "durationSeconds": 7.2,
+      "notes": [
+        "Experimental Node SQLite warnings; no failed tests.",
+        "No live shop DB selected."
+      ]
+    },
+    {
+      "status": "skipped",
+      "tests": [
+        {
+          "file": "src/lib/stores/schemaUpgrade.integration.test.ts",
+          "name": "initializes a fresh schema and skips DDL/repairs on the next startup",
+          "requires": "POS_TEST_MYSQL_DATABASE with disposable pos_audit_/pos_test_ schema"
+        },
+        {
+          "file": "src/lib/stores/mysql.test.ts",
+          "name": "installs the current attendance guards on a configured MariaDB",
+          "requires": "POS_TEST_MYSQL_HOST, POS_TEST_MYSQL_USER, POS_TEST_MYSQL_DATABASE"
+        }
+      ]
+    },
+    {
+      "command": "cargo test",
+      "status": "not-run-by-this-agent",
+      "reason": "Root owns native app/runtime; no concurrent native build load added."
+    }
+  ],
+  "targetedChecks": [
+    {
+      "id": "FIXTURE-01",
+      "status": "confirmed",
+      "method": "Current categoryUsage/loadCategoryUsage/confirmDel handlers extracted and transpiled, run in a Node VM with a rejecting usage-query mock and empty usage map.",
+      "result": {
+        "confirmationOpens": true,
+        "target": "used-category-fixture"
+      },
+      "limits": "No Delete action, tombstone or database mutation was executed."
+    },
+    {
+      "id": "FIXTURE-02",
+      "status": "confirmed",
+      "method": "Current Dojo saveConfiguration/disableSumupIfNeeded/toggleEnabled handlers extracted and transpiled; old SumUp config enabled, new Dojo save mock rejects.",
+      "result": {
+        "previousProviderEnabled": false,
+        "newProviderEnabled": false
+      },
+      "limits": "In-memory configuration only; no API key read/written, no real provider call."
+    },
+    {
+      "id": "FIXTURE-03",
+      "status": "confirmed",
+      "method": "Current Suppliers Save handler extracted and transpiled; two calls wait on independent mocked upserts before resolving.",
+      "result": {
+        "writeCount": 2,
+        "optimisticRows": 2,
+        "duplicateIds": true
+      },
+      "limits": "Confirms duplicate in-memory supplier rows, not duplicate persistent supplier records."
+    },
+    {
+      "id": "FIXTURE-04",
+      "status": "confirmed",
+      "method": "Current Fonts updateSetting/markPending/clearPending/restorePreviousSetting handlers extracted and transpiled; B write resolves, then prior A rejects.",
+      "result": {
+        "persistedValue": "B",
+        "uiValue": "base",
+        "pendingKeys": []
+      },
+      "limits": "Pure in-memory mocked ordering; native UI/config-write failure not injected."
+    },
+    {
+      "id": "FIXTURE-05",
+      "status": "confirmed",
+      "method": "Current Generate PLU handler extracted and transpiled; query pending, currentItem replaced with draft-b, query resolves54321.",
+      "result": {
+        "currentItemId": "draft-b",
+        "currentItemPlu": "54321"
+      },
+      "limits": "No real product or PLU reservation mutation."
+    },
+    {
+      "id": "FIXTURE-06",
+      "status": "confirmed",
+      "method": "Import current pure barcodeRules.ts with Node experimental type stripping, test valid code and changed check digit against checked/unchecked rules.",
+      "result": {
+        "validBarcode": "2312345002501",
+        "invalidBarcode": "2312345002502",
+        "invalidDigitValid": false,
+        "checkedRuleRejects": true,
+        "uncheckedRuleAccepts": true
+      },
+      "limits": "Confirms parser behavior; native tester label is source-inspected, not UI-tested."
+    },
+    {
+      "id": "NEGATIVE-CONTROL-01",
+      "status": "candidate_retracted",
+      "method": "Deferred-Promise JavaScript assignment using the same currentItem.image = await compression shape, followed by new currentItem object before resolution.",
+      "result": {
+        "oldDraftReceivesImage": true,
+        "newDraftReceivesImage": false
+      },
+      "limits": "Language-semantics fixture; supports retracting the claimed wrong-draft image upload, not a full image-workflow PASS."
+    }
+  ],
+  "nativeSnapshotVerdicts": [
+    {
+      "route": "/",
+      "action": "Attendance header; staff selection; digit 0–9; 8-digit cap; backspace; clear",
+      "result": "PASS",
+      "detail": "1–2–3 pad opened, max8 masked digits, backspace 8→7, clear returns empty disabled Sign in.",
+      "index": 0
+    },
+    {
+      "route": "/",
+      "action": "DRAWER",
+      "result": "BLOCKED_HARDWARE",
+      "detail": "Configured Windows print-spooler drawer reports explicit unsupported macOS error; no physical drawer test possible.",
+      "index": 4
+    },
+    {
+      "route": "/",
+      "action": "Hold / other-till tab / this-till tab / retrieve",
+      "result": "PASS",
+      "detail": "£7.11 trolley held, restored with both lines and 3 units; held count returned to 0 and status Synced.",
+      "index": 126
+    },
+    {
+      "route": "/",
+      "action": "Customer search/select/close/reopen",
+      "result": "PASS",
+      "detail": "KASIA persisted; disabled pay-later showed the reason.",
+      "index": 136
+    }
+  ],
+  "findings": [
+    {
+      "id": "AUDIT-01",
+      "originIds": [
+        "ADMIN-S01",
+        "ADMIN-S13"
+      ],
+      "priority": "P1",
+      "title": "Category/tax deletion eligibility is not enforced atomically",
+      "routes": [
+        "/categories",
+        "/tax-rates"
+      ],
+      "category": "data_integrity",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_category_query_failure_opens_confirmation",
+        "native": "destructive_or_concurrent_database_reproduction_not_run"
+      },
+      "sources": [
+        {
+          "file": "src/routes/categories/+page.svelte",
+          "line": 59,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/categories/+page.svelte"
+        },
+        {
+          "file": "src/routes/categories/+page.svelte",
+          "line": 134,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/categories/+page.svelte"
+        },
+        {
+          "file": "src/lib/stores/database.ts",
+          "line": 3156,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/stores/database.ts"
+        },
+        {
+          "file": "src/lib/stores/sqlite.ts",
+          "line": 133,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/stores/sqlite.ts"
+        },
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 59,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        },
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 78,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        }
+      ],
+      "reason": "Category usage-read failure is swallowed and missing counts default to zero, so a used category can reach Delete confirmation. Category and tax usage/default checks are performed only before confirmation; generic deletion writes the delete/tombstone without a transaction-time product-usage/default recheck. The product schemas do not declare category/tax foreign keys.",
+      "impact": "A failed first usage query or a concurrent product assignment can leave products referring to a deleted category/tax rate. This is a potential data-integrity failure, not a reproduced live database deletion.",
+      "recommendation": "Fail closed when category usage cannot be read. Revalidate usage/default eligibility in the same authoritative transaction as deletion, including shared-till writes.",
+      "testEvidence": [
+        "FIXTURE-01"
+      ],
+      "verificationNext": "Use an isolated disposable database to attempt deletion after a usage-query failure and a concurrent assignment; assert that no delete or tombstone is committed."
+    },
+    {
+      "id": "AUDIT-02",
+      "originIds": [
+        "SET-SOURCE-04"
+      ],
+      "priority": "P2",
+      "title": "A failed card-provider switch can disable the working provider",
+      "routes": [
+        "/settings/payments/dojo",
+        "/settings/payments/sumup"
+      ],
+      "category": "payment_configuration",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_dojo_enable_failure_disables_both",
+        "native": "provider_failure_not_injected"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/payments/dojo/+page.svelte",
+          "line": 156,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/payments/dojo/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/payments/sumup/+page.svelte",
+          "line": 160,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/payments/sumup/+page.svelte"
+        }
+      ],
+      "reason": "Each enable path first persists enabled:false for the other provider, then awaits saveConfiguration(true). saveConfiguration catches failures and returns false; there is no rollback of the previously enabled provider.",
+      "impact": "If new-provider config validation/journal guard/write fails after the old provider was disabled, card checkout loses its prior working integration until manually re-enabled.",
+      "recommendation": "Atomic or recoverable switching preserving the working provider, or explicit visible recovery instructions/state.",
+      "testEvidence": [
+        "FIXTURE-02"
+      ],
+      "verificationNext": "In a native-config fixture, enable the alternative provider with a failed target save and reload both configurations. Preserve/recover the previously enabled provider."
+    },
+    {
+      "id": "AUDIT-03",
+      "originIds": [
+        "SET-SOURCE-01"
+      ],
+      "priority": "P2",
+      "title": "Failed settings saves can still appear saved",
+      "routes": [
+        "/settings/feedback",
+        "/settings/scale",
+        "/settings/printers",
+        "/settings/advanced"
+      ],
+      "category": "persistence_feedback",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/feedback/+page.svelte",
+          "line": 54,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/feedback/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/scale/+page.svelte",
+          "line": 43,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 221,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 372,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/advanced/+page.svelte"
+        }
+      ],
+      "reason": "Each handler updates settingsDB or storeDB before awaiting upsert. These handlers have no catch, rollback or local error state. Event callbacks also do not consume the rejected promise.",
+      "impact": "A blocked/failed local or shared setting write can leave the operator seeing On, a new target, or a changed tax mode even though it was not persisted; re-entry/restart then changes it back.",
+      "recommendation": "Catch persistence errors, show actionable failure and retain/revert the prior saved state.",
+      "verificationNext": "Reject an isolated settings write and verify a visible error plus retained/reverted saved value; do not fault-inject the real shop database."
+    },
+    {
+      "id": "AUDIT-04",
+      "originIds": [
+        "ADMIN-S02"
+      ],
+      "priority": "P2",
+      "title": "Changing the default tax rate is a partially committing write sequence",
+      "routes": [
+        "/tax-rates"
+      ],
+      "category": "transaction_atomicity",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 27,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        },
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 39,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        }
+      ],
+      "reason": "Save awaits one upsert for each updated rate. Failure after unsetting the old default and before setting the new default leaves a partial change; the store updates only after all writes.",
+      "impact": "Database/default badges can disagree; no default can remain after a failed switch.",
+      "recommendation": "Save the complete default change in one transaction with a busy guard.",
+      "verificationNext": "In an isolated fixture, let the old-default update succeed and fail the new-default update; assert the whole change rolls back and exactly one default remains."
+    },
+    {
+      "id": "AUDIT-05",
+      "originIds": [
+        "ADMIN-S04"
+      ],
+      "priority": "P2",
+      "title": "Item fields can save while the stock change fails",
+      "routes": [
+        "/items"
+      ],
+      "category": "transaction_atomicity",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 467,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 470,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 472,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        }
+      ],
+      "reason": "Save commits updateProductFields then separately setStockLevel. A failed stock write is reported as a Save error after details already committed.",
+      "impact": "Operator retries under the impression nothing was saved; editor base is stale and fields/stock have mixed results.",
+      "recommendation": "Commit both mutations atomically or clearly show the saved portion and refresh the expected editor snapshot.",
+      "verificationNext": "Isolated fixture: permit updateProductFields then fail setStockLevel; confirm atomic rollback or an accurate partial-success explanation and refreshed editor baseline."
+    },
+    {
+      "id": "AUDIT-06",
+      "originIds": [
+        "ADMIN-S03",
+        "SET-SOURCE-02"
+      ],
+      "priority": "P2",
+      "title": "Repeated clicks can overlap saves and hardware tests",
+      "routes": [
+        "/items",
+        "/suppliers",
+        "/tax-rates",
+        "/settings/printers"
+      ],
+      "category": "in_flight_operations",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_duplicate_supplier_optimistic_rows",
+        "native": "repeat_save_or_hardware_overlap_not_run"
+      },
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 426,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 1051,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 644,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/suppliers/+page.svelte",
+          "line": 16,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/suppliers/+page.svelte"
+        },
+        {
+          "file": "src/routes/suppliers/+page.svelte",
+          "line": 79,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/suppliers/+page.svelte"
+        },
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 21,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        },
+        {
+          "file": "src/routes/tax-rates/+page.svelte",
+          "line": 120,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/tax-rates/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 338,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 350,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 362,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 550,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 644,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 705,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/printers/+page.svelte"
+        }
+      ],
+      "reason": "Items, Goods Menu, Suppliers and Tax Rates lack submission handler busy guards; draft controls remain actionable during awaited saves. Receipt/label/drawer test handlers also lack in-flight guards and their buttons are disabled by configuration only.",
+      "impact": "Repeated supplier saves append duplicate optimistic rows with the same ID; this does not prove duplicate persistent supplier records. Other saves can overlap and mutable drafts can change during commit. Hardware actions can send unintended repeated print jobs or drawer pulses.",
+      "recommendation": "Capture an immutable submitted draft, guard handlers, disable edits/dismissal during commit and show Saving. Use a per-operation busy flag for printer/drawer tests.",
+      "testEvidence": [
+        "FIXTURE-03"
+      ],
+      "verificationNext": "Double-click each operation against a delayed mock and assert one call/result. Physical drawer/printer behavior needs the intended Windows transport/hardware."
+    },
+    {
+      "id": "AUDIT-07",
+      "originIds": [
+        "SET-SOURCE-07"
+      ],
+      "priority": "P2",
+      "title": "An older failed font save can undo a newer successful selection",
+      "routes": [
+        "/settings/fonts"
+      ],
+      "category": "asynchronous_ordering",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_actual_handler_ordered_failure",
+        "native": "ordered_write_failure_not_injected"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/fonts/+page.svelte",
+          "line": 133,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/fonts/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/fonts/+page.svelte",
+          "line": 190,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/fonts/+page.svelte"
+        }
+      ],
+      "reason": "Font choices remain enabled while saving. Every update captures a previous row and unconditionally restores it on error, then clears pendingSettings for the key. There is no per-key version or stale-result guard.",
+      "impact": "If earlier requestA fails after later choiceB succeeds, A rollback can overwrite the UI with an older font/size, while the persisted setting remainsB.",
+      "recommendation": "Serialize per-key updates or ignore stale completion/rollback so the newest successful selection remains displayed.",
+      "testEvidence": [
+        "FIXTURE-04"
+      ],
+      "verificationNext": "Native UI with isolated config-write mocks: start choice A then B, complete B, reject A. B must remain displayed and persisted."
+    },
+    {
+      "id": "AUDIT-08",
+      "originIds": [
+        "ADMIN-S06"
+      ],
+      "priority": "P2",
+      "title": "Scale page Add can commit stale page selections",
+      "routes": [
+        "/design/scale"
+      ],
+      "category": "asynchronous_ordering",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 115,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 189,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 203,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 422,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        }
+      ],
+      "reason": "Changing activePageId starts async selected-product loading but leaves previous selectedProducts. Available-product Add is disabled only by saveBusy, then commits selectedProducts under the new activePageId.",
+      "impact": "Quick Add after page switch can overwrite the new page assignments with previous-page products.",
+      "recommendation": "Disable mutations during selectedLoading and derive edits from canonical selected IDs with page/generation checks.",
+      "verificationNext": "Delay selected-product loading, switch page, complete available search, then Add before selected loading finishes; assert previous-page products are not committed to the new page."
+    },
+    {
+      "id": "AUDIT-09",
+      "originIds": [],
+      "priority": "P2",
+      "title": "Generate PLU can write into a different item draft",
+      "routes": [
+        "/items"
+      ],
+      "category": "asynchronous_draft_identity",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_actual_handler_draft_replacement",
+        "native": "delayed_plu_query_not_injected"
+      },
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 340,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 343,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 348,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        }
+      ],
+      "reason": "generateScalePlu awaits findNextAvailableScalePlu(length, currentItem.id), then assigns currentItem.scalePlu after the await without verifying that the same item draft is still open.",
+      "impact": "Closing the editor and opening another item during the lookup can place the generated PLU into the second item draft. The query excluded the first item's ID, not the second.",
+      "recommendation": "Capture the draft ID/generation and apply the result only to the same still-open editor; disable or cancel stale generation requests.",
+      "replacesCandidate": "ADMIN-S05",
+      "testEvidence": [
+        "FIXTURE-05"
+      ],
+      "verificationNext": "Delay the PLU lookup in an isolated fixture, open another draft, then complete it. The second draft must remain unchanged."
+    },
+    {
+      "id": "AUDIT-10",
+      "originIds": [
+        "OPS-SOURCE-01"
+      ],
+      "priority": "P2",
+      "title": "Customer-account card payments have no visible on-screen cancellation",
+      "routes": [
+        "/customers"
+      ],
+      "category": "payment_ui_control",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 1102,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/customers/+page.svelte",
+          "description": "Dojo monitor has an internal cancel callback"
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 2149,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/customers/+page.svelte",
+          "description": "Footer Cancel is disabled while accountSaving"
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 2025,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/customers/+page.svelte",
+          "description": "Modal dismissal disabled while saving or managedcardapproved"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6346,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/+page.svelte",
+          "description": "Checkout has a visible Cancel Terminal control"
+        }
+      ],
+      "reason": "Customer-account Dojo monitoring provides an internal cancel callback, but the displayed entry Cancel/Close are disabled while accountSaving; the entry UI does not render a Cancel Terminal action analogous to checkout.",
+      "impact": "A user who needs to abort an account debt repayment while a terminal is waiting cannot use the same on-screen cancellation available in checkout.",
+      "recommendation": "Expose a cancellation request action while the terminal is waiting, continue reconciliation until cancellation/outcome is confirmed and retain the do-not-retry safeguard.",
+      "verificationNext": "Run a customer-account sandbox timeout/waiting payment in Tauri, inspect all visible controls and confirm that an on-screen cancellation request is available and reconciled. Not tested by this source-only agent."
+    },
+    {
+      "id": "AUDIT-11",
+      "originIds": [
+        "ADMIN-S10"
+      ],
+      "priority": "P2",
+      "title": "Item and Goods Menu dialogs lack the shared keyboard-focus handling",
+      "routes": [
+        "/items"
+      ],
+      "category": "keyboard_accessibility",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 840,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 1066,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 1136,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/items/+page.svelte"
+        },
+        {
+          "file": "src/lib/components/Modal.svelte",
+          "line": 1,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/components/Modal.svelte"
+        }
+      ],
+      "reason": "Custom role=dialog overlays implement backdrop/Escape but do not use modalFocusTrap; Item editor also does not set initial focus or restore opener focus.",
+      "impact": "Keyboard users can tab to background controls and encounter inconsistent modal behavior.",
+      "recommendation": "Apply shared focus action/modal, set initial field focus and restore triggering button.",
+      "verificationNext": "Open each custom modal using keyboard, Tab/Shift+Tab around the dialog, Escape/backdrop-close, and verify focus never escapes and returns to the opener."
+    },
+    {
+      "id": "AUDIT-12",
+      "originIds": [
+        "ADMIN-S07"
+      ],
+      "priority": "P2",
+      "title": "Scale layout edits can be discarded without an exit/reload warning",
+      "routes": [
+        "/design/scale"
+      ],
+      "category": "unsaved_work_usability",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 26,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 226,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 230,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 293,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        }
+      ],
+      "reason": "Save Changes is the only draft persistence. Reload immediately clears dirty; teardown has no beforeNavigate/unload guard.",
+      "impact": "Unsaved add/remove/reorder work disappears when navigating away or reloading latest.",
+      "recommendation": "Add Save/Discard/Cancel on dirty exit and confirmation before Reload Latest discards.",
+      "verificationNext": "Make one unsaved change, navigate away or choose Reload Latest and verify Save/Discard/Cancel confirmation; distinguish saved layout from draft."
+    },
+    {
+      "id": "AUDIT-13",
+      "originIds": [
+        "ADMIN-S08"
+      ],
+      "priority": "P2",
+      "title": "Canceling the OS label print dialog still clears the selected labels",
+      "routes": [
+        "/label-print"
+      ],
+      "category": "print_workflow",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/label-print/+page.svelte",
+          "line": 184,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/label-print/+page.svelte"
+        },
+        {
+          "file": "src/routes/label-print/+page.svelte",
+          "line": 192,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/label-print/+page.svelte"
+        }
+      ],
+      "reason": "System-print branch calls window.print and clearSelected unconditionally after dialog closes. The browser cannot tell printed versus canceled.",
+      "impact": "After Cancel the operator has to rebuild the selected label quantities.",
+      "recommendation": "Keep the selected job after window.print; offer explicit Clear/Mark printed because the browser print API does not return printed versus canceled.",
+      "verificationNext": "Using the native system-print mode with mock selected labels, open the OS print dialog then Cancel. Verify selected quantities survive until explicit Clear/Mark printed."
+    },
+    {
+      "id": "AUDIT-14",
+      "originIds": [
+        "SET-SOURCE-06"
+      ],
+      "priority": "P2",
+      "title": "Some maintenance failures leave an inert or Checking state",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "category": "diagnostic_error_feedback",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 326,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/advanced/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 354,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/advanced/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 379,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/advanced/+page.svelte"
+        }
+      ],
+      "reason": "refreshConflicts, performConflictDismiss and validateSchemas await fallible operations without try/catch. validateSchemas sets Checking databases before the await; on rejection that status stays unchanged.",
+      "impact": "Schema validation can remain visually checking; conflict refresh/dismiss failure may appear inert or escape only as an unhandled rejection.",
+      "recommendation": "Finish busy/status states and show a readable failure with retry.",
+      "verificationNext": "Reject isolated schema/conflict query or dismissal calls; require completed busy state, readable error, and Retry."
+    },
+    {
+      "id": "AUDIT-15",
+      "originIds": [
+        "OPS-SOURCE-02"
+      ],
+      "priority": "P3",
+      "title": "Change Price touch pad has no delete-last-digit button",
+      "routes": [
+        "/"
+      ],
+      "category": "control_consistency",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_needed_for_visible_control_inventory",
+        "native": "control_absence_confirmed_from_accessibility_snapshot; hardware_backspace_untested"
+      },
+      "sources": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5873,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/+page.svelte",
+          "description": "Key list is1–9,00,0,C"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5807,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/+page.svelte",
+          "description": "Quantity key list includes delete"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6311,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/+page.svelte",
+          "description": "Payment key list includes delete"
+        }
+      ],
+      "reason": [
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5873,
+          "description": "Key list is1–9,00,0,C"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 5807,
+          "description": "Quantity key list includes delete"
+        },
+        {
+          "file": "src/routes/+page.svelte",
+          "line": 6311,
+          "description": "Payment key list includes delete"
+        }
+      ],
+      "impact": "Correcting a mistyped price requires clearing and re-entering the full amount in this pad.",
+      "recommendation": "Add the same Delete-last-digit control used by Quantity and Payment while retaining Clear; verify hardware Backspace separately.",
+      "nativeEvidence": [
+        {
+          "log": "docs/qa/audit-2026-10-12/native-actions.json",
+          "entryIndex": 102,
+          "time": "2026-10-12T08:29:49.973Z",
+          "action": "CHANGE PRICE",
+          "result": "observed",
+          "supportedClaim": "The dialog lists 1–9,00,0,Clear and action buttons but no visible Delete-last-digit control. This is not a PASS for price application or accounting."
+        }
+      ],
+      "verificationNext": "Enter a mistyped amount, check hardware Backspace and compare with the payment/quantity touch-pad correction behavior."
+    },
+    {
+      "id": "AUDIT-16",
+      "originIds": [
+        "SET-SOURCE-03"
+      ],
+      "priority": "P3",
+      "title": "Barcode testing labels unchecked check digits Valid",
+      "routes": [
+        "/settings/barcodes"
+      ],
+      "category": "incorrect_status_label",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "confirmed_actual_parser_accepts_bad_digit_when_validation_off",
+        "native": "tester_ui_not_run"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/barcodes/+page.svelte",
+          "line": 422,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/barcodes/+page.svelte"
+        },
+        {
+          "file": "src/lib/barcodeRules.ts",
+          "line": 173,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/barcodeRules.ts"
+        }
+      ],
+      "reason": "Successful tester markup renders Check digit: Valid unconditionally. Parser only checks EAN-13 validity when validateCheckDigit is true.",
+      "impact": "With Validate check digit off, a barcode with an incorrect digit can be accepted by the intended rule but falsely reported as validated.",
+      "recommendation": "Show Not checked when validation is disabled; display Valid only after an actual check.",
+      "testEvidence": [
+        "FIXTURE-06"
+      ],
+      "verificationNext": "With Validate check digit off, enter fixture 2312345002502 in the native tester; expected Check digit: Not checked."
+    },
+    {
+      "id": "AUDIT-17",
+      "originIds": [
+        "SET-SOURCE-05"
+      ],
+      "priority": "P3",
+      "title": "Card-provider read errors are presented as Setup required",
+      "routes": [
+        "/settings/payments"
+      ],
+      "category": "diagnostic_error_feedback",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/settings/payments/+page.svelte",
+          "line": 12,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/payments/+page.svelte"
+        },
+        {
+          "file": "src/routes/settings/payments/+page.svelte",
+          "line": 21,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/settings/payments/+page.svelte"
+        }
+      ],
+      "reason": "Rejected loadDojoConfig/loadSumupConfig only console.warn; null config is later rendered as Setup required.",
+      "impact": "A transient native config read failure looks like absent credentials and encourages unnecessary reconfiguration.",
+      "recommendation": "Separate Could not load/Retry state from genuinely missing setup.",
+      "verificationNext": "Reject an isolated provider config read; show Could not load / Retry rather than absent credentials."
+    },
+    {
+      "id": "AUDIT-18",
+      "originIds": [
+        "ADMIN-S11"
+      ],
+      "priority": "P3",
+      "title": "Suppliers lack search and paging",
+      "routes": [
+        "/suppliers"
+      ],
+      "category": "enhancement",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/suppliers/+page.svelte",
+          "line": 45,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/suppliers/+page.svelte"
+        },
+        {
+          "file": "src/routes/suppliers/+page.svelte",
+          "line": 47,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/suppliers/+page.svelte"
+        }
+      ],
+      "reason": "All supplier rows render directly; no shared search strip/filter/paged query exists.",
+      "impact": "Large supplier lists are harder to find entries in and slower to render.",
+      "recommendation": "Add the consistent search strip and a paged query for growing lists.",
+      "verificationNext": "Evaluate a representative large mock supplier list; add the shared search strip and paging if needed for actual shop size."
+    },
+    {
+      "id": "AUDIT-19",
+      "originIds": [
+        "ADMIN-S12"
+      ],
+      "priority": "P3",
+      "title": "Scale/label bounded suggestions do not explain omitted results",
+      "routes": [
+        "/design/scale",
+        "/label-print"
+      ],
+      "category": "enhancement",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 145,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/design/scale/+page.svelte",
+          "line": 155,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/design/scale/+page.svelte"
+        },
+        {
+          "file": "src/routes/label-print/+page.svelte",
+          "line": 88,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/label-print/+page.svelte"
+        }
+      ],
+      "reason": "Scale takes first100 then excludes assigned IDs and truncates to60; labels take first100. Neither offers paging/count-capped feedback.",
+      "impact": "Available products can be omitted from an unfiltered list; the need to narrow the query is unclear.",
+      "recommendation": "Show bounded-results messaging, deliberate search and paging before client filtering.",
+      "verificationNext": "Use more than100 matching products and assigned scale products; verify explicit capped-results messaging and a way to reach additional matches."
+    },
+    {
+      "id": "AUDIT-20",
+      "originIds": [
+        "OPS-SOURCE-03"
+      ],
+      "priority": "P3",
+      "title": "Stock-receipt history stops at50 without receipt-line detail",
+      "routes": [
+        "/stock-receiving"
+      ],
+      "category": "enhancement",
+      "verification": {
+        "source": "confirmed",
+        "isolatedLogic": "not_run_for_this_finding",
+        "native": "not_reproduced"
+      },
+      "sources": [
+        {
+          "file": "src/routes/stock-receiving/+page.svelte",
+          "line": 132,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/stock-receiving/+page.svelte",
+          "description": "getRecentStockReceipts(50)"
+        },
+        {
+          "file": "src/routes/stock-receiving/+page.svelte",
+          "line": 244,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/stock-receiving/+page.svelte",
+          "description": "History copy explicitly says latest50; static receiptcards"
+        }
+      ],
+      "reason": "The recent-receipt query requests50 and cards do not expose line details. The UI already calls these the latest50, so this is an intentional bounded recent-history surface, not proof of lost historical data.",
+      "impact": "Older delivery investigations require another database/reporting route; item-by-item receipt inspection is unavailable here.",
+      "recommendation": "If delivery investigation belongs here, add paged/filterable history and receipt-line detail while keeping the initial load bounded.",
+      "verificationNext": "Agree scope for older receipt investigation and item-level receipt detail; confirm existing reports cover it or add a deliberate history/detail route."
+    },
+    {
+      "id": "AUDIT-21",
+      "originIds": [],
+      "priority": "P2",
+      "title": "Touch keyboard remains after its form closes and across page navigation",
+      "routes": [
+        "/customers",
+        "/attendance",
+        "/design",
+        "global_checkout_mode"
+      ],
+      "category": "global_overlay_lifecycle",
+      "verification": {
+        "source": "confirmed_missing_lifecycle_cleanup",
+        "isolatedLogic": "not_needed_for_native_reproduction",
+        "native": "confirmed_by_root_native_cua_scenarios"
+      },
+      "sources": [
+        {
+          "file": "src/routes/+layout.svelte",
+          "line": 801,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/+layout.svelte"
+        },
+        {
+          "file": "src/lib/components/GlobalTouchInput.svelte",
+          "line": 165,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/components/GlobalTouchInput.svelte"
+        },
+        {
+          "file": "src/lib/components/GlobalTouchInput.svelte",
+          "line": 204,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/components/GlobalTouchInput.svelte"
+        },
+        {
+          "file": "src/lib/components/GlobalTouchInput.svelte",
+          "line": 232,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/lib/components/GlobalTouchInput.svelte"
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 440,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/customers/+page.svelte"
+        },
+        {
+          "file": "src/routes/attendance/+page.svelte",
+          "line": 329,
+          "absoluteFile": "/Users/elamreda/Desktop/Tauri for Svelte POS/src/routes/attendance/+page.svelte"
+        }
+      ],
+      "reason": "GlobalTouchInput is mounted in the persistent root layout for checkout mode. visible/target are not invalidated when a modal removes its input or the route changes. The disconnected-target check exists inside updateTargetRect, but listeners call that check on resize/scroll/input work rather than DOM removal/navigation. Customer and Attendance Save close their forms without dispatching close-touch-keyboard.",
+      "impact": "An orphan Name or Correction note keyboard/backdrop remains above unrelated page controls, appears to edit a vanished field, blocks/obscures UI and can confuse later Search interaction.",
+      "recommendation": "Close the global touch-input overlay on navigation and when its target disconnects or becomes hidden/ineligible. Integrate cleanup with the shared modal lifecycle or a central observer, clear pending refocus work and preserve only valid field focus. Do not rely on each page remembering to dispatch an event.",
+      "nativeEvidence": [
+        {
+          "reporter": "/root",
+          "scenario": "Customers Add Customer with Name focused → successful Save Customer → customer form closes but Name keyboard stays; subsequent Search exposes the stale Name keyboard.",
+          "screenshot": "docs/qa/audit-2026-10-12/screenshots/19-orphan-customer-keyboard.png",
+          "log": "docs/qa/audit-2026-10-12/native-actions.json",
+          "entryIndex": null,
+          "note": "Root explicitly reported a reproduced defect; corresponding later log entries had not yet been flushed when this synthesis read the149-entry snapshot."
+        },
+        {
+          "reporter": "/root",
+          "scenario": "Attendance Add Record with Correction note focused → Save Record → Back → Design Studio; Correction note keyboard still overlays the new page.",
+          "log": "docs/qa/audit-2026-10-12/native-actions.json",
+          "entryIndex": null,
+          "note": "Root explicitly reported native reproduction; source inspected independently."
+        }
+      ],
+      "verificationNext": "Repeat both successful-save/navigation sequences in checkout mode; also Cancel, Escape, deleted/hidden input, failed Save (keyboard should remain usable), and route changes with keyboard closed. Back-office mode must remain without automatic touch overlay."
+    }
+  ],
+  "reviewedNonFindings": [
+    {
+      "originId": "ADMIN-S05",
+      "originalTitle": "Delayed image upload can attach to a different item draft",
+      "disposition": "retracted; replaced by independently verified Generate PLU race",
+      "reason": "The left-hand object reference of currentItem.image = await compressProductImage(file) is evaluated before await. The supplied image therefore writes to the captured old object, not a new currentItem draft. Image fetch in openEditModal already checks showModal/isEditing/currentItem.id. An async shared-error/toast cleanup may still be worth UX review but is not the claimed wrong-item image attachment.",
+      "sources": [
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 330
+        },
+        {
+          "file": "src/routes/items/+page.svelte",
+          "line": 408
+        }
+      ]
+    },
+    {
+      "originId": "ADMIN-S09",
+      "originalTitle": "ConfirmDialog dismissDisabled does not protect footer actions",
+      "disposition": "excluded; prop semantics are intentionally different from action disablement",
+      "reason": "dismissDisabled prevents generic dismissal, not intentional Accept/Reject choices. Checkout and customer-account signature dialogs set it true permanently while their footer must remain actionable. Secret removal already guards duplicate handler calls and disables its opener. Blindly disabling both footer buttons would break signature verification.",
+      "sources": [
+        {
+          "file": "src/lib/components/ConfirmDialog.svelte",
+          "line": 25
+        },
+        {
+          "file": "src/routes/customers/+page.svelte",
+          "line": 2183
+        },
+        {
+          "file": "src/routes/settings/payments/dojo/+page.svelte",
+          "line": 170
+        }
+      ]
+    },
+    {
+      "id": "ENV-01",
+      "title": "Windows print-spooler receipt/drawer cannot be physically verified on this Mac",
+      "disposition": "environment/hardware limitation, not an inferred product bug",
+      "nativeEvidence": [
+        {
+          "entryIndex": 4,
+          "result": "BLOCKED_HARDWARE"
+        },
+        {
+          "entryIndex": 146,
+          "result": "observed",
+          "claim": "Last Receipt reports Windows print-spooler mode unsupported on macOS and suggests network ESC/POS/device path."
+        }
+      ],
+      "nextStep": "Test actual installed Windows printer/drawer configuration and physical output."
+    }
+  ],
+  "verificationGaps": [
+    "No write-failure, race or destructive fault injection against the real local/shared database.",
+    "Two MariaDB integration tests were skipped because disposable test configuration was not present; this does not verify a Windows upgrade or shared MariaDB migration.",
+    "No Windows native execution or physical receipt/label/drawer/scales verification by this agent.",
+    "Source inventory does not substitute for runtime rendering at target square-screen sizes, both operating modes, populated/empty lists, and modal/keyboard states.",
+    "Root native-actions.json contains ongoing evidence; this independent snapshot does not claim full native payment/cancellation/accounting/report coverage."
+  ]
+}

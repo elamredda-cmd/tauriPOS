@@ -1,0 +1,624 @@
+{
+  "date": "2026-10-12",
+  "scope": "Root-observed native Tauri continuation of the remaining 36 findings; separate original P1 Pay Later timeout recovery",
+  "recordedBy": "Root agent native observations; report assembly by settings agent, which did not control native UI",
+  "status": "NATIVE_SCENARIOS_COMPLETE_WITH_EXPLICIT_PARTIAL_AND_AUTOMATED_LIMITS",
+  "checks": {
+    "frontend": {
+      "passed": 1234,
+      "skipped": 56,
+      "totalTests": 1290,
+      "filesPassed": 95,
+      "filesSkipped": 3,
+      "totalFiles": 98,
+      "databaseOptionalSkipped": 54,
+      "databaseOptionalSeparatelyPassed": 54,
+      "otherOptionalSkippedNotRun": 2
+    },
+    "rust": {
+      "passed": 251,
+      "excluded": 10,
+      "existingWarnings": 4,
+      "databaseOptionalFilteredSeparatelyPassed": 1,
+      "otherOptionalFilteredNotRun": 9
+    },
+    "mariaDb": {
+      "passed": 55,
+      "catalogue": 42,
+      "attendance": 9,
+      "stockCountSql": 3,
+      "genericStockReplay": 1,
+      "unitCasesExcluded": 14
+    },
+    "svelte": {
+      "errors": 0,
+      "warnings": 0
+    },
+    "commandPermissionAudit": {
+      "frontendCommands": 95,
+      "registeredCommands": 101,
+      "passed": true
+    },
+    "diffCheck": "passed",
+    "nativeBundle": "Final normal debug macOS bundle built without the test fault flag and launched successfully",
+    "provisional": false,
+    "note": "Final scopes are not additive. Frontend 56 skips include 54 real-MariaDB cases separately passed (42 catalogue + 9 attendance + 3 stock-count SQL), plus 2 other optional cases not run. Rust 10 filtered cases include the generic-stock MariaDB replay separately passed, plus 9 other optional cases not run. Real database total 55 excludes 14 additional unit cases."
+  },
+  "findings": [
+    {
+      "id": "OPS-SOURCE-CUSTOMER-HOLD-ADJUSTMENT-POLICY",
+      "nativeRetest": "PASS",
+      "native": "Native held QA customer accepted a 200p opening balance and a 100p historical increase without enabling purchases. A 300p cash repayment cleared the balance while the hold remained in place. The final native account view showed Allow Pay Later purchases unchecked, status On hold, balance 0p and points 0.",
+      "nativeEvidence": [
+        "screenshots/26-new-account-opening-held.png",
+        "screenshots/29-new-customer-restored-clear.png",
+        "screenshots/57-customer-held-state-clear-wording.png"
+      ],
+      "limits": "Observed local historical-debt/repayment workflow passed. Shared-MariaDB first-writer concurrency and custom-role authorization rejection were not native UI tested; automated policy checks remain separate."
+    },
+    {
+      "id": "OPS-NATIVE-SETUP-NO-CANCEL",
+      "nativeRetest": "PASS",
+      "native": "Configured native setup exposed Cancel — Back to Settings and returned to Advanced Settings without committing a mode or credential change.",
+      "nativeEvidence": [
+        "screenshots/52-existing-till-setup-cancel-reconnect.png",
+        "screenshots/53-setup-cancel-returned-settings.png"
+      ],
+      "limits": "Configured, authenticated success path observed. Initial setup, pending restore, inactive authentication and running-operation cancellation exclusions are isolated guard tests, not additional native scenarios."
+    },
+    {
+      "id": "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION",
+      "nativeRetest": "PASS",
+      "native": "Native VCMLABJTIP0 sandbox recovery obtained definitive Canceled proof for customer attempt 5bf39884 (300p) and checkout attempt 02873c32 (169p). Neither produced a charge; order count remained 91.",
+      "nativeEvidence": [
+        "screenshots/27-customer-dojo-cancel-visible.png",
+        "screenshots/28-customer-timeout-returned-safe.png",
+        "screenshots/35-checkout-timeout-returned-safe.png"
+      ],
+      "limits": "Dojo sandbox only. Fresh final provider/journal proof, rather than a cancellation-request acknowledgement, established these outcomes. Late capture, Live/Unknown exclusion and uncertain-result branches are automated fixtures, not native live-payment certification."
+    },
+    {
+      "id": "OPS-NATIVE-CUSTOMER-ACCOUNT-INITIALIZATION",
+      "nativeRetest": "PASS",
+      "native": "A newly saved native customer had its missing held account initialized by a 200p opening post. A subsequent 100p increase and 300p cash repayment succeeded; balance returned to zero without changing its purchase hold.",
+      "nativeEvidence": [
+        "screenshots/26-new-account-opening-held.png",
+        "screenshots/29-new-customer-restored-clear.png"
+      ],
+      "limits": "Native local account initialization/ledger workflow passed. MariaDB simultaneous first-writer behavior and unauthorized/invalid rollback branches were not exercised through the native UI."
+    },
+    {
+      "id": "BO-VIS-01",
+      "nativeRetest": "PASS",
+      "native": "Native Back Office order history with 91 populated records displayed receipt buttons within the first column instead of clipping them.",
+      "nativeEvidence": [
+        "screenshots/36-back-office-populated-orders.png"
+      ],
+      "limits": "Observed populated square-screen layout passed. This is not a complete receipt-number-length, zoom or every supported resolution matrix."
+    },
+    {
+      "id": "AUDIT-21",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native new-customer form save closed the on-screen keyboard instead of leaving it orphaned over the next view.",
+      "nativeEvidence": [
+        "screenshots/25-new-customer-save-keyboard-cleanup.png"
+      ],
+      "limits": "Customer form-save path only. Attendance/design modal closure and cross-page navigation are covered by source/target-eligibility fixtures but were not individually native verified."
+    },
+    {
+      "id": "AUDIT-02",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "native": "No native provider-switch failure was injected and no saved provider key or configuration was changed. Confirmed-state recovery is covered by seven provider helper cases plus native source review.",
+      "nativeEvidence": [],
+      "limits": "Recoverable two-provider sequence, not an atomic cross-provider transaction. Before rollback, production rereads the prior provider after an ambiguous write failure; mocked tests cover confirmed-enabled, confirmed-disabled and unreadable outcomes. Native filesystem faults/failed-save branches are not a native PASS; uncertain configurations require reload/confirmation."
+    },
+    {
+      "id": "AUDIT-07",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native font selection saved the L&Bj default choice, then saved the original Legacy choice again and confirmed restoration.",
+      "nativeEvidence": [
+        "screenshots/55-font-save-original-restored.png"
+      ],
+      "limits": "Healthy font saves/restoration were observed. Older-save rejection, rapid overlapping choice order and durable audit failure were simulated in isolated fixtures, not injected into native Tauri."
+    },
+    {
+      "id": "AUDIT-13",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native label selection retained one chosen label until explicit Clear. Print was disabled because no printer was configured.",
+      "nativeEvidence": [
+        "screenshots/62-label-selected-explicit-clear.png"
+      ],
+      "limits": "No native OS print dialog opened, so OS cancellation retention is automated-only. Native selection and explicit Clear were observed; no physical label print was sent."
+    },
+    {
+      "id": "AUDIT-04",
+      "nativeRetest": "PASS",
+      "native": "Native tax default changed Zero → Standard → Zero through the atomic save path. Original default was restored, two tax rates remained and four related audit records were retained.",
+      "nativeEvidence": [
+        "screenshots/46-tax-default-atomic-native.png",
+        "screenshots/47-tax-original-default-restored.png"
+      ],
+      "limits": "Healthy atomic snapshot saves and restoration passed in native Tauri. Compare-and-set conflicts, concurrent editors and commit rejection remain automated checks rather than native fault injection."
+    },
+    {
+      "id": "OPS-SOURCE-SETUP-RECONNECT-DATA-ACTIONS",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native Test Connection and Save & Reconnect Only succeeded on the configured till without entering import, forced-upload or cache-rebuild UI. Counts remained 91 orders, 855 customers and 2 tax rates.",
+      "nativeEvidence": [
+        "screenshots/52-existing-till-setup-cancel-reconnect.png",
+        "screenshots/53-setup-cancel-returned-settings.png"
+      ],
+      "limits": "Observed healthy same-target reconnect preserved data counts. Failed candidate, post-save failure/rollback, changed-server identity and restore branches were isolated/source tests, not native failures; absence of destructive UI is not a full tracing claim for every server operation."
+    },
+    {
+      "id": "AUDIT-10",
+      "nativeRetest": "PASS",
+      "native": "The native customer-account Dojo TIP0 payment displayed Cancel Terminal. An on-screen request returned without an account charge; later final provider/journal verification established Canceled.",
+      "nativeEvidence": [
+        "screenshots/27-customer-dojo-cancel-visible.png",
+        "screenshots/28-customer-timeout-returned-safe.png"
+      ],
+      "limits": "Observed sandbox customer cancellation workflow passed without going to a physical terminal. Final-state wording in the latest rebuild was source verified, not captured again natively. Live card cancellation, late capture and uncertain recovery remain separate automated/provider certification scopes."
+    },
+    {
+      "id": "AUDIT-03",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native feedback toggles saved confirmed off/on values and restored the original setting. Font saves also confirmed the selected value and restored Legacy. Failed saves are no longer treated as confirmed by the shared batch path.",
+      "nativeEvidence": [
+        "screenshots/58-feedback-restored-confirmed.png",
+        "screenshots/55-font-save-original-restored.png"
+      ],
+      "limits": "Native healthy save paths observed. Seven production-function VM tests execute batching/audit policy with mocked transaction boundaries; before-read failure, atomic commit rejection, audit sanitization and publication ordering were not native fault injected. Scale/printer/tax failure paths are not blanket native PASS."
+    },
+    {
+      "id": "AUDIT-09",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "native": "Generate PLU editor-generation and delayed-result protection passed isolated production-handler fixtures; no native delayed PLU result was induced.",
+      "nativeEvidence": [],
+      "limits": "Native close/reopen, same-ID editor reuse and image-read races remain unobserved. Automated stale-generation proof is not a native UI PASS."
+    },
+    {
+      "id": "AUDIT-11",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native Goods dialog initially focused Close, Tab reached search and Escape closed it. Native item editor initially focused Name and Escape closed it.",
+      "nativeEvidence": [
+        "screenshots/44-goods-picker-square.png",
+        "screenshots/56-goods-manager-square-lists.png"
+      ],
+      "limits": "Initial focus, traversal and dismissal observed. Accessibility clicks on openers did not establish keyboard focus, so opener-focus restoration was not native verified; nested pad and full focus-cycle/inertness checks remain source/isolated coverage."
+    },
+    {
+      "id": "AUDIT-05",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native Edit Item for 0EGGS (barcode 5020379111201, old-item-016480) started at stock 0, item tracking off, price 169p. With global stock tracking temporarily on, enabling item tracking and Save Item counted 0→1; UI and database confirmed stock 1/tracking on with queue 0, conflicts 0, intents 0. Reopening, counting 1→0 and disabling item tracking restored stock 0/tracking off/price 169p. Exactly two stock_counted audit rows recorded 0→1 and1→0 with the original expected-count CAS values. Global tracking was restored off.",
+      "nativeEvidence": [
+        "screenshots/63-native-stock-count-confirmed.png",
+        "screenshots/64-native-stock-original-restored.png"
+      ],
+      "limits": "Native healthy count/save and exact restoration passed; native stale-count races, audit failure, cache failure and uncertain COMMIT were not injected. Actual production SQL and native batch/CAS/generic-replay tests cover those boundaries separately. Details and stock remain separate commits with explicit partial-success handling. Shared counted-stock writes intentionally require online authority; legacy queued absolute counts need review/recount, not blind replay."
+    },
+    {
+      "id": "AUDIT-06",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native tax snapshot saves succeeded. Repeated-click submission and hardware transport overlap protection passed isolated handler tests.",
+      "nativeEvidence": [
+        "screenshots/46-tax-default-atomic-native.png",
+        "screenshots/47-tax-original-default-restored.png"
+      ],
+      "limits": "Actual double-click races were mocked, not native induced. Receipt/label/drawer tests are AUTOMATED_ONLY at mocked transport boundaries; no physical printer or drawer job/pulse was sent. Healthy tax saves do not prove duplicate-click or hardware safety natively."
+    },
+    {
+      "id": "AUDIT-12",
+      "nativeRetest": "PASS",
+      "native": "Native scale designer moved the apple later without saving; sidebar Settings triggered the unsaved-change warning. Cancel kept the draft. The apple was moved earlier and Save restored the original order.",
+      "nativeEvidence": [
+        "screenshots/49-scale-unsaved-exit-warning.png"
+      ],
+      "limits": "Observed dirty sidebar navigation, Cancel and save/restoration passed. Reload, OS unload and rejected-save navigation branches remain automated/source coverage."
+    },
+    {
+      "id": "AUDIT-08",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "native": "Selected-page loading/generation and canonical assignment safeguards passed delayed async fixtures; no native Add was raced against a loading page.",
+      "nativeEvidence": [],
+      "limits": "Native delayed loading, stale page completion and incomplete catalogue races were not induced; the protected Add path is automated-only."
+    },
+    {
+      "id": "AUDIT-14",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native Validate Schemas changed to Checking, completed with schemas ready, and re-enabled the control.",
+      "nativeEvidence": [
+        "screenshots/51-schema-validation-completed.png"
+      ],
+      "limits": "Healthy native validation observed. Schema rejection, conflict refresh/dismiss rejection and repeated pending invocation were mocked production-handler tests; failure recovery is not a native fault-injection PASS."
+    },
+    {
+      "id": "VIS-SCALE-ADD-PAGE-CLIPPING",
+      "nativeRetest": "PASS",
+      "native": "Native scale toolbar displayed Add Page fully in fixed page actions outside the horizontally scrolling tab strip. Final normal native 1024×768 Back Office also displayed Royal, Conference, Grapes, Lemons, Limes, tomato and watermelon prices fully. Toolbar actions remained visible and page chips scrolled independently.",
+      "nativeEvidence": [
+        "screenshots/48-scale-toolbar-add-page-visible.png",
+        "screenshots/65-final-scale-price-rows-visible.png"
+      ],
+      "limits": "Original Add Page clipping and final square-screen tile-price-row regressions passed in native Tauri. This does not certify all screen sizes, extreme product names, translations or font/zoom settings; delayed page assignment races are automated-only."
+    },
+    {
+      "id": "VIS-ATTENDANCE-CLOCKED-IN-SUMMARY",
+      "nativeRetest": "PASS",
+      "native": "Native attendance summary displayed Open in this filter 0 while the current user's actual clock status was outside the filtered period, making the scope distinction explicit.",
+      "nativeEvidence": [
+        "screenshots/41-attendance-filter-summary.png"
+      ],
+      "limits": "Observed filtered-period label passed. All date/status/search combinations and live clock-state changes are not a complete native matrix."
+    },
+    {
+      "id": "VIS-PERMISSION-TAB-LABEL",
+      "nativeRetest": "PASS",
+      "native": "Native role-permission tabs showed full wrapped labels including Attendance only at square width.",
+      "nativeEvidence": [
+        "screenshots/40-role-permission-tabs-wrapped.png"
+      ],
+      "limits": "Observed permission tab layout passed. No permissions were changed; every role/translation/zoom variant is not certified."
+    },
+    {
+      "id": "AUDIT-16",
+      "nativeRetest": "PASS",
+      "native": "Native barcode tester used 2312345002502 with unsaved check-digit validation switched off and displayed Not checked. The original saved rule was restored/left unchanged.",
+      "nativeEvidence": [
+        "screenshots/54-barcode-not-checked-label.png"
+      ],
+      "limits": "Observed unchecked-rule label passed. No barcode rule was persisted; parser/rule-matching edge cases remain automated coverage."
+    },
+    {
+      "id": "AUDIT-15",
+      "nativeRetest": "PASS",
+      "native": "Native Change Price used touch Delete last digit to change 169p → 16p, then physical Backspace to change 16p → 1p. Cancel retained the item's original 169p price.",
+      "nativeEvidence": [
+        "screenshots/30-price-pad-backspace.png"
+      ],
+      "limits": "Observed touch/keyboard deletion and cancellation passed. This is not every key sequence or completed discounted/return sale combination."
+    },
+    {
+      "id": "NATIVE-MAINTENANCE-BUSY-LABEL",
+      "nativeRetest": "AUTOMATED_ONLY",
+      "native": "Maintenance button labels are scoped to their own operations in source; no native full-backup/history-delete overlap was run.",
+      "nativeEvidence": [],
+      "limits": "Busy-label predicate was source checked. Full backup, history deletion and destructive maintenance were not executed to verify the shared-lock visual behavior."
+    },
+    {
+      "id": "VIS-GOODS-LIST-HEIGHT",
+      "nativeRetest": "PASS",
+      "native": "Native Goods Menu Manager displayed eight visible rows in the square-screen list instead of a single row.",
+      "nativeEvidence": [
+        "screenshots/56-goods-manager-square-lists.png"
+      ],
+      "limits": "Observed populated manager layout passed. Extremely long names, maximum row counts, alternate font sizes and every viewport remain separate visual scopes."
+    },
+    {
+      "id": "OPS-NATIVE-WEIGHT-PRICE-LABEL",
+      "nativeRetest": "PASS",
+      "native": "Native receipt 1000081 displayed apples at 1.25kg and the catalogue £2.49/kg without a false Price changed label. A genuine DELIA price override retained its disclosure.",
+      "nativeEvidence": [
+        "screenshots/38-weighted-order-no-false-price-change.png"
+      ],
+      "limits": "Observed ordinary weighed calculation and genuine override distinction passed. Historical lines with incomplete metadata retain only distinctions supported by stored data; not every return/legacy line was native checked."
+    },
+    {
+      "id": "OPS-NATIVE-CASH-DETAIL-LABEL",
+      "nativeRetest": "PASS",
+      "native": "Native receipt 1000082 showed Cash received 200p, Cash retained 169p and Change given 31p as distinct values.",
+      "nativeEvidence": [
+        "screenshots/37-order-cash-received-retained.png"
+      ],
+      "limits": "Observed cash-only detail passed. Mixed card/cash, cashback, negative return allocations and every legacy tender shape were not native UI tested."
+    },
+    {
+      "id": "VIS-REPORT-CLOSE-ICON",
+      "nativeRetest": "PASS",
+      "native": "Native period-report preview displayed a visible close X and the close control worked.",
+      "nativeEvidence": [
+        "screenshots/50-period-report-visible-close-icon.png"
+      ],
+      "limits": "Observed preview icon/close workflow passed. Every theme, focus style, font scaling and save-busy close guard is not a complete native visual matrix."
+    },
+    {
+      "id": "BO-VIS-02",
+      "nativeRetest": "PASS",
+      "native": "Native populated staff summary displayed full role names rather than truncating them.",
+      "nativeEvidence": [
+        "screenshots/39-back-office-staff-role-summary.png"
+      ],
+      "limits": "Observed Back Office square-screen summary passed. Other resolutions, localization and unusually long custom labels remain separate visual checks."
+    },
+    {
+      "id": "SET-VISUAL-01",
+      "nativeRetest": "PASS",
+      "native": "Native safe Test Terminal notification appeared at bottom-right with settings header/actions uncovered.",
+      "nativeEvidence": [
+        "screenshots/60-dojo-terminal-available.png"
+      ],
+      "limits": "Observed single safe notification placement passed. Rapid two-notice stacking, every theme/layout save and every viewport are not fully native verified; blocking financial/error dialogs intentionally remain unchanged."
+    },
+    {
+      "id": "AUDIT-17",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native provider overview showed Dojo Enabled and genuinely unconfigured SumUp Setup required after healthy reads.",
+      "nativeEvidence": [
+        "screenshots/59-payment-provider-status.png"
+      ],
+      "limits": "Native healthy read states observed. Read rejection/Retry and fail-closed detail save/removal protections were tested with mocks, not by corrupting or changing provider configuration; saved keys were unchanged."
+    },
+    {
+      "id": "AUDIT-19",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native label catalogue displayed a 76,000-item bounded result set at 100 per page; Next showed 101–200. Scale displayed its bounded 10-item result range.",
+      "nativeEvidence": [
+        "screenshots/61-label-suggestions-next-page.png",
+        "screenshots/48-scale-toolbar-add-page-visible.png"
+      ],
+      "limits": "Native label next-page and displayed scale boundaries observed. Later unassigned scale pages, capped-total edge cases and stale searches remain isolated fixtures, not a full native catalogue traversal."
+    },
+    {
+      "id": "AUDIT-20",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native two-receipt stock history supported search and opened receipt detail containing three lines.",
+      "nativeEvidence": [
+        "screenshots/42-stock-history-searchable.png",
+        "screenshots/43-stock-history-line-details.png"
+      ],
+      "limits": "Native search/detail passed on the small existing history. Traversal beyond 50 receipts is actual SQLite fixture evidence, not a native >50-record scenario. Product names are current catalogue names, not historical snapshots. Final native stock count/save restoration is separately recorded under AUDIT-05."
+    },
+    {
+      "id": "AUDIT-18",
+      "nativeRetest": "PARTIAL_OBSERVATION",
+      "native": "Native supplier page with zero suppliers showed search and empty/paging controls without broken layout.",
+      "nativeEvidence": [
+        "screenshots/45-suppliers-search-pages.png"
+      ],
+      "limits": "Observed empty-state UI only. Populated search, large supplier paging and stale delayed searches are isolated/actual SQLite fixtures, not native large-data traversal."
+    }
+  ],
+  "nativeScenarios": [
+    {
+      "id": "new-customer-account",
+      "title": "New customer: held historical debt and repayment",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "OPS-SOURCE-CUSTOMER-HOLD-ADJUSTMENT-POLICY",
+        "OPS-NATIVE-CUSTOMER-ACCOUNT-INITIALIZATION"
+      ],
+      "evidence": "New held QA account accepted 200p opening + 100p historical adjustment. Purchases stayed held; normal 300p cash repayment returned the balance to 0p.",
+      "screenshots": [
+        "screenshots/26-new-account-opening-held.png",
+        "screenshots/29-new-customer-restored-clear.png",
+        "screenshots/57-customer-held-state-clear-wording.png"
+      ],
+      "limits": "Observed native local workflow, not shared-MariaDB first-writer concurrency or every custom-role permission rejection."
+    },
+    {
+      "id": "customer-tip0-cancel",
+      "title": "Customer Dojo TIP0: visible cancellation and final proof",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "AUDIT-10",
+        "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION"
+      ],
+      "evidence": "Customer sandbox attempt 5bf39884 for 300p displayed Cancel Terminal and received an on-screen cancellation request. It returned without a customer charge; subsequent definitive provider/journal proof was Canceled. No order was added.",
+      "screenshots": [
+        "screenshots/27-customer-dojo-cancel-visible.png",
+        "screenshots/28-customer-timeout-returned-safe.png"
+      ],
+      "limits": "Dojo sandbox only. The returned-state screenshot is not by itself final proof; final proof was checked separately. Latest final-state wording is source verified only. No live-payment certification."
+    },
+    {
+      "id": "checkout-tip0-cancel",
+      "title": "Checkout Dojo TIP0: expiry recovery without a sale",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "OPS-NATIVE-DOJO-SANDBOX-EXPIRY-INTEGRATION"
+      ],
+      "evidence": "Checkout sandbox attempt 02873c32 for 169p reached definitive Canceled proof with no sale. Order count remained 91.",
+      "screenshots": [
+        "screenshots/35-checkout-timeout-returned-safe.png"
+      ],
+      "limits": "Mock sandbox only; late capture and uncertain cancellation branches are automated checks, not native live certification."
+    },
+    {
+      "id": "financial-timeout-recovery",
+      "title": "Pay Later: native original-receipt timeout recovery",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "OPS-NATIVE-PAY-LATER-POOL-TIMEOUT-RECOVERY"
+      ],
+      "evidence": "Controlled native Pay Later acquisition timed out after 5,003ms and retained reserved receipt 1000085. The alert and persistent banner said pending verification, not cancelled. Review showed the original customer, one item and 169p. Recover completed and verified that same receipt: database proof showed exactly one order and one 169p account charge; total orders 91, pending financial journals 0. A normal 169p repayment restored balance 0p and the original hold. The final normal app was rebuilt without the test fault flag.",
+      "screenshots": [
+        "screenshots/31-financial-timeout-pending-alert.png",
+        "screenshots/32-financial-review-original-receipt.png",
+        "screenshots/33-recovered-original-receipt-completed.png",
+        "screenshots/34-recovery-account-restored.png"
+      ],
+      "limits": "Separately requested original P1 regression, not an extra finding in the remaining-36 count. Mock data; one controlled failure/replay path, not every crash/network boundary.",
+      "databaseProof": {
+        "orderId": "1faa4e9c-0d6e-455b-95db-d9f9d1ffbd4",
+        "customerId": "8ee6ce7f-c3f5-4a82-868e-7456ee7b6422",
+        "matchingOrders": 1,
+        "matchingCustomerChargeEntries": 1,
+        "receipt": 1000085,
+        "amountPence": 169,
+        "pendingJournalsAfter": 0
+      }
+    },
+    {
+      "id": "price-pad-delete",
+      "title": "Change Price: touch and keyboard deletion",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "AUDIT-15"
+      ],
+      "evidence": "Native touch Delete last digit changed 169p → 16p, physical Backspace changed 16p → 1p, and Cancel retained the original 169p item price.",
+      "screenshots": [
+        "screenshots/30-price-pad-backspace.png"
+      ],
+      "limits": "Observed delete/cancel workflow, not every pad key or completed price-override sale."
+    },
+    {
+      "id": "customer-keyboard-cleanup",
+      "title": "Touch keyboard: customer-save cleanup",
+      "result": "PARTIAL_NATIVE_OBSERVATION",
+      "findingIds": [
+        "AUDIT-21"
+      ],
+      "evidence": "Native new-customer save closed the touch keyboard rather than leaving it over the next view.",
+      "screenshots": [
+        "screenshots/25-new-customer-save-keyboard-cleanup.png"
+      ],
+      "limits": "Customer save only; other modal/navigation targets remain source/isolated coverage."
+    },
+    {
+      "id": "tax-default-restore",
+      "title": "Tax default: atomic native switch and restoration",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "AUDIT-04"
+      ],
+      "evidence": "Native default changed Zero → Standard → Zero and returned to the original default with two tax rates retained. Database verification found four related audit records with the corresponding old/new default values.",
+      "screenshots": [
+        "screenshots/46-tax-default-atomic-native.png",
+        "screenshots/47-tax-original-default-restored.png"
+      ],
+      "limits": "Healthy native snapshot commits and exact audit/restoration proof. Stale compare-and-set, simultaneous editors and transaction rejection are automated checks, not native fault injection."
+    },
+    {
+      "id": "stock-count-restore",
+      "title": "Stock count: native healthy save and exact restoration",
+      "result": "PARTIAL_NATIVE_OBSERVATION",
+      "findingIds": [
+        "AUDIT-05"
+      ],
+      "evidence": "Native Edit Item for 0EGGS (barcode 5020379111201, old-item-016480) started at stock 0, item tracking off, price 169p. With global stock tracking temporarily on, enabling item tracking and Save Item counted 0→1; UI and database confirmed stock 1/tracking on with queue 0, conflicts 0, intents 0. Reopening, counting 1→0 and disabling item tracking restored stock 0/tracking off/price 169p. Exactly two stock_counted audit rows recorded 0→1 and1→0 with the original expected-count CAS values. Global tracking was restored off.",
+      "screenshots": [
+        "screenshots/63-native-stock-count-confirmed.png",
+        "screenshots/64-native-stock-original-restored.png"
+      ],
+      "limits": "Native healthy count/save and exact restoration passed; native stale-count races, audit failure, cache failure and uncertain COMMIT were not injected. Actual production SQL and native batch/CAS/generic-replay tests cover those boundaries separately. Details and stock remain separate commits with explicit partial-success handling. Shared counted-stock writes intentionally require online authority; legacy queued absolute counts need review/recount, not blind replay."
+    },
+    {
+      "id": "final-square-scale-layout",
+      "title": "Square scale designer: final price rows and toolbar",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [
+        "VIS-SCALE-ADD-PAGE-CLIPPING"
+      ],
+      "evidence": "Final normal 1024×768 Back Office scale view showed Royal, Conference, Grapes, Lemons, Limes, tomato and watermelon price lines fully. Toolbar actions were visible; page chips had independent horizontal scrolling.",
+      "screenshots": [
+        "screenshots/65-final-scale-price-rows-visible.png"
+      ],
+      "limits": "Observed final square-screen layout, not all fonts/translations/zoom levels or every async assignment race."
+    },
+    {
+      "id": "final-native-handoff",
+      "title": "Final normal Tauri app: empty checkout and restored fixtures",
+      "result": "VERIFIED_NATIVE_SCENARIO",
+      "findingIds": [],
+      "evidence": "Final normal no-fault bundle was open on Checkout as Alan, trolley 0 / £0.00 / Synced. Metadata checks found offline queue 0, financial intents 0, conflicts 0 and active terminal attempts 0; orders 91, customers 855, categories 95, tax rates 2, attendance 8. Global stock tracking off; 0EGGS restored to stock 0 / item tracking off / 169p; Zero default on / Standard off. Both QA customer balances and points were 0 with Pay Later disabled/status On hold.",
+      "screenshots": [
+        "screenshots/66-final-checkout-empty-synced.png"
+      ],
+      "limits": "Mock QA sales/repayments, account fixtures and audit records intentionally retained. No byte-for-byte rollback or Windows/physical-hardware certification."
+    }
+  ],
+  "summary": {
+    "originalFindings": 36,
+    "implemented": 36,
+    "nativePass": 19,
+    "nativePartial": 13,
+    "automatedOnly": 4,
+    "nativePending": 0
+  },
+  "notes": [
+    "Native PASS means the explicitly described observed scenario, not every fault, resolution, role, provider or hardware combination. PARTIAL_OBSERVATION and AUTOMATED_ONLY must not be presented as blanket native PASS.",
+    "All final automated suites completed, and final native stock count/restoration plus square-scale layout evidence were recorded. Native stale/error branches retain their explicit automated-only limits.",
+    "Provider keys/configuration were not changed. No live card charge, physical printer job/drawer pulse, database wipe, history deletion, full restore, Z-close, deployment or commit was performed by this report assembly agent.",
+    "All retained sales, repayment and QA customer records are mock audit fixtures. Historical priority evidence, including healthy receipt 1000084, remains in REPORT.html.",
+    "Final native handoff verified on the normal rebuilt bundle without the debug test fault flag. Retained observations are metadata only: 478 observations, first 2026-10-12T18:25:37.338Z, last 2026-10-12T19:52:23.086Z."
+  ],
+  "overallImplementation": {
+    "originalFindings": 41,
+    "implemented": 41,
+    "priorityFindings": 4,
+    "relatedFutureAttendanceGuard": 1,
+    "remainingFindingsTrackedHere": 36,
+    "verification": "Per-finding native scenario, partial, automated-only and remaining limits remain explicit; not all 36 native PASS"
+  },
+  "finalRestoration": {
+    "status": "FINAL_NATIVE_HANDOFF_VERIFIED",
+    "observedAt": "2026-10-12T19:52:23.086Z",
+    "nativeOpen": true,
+    "page": "/",
+    "mode": "Checkout",
+    "staffDisplayName": "Alan",
+    "trolleyItems": 0,
+    "trolleyTotalPence": 0,
+    "sync": "Synced",
+    "offlineQueue": 0,
+    "onlineFinancialIntents": 0,
+    "conflicts": 0,
+    "activeTerminalAttempts": 0,
+    "orders": 91,
+    "customers": 855,
+    "categories": 95,
+    "taxRates": 2,
+    "attendance": 8,
+    "globalStockTracking": false,
+    "restoredProduct": {
+      "id": "old-item-016480",
+      "barcode": "5020379111201",
+      "name": "0EGGS",
+      "stockLevel": 0,
+      "trackStock": false,
+      "pricePence": 169
+    },
+    "restoredTaxDefaults": {
+      "Zero": true,
+      "Standard": false
+    },
+    "qaCustomerRestoration": {
+      "count": 2,
+      "balancesPence": [
+        0,
+        0
+      ],
+      "points": [
+        0,
+        0
+      ],
+      "payLaterEnabled": [
+        false,
+        false
+      ],
+      "status": "On hold"
+    },
+    "dojo": {
+      "providerConfiguration": "unchanged",
+      "savedKeys": "unchanged",
+      "environment": "Sandbox",
+      "virtualTerminal": "VCMLABJTIP0",
+      "terminalUsage": "Dedicated"
+    },
+    "finalBundle": "normal debug macOS Tauri, rebuilt and launched without the test fault flag",
+    "evidence": [
+      "screenshots/63-native-stock-count-confirmed.png",
+      "screenshots/64-native-stock-original-restored.png",
+      "screenshots/65-final-scale-price-rows-visible.png",
+      "screenshots/66-final-checkout-empty-synced.png"
+    ],
+    "limits": "Mock fixtures retained with normal audit rows; not a byte-for-byte database rollback. No Windows installation, physical hardware, live card certification or destructive maintenance verdict."
+  },
+  "recordedAt": "2026-10-12T19:52:23.086Z",
+  "nativeObservations": {
+    "count": 478,
+    "first": "2026-10-12T18:25:37.338Z",
+    "last": "2026-10-12T19:52:23.086Z",
+    "note": "Count and timestamp metadata only; no raw accessibility values or credentials. Observations are not automatically verdicts; per-finding limits distinguish verified scenarios from partial/automated coverage."
+  }
+}

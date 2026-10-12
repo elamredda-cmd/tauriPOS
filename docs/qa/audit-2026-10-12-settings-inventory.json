@@ -1,0 +1,3313 @@
+{
+  "schemaVersion": 1,
+  "title": "Settings page/control inventory for native POS audit",
+  "auditDate": "2026-10-12",
+  "sourceRoot": "/Users/elamreda/Desktop/Tauri for Svelte POS",
+  "provenance": {
+    "method": "Read-only source inspection of all settings route scripts, markup and linked control helpers.",
+    "nativeUiActionsPerformedByThisAgent": 0,
+    "productFilesChangedByThisAgent": 0,
+    "note": "This is a checklist and source evidence. It does not assert native runtime, external service or hardware passes."
+  },
+  "coverage": {
+    "svelteRoutes": 19,
+    "redirectRoutes": 1,
+    "controlFamilies": 185,
+    "templateSiteTotals": {
+      "button": 164,
+      "link": 4,
+      "input": 81,
+      "nativeSelect": 7,
+      "textarea": 7,
+      "customSelect": 33,
+      "touchDigitPad": 3,
+      "touchKeyboardButton": 2,
+      "searchField": 1,
+      "details": 4
+    },
+    "countMethod": "Literal tag sites in19 +page.svelte files. Loops, inherited Back, Modal/ConfirmDialog/CustomSelect/SearchField/TouchDigitPad internals and conditionally hidden states mean runtime counts differ. A control family explicitly lists its repeated choices when fixed."
+  },
+  "statusVocabulary": {
+    "source_inspected_only": "Read handler and markup, not executed.",
+    "runtime_pass": "Root must attach native action plus observed result/evidence.",
+    "runtime_issue": "Root must attach reproducible native action/result.",
+    "dependency_blocked": "Needs physical hardware, external fixture, credentials, connectivity or isolated destructive dataset."
+  },
+  "uiChecksForEveryRoute": [
+    "Open from its visible parent link and verify header, title, Back, active mode and permissions.",
+    "Checkout and Back Office: test keyboard focus, Tab/Shift-Tab, Enter and Escape where supported; on-screen keyboard absent in Back Office.",
+    "Square POS client area: check no horizontal overflow, clipped labels, unreachable bottom actions, conflicting scroll containers or modal outside viewport.",
+    "Check narrow/square and larger desktop widths with normal and Extra large section/modal fonts.",
+    "Click every enabled action once and every repeated fixed choice at least once; inspect disabled reason/state.",
+    "For reversible configuration, record original value, save/test persistence after revisit and restore original.",
+    "Open, cancel and close every modal; verify focus returns, background cannot receive actions and busy dismissal behaves correctly.",
+    "Validate empty/no records, populated/long names, loading, dependency-offline and persistence/provider failure states.",
+    "Hardware/API success needs actual configured service; do not equate button invocation or toast with confirmed physical/provider outcome.",
+    "Final delete/restore/migrate/push/key-removal/licence/seat/module financial/external actions need isolated fixture or explicit intended mutation; source-only coverage must be labelled."
+  ],
+  "sharedControls": [
+    {
+      "label": "Go back",
+      "sourceFile": "src/lib/components/PageBackButton.svelte",
+      "sourceLine": 9,
+      "effect": "Uses app goBack with page-specific fallback.",
+      "expected": "Returns to prior internal page; direct entry uses Settings/Design/Admin fallback appropriate to current route.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "Modal Close / backdrop / Escape",
+      "sourceFile": "src/lib/components/Modal.svelte",
+      "sourceLine": 36,
+      "effect": "Closes dismissible modal via shared modal helper.",
+      "expected": "No side effect; disabled while dismissDisabled; focus returns.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "ConfirmDialog Cancel / Confirm",
+      "sourceFile": "src/lib/components/ConfirmDialog.svelte",
+      "sourceLine": 29,
+      "effect": "Dispatches cancel or confirm and sets show false.",
+      "expected": "Cancel no mutation; confirm handler called once and failure visible on host page.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "CustomSelect trigger / options / arrows / Enter / Escape",
+      "sourceFile": "src/lib/components/CustomSelect.svelte",
+      "sourceLine": 163,
+      "effect": "Opens contained listbox, selects option or dismisses.",
+      "expected": "Visible chosen option, no clipping; keyboard traversal/focus; disabled skip.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "TouchDigitPad 1–9 / 0 / clear / backspace / submit",
+      "sourceFile": "src/lib/components/TouchDigitPad.svelte",
+      "sourceLine": 87,
+      "effect": "Edits PIN/numeric value with digit grid and submit.",
+      "expected": "1-2-3 top row; masking/maxlength; clear/delete exact; disabled submit does not fire.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "SearchField clear / touch keyboard",
+      "sourceFile": "src/lib/components/SearchField.svelte",
+      "sourceLine": 74,
+      "effect": "Clears search or opens on-screen keyboard for selected field.",
+      "expected": "No stale results, input stays visible, touch button absent in Back Office.",
+      "verification": "source_inspected_only"
+    },
+    {
+      "label": "TouchKeyboardButton",
+      "sourceFile": "src/lib/components/TouchKeyboardButton.svelte",
+      "sourceLine": 19,
+      "effect": "Opens touch keyboard bound to its target.",
+      "expected": "Correct input targeted; no Back Office on-screen keyboard.",
+      "verification": "source_inspected_only"
+    }
+  ],
+  "routes": [
+    {
+      "route": "/settings",
+      "sourceFile": "src/routes/settings/+page.svelte",
+      "controls": [
+        {
+          "label": "Shop & till / Appearance / Hardware / Checkout / Administration",
+          "kind": "category_buttons",
+          "sourceLine": 454,
+          "effect": "Changes the settings section query parameter.",
+          "expected": "Selected category highlights; related form or shortcuts render without page reload.",
+          "dependencies": [],
+          "risk": "navigation",
+          "values": [
+            "Shop & till",
+            "Appearance",
+            "Hardware",
+            "Checkout",
+            "Administration"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Settings shortcut tiles",
+          "kind": "links",
+          "sourceLine": 475,
+          "effect": "Navigates to the matching settings route.",
+          "expected": "All visible links reach their labelled destination; permission and Back Office filters apply.",
+          "dependencies": [
+            "Staff path permissions"
+          ],
+          "risk": "navigation",
+          "values": [
+            "Button layout",
+            "Receipt design",
+            "Product labels",
+            "Colour theme",
+            "Fonts & text",
+            "Printers & drawer",
+            "Scale",
+            "Scale barcodes",
+            "Customer display",
+            "Card terminals",
+            "Sound & haptics",
+            "CCTV overlay",
+            "Shop licence",
+            "Owner app",
+            "Cash Control",
+            "Maintenance"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Store name / Address / Phone / Email",
+          "kind": "text_fields",
+          "sourceLine": 499,
+          "effect": "Edits draft store information.",
+          "expected": "Typing works; selected field focus and keyboard do not cover Save shop.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Store name",
+            "Address",
+            "Phone",
+            "Email"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save shop",
+          "kind": "button",
+          "sourceLine": 506,
+          "effect": "Persists store_info and updates shared store settings.",
+          "expected": "Success persists after revisit; failed write leaves current saved store intact.",
+          "dependencies": [
+            "Local database; shared sync if multi-till"
+          ],
+          "risk": "shop_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Till display name / Save name",
+          "kind": "text_field_and_button",
+          "sourceLine": 522,
+          "effect": "Updates the local till display name.",
+          "expected": "Name persists; immutable Till ID does not change.",
+          "dependencies": [
+            "Native app"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Till ID",
+          "kind": "readonly_field",
+          "sourceLine": 528,
+          "effect": "Displays current till identifier.",
+          "expected": "Cannot edit; long ID remains readable/selectable.",
+          "dependencies": [],
+          "risk": "readonly",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Use Back Office / Use Checkout",
+          "kind": "button",
+          "sourceLine": 547,
+          "effect": "Opens administrator-authorized device mode switch.",
+          "expected": "Current mode remains until approved; changing mode signs out. Cash-up shift blocks Back Office.",
+          "dependencies": [
+            "Active administrator; no cash-up shift for Back Office"
+          ],
+          "risk": "device_mode_change",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Loyalty programme",
+          "kind": "switch",
+          "sourceLine": 583,
+          "effect": "Saves loyalty enabled flag immediately.",
+          "expected": "On/Off state and associated numeric field enablement agree.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Points per £1 / Points for credit / Credit (pence)",
+          "kind": "numeric_fields",
+          "sourceLine": 595,
+          "effect": "Saves floored, minimum-bounded loyalty configuration on change.",
+          "expected": "Values persist; displayed example matches redemption rate; invalid input is normalized.",
+          "dependencies": [
+            "Loyalty enabled"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Points per £1",
+            "Points for credit",
+            "Credit (pence)"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Time attendance / Stock tracking / 18+ item alerts / Training mode / Till cash-up",
+          "kind": "switches",
+          "sourceLine": 617,
+          "effect": "Saves operation flag immediately.",
+          "expected": "Every switch persists and drives its matching feature; Training warning appears; cash-up suboptions render.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Time attendance",
+            "Stock tracking",
+            "18+ item alerts",
+            "Training mode",
+            "Till cash-up"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Opening float / Card-machine total",
+          "kind": "conditional_switches",
+          "sourceLine": 686,
+          "effect": "Saves cash-up requirements.",
+          "expected": "Available only when cash-up enabled; saved state matches future shift workflow.",
+          "dependencies": [
+            "Till cash-up enabled"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Opening float",
+            "Card-machine total"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Approving administrator",
+          "kind": "modal_custom_select",
+          "sourceLine": 740,
+          "effect": "Selects an active non-support administrator.",
+          "expected": "Only eligible active administrator appears; selected approver used for PIN verification.",
+          "dependencies": [
+            "Administrator staff profiles"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Administrator PIN / touch digit pad / Confirm switch",
+          "kind": "modal_pin_controls",
+          "sourceLine": 761,
+          "effect": "Verifies PIN and applies device mode with audit event.",
+          "expected": "Wrong PIN displays error; 1-2-3 touch layout in Checkout; keyboard input in Back Office; Enter confirms; successful switch signs out.",
+          "dependencies": [
+            "Native session and administrator PIN"
+          ],
+          "risk": "device_mode_change",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Cancel / modal close / Escape",
+          "kind": "modal_buttons",
+          "sourceLine": 804,
+          "effect": "Dismisses pending mode switch.",
+          "expected": "Draft PIN clears; no device change or logout; disabled during save.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Back Office removes Customer display and Card terminals shortcut tiles. Shared shop settings differ from local device role and till identity."
+      ],
+      "templateSites": {
+        "button": 14,
+        "link": 1,
+        "input": 10,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 1,
+        "touchDigitPad": 1,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/advanced",
+      "sourceFile": "src/routes/settings/advanced/+page.svelte",
+      "controls": [
+        {
+          "label": "Tax Included in Price: Yes / No",
+          "kind": "toggle_button",
+          "sourceLine": 602,
+          "effect": "Edits tax mode draft.",
+          "expected": "Label changes; future sale calculations change only after save.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save Tax Mode",
+          "kind": "button",
+          "sourceLine": 605,
+          "effect": "Sets storeDB and writes store_info.",
+          "expected": "Persisted state matches display after revisit; failure is visible and rolls back.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Change Setup / Database Mode",
+          "kind": "link",
+          "sourceLine": 619,
+          "effect": "Navigates to /setup.",
+          "expected": "Setup opens and current configuration remains available.",
+          "dependencies": [],
+          "risk": "navigation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Validate Database Schemas",
+          "kind": "button",
+          "sourceLine": 620,
+          "effect": "Runs SQLite/MariaDB schema validation.",
+          "expected": "Displays ready or actionable issues; repeated clicks and query failure do not leave a stuck checking state.",
+          "dependencies": [
+            "Native database; MariaDB for shared schema"
+          ],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Migrate Local Data to Multi-Till",
+          "kind": "conditional_button",
+          "sourceLine": 622,
+          "effect": "First click requests second confirmation, second migrates data to an empty server.",
+          "expected": "Visible in multi-till mode; first click makes no migration; run shows clear success/failure.",
+          "dependencies": [
+            "Empty MariaDB target; administrator"
+          ],
+          "risk": "data_migration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Create Full Backup",
+          "kind": "button",
+          "sourceLine": 655,
+          "effect": "Creates and verifies complete local database backup.",
+          "expected": "New verified path/time displays; data in live till unchanged.",
+          "dependencies": [
+            "Native app; writable destination"
+          ],
+          "risk": "local_file_create",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Restore Backup / Confirm Restore",
+          "kind": "button",
+          "sourceLine": 658,
+          "effect": "First click describes selected full backup; second replaces local database with safety backup.",
+          "expected": "Confirmation targets displayed backup; progress/error visible; restore restarts/reloads as needed.",
+          "dependencies": [
+            "Verified full backup; native restore guards"
+          ],
+          "risk": "destructive_restore",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Automatic On / Off",
+          "kind": "switch",
+          "sourceLine": 677,
+          "effect": "Toggles automatic setup backups.",
+          "expected": "Saved state persists; failed save returns to previous state.",
+          "dependencies": [
+            "Native backup configuration"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Create Setup Backup Now",
+          "kind": "button",
+          "sourceLine": 689,
+          "effect": "Creates setup-only backup; newest two daily files retained.",
+          "expected": "Shows verified created/already-existing result and excludes sales/orders.",
+          "dependencies": [
+            "Native app; writable backup folder"
+          ],
+          "risk": "local_file_create",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Daily time",
+          "kind": "time_input",
+          "sourceLine": 696,
+          "effect": "Edits automatic schedule draft.",
+          "expected": "Valid local time can be entered and saved.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Choose Folder",
+          "kind": "button",
+          "sourceLine": 715,
+          "effect": "Opens directory picker and saves chosen destination/schedule.",
+          "expected": "Cancel leaves destination unchanged; valid path reflects in UI.",
+          "dependencies": [
+            "Native file picker"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Use Default",
+          "kind": "button",
+          "sourceLine": 719,
+          "effect": "Restores default backup destination and saves schedule.",
+          "expected": "Custom destination clears; backup reads use default path.",
+          "dependencies": [
+            "Native backup configuration"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Open Folder",
+          "kind": "button",
+          "sourceLine": 722,
+          "effect": "Reveals most recent backup in Finder/Explorer.",
+          "expected": "Correct verified backup path is revealed; unavailable state disabled.",
+          "dependencies": [
+            "Existing full/setup backup"
+          ],
+          "risk": "local_shell_open",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save Schedule",
+          "kind": "button",
+          "sourceLine": 725,
+          "effect": "Persists time/destination and refreshes latest backups.",
+          "expected": "Schedule success/failure visible; chosen folder reflected consistently.",
+          "dependencies": [
+            "Native backup configuration"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Restore from another till database",
+          "kind": "details",
+          "sourceLine": 733,
+          "effect": "Expands file restore controls.",
+          "expected": "Panel expands without horizontal overflow.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Database file path",
+          "kind": "text_input",
+          "sourceLine": 737,
+          "effect": "Edits restore path, clears final confirmation.",
+          "expected": "Editing resets confirmation; long path can be entered/read.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Choose File / Choose Another File",
+          "kind": "buttons",
+          "sourceLine": 744,
+          "effect": "Opens native database picker.",
+          "expected": "Cancel makes no restore; selected path displayed.",
+          "dependencies": [
+            "Native app"
+          ],
+          "risk": "local_file_picker",
+          "values": [
+            "Choose File",
+            "Choose Another File"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Restore From File / Confirm Restore From File",
+          "kind": "button",
+          "sourceLine": 747,
+          "effect": "Validates and replaces local database after second confirmation.",
+          "expected": "Wrong/invalid file is rejected; selected target and safety backup visible.",
+          "dependencies": [
+            "Native restore guards; chosen database"
+          ],
+          "risk": "destructive_restore",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Dismiss restore error",
+          "kind": "button",
+          "sourceLine": 773,
+          "effect": "Clears stopped restore progress.",
+          "expected": "Stopped panel hides; no data change.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Force Full Pull",
+          "kind": "conditional_button",
+          "sourceLine": 795,
+          "effect": "Pulls server rows without deleting local cache first.",
+          "expected": "Progress and result shown; protected local records remain reviewable.",
+          "dependencies": [
+            "Multi-till; MariaDB"
+          ],
+          "risk": "shared_data_refresh",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Wipe Local Cache & Pull",
+          "kind": "conditional_button",
+          "sourceLine": 801,
+          "effect": "Second click wipes local cache and downloads MariaDB dataset.",
+          "expected": "First click only confirms; no silent data loss; shared server unchanged.",
+          "dependencies": [
+            "MariaDB online; native maintenance guards"
+          ],
+          "risk": "destructive_local_cache",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Push Local Data to Server",
+          "kind": "conditional_button",
+          "sourceLine": 807,
+          "effect": "Second click pushes shop data while preserving server customer/loyalty/account records.",
+          "expected": "First click only confirms; progress/error visible; preservation boundaries hold.",
+          "dependencies": [
+            "Multi-till; MariaDB"
+          ],
+          "risk": "shared_data_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Refresh sync conflicts",
+          "kind": "button",
+          "sourceLine": 820,
+          "effect": "Reloads stored conflict list.",
+          "expected": "Empty versus failed query is distinguishable; latest rows display.",
+          "dependencies": [
+            "Local database"
+          ],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Retry conflict",
+          "kind": "conditional_row_button",
+          "sourceLine": 848,
+          "effect": "Retries a replayable conflict only.",
+          "expected": "Non-retryable retained financial/history conflict lacks Retry; outcome visible.",
+          "dependencies": [
+            "Replayable conflict; MariaDB"
+          ],
+          "risk": "shared_data_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Dismiss / Dismiss warning",
+          "kind": "row_button",
+          "sourceLine": 850,
+          "effect": "Dismisses conflict warning; retained sale gets confirmation dialog.",
+          "expected": "Dismissed warning disappears; retained sale remains locally stored.",
+          "dependencies": [
+            "Existing conflict"
+          ],
+          "risk": "local_audit_change",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Dismiss Warning / Cancel / close",
+          "kind": "confirmation_modal",
+          "sourceLine": 904,
+          "effect": "Confirms or cancels retained warning dismissal.",
+          "expected": "Confirm does not upload/remove sale; Cancel leaves warning unchanged.",
+          "dependencies": [],
+          "risk": "local_audit_change",
+          "values": [
+            "Dismiss Warning",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Permanent deletion acknowledgement",
+          "kind": "switch",
+          "sourceLine": 879,
+          "effect": "Enables final purge workflow.",
+          "expected": "Toggling acknowledgement resets final confirmation.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Continue to Final Confirmation / Delete History Permanently",
+          "kind": "button",
+          "sourceLine": 892,
+          "effect": "Second confirmed click purges sales history across tills.",
+          "expected": "Customer points, loyalty history, account balances/statements/private counts preserved; unresolved terminal and report guards honored.",
+          "dependencies": [
+            "Administrator; database; MariaDB if multi-till"
+          ],
+          "risk": "destructive_history_purge",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Do not execute final migration/restore/wipe/push/purge during broad audit without an isolated fixture. Initial confirmation-only clicks are practical UI tests."
+      ],
+      "templateSites": {
+        "button": 24,
+        "link": 1,
+        "input": 3,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 1
+      }
+    },
+    {
+      "route": "/settings/barcodes",
+      "sourceFile": "src/routes/settings/barcodes/+page.svelte",
+      "controls": [
+        {
+          "label": "Price Rule / Weight Rule",
+          "kind": "buttons",
+          "sourceLine": 247,
+          "effect": "Adds new preset draft rule.",
+          "expected": "Distinct editable rule appears; unsaved state marked.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Price Rule",
+            "Weight Rule"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save",
+          "kind": "button",
+          "sourceLine": 255,
+          "effect": "Validates and persists barcode rule set.",
+          "expected": "Conflicting/invalid rules block save; success persists; external update blocks overwrite.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Rule tabs",
+          "kind": "dynamic_buttons",
+          "sourceLine": 265,
+          "effect": "Selects active rule.",
+          "expected": "Name, diagram, fields and enabled state reflect selected rule.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Reload Latest",
+          "kind": "conditional_button",
+          "sourceLine": 279,
+          "effect": "Loads newer externally synced rules.",
+          "expected": "New rules replace draft after explicit click; unsaved indicator clears.",
+          "dependencies": [
+            "Incoming settings change"
+          ],
+          "risk": "draft_reset",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Standard",
+          "kind": "button",
+          "sourceLine": 294,
+          "effect": "Arranges prefix/product/value positions into standard EAN-13 format.",
+          "expected": "Position diagram follows; conflicting dimensions show validation error.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Remove / confirm Remove Rule / Cancel",
+          "kind": "button_and_modal",
+          "sourceLine": 298,
+          "effect": "Removes selected draft rule after confirmation.",
+          "expected": "Cancel preserves rule; confirm chooses sensible next rule; Save required to persist.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Remove",
+            "Remove Rule",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Scale prefix / PLU digits / Price or Weight digits / Decimals / Rule name",
+          "kind": "fields",
+          "sourceLine": 328,
+          "effect": "Edits rule parameters and diagram.",
+          "expected": "Numeric limits validate; nonnumeric prefix sanitized; label and preview update.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Scale prefix",
+            "PLU digits",
+            "Value digits",
+            "Decimals",
+            "Rule name"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Embedded value",
+          "kind": "custom_select",
+          "sourceLine": 350,
+          "effect": "Chooses Total price or Weight in kilograms.",
+          "expected": "Diagram/test result interpretation switches correctly.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Total price",
+            "Weight in kilograms"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Enabled / Validate check digit",
+          "kind": "switches",
+          "sourceLine": 357,
+          "effect": "Edits draft rule active and check-digit flags.",
+          "expected": "State displays correctly and parser follows selected setting.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Enabled",
+            "Validate check digit"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Advanced EAN-13 positions / PLU starts / PLU digits / Value starts / Value digits",
+          "kind": "details_and_fields",
+          "sourceLine": 365,
+          "effect": "Edits explicit field positions.",
+          "expected": "Overlaps and check-digit conflicts rejected before save.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "PLU starts",
+            "PLU digits",
+            "Value starts",
+            "Value digits"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Scan barcode / Open barcode keyboard",
+          "kind": "field_and_keyboard_button",
+          "sourceLine": 391,
+          "effect": "Sanitizes test barcode to digits and opens touch keyboard when appropriate.",
+          "expected": "Physical scan/typing works; keyboard respects Back Office; input visible above keyboard.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Test / Enter",
+          "kind": "button_and_keyboard",
+          "sourceLine": 394,
+          "effect": "Parses test label against current draft rules.",
+          "expected": "Valid value and PLU shown; invalid prefix/length/check digit reports reason; unchecked digit is not falsely labelled validated.",
+          "dependencies": [],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 10,
+        "link": 0,
+        "input": 10,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 1,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 1,
+        "searchField": 0,
+        "details": 1
+      }
+    },
+    {
+      "route": "/settings/cash-control",
+      "sourceFile": "src/routes/settings/cash-control/+page.svelte",
+      "controls": [
+        {
+          "label": "Till / Business date",
+          "kind": "selector_and_date",
+          "sourceLine": 226,
+          "effect": "Selects daily drawer period before unlocking.",
+          "expected": "Current till and registered tills deduplicated; future dates disabled; unlocked scope cannot edit.",
+          "dependencies": [
+            "Native app; admin; shared MariaDB for multi-till"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Till",
+            "Business date"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Administrator PIN / Unlock Cash Control / touch digit pad",
+          "kind": "pin_controls",
+          "sourceLine": 240,
+          "effect": "Loads private daily count context after native administrator verification.",
+          "expected": "Wrong PIN rejected; valid admin sees count workflow; browser preview disabled.",
+          "dependencies": [
+            "Native administrator PIN"
+          ],
+          "risk": "private_financial_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Lock / Change till-date",
+          "kind": "buttons",
+          "sourceLine": 214,
+          "effect": "Clears unlocked context and secrets.",
+          "expected": "Private count hidden immediately; date/till selectable again.",
+          "dependencies": [],
+          "risk": "private_view_lock",
+          "values": [
+            "Lock",
+            "Change till / date"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Opening cash/float / Cash physically counted / Private note / Re-enter administrator PIN",
+          "kind": "form_fields",
+          "sourceLine": 254,
+          "effect": "Edits declared cash count.",
+          "expected": "Money validated as pence; required reason/PIN gate saving; expected amount hidden before first save.",
+          "dependencies": [
+            "Unlocked Cash Control"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Opening cash / float",
+            "Cash physically counted",
+            "Private note or reason",
+            "Administrator save PIN"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save private count / Save private correction",
+          "kind": "submit_button",
+          "sourceLine": 260,
+          "effect": "Creates immutable daily private count/revision.",
+          "expected": "Saved count shows expected/count/difference; corrections retain original and never enter reports.",
+          "dependencies": [
+            "Native admin verification; context.canCreate or editing"
+          ],
+          "risk": "private_financial_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Correct count",
+          "kind": "button",
+          "sourceLine": 273,
+          "effect": "Loads original declared float/count into correction draft.",
+          "expected": "Reason/PIN clear; original cash-flow snapshot unchanged.",
+          "dependencies": [
+            "Existing private count"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Cancel correction",
+          "kind": "conditional_button",
+          "sourceLine": 261,
+          "effect": "Leaves correction form without saving.",
+          "expected": "Previous saved result returns; save PIN/error clear.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Touch PIN pad",
+          "kind": "details",
+          "sourceLine": 264,
+          "effect": "Expands save PIN digit pad in Checkout.",
+          "expected": "Digits enter correctly; pad absent in Back Office.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "How expected cash was calculated",
+          "kind": "details",
+          "sourceLine": 279,
+          "effect": "Expands original snapshot components.",
+          "expected": "Float, net cash sales, account cash, movements and cashback sum to expected amount.",
+          "dependencies": [],
+          "risk": "readonly",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Native-only private financial feature. Blur/visibility loss, source/session change, and five-minute inactivity lock it. Final save is a financial write; use fixture only."
+      ],
+      "templateSites": {
+        "button": 6,
+        "link": 0,
+        "input": 5,
+        "nativeSelect": 0,
+        "textarea": 1,
+        "customSelect": 1,
+        "touchDigitPad": 2,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 2
+      }
+    },
+    {
+      "route": "/settings/customer-display",
+      "sourceFile": "src/routes/settings/customer-display/+page.svelte",
+      "controls": [
+        {
+          "label": "Close display / Open display",
+          "kind": "buttons",
+          "sourceLine": 113,
+          "effect": "Closes/opens second native display window.",
+          "expected": "Selected monitor used; unavailable browser/no-monitor disabled; error visible.",
+          "dependencies": [
+            "Native app; monitor"
+          ],
+          "risk": "hardware_window",
+          "values": [
+            "Close display",
+            "Open display"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save changes (header and preview)",
+          "kind": "buttons",
+          "sourceLine": 115,
+          "effect": "Persists content, removes retired media and notifies display.",
+          "expected": "Dirty state clears; saved content survives reopen and second display updates.",
+          "dependencies": [
+            "Local display storage/media permissions"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Display / Refresh screens",
+          "kind": "selector_and_button",
+          "sourceLine": 124,
+          "effect": "Chooses monitor immediately; redetects attached displays.",
+          "expected": "Detected monitor names/resolutions update; missing saved monitor safely falls back.",
+          "dependencies": [
+            "Native display discovery"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Open automatically on second screen",
+          "kind": "checkbox",
+          "sourceLine": 129,
+          "effect": "Persists local auto-open preference immediately.",
+          "expected": "Preference persists after revisit/start; checkbox matches.",
+          "dependencies": [
+            "Local settings"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Pictures & slides / Text only",
+          "kind": "mode_buttons",
+          "sourceLine": 136,
+          "effect": "Edits content mode draft.",
+          "expected": "Matching playlist/text UI and preview display.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Pictures & slides",
+            "Text only"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Add pictures/videos / Choose display media",
+          "kind": "button_and_file_input",
+          "sourceLine": 140,
+          "effect": "Imports and validates image/video files into local media.",
+          "expected": "Cancel leaves playlist unchanged; size/format/duration validation shown; maximum 24 slides.",
+          "dependencies": [
+            "Native file picker or browser file input"
+          ],
+          "risk": "local_media_import",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Add text slide",
+          "kind": "button",
+          "sourceLine": 141,
+          "effect": "Adds editable text draft slide.",
+          "expected": "New heading/message/duration fields and preview render; limit24 disables add.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Move slide up / Move slide down / Remove slide",
+          "kind": "dynamic_row_buttons",
+          "sourceLine": 148,
+          "effect": "Reorders/removes draft slides.",
+          "expected": "Boundary arrows disabled; order/preview matches; saved media removed only after Save.",
+          "dependencies": [
+            "At least one slide"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Move up",
+            "Move down",
+            "Remove"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Slide Heading / Message / Show for seconds",
+          "kind": "dynamic_fields",
+          "sourceLine": 150,
+          "effect": "Edits text-slide content or image/text duration.",
+          "expected": "Long text wraps; duration2–60s normalized; video has no duration field.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Heading",
+            "Message",
+            "Duration"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Picture fit / Transition",
+          "kind": "native_selects",
+          "sourceLine": 156,
+          "effect": "Edits contain/cover and fade/instant draft.",
+          "expected": "Preview reflects selection without distorted media.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Fit whole picture",
+            "Fill screen",
+            "Gentle fade",
+            "Instant"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Show promotions beside basket",
+          "kind": "checkbox",
+          "sourceLine": 157,
+          "effect": "Edits during-sale promotion flag.",
+          "expected": "Basket retains priority; promotion placement appropriate on roomy screen.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Welcome Heading / Message",
+          "kind": "fields",
+          "sourceLine": 162,
+          "effect": "Edits fallback/overlay copy.",
+          "expected": "Preview respects long Sorani/English text and selected mode.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Heading",
+            "Message"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Font / Text size / Alignment",
+          "kind": "native_selects",
+          "sourceLine": 163,
+          "effect": "Edits text presentation.",
+          "expected": "Modern/Classic/Friendly/Typewriter and Small/Medium/Large/Extra large and Left/Centre/Right render correctly.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Font",
+            "Text size",
+            "Alignment"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Bold / Italic",
+          "kind": "buttons",
+          "sourceLine": 163,
+          "effect": "Toggles text style draft.",
+          "expected": "Selected button state and preview agree.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Bold",
+            "Italic"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Text colour / Background colour",
+          "kind": "colour_inputs",
+          "sourceLine": 163,
+          "effect": "Edits display palette.",
+          "expected": "Picker opens; selected colours display and contrast remains readable.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Text colour",
+            "Background colour"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Show this message over pictures/videos",
+          "kind": "checkbox",
+          "sourceLine": 164,
+          "effect": "Edits overlay flag.",
+          "expected": "Message appears/disappears on media while text slide styling remains.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Restart preview",
+          "kind": "button",
+          "sourceLine": 168,
+          "effect": "Recreates preview player.",
+          "expected": "Playlist restarts at first slide without saving.",
+          "dependencies": [],
+          "risk": "presentation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Screen shape",
+          "kind": "native_select",
+          "sourceLine": 169,
+          "effect": "Chooses preview aspect ratio.",
+          "expected": "Wide, Square POS and Portrait preview stay within bounds.",
+          "dependencies": [],
+          "risk": "presentation",
+          "values": [
+            "Wide",
+            "Square POS",
+            "Portrait"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 15,
+        "link": 0,
+        "input": 9,
+        "nativeSelect": 7,
+        "textarea": 2,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/feedback",
+      "sourceFile": "src/routes/settings/feedback/+page.svelte",
+      "controls": [
+        {
+          "label": "Button Click / Item Added / Barcode Scan / Sale Complete / Vibration",
+          "kind": "preview_buttons",
+          "sourceLine": 90,
+          "effect": "Plays configured feedback signal.",
+          "expected": "One relevant sound/haptic fires; vibration disabled when unsupported/off.",
+          "dependencies": [
+            "Audio hardware; vibration capability for Vibration"
+          ],
+          "risk": "hardware_feedback",
+          "values": [
+            "Button Click",
+            "Item Added",
+            "Barcode Scan",
+            "Sale Complete",
+            "Vibration"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Button click sound / Item-added sound / Successful barcode scan sound / Haptic vibration / Sale-completed sound",
+          "kind": "toggle_buttons",
+          "sourceLine": 101,
+          "effect": "Persists immediate feedback flags.",
+          "expected": "On/Off values persist and real workflow follows them; failed save is visible.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Button click sound",
+            "Item-added sound",
+            "Successful barcode scan sound",
+            "Haptic vibration",
+            "Sale-completed sound"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Test Barcode Alert",
+          "kind": "button",
+          "sourceLine": 135,
+          "effect": "Plays current failed-barcode alert.",
+          "expected": "Silent selection disables preview; enabled sound audible once.",
+          "dependencies": [
+            "Audio hardware"
+          ],
+          "risk": "hardware_feedback",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Vintage Ring / Busy Line / Warning Beep / Silent",
+          "kind": "choice_buttons",
+          "sourceLine": 139,
+          "effect": "Saves alert style and previews non-silent choice.",
+          "expected": "Selected style is clear; test and scan failures use chosen style.",
+          "dependencies": [
+            "Settings database; audio hardware"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Vintage Ring",
+            "Busy Line",
+            "Warning Beep",
+            "Silent"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 12,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/fonts",
+      "sourceFile": "src/routes/settings/fonts/+page.svelte",
+      "controls": [
+        {
+          "label": "Font family tiles",
+          "kind": "choice_buttons",
+          "sourceLine": 190,
+          "effect": "Immediately saves app font family with optimistic preview.",
+          "expected": "All five selections move active indicator and persist; failed save reverts correctly.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "L&Bj default",
+            "Windows native",
+            "System default",
+            "Large readable",
+            "Legacy POS crisp"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Product name size / Tile price size",
+          "kind": "choice_button_groups",
+          "sourceLine": 242,
+          "effect": "Saves four size choices separately for tile name/price.",
+          "expected": "Each active choice highlights; preview and selling tiles reflect respective size.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Compact",
+            "Normal",
+            "Large",
+            "Extra large"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Product name weight",
+          "kind": "choice_buttons",
+          "sourceLine": 260,
+          "effect": "Saves tile name weight.",
+          "expected": "Medium/Strong/Heavy selection and preview agree.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Medium",
+            "Strong",
+            "Heavy"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "POS selling screen / Management pages / Settings pages / Dialogs-popups text size",
+          "kind": "choice_button_groups",
+          "sourceLine": 295,
+          "effect": "Saves four sizes per section.",
+          "expected": "Every section respects chosen size; Extra large does not clip controls or totals.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "POS selling screen: Compact/Normal/Large/Extra large",
+            "Management: Compact/Normal/Large/Extra large",
+            "Settings: Compact/Normal/Large/Extra large",
+            "Dialogs: Compact/Normal/Large/Extra large"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Five font choices, 24 size buttons across six groups, and three weight choices: 32 rendered choice buttons."
+      ],
+      "templateSites": {
+        "button": 4,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/integrations",
+      "sourceFile": "src/routes/settings/integrations/+page.svelte",
+      "controls": [
+        {
+          "label": "Send TCP Test",
+          "kind": "button",
+          "sourceLine": 181,
+          "effect": "Sends timestamped test overlay through native TCP.",
+          "expected": "Status includes local address and success/error; recorder displays formatted text.",
+          "dependencies": [
+            "Configured DVR/NVR network; native TCP"
+          ],
+          "risk": "external_hardware_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Automatic: On / Off",
+          "kind": "button",
+          "sourceLine": 188,
+          "effect": "Saves automatic overlay flag.",
+          "expected": "Empty host cannot enable; disabling clears automatic queue.",
+          "dependencies": [
+            "Settings database; configured recorder for enable"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "DVR/NVR IP / Unique POS Port",
+          "kind": "fields",
+          "sourceLine": 202,
+          "effect": "Saves local recorder target immediately.",
+          "expected": "Invalid port1–65535 rejected with previous value; changed target resets transport.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "DVR / NVR IP",
+            "POS Port"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Use suggested port",
+          "kind": "conditional_button",
+          "sourceLine": 216,
+          "effect": "Saves suggested till-specific recorder port.",
+          "expected": "Displayed target changes and transport resets.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Recorder Protocol",
+          "kind": "custom_select",
+          "sourceLine": 224,
+          "effect": "Chooses Hikvision or custom framing.",
+          "expected": "Hikvision requires Latin-1 and hides custom marker controls; custom reveals fields.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Hikvision Universal TCP",
+            "Custom TCP text"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Overlay Line Width",
+          "kind": "custom_select",
+          "sourceLine": 232,
+          "effect": "Saves message line width.",
+          "expected": "Preview uses24/28/32 columns and does not overflow undesirably.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "24",
+            "28",
+            "32"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Character Encoding",
+          "kind": "conditional_custom_select",
+          "sourceLine": 246,
+          "effect": "Saves custom encoding; Hikvision shows readonly Latin-1.",
+          "expected": "UTF-8/Latin-1 choices apply only custom; appropriate recorder text sent.",
+          "dependencies": [
+            "Custom framing"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Latin-1",
+            "UTF-8"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Start Marker / Line Separator / End Marker",
+          "kind": "conditional_fields",
+          "sourceLine": 269,
+          "effect": "Saves custom framing escape strings.",
+          "expected": "Preview and sent bytes match; invalid framing reports failure cleanly.",
+          "dependencies": [
+            "Custom framing"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Start Marker",
+            "Line Separator",
+            "End Marker"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Trolley activity / Completed transactions",
+          "kind": "toggle_buttons",
+          "sourceLine": 334,
+          "effect": "Saves which activities emit overlay updates.",
+          "expected": "Flags persist; cashier/cart/receipts updates follow chosen types.",
+          "dependencies": [
+            "Settings database; native recorder"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Trolley activity",
+            "Completed transactions"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 5,
+        "link": 0,
+        "input": 5,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 3,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/labels",
+      "sourceFile": "src/routes/settings/labels/+page.svelte",
+      "controls": [
+        {
+          "label": "Reset / Save / Print",
+          "kind": "header_buttons",
+          "sourceLine": 208,
+          "effect": "Resets draft, saves label_design, or prints selected item.",
+          "expected": "Reset is draft only; Save persists; Print opens system dialog or sends configured label job with clear result.",
+          "dependencies": [
+            "Selected item for print; printer or system dialog"
+          ],
+          "risk": "local_print_or_setting",
+          "values": [
+            "Reset",
+            "Save",
+            "Print"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Item / Size / Design",
+          "kind": "tab_buttons",
+          "sourceLine": 225,
+          "effect": "Switches editor section.",
+          "expected": "Selection and corresponding panel/preview remain stable.",
+          "dependencies": [],
+          "risk": "presentation",
+          "values": [
+            "Item",
+            "Size",
+            "Design"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Find item / clear item search / open search keyboard",
+          "kind": "search_controls",
+          "sourceLine": 248,
+          "effect": "Queries first60 active product matches with180ms debounce.",
+          "expected": "Name/SKU/barcode/PLU match; stale responses ignored; clear reloads.",
+          "dependencies": [
+            "Local/shared product lookup"
+          ],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Product result selection",
+          "kind": "dynamic_buttons",
+          "sourceLine": 265,
+          "effect": "Selects item for label preview/printing.",
+          "expected": "Name/code/price and selected check match selected product.",
+          "dependencies": [
+            "Matching active product"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label size presets",
+          "kind": "choice_buttons",
+          "sourceLine": 282,
+          "effect": "Edits width/height draft.",
+          "expected": "All14 preset sizes reflected in preview.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "25×25",
+            "32×25",
+            "40×30",
+            "50×25",
+            "50×30",
+            "57×32",
+            "62×29",
+            "80×30",
+            "80×40",
+            "80×50",
+            "80×60",
+            "80×100",
+            "100×50",
+            "100×150"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Width / Height / Copies",
+          "kind": "numeric_fields",
+          "sourceLine": 286,
+          "effect": "Edits custom size and print quantity.",
+          "expected": "Width15–210mm, height15–297mm, quantity1–500 normalize; preview and job agree.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Width",
+            "Height",
+            "Copies"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Compact / Standard / Barcode / Shelf",
+          "kind": "template_buttons",
+          "sourceLine": 295,
+          "effect": "Chooses label template draft.",
+          "expected": "Preview uses correct selected layout without clipping.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Compact",
+            "Standard",
+            "Barcode",
+            "Shelf"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Font / Name characters",
+          "kind": "select_and_input",
+          "sourceLine": 302,
+          "effect": "Edits font family and clamped5–80 character limit.",
+          "expected": "Selected font and truncation reflected in preview.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Standard",
+            "Condensed",
+            "Serif",
+            "Name characters"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Item name / Price / Other writing / Barcode height",
+          "kind": "range_inputs",
+          "sourceLine": 320,
+          "effect": "Edits independently bounded scaling percentages.",
+          "expected": "Preview updates smoothly; maximum scales remain contained and scannable.",
+          "dependencies": [
+            "Selected item"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Item name60–180%",
+            "Price60–200%",
+            "Other writing60–180%",
+            "Barcode height50–170%"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Store name / Item name / Price / Barcode / Barcode number / SKU / PLU",
+          "kind": "visibility_switches",
+          "sourceLine": 338,
+          "effect": "Edits content visibility.",
+          "expected": "Each field toggles in preview and print without unwanted empty gaps.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Store name",
+            "Item name",
+            "Price",
+            "Barcode",
+            "Barcode number",
+            "SKU",
+            "PLU"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Print date",
+          "kind": "switch",
+          "sourceLine": 345,
+          "effect": "Edits date visibility.",
+          "expected": "Shows day only; positioning choices appear.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Print date position",
+          "kind": "choice_buttons",
+          "sourceLine": 352,
+          "effect": "Positions date in one of six anchors.",
+          "expected": "All positions remain within label at small and large templates.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Top left",
+            "Top centre",
+            "Top right",
+            "Bottom left",
+            "Bottom centre",
+            "Bottom right"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 12,
+        "link": 0,
+        "input": 8,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 1,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 1,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/layout",
+      "sourceFile": "src/routes/settings/layout/+page.svelte",
+      "controls": [
+        {
+          "label": "Reset / Save",
+          "kind": "header_buttons",
+          "sourceLine": 103,
+          "effect": "Resets layout draft or saves cart+toolbar order.",
+          "expected": "Reset restores defaults; Save persists both orders; payment position stays fixed.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Reset",
+            "Save"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Move Goods / Last Receipt / Change Price / Hold up/down",
+          "kind": "dynamic_buttons",
+          "sourceLine": 131,
+          "effect": "Reorders four trolley controls.",
+          "expected": "Boundary arrows disabled; order/preview move exactlyone position.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Goods up/down",
+            "Last Receipt up/down",
+            "Change Price up/down",
+            "Hold up/down"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Move Scale / Recent Trans / Label Print / Discount left/right",
+          "kind": "dynamic_buttons",
+          "sourceLine": 160,
+          "effect": "Reorders four toolbar controls.",
+          "expected": "Boundary arrows disabled; order and preview match checkout.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Scale left/right",
+            "Recent Trans left/right",
+            "Label Print left/right",
+            "Discount left/right"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "18 rendered button elements before inherited Back. Checkout touch arrows44px; Back Office arrows34px."
+      ],
+      "templateSites": {
+        "button": 6,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/licence",
+      "sourceFile": "src/routes/settings/licence/+page.svelte",
+      "controls": [
+        {
+          "label": "Retry sharing with other tills",
+          "kind": "conditional_button",
+          "sourceLine": 242,
+          "effect": "Retries saving activated licence into shared configuration.",
+          "expected": "Success clears sharing warning; query failure displayed.",
+          "dependencies": [
+            "Native licence; MariaDB for sharing"
+          ],
+          "risk": "shared_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Retire till / Retire till confirm / Cancel",
+          "kind": "conditional_row_button_and_modal",
+          "sourceLine": 310,
+          "effect": "Retires unused noncurrent disconnected till registration.",
+          "expected": "Connected/current till cannot retire; confirm retains historical sales/reports; Cancel no change.",
+          "dependencies": [
+            "Admin; noncurrent disconnected registered till"
+          ],
+          "risk": "shared_registration_write",
+          "values": [
+            "Retire",
+            "Retire till",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Copy licence request",
+          "kind": "button",
+          "sourceLine": 352,
+          "effect": "Copies shop request code to clipboard.",
+          "expected": "Clipboard matches QR/request; clear success/error.",
+          "dependencies": [
+            "Clipboard permission"
+          ],
+          "risk": "clipboard",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Import licence file",
+          "kind": "button",
+          "sourceLine": 367,
+          "effect": "Opens native licence file picker and validates signed file.",
+          "expected": "Cancel unchanged; wrongshop/invalidsignature rejected; valid licence installs.",
+          "dependencies": [
+            "Native app; issuer signed licence fixture"
+          ],
+          "risk": "licence_change",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Signed licence code / Open licence keyboard",
+          "kind": "textarea_and_keyboard_button",
+          "sourceLine": 379,
+          "effect": "Edits signed licence token draft.",
+          "expected": "Long token input remains usable; keyboard respects Back Office; paste intact.",
+          "dependencies": [
+            "Clipboard or typing"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Activate licence",
+          "kind": "button",
+          "sourceLine": 390,
+          "effect": "Validates and installs pasted signed licence.",
+          "expected": "Disabled empty/browser/busy; signed fixture succeeds, wrongshop/invalid token errors.",
+          "dependencies": [
+            "Native app; signed licence fixture"
+          ],
+          "risk": "licence_change",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Opening first reads registered tills from the local database; live connectivity lookup failures are caught and MariaDB-offline skips remote presence. Verify licence status, local seat display and sharing warning separately."
+      ],
+      "templateSites": {
+        "button": 5,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 1,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 1,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/owner-app",
+      "sourceFile": "src/routes/settings/owner-app/+page.svelte",
+      "controls": [
+        {
+          "label": "Page open / initial pairing preparation",
+          "kind": "automatic_action",
+          "sourceLine": 34,
+          "effect": "Ensures shop identity, creates pairing code, generates QR and automatically sends owner-cloud snapshot.",
+          "expected": "QR represents shared shop; native authorization/storage failures visible.",
+          "dependencies": [
+            "Native shop identity; Firebase owner cloud"
+          ],
+          "risk": "external_cloud_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Send live snapshot now",
+          "kind": "button",
+          "sourceLine": 139,
+          "effect": "Publishes latest shop snapshot to owner cloud.",
+          "expected": "Connecting state returns to live/error; repeated busy clicks disabled.",
+          "dependencies": [
+            "Native shop identity; Firebase internet access"
+          ],
+          "risk": "external_cloud_write",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Copy pairing code",
+          "kind": "button",
+          "sourceLine": 166,
+          "effect": "Copies pairing URI to clipboard.",
+          "expected": "Clipboard code matches QR; invalid/unprepared QR disables action.",
+          "dependencies": [
+            "Clipboard permission"
+          ],
+          "risk": "clipboard",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Page entry itself writes owner-cloud data after QR preparation; source audit only unless external write is intentionally authorized."
+      ],
+      "templateSites": {
+        "button": 2,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/payments",
+      "sourceFile": "src/routes/settings/payments/+page.svelte",
+      "controls": [
+        {
+          "label": "SumUp provider tile",
+          "kind": "link",
+          "sourceLine": 56,
+          "effect": "Opens SumUp settings.",
+          "expected": "Accessible label/status agree; route /settings/payments/sumup opens.",
+          "dependencies": [],
+          "risk": "navigation",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Dojo provider tile",
+          "kind": "link",
+          "sourceLine": 82,
+          "effect": "Opens Dojo settings.",
+          "expected": "Accessible label/status agree; route /settings/payments/dojo opens.",
+          "dependencies": [],
+          "risk": "navigation",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Provider load failure currently becomes Setup required after console warning; failure-state UI deserves native verification."
+      ],
+      "templateSites": {
+        "button": 0,
+        "link": 2,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/payments/dojo",
+      "sourceFile": "src/routes/settings/payments/dojo/+page.svelte",
+      "controls": [
+        {
+          "label": "Test Terminal",
+          "kind": "button",
+          "sourceLine": 188,
+          "effect": "Saves current draft settings, queries selected Dojo terminal status.",
+          "expected": "Available/InUse/offline/error reported; no payment started.",
+          "dependencies": [
+            "Saved sandbox API key; internet; terminal"
+          ],
+          "risk": "provider_configuration_and_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save Settings",
+          "kind": "button",
+          "sourceLine": 191,
+          "effect": "Persists selected terminal, ownership, key and IDs locally.",
+          "expected": "Leave key blank retains stored key; native unresolved/shared guards preserved.",
+          "dependencies": [
+            "Native app; MariaDB if changing existing live shared registration"
+          ],
+          "risk": "provider_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Enable Dojo / Disable Dojo",
+          "kind": "button",
+          "sourceLine": 209,
+          "effect": "Enables ready Dojo or disables existing integration; enabling first disables SumUp.",
+          "expected": "Only one enabled card provider; failed new-provider save has clear recoverable result.",
+          "dependencies": [
+            "Complete credentials; selected terminal"
+          ],
+          "risk": "provider_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "How this terminal is used",
+          "kind": "custom_select",
+          "sourceLine": 219,
+          "effect": "Edits Dedicated/Shared ownership draft.",
+          "expected": "Dedicated explains noMariaDB; Shared warning reflects connection; Save required.",
+          "dependencies": [
+            "Native ownership guard on save"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Dedicated to this till",
+            "Shared between tills"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Resolve old sandbox payments",
+          "kind": "conditional_button",
+          "sourceLine": 239,
+          "effect": "Opens local-admin sandbox recovery modal.",
+          "expected": "Visible saved Sandbox key only; rejects unverified/captured records; when all clear switches Dedicated.",
+          "dependencies": [
+            "Saved actual sandbox key; local administrator; internet"
+          ],
+          "risk": "sandbox_recovery",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Secret API key / Software-house ID / Reseller ID / Currency / Terminal name",
+          "kind": "fields",
+          "sourceLine": 267,
+          "effect": "Edits native provider configuration draft.",
+          "expected": "Secret masked; values persist only on save; stored key not exposed.",
+          "dependencies": [],
+          "risk": "credential_draft",
+          "values": [
+            "Secret API key",
+            "Software-house ID",
+            "Reseller ID",
+            "Currency",
+            "Terminal name"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Find My Terminals",
+          "kind": "button",
+          "sourceLine": 295,
+          "effect": "Saves current settings then lists account terminals.",
+          "expected": "Returned TIDs/status choices display; zero/auth/offline error actionable.",
+          "dependencies": [
+            "Native saved credentials; Dojo internet"
+          ],
+          "risk": "provider_configuration_and_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Selected terminal",
+          "kind": "conditional_custom_select",
+          "sourceLine": 303,
+          "effect": "Edits assigned terminal and default human-readable name.",
+          "expected": "Selection/status agree; absent saved terminal remains selectable; saved only on Save.",
+          "dependencies": [
+            "Dojo terminal list or previous terminal"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Remove Saved API Key / Remove API Key confirm / Cancel",
+          "kind": "button_and_modal",
+          "sourceLine": 323,
+          "effect": "Clears native secret and disables Dojo after confirmation.",
+          "expected": "Cancel retains key; unresolved record guards visible; verified Dedicated allows removal.",
+          "dependencies": [
+            "Native credentials; no blocking payment journals"
+          ],
+          "risk": "credential_remove",
+          "values": [
+            "Remove Saved API Key",
+            "Remove API Key",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Recovery Administrator PIN / Resolve / Close",
+          "kind": "linked_modal_controls",
+          "sourceLine": 331,
+          "effect": "Verifies administrator and native sandbox recovery twice with31s confirmation wait.",
+          "expected": "PIN clears; session change aborts UI; completed path allows Close/key removal.",
+          "dependencies": [
+            "src/lib/components/DojoSandboxRecovery.svelte:69; sandbox terminal"
+          ],
+          "risk": "sandbox_recovery",
+          "values": [
+            "Administrator PIN",
+            "Resolve old sandbox payments",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 6,
+        "link": 0,
+        "input": 5,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 2,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/payments/sumup",
+      "sourceFile": "src/routes/settings/payments/sumup/+page.svelte",
+      "controls": [
+        {
+          "label": "Test Reader",
+          "kind": "button",
+          "sourceLine": 212,
+          "effect": "Saves current settings then queries reader online/state status.",
+          "expected": "Online/offline/error and battery/firmware rendered; no payment.",
+          "dependencies": [
+            "Native credentials; SumUp internet"
+          ],
+          "risk": "provider_configuration_and_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Save Settings",
+          "kind": "button",
+          "sourceLine": 215,
+          "effect": "Persists credentials/merchant/app/reader/ownership locally.",
+          "expected": "Blank secrets retain stored values; failed save visible.",
+          "dependencies": [
+            "Native app; ownership guards"
+          ],
+          "risk": "provider_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Enable SumUp / Disable SumUp",
+          "kind": "button",
+          "sourceLine": 233,
+          "effect": "Enables ready SumUp, first disabling Dojo, or disables integration.",
+          "expected": "Only one enabled provider; failurepath explains any disabled provider.",
+          "dependencies": [
+            "Complete credential setup; paired reader"
+          ],
+          "risk": "provider_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "How this reader is used",
+          "kind": "custom_select",
+          "sourceLine": 243,
+          "effect": "Edits Dedicated/Shared ownership draft.",
+          "expected": "Warnings reflect mode; existing shared switch requires MariaDB check.",
+          "dependencies": [
+            "Native ownership guard at save"
+          ],
+          "risk": "draft_only",
+          "values": [
+            "Dedicated to this till",
+            "Shared between tills"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Merchant code / Currency / API key / Affiliate App ID / Affiliate key",
+          "kind": "fields",
+          "sourceLine": 283,
+          "effect": "Edits provider credentials draft.",
+          "expected": "Secrets masked; valid required values accepted; blank saved secret retained.",
+          "dependencies": [],
+          "risk": "credential_draft",
+          "values": [
+            "Merchant code",
+            "Currency",
+            "API key",
+            "Affiliate App ID",
+            "Affiliate key"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Find My Readers",
+          "kind": "button",
+          "sourceLine": 310,
+          "effect": "Saves current settings and lists paired Solo readers.",
+          "expected": "Reader choices/status correct; empty/error visible.",
+          "dependencies": [
+            "Native configured credentials; SumUp internet"
+          ],
+          "risk": "provider_configuration_and_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Selected reader",
+          "kind": "conditional_custom_select",
+          "sourceLine": 318,
+          "effect": "Edits selected reader/name.",
+          "expected": "Selected model/device metadata agrees; Save required.",
+          "dependencies": [
+            "Available/saved reader"
+          ],
+          "risk": "draft_only",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Pairing code / Reader name",
+          "kind": "fields",
+          "sourceLine": 350,
+          "effect": "Edits new Solo pairing draft.",
+          "expected": "Code max9 and name max500; pair enabled code length8or9.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Pairing code",
+            "Reader name"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Pair Reader",
+          "kind": "button",
+          "sourceLine": 361,
+          "effect": "Saves config, calls Solo pairing API, selects result and resaves assignment.",
+          "expected": "Physical reader confirms pairing; code clears; assignment persists before success.",
+          "dependencies": [
+            "Logged-out Solo pairing code; native credentials; internet"
+          ],
+          "risk": "external_reader_registration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Remove Saved Keys / Remove Saved Keys confirm / Cancel",
+          "kind": "button_and_modal",
+          "sourceLine": 358,
+          "effect": "Removes stored API+affiliate keys and disables provider.",
+          "expected": "Cancel retains secrets; unresolved records block removal with visible reason.",
+          "dependencies": [
+            "Native journal guards"
+          ],
+          "risk": "credential_remove",
+          "values": [
+            "Remove Saved Keys",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 6,
+        "link": 0,
+        "input": 7,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 2,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/printers",
+      "sourceFile": "src/routes/settings/printers/+page.svelte",
+      "controls": [
+        {
+          "label": "Receipt / Labels / Drawer / Modules tabs",
+          "kind": "tab_buttons",
+          "sourceLine": 517,
+          "effect": "Switches hardware sections.",
+          "expected": "Correct panel and status selected; Drawer absent in Back Office.",
+          "dependencies": [],
+          "risk": "presentation",
+          "values": [
+            "Receipt",
+            "Labels",
+            "Drawer",
+            "Modules"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Star TSP100 preset / Cancel Star preset",
+          "kind": "button",
+          "sourceLine": 542,
+          "effect": "Saves several receipt printer configuration values immediately.",
+          "expected": "Preset applies USB/80mm/Latin-1/cut settings; cancel returns generic model with clear saved result.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Test Receipt / Receipt On-Off",
+          "kind": "button_and_switch",
+          "sourceLine": 550,
+          "effect": "Sends test job or toggles receipt integration.",
+          "expected": "Disabled off; test reports result; repeated in-flight clicks do not duplicate jobs.",
+          "dependencies": [
+            "Native printer/system dialog for test"
+          ],
+          "risk": "hardware_write",
+          "values": [
+            "Test Receipt",
+            "Receipt enable switch"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt connection choices",
+          "kind": "choice_buttons",
+          "sourceLine": 571,
+          "effect": "Saves selected receipt transport immediately.",
+          "expected": "Connection-specific fields render; current values retained.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "System driver",
+            "ESC/POS network",
+            "Windows USB",
+            "Serial / COM",
+            "Bluetooth",
+            "SDK module"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt Printer IP / Port",
+          "kind": "conditional_fields",
+          "sourceLine": 593,
+          "effect": "Saves network destination.",
+          "expected": "IP entered; port1–65535 valid; failed save visible.",
+          "dependencies": [
+            "Network connection"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "IP",
+            "Port"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt Installed Windows Printer",
+          "kind": "conditional_custom_select",
+          "sourceLine": 601,
+          "effect": "Selects detected system printer for raw jobs.",
+          "expected": "Detected and missing-current options clearly labelled; native Windows raw requirement explained.",
+          "dependencies": [
+            "Windows USB transport; installed printer"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt SDK Module / Module Device ID / Open SDK Modules",
+          "kind": "conditional_controls",
+          "sourceLine": 604,
+          "effect": "Assigns trusted enabled module/device or opens modules panel.",
+          "expected": "Missing module shows empty state and navigable install path.",
+          "dependencies": [
+            "Trusted enabled installed module for assignment"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "SDK Module",
+            "Module Device ID",
+            "Open SDK Modules"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt Serial or Bluetooth COM Port / Baud Rate",
+          "kind": "conditional_controls",
+          "sourceLine": 613,
+          "effect": "Saves serial device and baud rate.",
+          "expected": "Port/baud persist; appropriate label distinguishes Bluetooth.",
+          "dependencies": [
+            "Serial/Bluetooth transport"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt Printer Model / Paper Width / Character Encoding",
+          "kind": "custom_selects",
+          "sourceLine": 617,
+          "effect": "Saves model/paper/codepage.",
+          "expected": "Star restricts Latin-1; generic allowsUTF-8; width58/80mm persists.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Printer Model",
+            "Paper Width",
+            "Character Encoding"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Auto print / Cut paper / Feed before cut / Open drawer",
+          "kind": "after_payment_controls",
+          "sourceLine": 626,
+          "effect": "Saves after-payment options.",
+          "expected": "Auto-print/cut/feed0–20 respected; drawer option hidden Back Office.",
+          "dependencies": [
+            "Settings database; hardware for output"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Auto print",
+            "Cut paper",
+            "Feed before cut",
+            "Open drawer"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Test Label / Labels On-Off",
+          "kind": "button_and_switch",
+          "sourceLine": 644,
+          "effect": "Sends test label or toggles integration.",
+          "expected": "Test disabled system/off; raw transport success/failure visible; no duplicate in-flight jobs.",
+          "dependencies": [
+            "Native configured label printer"
+          ],
+          "risk": "hardware_write",
+          "values": [
+            "Test Label",
+            "Labels enable switch"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label connection choices",
+          "kind": "choice_buttons",
+          "sourceLine": 655,
+          "effect": "Saves label transport and adjusts matching protocol.",
+          "expected": "Connection/protocol agree and appropriate fields render.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "System driver",
+            "Network printer",
+            "Windows USB",
+            "Serial / COM",
+            "Bluetooth",
+            "SDK module"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label Protocol / Print Resolution",
+          "kind": "custom_selects",
+          "sourceLine": 667,
+          "effect": "Saves protocol and DPI.",
+          "expected": "Protocol system/ESC-POS/Star/ZPL/TSPL and DPI203/300/600 supported; system hides DPI.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Label Protocol",
+            "Print Resolution"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label Printer IP / Port / Installed Windows Printer",
+          "kind": "conditional_controls",
+          "sourceLine": 672,
+          "effect": "Saves selected network or Windows raw printer target.",
+          "expected": "Appropriate target shown and persists; native dependency/error clear.",
+          "dependencies": [
+            "Chosen label connection"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Printer IP",
+            "Port",
+            "Installed Windows Printer"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label SDK Module / Module Device ID / Open SDK Modules",
+          "kind": "conditional_controls",
+          "sourceLine": 677,
+          "effect": "Assigns installed module/device or opens modules tab.",
+          "expected": "Trusted enabled module options only; absence actionable.",
+          "dependencies": [
+            "SDK transport"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "SDK Module",
+            "Module Device ID",
+            "Open SDK Modules"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Label Serial or Bluetooth COM Port / Baud Rate",
+          "kind": "conditional_controls",
+          "sourceLine": 681,
+          "effect": "Saves serial printer device and speed.",
+          "expected": "Appropriate labels/baud options; settings persist.",
+          "dependencies": [
+            "Serial/Bluetooth transport"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Cut after label / Label gap-feed",
+          "kind": "switch_and_numeric",
+          "sourceLine": 690,
+          "effect": "Saves cut and gap0–12.",
+          "expected": "Output finishing and saved UI agree.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Cut after label",
+            "Label gap / feed"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Open Drawer / Drawer On-Off",
+          "kind": "button_and_switch",
+          "sourceLine": 704,
+          "effect": "Sends native cash-drawer pulse or saves enabled flag.",
+          "expected": "No target/off disables pulse; success/failure visible; repeated click safe.",
+          "dependencies": [
+            "Checkout mode; configured drawer hardware"
+          ],
+          "risk": "hardware_cash_drawer",
+          "values": [
+            "Open Drawer",
+            "Drawer enable switch"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Drawer Pin / Pulse on-ms / Pulse off-ms",
+          "kind": "controls",
+          "sourceLine": 719,
+          "effect": "Saves cash-drawer command timing.",
+          "expected": "Pin2or5 and pulse2–510ms values persist and normalized.",
+          "dependencies": [
+            "Checkout mode"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Drawer Pin",
+            "Pulse on",
+            "Pulse off"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt printer / Separate target",
+          "kind": "buttons",
+          "sourceLine": 728,
+          "effect": "Clears separate target settings or opens target editor.",
+          "expected": "Receipt target fallback shows current actual printer; Separate reveals target choices.",
+          "dependencies": [
+            "Checkout mode"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Receipt printer",
+            "Separate target"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Drawer Target Type",
+          "kind": "custom_select",
+          "sourceLine": 734,
+          "effect": "Changes separate-target editor mode only.",
+          "expected": "Windows/Network/Serial/Module corresponding controls render.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Windows printer",
+            "Network printer",
+            "Serial / COM device",
+            "Installed SDK module"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Drawer Windows Printer / Printer IP / Port / Serial COM Port / Baud Rate / SDK Module / Module Device ID / Open SDK Modules",
+          "kind": "conditional_controls",
+          "sourceLine": 736,
+          "effect": "Saves separate drawer target and clears conflicting alternatives.",
+          "expected": "Each target routes to exactlyone configured transport; failure cannot leave misleading selection.",
+          "dependencies": [
+            "Checkout mode; selected target transport"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Windows Printer",
+            "Printer IP",
+            "Port",
+            "Serial / COM Port",
+            "Baud Rate",
+            "SDK Module",
+            "Module Device ID",
+            "Open SDK Modules"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Refresh printer modules",
+          "kind": "button",
+          "sourceLine": 761,
+          "effect": "Reloads local installed module list.",
+          "expected": "Spinner completes and error/empty state clear.",
+          "dependencies": [
+            "Native module configuration"
+          ],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Install Module",
+          "kind": "button",
+          "sourceLine": 762,
+          "effect": "Opens .lbjprinter picker and installs signed compatible module.",
+          "expected": "Cancel unchanged; untrusted/incompatible module rejected; installed module appears.",
+          "dependencies": [
+            "Native app; signed module fixture"
+          ],
+          "risk": "local_extension_install",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Check module / Enable-Disable module / Uninstall module",
+          "kind": "dynamic_row_buttons",
+          "sourceLine": 776,
+          "effect": "Runs health check, saves enabled state, or opens uninstall confirmation.",
+          "expected": "Trusted checks and in-use restrictions apply; uninstall requires switching targets; current busy action blocked.",
+          "dependencies": [
+            "Installed module; native SDK"
+          ],
+          "risk": "local_extension_change",
+          "values": [
+            "Check",
+            "Enable/Disable",
+            "Uninstall"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Uninstall Module / Cancel / close",
+          "kind": "confirmation_modal",
+          "sourceLine": 791,
+          "effect": "Removes selected unused module after confirmation.",
+          "expected": "Cancel unchanged; confirm removes module files/list and reports result.",
+          "dependencies": [
+            "Unused installed module"
+          ],
+          "risk": "local_extension_remove",
+          "values": [
+            "Uninstall Module",
+            "Cancel",
+            "Close"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Raw Windows printers, serial adapters, real printer/drawer and signed SDK module fixtures may be absent on Mac; classify their physical result as dependency-blocked rather than passed."
+      ],
+      "templateSites": {
+        "button": 24,
+        "link": 0,
+        "input": 16,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 16,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/receipt",
+      "sourceFile": "src/routes/settings/receipt/+page.svelte",
+      "controls": [
+        {
+          "label": "Reset / Test Print / Save",
+          "kind": "header_buttons",
+          "sourceLine": 172,
+          "effect": "Resets draft, sends preview receipt to configured printer, or saves receipt_design.",
+          "expected": "Reset needs Save; print job reports outcome; Save persists design.",
+          "dependencies": [
+            "Printer for Test Print; settings database for Save"
+          ],
+          "risk": "local_print_or_setting",
+          "values": [
+            "Reset",
+            "Test Print",
+            "Save"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Format / Messages / Content",
+          "kind": "tab_buttons",
+          "sourceLine": 189,
+          "effect": "Switches editor panel.",
+          "expected": "Active tab/panel and preview consistent.",
+          "dependencies": [],
+          "risk": "presentation",
+          "values": [
+            "Format",
+            "Messages",
+            "Content"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "58mm Thermal / 80mm Thermal",
+          "kind": "paper_width_buttons",
+          "sourceLine": 211,
+          "effect": "Edits receipt width draft.",
+          "expected": "Preview and printed content use selected width without clipping.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "58mm Thermal",
+            "80mm Thermal"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Text size / Title size / Font",
+          "kind": "custom_selects",
+          "sourceLine": 218,
+          "effect": "Edits receipt typography draft.",
+          "expected": "Small/Normal/Large text+title and Mono/Standard/Condensed render correctly.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Text size",
+            "Title size",
+            "Font"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Compact / Comfortable",
+          "kind": "spacing_buttons",
+          "sourceLine": 224,
+          "effect": "Edits receipt density draft.",
+          "expected": "Preview spacing changes while totals remain aligned.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Compact",
+            "Comfortable"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Header text / Below store details / Footer text",
+          "kind": "textarea_fields",
+          "sourceLine": 236,
+          "effect": "Edits receipt messages draft.",
+          "expected": "Multiline text wraps; blank header uses store name; preview/print match.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Header text",
+            "Below store details",
+            "Footer text"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Receipt content visibility",
+          "kind": "switches",
+          "sourceLine": 251,
+          "effect": "Edits ten receipt content flags.",
+          "expected": "Every flagged item appears/disappears consistently in preview/print.",
+          "dependencies": [],
+          "risk": "draft_only",
+          "values": [
+            "Store address",
+            "Store phone",
+            "Store email",
+            "Receipt number",
+            "Date and time",
+            "Cashier name",
+            "Till name",
+            "Product SKU",
+            "Payment and change",
+            "Receipt number barcode"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 9,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 3,
+        "customSelect": 3,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/scale",
+      "sourceFile": "src/routes/settings/scale/+page.svelte",
+      "controls": [
+        {
+          "label": "Scale Enabled / Disabled",
+          "kind": "toggle_button",
+          "sourceLine": 114,
+          "effect": "Saves immediate hardware enabled flag.",
+          "expected": "Visible state persists; Test Scale gated off.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Find ports",
+          "kind": "button",
+          "sourceLine": 134,
+          "effect": "Enumerates native serial devices; auto-selects onlyport if none configured.",
+          "expected": "Busy state prevents repeat; no ports/driver issue explained.",
+          "dependencies": [
+            "Native serial enumeration"
+          ],
+          "risk": "diagnostic",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Scale Port / fallback / Manual Port",
+          "kind": "conditional_selector_and_fields",
+          "sourceLine": 143,
+          "effect": "Saves serial device path immediately.",
+          "expected": "Detected/current path agrees with manual field; stale configured path remains visible.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Scale Port",
+            "Fallback Port",
+            "Manual Port"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Test Scale",
+          "kind": "button",
+          "sourceLine": 186,
+          "effect": "Reads scale once using current settings.",
+          "expected": "Disabled missing/off/busy; grams/kg parsed; no data returns actionable error.",
+          "dependencies": [
+            "Native configured scale and cable"
+          ],
+          "risk": "hardware_read",
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Baud Rate",
+          "kind": "custom_select",
+          "sourceLine": 193,
+          "effect": "Saves serial speed.",
+          "expected": "9600/4800/2400/19200/38400 persist and apply to read.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "9600",
+            "4800",
+            "2400",
+            "19200",
+            "38400"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Scale Output Mode",
+          "kind": "custom_select",
+          "sourceLine": 199,
+          "effect": "Saves request mode.",
+          "expected": "Automatic/listen/Adam PRINT choices reflected in native test.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "values": [
+            "Automatic",
+            "Continuous output / listen only",
+            "Adam PRINT command"
+          ],
+          "verification": "source_inspected_only"
+        },
+        {
+          "label": "Read Timeout",
+          "kind": "numeric_input",
+          "sourceLine": 207,
+          "effect": "Saves wait500–5000ms.",
+          "expected": "Valid range persists; invalid typed values safely normalize.",
+          "dependencies": [
+            "Settings database"
+          ],
+          "risk": "device_configuration",
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [],
+      "templateSites": {
+        "button": 3,
+        "link": 0,
+        "input": 3,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 3,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    },
+    {
+      "route": "/settings/themes",
+      "sourceFile": "src/routes/settings/themes/+page.svelte",
+      "controls": [
+        {
+          "label": "Theme choices",
+          "kind": "choice_buttons",
+          "sourceLine": 49,
+          "effect": "Immediately saves and applies selected global colour theme.",
+          "expected": "Current choice marked; disabled while saving; error shown; light/dark surfaces legible on every page.",
+          "dependencies": [
+            "Settings database; shared sync if multi-till"
+          ],
+          "risk": "shop_configuration",
+          "values": [
+            "Midnight",
+            "Forest",
+            "Snow",
+            "Linen & Walnut",
+            "Sage Slate",
+            "Daylight",
+            "Coffee",
+            "Sunset"
+          ],
+          "verification": "source_inspected_only"
+        }
+      ],
+      "notes": [
+        "Eight rendered theme buttons; themes synchronize across tills. Restore original theme after reversible native audit."
+      ],
+      "templateSites": {
+        "button": 1,
+        "link": 0,
+        "input": 0,
+        "nativeSelect": 0,
+        "textarea": 0,
+        "customSelect": 0,
+        "touchDigitPad": 0,
+        "touchKeyboardButton": 0,
+        "searchField": 0,
+        "details": 0
+      }
+    }
+  ],
+  "redirects": [
+    {
+      "route": "/settings/permissions",
+      "sourceFile": "src/routes/settings/permissions/+page.ts",
+      "sourceLine": 4,
+      "target": "/employees/permissions",
+      "expected": "307 redirect reaches staff permissions page; no separate settings UI.",
+      "verification": "source_inspected_only"
+    }
+  ],
+  "sourceFindings": [
+    {
+      "id": "SET-SOURCE-01",
+      "priority": "P2",
+      "verification": "source_logic_confirmed_runtime_failure_injection_needed",
+      "title": "Several settings show an unsaved value when database persistence fails",
+      "routes": [
+        "/settings/feedback",
+        "/settings/scale",
+        "/settings/printers",
+        "/settings/advanced"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/feedback/+page.svelte",
+          "line": 54
+        },
+        {
+          "file": "src/routes/settings/scale/+page.svelte",
+          "line": 43
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 221
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 372
+        }
+      ],
+      "evidence": "Each handler updates settingsDB or storeDB before awaiting upsert. These handlers have no catch, rollback or local error state. Event callbacks also do not consume the rejected promise.",
+      "impact": "A blocked/failed local or shared setting write can leave the operator seeing On, a new target, or a changed tax mode even though it was not persisted; re-entry/restart then changes it back.",
+      "reproduction": "In an isolated fixture, force a settings write to fail and change a sound switch, scale enabled/port, printer transport, or Save Tax Mode. Compare on-screen state to persisted settings and unhandled rejection.",
+      "expected": "Catch persistence errors, show actionable failure and retain/revert the prior saved state."
+    },
+    {
+      "id": "SET-SOURCE-02",
+      "priority": "P2",
+      "verification": "source_logic_confirmed_native_hardware_test_needed",
+      "title": "Printer and drawer tests allow overlapping repeated operations",
+      "routes": [
+        "/settings/printers"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 338
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 350
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 362
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 550
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 644
+        },
+        {
+          "file": "src/routes/settings/printers/+page.svelte",
+          "line": 705
+        }
+      ],
+      "evidence": "Test Receipt, Test Label and Open Drawer have no in-flight flag or early busy return; disabled conditions only depend on configuration. Clicking while the first awaited request is running invokes another job.",
+      "impact": "Multiple unintended physical test receipts/labels or drawer pulses; concurrent results can overwrite each other.",
+      "reproduction": "With an isolated slow mock/hardware transport, double-click each test while the first status says Sending/Opening.",
+      "expected": "Busy state prevents concurrent repeat until the first request settles."
+    },
+    {
+      "id": "SET-SOURCE-03",
+      "priority": "P3",
+      "verification": "source_logic_confirmed_parser_fixture_needed",
+      "title": "Barcode tester labels unchecked check digits Valid",
+      "routes": [
+        "/settings/barcodes"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/barcodes/+page.svelte",
+          "line": 422
+        },
+        {
+          "file": "src/lib/barcodeRules.ts",
+          "line": 173
+        }
+      ],
+      "evidence": "Successful tester markup renders Check digit: Valid unconditionally. Parser only checks EAN-13 validity when validateCheckDigit is true.",
+      "impact": "With Validate check digit off, a barcode with an incorrect digit can be accepted by the intended rule but falsely reported as validated.",
+      "reproduction": "Disable Validate check digit in a draft rule, enter a matching13-digit code with an incorrect final digit, press Test.",
+      "expected": "Show Not checked when validation is disabled; display Valid only after an actual check."
+    },
+    {
+      "id": "SET-SOURCE-04",
+      "priority": "P2",
+      "verification": "source_logic_confirmed_provider_save_failure_fixture_needed",
+      "title": "Switching card provider can leave both providers disabled after a save failure",
+      "routes": [
+        "/settings/payments/dojo",
+        "/settings/payments/sumup"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/payments/dojo/+page.svelte",
+          "line": 156
+        },
+        {
+          "file": "src/routes/settings/payments/sumup/+page.svelte",
+          "line": 160
+        }
+      ],
+      "evidence": "Each enable path first persists enabled:false for the other provider, then awaits saveConfiguration(true). saveConfiguration catches failures and returns false; there is no rollback of the previously enabled provider.",
+      "impact": "If new-provider config validation/journal guard/write fails after the old provider was disabled, card checkout loses its prior working integration until manually re-enabled.",
+      "reproduction": "In fixture with providerA enabled, enable ready providerB while forcing B save to fail; reload both native configs.",
+      "expected": "Atomic or recoverable switching preserving the working provider, or explicit visible recovery instructions/state."
+    },
+    {
+      "id": "SET-SOURCE-05",
+      "priority": "P3",
+      "verification": "source_logic_confirmed_runtime_load_failure_needed",
+      "title": "Provider status screen turns a load error into Setup required",
+      "routes": [
+        "/settings/payments"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/payments/+page.svelte",
+          "line": 12
+        },
+        {
+          "file": "src/routes/settings/payments/+page.svelte",
+          "line": 21
+        }
+      ],
+      "evidence": "Rejected loadDojoConfig/loadSumupConfig only console.warn; null config is later rendered as Setup required.",
+      "impact": "A transient native config read failure looks like absent credentials and encourages unnecessary reconfiguration.",
+      "reproduction": "Reject one provider config read while opening Card Payments; observe provider tile state.",
+      "expected": "Separate Could not load/Retry state from genuinely missing setup."
+    },
+    {
+      "id": "SET-SOURCE-06",
+      "priority": "P2",
+      "verification": "source_logic_confirmed_runtime_query_failure_needed",
+      "title": "Some maintenance diagnostic failures have no visible completion/error state",
+      "routes": [
+        "/settings/advanced"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 326
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 354
+        },
+        {
+          "file": "src/routes/settings/advanced/+page.svelte",
+          "line": 379
+        }
+      ],
+      "evidence": "refreshConflicts, performConflictDismiss and validateSchemas await fallible operations without try/catch. validateSchemas sets Checking databases before the await; on rejection that status stays unchanged.",
+      "impact": "Schema validation can remain visually checking; conflict refresh/dismiss failure may appear inert or escape only as an unhandled rejection.",
+      "reproduction": "In isolated fixture reject schema validation or conflict read/delete, then click the corresponding control.",
+      "expected": "Finish busy/status states and show a readable failure with retry."
+    },
+    {
+      "id": "SET-SOURCE-07",
+      "priority": "P2",
+      "verification": "source_race_candidate_requires_ordered_failure_fixture",
+      "title": "Concurrent font saves can revert a newer successful choice",
+      "routes": [
+        "/settings/fonts"
+      ],
+      "sources": [
+        {
+          "file": "src/routes/settings/fonts/+page.svelte",
+          "line": 133
+        },
+        {
+          "file": "src/routes/settings/fonts/+page.svelte",
+          "line": 190
+        }
+      ],
+      "evidence": "Font choices remain enabled while saving. Every update captures a previous row and unconditionally restores it on error, then clears pendingSettings for the key. There is no per-key version or stale-result guard.",
+      "impact": "If earlier requestA fails after later choiceB succeeds, A rollback can overwrite the UI with an older font/size, while the persisted setting remainsB.",
+      "reproduction": "StartA thenB for the same font key; letB complete successfully andA reject afterwards; compare UI and stored value.",
+      "expected": "Serialize per-key updates or ignore stale completion/rollback so the newest successful selection remains displayed."
+    }
+  ]
+}

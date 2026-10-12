@@ -78,6 +78,22 @@ describe('stock receipt validation', () => {
 });
 
 describe('isolated stock receipt preview', () => {
+    it('pages beyond 50 receipts and returns immutable receipt lines and literal-search matches', () => {
+        const preview = createStockReceiptPreview();
+        for (let index = 0; index < 65; index++) {
+            const receipt = bundle(`receipt-${String(index).padStart(3, '0')}`);
+            receipt.receipt.reference = index === 3 ? 'INV_%' : `INV-${index}`;
+            receipt.receipt.supplierId = index % 2 ? 'supplier-a' : 'supplier-b';
+            preview.commit(receipt, [product()]);
+        }
+        const pages = [0, 20, 40, 60].flatMap(offset => preview.history({ offset, limit: 20 }).rows);
+        expect(pages).toHaveLength(65);
+        expect(new Set(pages.map(row => row.id)).size).toBe(65);
+        expect(preview.history({ supplierId: 'supplier-a' }).total).toBe(32);
+        expect(preview.history({ query: '_%' }).rows.map(row => row.id)).toEqual(['receipt-003']);
+        const first = preview.lines('receipt-003'); first[0].quantity = 99;
+        expect(preview.lines('receipt-003')[0].quantity).toBe(3);
+    });
     it('increments stock and returns matching inventory/audit records only once', () => {
         const preview = createStockReceiptPreview();
         const original = [product()];
