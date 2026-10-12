@@ -17,7 +17,7 @@ import { beginSyncActivity, recordSyncResult, syncActivity } from './syncActivit
 import * as sqlite from './sqlite';
 import { sumPaymentExtras } from '../paymentExtras';
 import * as mysql from './mysql';
-import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection } from './connection';
+import { isMultiMode, getMysqlDb, connectionState, pingMysql, buildMysqlUri, resetMysqlConnection, sameMysqlConnectionConfig } from './connection';
 import {
     REPORT_CONTRIBUTING_CONFLICT_TABLES,
     REPORT_CONTRIBUTING_QUEUE_TABLES,
@@ -9492,7 +9492,10 @@ export async function getSyncRuntimeDiagnostics(): Promise<SyncRuntimeDiagnostic
         // Opening/probing the connection can change its state while we await it.
         // A responding server is not ready until startup recovery has finished.
         const latestState = get(connectionState);
-        const syncReady = latestState.mysqlOnline && latestState.mysqlReady && !latestState.syncError;
+        if (latestState.mode !== 'multi' || !sameMysqlConnectionConfig(state.mysqlConfig, latestState.mysqlConfig)) {
+            throw new Error('The MariaDB configuration changed while checking reachability. Refresh the current connection.');
+        }
+        const syncReady = latestState.mysqlOnline && latestState.mysqlReady;
         return {
             browserPreview: false,
             syncApplicable: true,
@@ -10508,7 +10511,16 @@ const LEGACY_LICENSE_REGISTER_IDS = new Set(['register-main', 'legacy-till']);
 
 async function publishTillPresence(force = false): Promise<void> {
     if (!isMultiMode() || isPresenceRunning) return;
-    if (!force && !get(connectionState).mysqlOnline) return;
+    const initial = get(connectionState);
+    if (!force && (!initial.mysqlOnline || !initial.mysqlReady)) return;
+    const config = initial.mysqlConfig ? { ...initial.mysqlConfig } : null;
+    const assertCurrentPresenceConnection = () => {
+        const state = get(connectionState);
+        if (state.mode !== 'multi' || !sameMysqlConnectionConfig(config, state.mysqlConfig)
+            || (!force && (!state.mysqlOnline || !state.mysqlReady))) {
+            throw new Error('SYNC_NOT_READY: Till presence waits for this connection to finish startup');
+        }
+    };
     isPresenceRunning = true;
     try {
         await wholeSystemCloseLocalMutex.runExclusive(async () => {
@@ -10517,7 +10529,9 @@ async function publishTillPresence(force = false): Promise<void> {
             // State/token must be stable across flush + local counts. If a close
             // phase changes underneath this pass, repeat before acknowledging.
             for (let pass = 0; pass < 3; pass += 1) {
+                assertCurrentPresenceConnection();
                 const observed = await mysql.mysqlGetWholeSystemCloseBarrier();
+                assertCurrentPresenceConnection();
                 await rememberLocalTerminalCloseBarrier(observed);
                 if (observed.state === 'preparing') {
                     try {
@@ -10533,9 +10547,12 @@ async function publishTillPresence(force = false): Promise<void> {
                     getOfflineQueueStats(),
                 ]);
                 const outboxCount = queuedOutboxCount + onlineIntentCount;
+                assertCurrentPresenceConnection();
                 const barrier = await mysql.mysqlGetWholeSystemCloseBarrier();
+                assertCurrentPresenceConnection();
                 await rememberLocalTerminalCloseBarrier(barrier);
                 if (barrier.state !== observed.state || barrier.token !== observed.token) continue;
+                assertCurrentPresenceConnection();
                 await mysql.mysqlTouchTillPresence(tillId, tillName, {
                     protocolVersion: WHOLE_SYSTEM_CLOSE_PROTOCOL_VERSION,
                     barrierToken: barrier.state === 'idle' ? '' : barrier.token,
@@ -10568,7 +10585,7 @@ export async function getConnectedTills(): Promise<ConnectedTill[]> {
         }];
     }
     const state = get(connectionState);
-    if (!state.mysqlOnline || state.syncError) {
+    if (!state.mysqlOnline || !state.mysqlReady) {
         throw new Error(
             'SYNC_NOT_READY: MariaDB presence is unavailable until sync startup completes',
         );
@@ -10576,7 +10593,17 @@ export async function getConnectedTills(): Promise<ConnectedTill[]> {
     // A dashboard read may refresh an already-ready till, but it must never
     // bypass readiness and make an unready process appear live to other tills.
     await publishTillPresence();
+    const current = get(connectionState);
+    if (!current.mysqlOnline || !current.mysqlReady || current.mode !== 'multi'
+        || !sameMysqlConnectionConfig(state.mysqlConfig, current.mysqlConfig)) {
+        throw new Error('SYNC_NOT_READY: The connection changed while reading connected tills');
+    }
     const tills = await mysql.mysqlGetConnectedTills(TILL_ONLINE_WINDOW_SECONDS);
+    const latest = get(connectionState);
+    if (!latest.mysqlOnline || !latest.mysqlReady || latest.mode !== 'multi'
+        || !sameMysqlConnectionConfig(state.mysqlConfig, latest.mysqlConfig)) {
+        throw new Error('SYNC_NOT_READY: The connection changed while reading connected tills');
+    }
     return tills.map((till) => ({ ...till, isCurrent: till.tillId === tillId }));
 }
 
@@ -10681,7 +10708,7 @@ async function runHeartbeat(): Promise<void> {
             resetRemoteConnections();
             return;
         }
-        if (online && !wasOnline) {
+        if (online && !wasOnline && get(connectionState).mysqlReady) {
             console.log('database: connection restored — resyncing before replaying offline changes…');
             runSyncCycle().catch(console.error);
         }
@@ -11059,7 +11086,7 @@ export async function runChangeSyncCycle(): Promise<void> {
         if (pendingLocalPurge) {
             await hydrateSvelteStores();
             reloadAfterPurge = true;
-        } else if (get(connectionState).mysqlOnline) {
+        } else if (get(connectionState).mysqlOnline && get(connectionState).mysqlReady) {
             const localCursor = await readLocalSyncChangeCursor();
             const syncWindow = await mysql.mysqlGetSyncChangeWindow(localCursor ?? 0);
             const cursorExpired = localCursor !== null
@@ -11103,7 +11130,7 @@ export async function runChangeSyncCycle(): Promise<void> {
         activityError = String(error);
         console.warn('database: change-cursor sync failed:', error);
         resetRemoteConnections();
-        connectionState.update(state => ({ ...state, mysqlOnline: false, syncError: String(error) }));
+        connectionState.update(state => ({ ...state, mysqlOnline: false, mysqlReady: false, syncError: String(error) }));
     } finally {
         isChangeSyncRunning = false;
         if (finishActivity) finishActivity(activityError, activitySucceeded);
@@ -11122,7 +11149,7 @@ export async function runChangeSyncCycle(): Promise<void> {
  */
 export async function runFastSyncCycle(): Promise<void> {
     if (!isMultiMode() || isFastSyncRunning || isSyncRunning || isChangeSyncRunning) return;
-    if (!get(connectionState).mysqlOnline) return;
+    if (!get(connectionState).mysqlOnline || !get(connectionState).mysqlReady) return;
     isFastSyncRunning = true;
     const finishActivity = beginSyncActivity('fast');
     let activityError: string | null = null;
@@ -11189,7 +11216,7 @@ export async function runFastSyncCycle(): Promise<void> {
         activityError = String(e);
         console.warn('database: fast sync failed:', e);
         resetRemoteConnections();
-        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
+        connectionState.update(s => ({ ...s, mysqlOnline: false, mysqlReady: false, syncError: e.toString() }));
     } finally {
         isFastSyncRunning = false;
         finishActivity(activityError, activitySucceeded);
@@ -11210,7 +11237,7 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
         if (strict) throw new Error('Another synchronization cycle is still running');
         return;
     }
-    if (!get(connectionState).mysqlOnline) {
+    if (!get(connectionState).mysqlOnline || (!strict && !get(connectionState).mysqlReady)) {
         if (strict) throw new Error('MariaDB is offline');
         return;
     }
@@ -11299,7 +11326,7 @@ export async function runSyncCycle(options: { strict?: boolean } = {}): Promise<
         activityError = String(e);
         console.warn('database: background sync failed:', e);
         resetRemoteConnections();
-        connectionState.update(s => ({ ...s, mysqlOnline: false, syncError: e.toString() }));
+        connectionState.update(s => ({ ...s, mysqlOnline: false, mysqlReady: false, syncError: e.toString() }));
         if (strict) throw e;
     } finally {
         isSyncRunning = false;

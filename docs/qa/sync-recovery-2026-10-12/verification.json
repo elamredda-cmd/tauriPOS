@@ -1,0 +1,115 @@
+{
+  "auditSeries": "2026-10-12",
+  "scope": "MariaDB shared connection lifecycle, sync startup recovery, connected-till presence",
+  "overallStatus": "completed_with_documented_native_scope_limitations",
+  "automated": {
+    "frontend": { "passed": 1493, "skipped": 56, "filesPassed": 107, "filesSkipped": 3, "status": "passed" },
+    "typeCheck": { "command": "npm run check", "errors": 0, "warnings": 0, "status": "passed" },
+    "diffCheck": { "command": "git diff --check", "status": "passed" }
+  },
+  "builds": {
+    "isolatedQa": { "platform": "macOS ARM64", "configuration": "debug", "isolatedApplicationId": true, "status": "built" },
+    "normalApp": { "platform": "macOS ARM64", "configuration": "debug", "qaFeaturesIncluded": false,
+      "latestNormalSource": true, "freshlyRelaunched": true, "status": "built_and_verified", "leftRunning": true,
+      "warnings": { "existingUnusedRustFunctions": 4, "frontendChunkSize": true } }
+  },
+  "nativeCases": [
+    {
+      "id": "B0", "status": "baseline_observed_not_fix_retest", "build": "original_running_app",
+      "observation": { "mariaDb": "reachable", "syncReadiness": "ready", "schema": "good", "pending": 0, "conflicts": 0,
+        "connectedTills": [ { "name": "Till 1", "current": true }, { "name": "Till 8", "current": false, "lastSeenSeconds": 13 } ] }
+    },
+    {
+      "id": "N1", "case": "Normal rebuilt-app startup and current/peer presence", "status": "passed_native_ui", "runId": "normal_fresh_relaunch_1",
+      "observation": { "normalStaffSignIn": true, "navigation": "Admin > Sync Dashboard", "mariaDb": "reachable", "syncReadiness": "ready",
+        "schema": "good", "pending": 0, "conflicts": 0,
+        "connectedTills": [ { "name": "Till 1", "current": true, "label": "THIS TILL", "status": "Online now" },
+          { "name": "Till 8", "current": false, "status": "Online now" } ], "refresh": { "succeeded": true, "connectedCount": 2, "error": null } }
+    },
+    {
+      "id": "N2", "case": "Two-second cold handshake delay", "status": "passed_native_ui_and_server", "runId": "isolated_delayed_connection_1",
+      "observation": { "testConnectionSucceeded": true, "saveAndReconnectOnlySucceeded": true, "schemaTableCount": 49,
+        "schemaMarkerCurrent": true, "presenceCount": 1, "remoteStaffCount": 0,
+        "staffRevalidationReturnedToSignIn": true, "authenticationBypassed": false, "triggersBypassed": false }
+    },
+    {
+      "id": "N3", "case": "Private server interruption and server-side presence pause", "status": "limited_pass_server_evidence", "runId": "isolated_outage_recovery_1",
+      "observation": { "privateServerShutdownConfirmed": true, "previousPresenceTimeUtc": "23:02:43.615",
+        "nativeUiReadinessTraced": false }, "limitation": "Server interruption/presence pause only; not a full UI offline-state trace."
+    },
+    {
+      "id": "N4", "case": "Private server restoration and automatic ready-gated presence recovery", "status": "passed_automatic_server_recovery", "runId": "isolated_outage_recovery_1",
+      "observation": { "serverRestartTimeUtc": "23:04:23", "freshPresenceTimeUtc": "23:05:58.131", "approximateRecoverySeconds": 95,
+        "presenceCount": 1, "retryButtonUsed": false, "connectionResetUsed": false, "individualStartupGateEventsTraced": false }
+    },
+    {
+      "id": "N5", "case": "Offline cold start and manual startup retry failure handling", "status": "passed_native_failure_handling_only",
+      "runId": "isolated_offline_cold_start_retry_1",
+      "observation": { "privateServerShutDown": true, "coldRestart": true, "ordinaryCachedStaffSignIn": true, "authenticationBypassed": false,
+        "mariaDb": "unreachable", "syncReadiness": "blocked", "connectedTills": "unavailable",
+        "uploadDisabled": true, "syncDisabled": true, "fullRepairDisabled": true, "retryConnectionEnabled": true,
+        "retryClicked": true, "retryRunningLabel": "Starting/Reconnecting", "retryDisabledWhileRunning": true,
+        "terminalRetryResult": "Sync startup could not finish: MariaDB is unavailable", "errorDismissed": true,
+        "retryReenabled": true, "refreshReenabled": true, "unsafeSyncActionsRemainDisabled": true },
+      "limitations": { "successfulManualStartupRetryVerified": false, "internalStartupNonOverlapTracedNatively": false }
+    },
+    {
+      "id": "N6", "case": "Normal cold relaunch and automatic recovery after offline QA cold start", "status": "passed_shared_normal_and_separate_qa_recovery_evidence",
+      "normalRelaunch": { "runId": "normal_fresh_relaunch_1", "sharedEvidenceWith": "N1", "independentAdditionalRestart": false,
+        "observation": "The same fresh normal-app relaunch used for N1 retained connection and showed both tills correctly." },
+      "qaRecovery": { "runId": "isolated_offline_cold_start_retry_1", "serverRestartTimeUtc": "23:07:31",
+        "freshPresenceTimeUtc": "23:07:39.636", "presenceQueryTimeUtc": "23:07:48.991", "approximateRecoverySeconds": 9,
+        "presenceCount": 1, "nativeUiObserved": "Starting/Reachable with Retry disabled", "successfulManualRetryClaimed": false,
+        "missingRemoteStaffRevokedLiveAuthority": true, "authenticationEnforced": true }
+    },
+    {
+      "id": "N7", "case": "Normal rebuilt-app Sync Now action and live presence", "status": "passed_native_action_success",
+      "runId": "normal_fresh_relaunch_1",
+      "observation": { "syncNowClicked": true, "toast": "Sync now finished", "mariaDb": "reachable", "syncReadiness": "ready",
+        "schema": "good", "pending": 0, "conflicts": 0, "connectedCount": 2,
+        "connectedTills": [ { "name": "Till 1", "current": true, "status": "online" },
+          { "name": "Till 8", "current": false, "lastSeenSeconds": 21, "freshServerHeartbeat": true } ],
+        "normalRefreshPassed": true }
+    }
+  ],
+  "isolation": {
+    "existingMariaDb3306Interrupted": false,
+    "privateLoopbackMariaDbPort": 65160,
+    "twoSecondHandshakeDelayProxyPort": 65161,
+    "proxyLogsTraffic": false,
+    "originalQaProfileRecoverablyPreserved": true,
+    "originalWebKitDataRecoverablyPreserved": true,
+    "disposableQaCloneUsed": true,
+    "testServerAndProfileCleanup": "completed",
+    "qaAppExited": true,
+    "privateTestServerShutDownGracefully": true,
+    "delayProxyStopped": true,
+    "disposableQaProfileAndWebKitMovedRecoverably": true,
+    "originalQaProfileRestored": true,
+    "originalWebKitDataRestored": true,
+    "restoredQaReadOnlyCheck": { "mode": "single", "savedCheckoutDraftPresent": true },
+    "materialFilesDeleted": false,
+    "normalAppLeftOnSyncDashboard": true,
+    "originalDatabaseConnectionSettingsChanged": false,
+    "firewallChanged": false,
+    "credentialsChanged": false,
+    "offlineCloneFixture": { "pending": 1, "conflicts": 1, "table": "audit_logs",
+      "errorCode": "ONLINE_FINANCIAL_INTENT_EPOCH_MISMATCH", "reason": "Older July epoch in cloned local profile versus empty epoch in fresh private database",
+      "retainedLocally": true, "dismissed": false, "replayed": false }
+  },
+  "limitations": {
+    "windowsInstallerExecuted": false,
+    "windowsDeviceRetested": false,
+    "physicalTwoLaptopReconnectRetested": false,
+    "dojoUatOrCertification": false,
+    "screenshotsAttached": false,
+    "pendingNativeCasesArePasses": false,
+    "normalRelaunchCasesShareEvidence": ["N1", "N6"],
+    "outageRecoveryNativeUiReadinessTraced": false,
+    "individualStartupGateEventsTraced": false,
+    "successfulManualStartupRetryVerified": false,
+    "internalStartupNonOverlapTracedNatively": false
+  },
+  "evidenceFiles": [],
+  "secretsIncluded": false
+}

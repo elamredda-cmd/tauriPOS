@@ -4,6 +4,7 @@
     import MgmtPage from '$lib/components/MgmtPage.svelte';
     import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
     import { connectionState } from '$lib/stores/connection';
+    import { syncStartupRecovery } from '$lib/stores/syncStartup';
     import { toast } from '$lib/stores/toast';
     import {
         canRetrySyncConflict,
@@ -61,7 +62,9 @@
         }
         if ($connectionState.mode === 'multi' && !runtimeDiagnostics?.syncReady) {
             presenceError = runtimeDiagnostics?.mariaDbReachable
-                ? 'MariaDB is reachable, but sync startup is not ready. This till was not published as connected.'
+                ? ($connectionState.mysqlStatus === 'pending'
+                    ? 'MariaDB is reachable. Completing safe sync startup before publishing this till as connected.'
+                    : 'MariaDB is reachable, but sync startup has not completed. Use Retry connection or review the sync message below.')
                 : 'MariaDB is unreachable, so live till presence is unavailable.';
             presenceLoading = false;
             return;
@@ -121,6 +124,21 @@
             presenceError = `Runtime diagnostics failed: ${String(error).replace(/^Error:\s*/, '')}`;
         }
         await loadConnectedTills();
+    }
+
+    async function retryConnection() {
+        if (busy || browserPreview) return;
+        busy = 'Retry connection';
+        presenceError = 'Reconnecting and completing safe sync startup...';
+        connectedTills = null;
+        try {
+            await syncStartupRecovery.requestRetry();
+        } catch (error) {
+            toast(`Sync startup could not finish: ${String(error).replace(/^Error:\s*/, '')}`, 'error');
+        } finally {
+            await load();
+            busy = '';
+        }
     }
 
     async function runAction(
@@ -233,8 +251,13 @@
                     <strong class="mt-2 block text-2xl text-success">Ready</strong>
                     <p class="m-0 mt-1 text-sm text-text-muted">Schema, startup and background sync completed</p>
                 {:else}
-                    <strong class="mt-2 block text-2xl text-danger">Blocked</strong>
+                    <strong class="mt-2 block text-2xl {$connectionState.mysqlStatus === 'pending' ? 'text-warning' : 'text-danger'}">{$connectionState.mysqlStatus === 'pending' ? 'Starting' : 'Blocked'}</strong>
                     <p class="m-0 mt-1 text-sm text-text-muted">{runtimeDiagnostics.syncBlockReason || 'Reachable does not mean ready; startup has not completed'}</p>
+                    {#if !browserPreview && $connectionState.mysqlConfig}
+                        <button class="btn btn-secondary mt-3" disabled={loading || !!busy || $connectionState.mysqlStatus === 'pending'} on:click={retryConnection}>
+                            {busy === 'Retry connection' ? 'Reconnecting...' : 'Retry connection'}
+                        </button>
+                    {/if}
                 {/if}
             </div>
             <div class="rounded-lg border border-border-flat bg-bg-card p-5">

@@ -40,8 +40,9 @@ describe('protected licence sync routing', () => {
         expect(mocks.invoke).toHaveBeenCalledWith('commit_mysql_outbox_operation', expect.objectContaining({
             tableName: 'app_identity', operation: 'upsert', data: identity, idKey: 'id', serverDataEpoch: 'fixture-epoch',
         }));
-        expect(mocks.select).toHaveBeenCalledOnce();
-        expect(mocks.select.mock.calls[0][0]).toContain('server_data_epoch');
+        expect(mocks.select).toHaveBeenCalledTimes(2);
+        expect(mocks.select.mock.calls[0][0]).toBe('SELECT 1');
+        expect(mocks.select.mock.calls[1][0]).toContain('server_data_epoch');
         expect(mocks.execute).not.toHaveBeenCalled();
     });
 

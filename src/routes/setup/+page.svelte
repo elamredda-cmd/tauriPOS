@@ -4,6 +4,7 @@
     import { captureConnectionSettings, connectionState, getMysqlDb, resetMysqlConnection, restoreConnectionSettings, saveMode, testMysqlConnection, type ConnectionSettingsSnapshot, type MysqlConfig } from '$lib/stores/connection';
     import { nativeQaEnabled, nativeQaCheckpoint } from '$lib/nativeQa';
     import { initMysqlDb } from '$lib/stores/mysql';
+    import { syncStartupRecovery } from '$lib/stores/syncStartup';
     import {
         ensureDatabaseIdentityForSync,
         forcePushToServer,
@@ -15,7 +16,6 @@
         replaceMariaDbDataFromThisTill,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
         saveEmployeeProfile,
-        startBackgroundSync,
         verifyDatabaseIdentityBeforeSchemaMutation,
         wipeAndPullFromServer
     } from '$lib/stores/database';
@@ -284,7 +284,9 @@
         let reconnectConfigSaved = false;
         let previousSettings: ConnectionSettingsSnapshot | null = null;
         connecting = true;
+        const resumeStartup = syncStartupRecovery.suspend();
         try {
+            await syncStartupRecovery.waitForIdle();
             previousSettings = await captureConnectionSettings();
             const cfg = buildConfig();
             // Probe the draft first; a failed test must not replace the working configuration.
@@ -302,8 +304,7 @@
                 reconnectConfigSaved = true;
                 if (nativeQaEnabled) await nativeQaCheckpoint('setup.after-reconnect-save');
                 if (!(await getMysqlDb())) throw new Error('Connection disconnected while saving. Retry reconnect.');
-                connectionState.update(state => ({ ...state, mysqlOnline: true, mysqlReady: true, mysqlStatus: 'online', syncError: null }));
-                await startBackgroundSync();
+                await syncStartupRecovery.start(cfg);
                 setSetupProgress('success', 100, 'Reconnected', 'Saved connection is ready. No bootstrap data actions were run.');
                 await goto('/settings/advanced');
                 return;
@@ -392,14 +393,7 @@
             await saveMode('multi', cfg);
             const finalServer = await getMysqlDb();
             if (!finalServer) throw new Error('MariaDB disconnected while finishing setup.');
-            await startBackgroundSync();
-            connectionState.update((state) => ({
-                ...state,
-                mysqlOnline: true,
-                mysqlReady: true,
-                mysqlStatus: 'online',
-                syncError: null,
-            }));
+            await syncStartupRecovery.start(cfg);
             const adminCandidates: any[] = await finalServer.select(
                 `SELECT CAST(id AS CHAR CHARACTER SET utf8mb4) AS id,
                         COALESCE(storeId, '') AS storeId,
@@ -469,12 +463,19 @@
             testResult = 'fail';
             setSetupProgress('error', 100, 'Connection failed', message);
             resetMysqlConnection();
-            connectionState.set(restoredPreviousConfig && previous.mode ? previous : {
+            connectionState.set(restoredPreviousConfig && previous.mode ? {
+                ...previous,
+                mysqlOnline: false,
+                mysqlReady: false,
+                mysqlStatus: previous.mode === 'multi' ? 'pending' : 'online',
+                syncError: previous.syncError,
+            } : {
                 mode: null, mysqlConfig: null, mysqlOnline: false, mysqlReady: false,
                 mysqlStatus: 'blocked', syncError: message,
             });
-            if (restoredPreviousConfig && previous.mode === 'multi' && previous.mysqlConfig) void startBackgroundSync().catch(() => undefined);
             connecting = false;
+        } finally {
+            resumeStartup();
         }
     }
 

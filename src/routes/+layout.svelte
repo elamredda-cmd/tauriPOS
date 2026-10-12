@@ -2,25 +2,20 @@
     import { onDestroy, onMount } from 'svelte';
     import { goto } from '$app/navigation';
     import { isTauri } from '@tauri-apps/api/core';
-    import { connectionState, loadSavedMode, type MysqlConfig } from '$lib/stores/connection';
-    import { initMysqlDb } from '$lib/stores/mysql';
+    import { connectionState, loadSavedMode } from '$lib/stores/connection';
+    import { syncStartupRecovery } from '$lib/stores/syncStartup';
     import '../app.css';
     import Toast from '$lib/components/Toast.svelte';
     import NativeQaControls from '$lib/components/NativeQaControls.svelte';
     import { nativeQaEnabled } from '$lib/nativeQa';
     import { initDb, migrateFromLocalStorage } from '$lib/stores/sqlite';
     import {
-        ensureDatabaseIdentityForSync,
         getLightRouteHydrationTables,
         hasRestorePendingMariaDbReplace,
         hydrateSvelteStores,
         isLightStorePath,
-        reconcileServerDataEpochBeforeFinancialRecovery,
-        recoverOnlineFinancialIntent,
         RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
         runAutomaticSetupBackupIfEnabled,
-        startBackgroundSync,
-        verifyDatabaseIdentityBeforeSchemaMutation
     } from '$lib/stores/database';
     import {
         productsDB, categoriesDB, posPagesDB, tilesDB, taxRatesDB, employeesDB,
@@ -61,9 +56,7 @@
 
     let dbReady = false;
     let dbError = '';
-    let syncStartupRetry: ReturnType<typeof setInterval> | null = null;
-    let syncStartupRunning = false;
-    let mysqlSchemaReadyConfigKey = '';
+    let stopSyncStartupWatcher: (() => void) | null = null;
     let stopCustomerDisplayAutoOpen: (() => void) | null = null;
     let stopOwnerCloudReporter: (() => void) | null = null;
     let ownerCloudStartupTimer: ReturnType<typeof setTimeout> | null = null;
@@ -77,7 +70,6 @@
     let automaticBackupRunning = false;
     let terminalRecoveryInterval: ReturnType<typeof setInterval> | null = null;
     let terminalRecoveryRunning = false;
-    const SYNC_STARTUP_RETRY_MS = 60 * 1000;
     const AUTOMATIC_BACKUP_START_DELAY_MS = 2 * 60 * 1000;
     const AUTOMATIC_BACKUP_CHECK_MS = 5 * 60 * 1000;
     let fullStoresHydrated = false;
@@ -95,13 +87,6 @@
 
     if (typeof window === 'undefined' || window.location.pathname !== '/customer-display') {
         primeSoundEngine();
-    }
-
-    function clearSyncStartupRetry() {
-        if (syncStartupRetry) {
-            clearInterval(syncStartupRetry);
-            syncStartupRetry = null;
-        }
     }
 
     function clearAutomaticBackupSchedule() {
@@ -175,136 +160,6 @@
             stopOwnerCloudReporter = reporterModule.startOwnerCloudReporter();
         } catch (error) {
             console.warn('owner cloud: delayed startup failed', error);
-        }
-    }
-
-    function isDatabaseStartupSafetyBlock(error: unknown): boolean {
-        const message = String(error);
-        return message.includes('DATABASE_IDENTITY_MISMATCH')
-            || message.includes('DATABASE_IDENTITY_UNVERIFIED')
-            || message.includes('MARIADB_RESTORE_MAINTENANCE');
-    }
-
-    function mysqlSchemaConfigKey(config: MysqlConfig): string {
-        return `${config.user}@${config.host}:${config.port}/${config.database}`;
-    }
-
-    function isTransientMariaDbStartupError(error: unknown): boolean {
-        const message = String(error).toLowerCase();
-        return [
-            'connection timed out',
-            'pool timed out',
-            'connect timeout',
-            'connection refused',
-            'connection reset',
-            'connection closed',
-            'connection was reset while opening',
-            'server has gone away',
-            'lost connection',
-            'broken pipe',
-            'network is unreachable',
-            'temporary failure',
-            'temporarily unavailable',
-            'too many connections',
-            'deadlock found',
-            'lock wait timeout',
-            'try restarting transaction',
-            'dns',
-            'econnrefused',
-            'econnreset',
-            'etimedout',
-        ].some((fragment) => message.includes(fragment));
-    }
-
-    function isDeterministicMariaDbStartupError(error: unknown): boolean {
-        const message = String(error);
-        const normalized = message.toLowerCase();
-        return message.includes('MARIADB_SCHEMA_MIGRATION_FAILED')
-            || message.includes('MARIADB_ACCOUNT_MIGRATION_BLOCKED')
-            || message.includes('MARIADB_IDENTIFIER_COLLATION_MIGRATION_FAILED')
-            || message.includes('MARIADB_CUSTOMER_COLLATION_MIGRATION_FAILED')
-            || message.includes('MariaDB schema migration failed')
-            || message.includes('MariaDB customer account migration stopped')
-            || normalized.includes('illegal mix of collations')
-            || normalized.includes('unknown collation')
-            || normalized.includes('collation is not valid')
-            || normalized.includes('duplicate values exist')
-            || normalized.includes('duplicate entry')
-            || normalized.includes('command denied')
-            || normalized.includes('access denied')
-            || normalized.includes('trigger already exists')
-            || normalized.includes('data too long')
-            || normalized.includes('cannot be null')
-            || normalized.includes('foreign key constraint');
-    }
-
-    async function startMultiTillSyncWhenReady(config: MysqlConfig) {
-        if (syncStartupRunning) return;
-        syncStartupRunning = true;
-        connectionState.update((state) => ({
-            ...state,
-            mysqlReady: false,
-            mysqlStatus: 'pending',
-        }));
-        const schemaConfigKey = mysqlSchemaConfigKey(config);
-        let startupStage: 'identity-preflight' | 'schema' | 'identity' | 'epoch' | 'financial-recovery' | 'background-sync' = 'identity-preflight';
-        try {
-            await verifyDatabaseIdentityBeforeSchemaMutation();
-            if (mysqlSchemaReadyConfigKey !== schemaConfigKey) {
-                startupStage = 'schema';
-                await initMysqlDb(config);
-                mysqlSchemaReadyConfigKey = schemaConfigKey;
-            }
-            startupStage = 'identity';
-            await ensureDatabaseIdentityForSync();
-            startupStage = 'epoch';
-            await reconcileServerDataEpochBeforeFinancialRecovery();
-            startupStage = 'financial-recovery';
-            await recoverOnlineFinancialIntent(config);
-            clearSyncStartupRetry();
-            startupStage = 'background-sync';
-            await startBackgroundSync();
-            connectionState.update((state) => ({
-                ...state,
-                mysqlOnline: true,
-                mysqlReady: true,
-                mysqlStatus: 'online',
-                syncError: null,
-            }));
-            startTerminalRecoverySchedule();
-        } catch (error) {
-            console.warn('POS: MariaDB sync blocked/deferred:', error);
-            const transientStartupFailure = isTransientMariaDbStartupError(error);
-            // Once DDL/hardening has returned a non-transport error, another
-            // timer pass would execute the same migration sequence against the
-            // same data. Keep the error visible and wait for an operator fix or
-            // an app restart instead of hammering MariaDB every minute.
-            const knownDeterministicFailure = isDeterministicMariaDbStartupError(error);
-            const deterministicSchemaFailure = startupStage === 'schema'
-                && (knownDeterministicFailure || !transientStartupFailure);
-            const syncError = deterministicSchemaFailure
-                ? `MariaDB schema setup is blocked and automatic retries have stopped: ${String(error)}`
-                : String(error);
-            connectionState.update((state) => ({
-                ...state,
-                mysqlOnline: false,
-                mysqlReady: false,
-                mysqlStatus: transientStartupFailure ? 'offline' : 'blocked',
-                syncError,
-            }));
-
-            if (isDatabaseStartupSafetyBlock(error) || deterministicSchemaFailure) {
-                clearSyncStartupRetry();
-                return;
-            }
-
-            if (!syncStartupRetry) {
-                syncStartupRetry = setInterval(() => {
-                    void startMultiTillSyncWhenReady(config);
-                }, SYNC_STARTUP_RETRY_MS);
-            }
-        } finally {
-            syncStartupRunning = false;
         }
     }
 
@@ -513,18 +368,13 @@
                     mysqlStatus: 'blocked',
                     syncError: RESTORE_PENDING_MARIADB_REPLACE_MESSAGE,
                 }));
-            } else if (savedMode === 'multi') {
-                // Run server schema migrations on every startup. Keep startup
-                // responsive when the server is offline, then start sync.
-                const config = get(connectionState).mysqlConfig;
-                if (config) {
-                    void startMultiTillSyncWhenReady(config);
-                } else {
-                    startBackgroundSync();
-                }
             } else {
-                startTerminalRecoverySchedule();
+                if (savedMode !== 'multi') startTerminalRecoverySchedule();
             }
+            // Install even for a blocked restore: the coordinator will not
+            // retry a hard block automatically, but must watch again after
+            // the operator finishes that restore through Setup.
+            stopSyncStartupWatcher = syncStartupRecovery.watch();
 
             // SQLite owns catalogue data; WebView storage also contains modern
             // device-local journals/outboxes. Clearing it here would erase the
@@ -564,7 +414,8 @@
         if (ownerCloudActivationListener) {
             window.removeEventListener(OWNER_CLOUD_ACTIVATION_EVENT, ownerCloudActivationListener);
         }
-        clearSyncStartupRetry();
+        stopSyncStartupWatcher?.();
+        syncStartupRecovery.stop();
         clearAutomaticBackupSchedule();
         if (terminalRecoveryInterval) {
             clearInterval(terminalRecoveryInterval);
@@ -575,6 +426,10 @@
             employeeAuthorityRevalidationInterval = null;
         }
     });
+
+    $: if (dbReady && isTauri() && $connectionState.mode === 'multi' && $connectionState.mysqlReady) {
+        startTerminalRecoverySchedule();
+    }
 
     // Reactive theme application via store subscription.
     $: if (typeof document !== 'undefined' && $activeTheme) {

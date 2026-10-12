@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MariaDB sync recovery QA</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#203044;background:#f3f6f8;line-height:1.55}
+    body{margin:0;padding:28px}main{max-width:1050px;margin:auto;background:#fff;border:1px solid #dce4eb;border-radius:16px;padding:30px}
+    h1{font-size:28px;line-height:1.2;margin:0 0 10px}h2{font-size:19px;margin:28px 0 10px}p{margin:10px 0}.muted{color:#5c6d7f}
+    .notice{padding:14px 16px;border:1px solid #e3c58a;border-radius:10px;background:#fff8e8;color:#674916}.good{color:#196346}.pending{color:#785713}
+    .table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;padding:11px 12px;border-bottom:1px solid #e2e8ee}th{background:#f2f5f8}th:first-child{width:50px}td:last-child{min-width:135px}
+    code{font-size:.92em;background:#f0f4f7;padding:2px 5px;border-radius:4px}a{color:#1f5a87}ul{padding-left:22px}li{margin:5px 0}
+    @media(max-width:650px){body{padding:12px}main{padding:19px}h1{font-size:24px}th,td{padding:9px}}
+    @media print{body{padding:0;background:#fff}main{max-width:none;border:0;padding:0}.table-wrap{overflow:visible}tr{break-inside:avoid}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>MariaDB connection and sync recovery</h1>
+  <p class="muted">QA continuation for the 12 October 2026 audit. Scope: shared connection handling, sync startup recovery, and connected-till presence.</p>
+  <div class="notice"><strong>The normal rebuilt app lists both connected tills correctly, and Refresh / Sync Now work.</strong> Native checks also exercised delayed connection, outage recovery, and the manual retry's failure path. The limits of each observation are recorded below; successful manual retry and every internal gate were not separately traced. Testing and recoverable QA cleanup are complete.</div>
+
+  <h2>What changed</h2>
+  <ul>
+    <li>Both connection entry points now share one pool lifecycle and a practical 10-second cold-connection deadline.</li>
+    <li>Late native loads and closes are serialized; resets, credential/URI changes, and stale callbacks cannot close or publish a newer pool.</li>
+    <li>Sync startup has coordinated retry/recovery rather than a permanently retained transient timeout. Readiness still requires identity, schema, and financial recovery to complete.</li>
+    <li>Connected-till queries publish/read presence only when startup is ready and their captured mode/configuration is still current.</li>
+  </ul>
+
+  <h2>Automated verification</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Check</th><th>Observed result</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Frontend test suite</td><td>1,493 passed; 56 skipped. 107 test files passed; 3 skipped.</td><td class="good">Passed</td></tr>
+      <tr><td>Type and Svelte checks</td><td><code>npm run check</code>: 0 errors, 0 warnings.</td><td class="good">Passed</td></tr>
+      <tr><td>Patch formatting</td><td><code>git diff --check</code>: clean.</td><td class="good">Passed</td></tr>
+      <tr><td>Isolated native QA build</td><td>macOS ARM64 debug build with an isolated application identifier.</td><td class="good">Built</td></tr>
+      <tr><td>Normal final app build</td><td>macOS ARM64 debug app bundle built successfully from the latest normal source, without QA features. Freshly quit and relaunched for verification.</td><td class="good">Built and opened</td></tr>
+    </tbody>
+  </table></div>
+  <p class="muted">Automated coverage includes shared-load races, delayed opens, timeout cleanup/retry, stale reset/config/mode completions, startup readiness recovery, and connected-till publication guards. Skipped tests are not counted as passes.</p>
+  <p class="muted">Build warnings remain: four existing unused Rust functions and frontend chunk-size warnings. These are warnings, not failed compilation or type checks. This was a macOS debug build, not a Windows installer or release certification.</p>
+
+  <h2>Native Tauri cases</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Case / acceptance condition</th><th>Observation</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>B0</td><td>Original running app baseline, before rebuilding.</td><td>Sync Dashboard showed MariaDB Reachable, Sync Ready, Schema Good, Pending 0, Conflicts 0. Connected tills: 2; Till 1 current, Till 8 last seen 13 seconds earlier.</td><td>Baseline observed<br><span class="muted">Not a fix retest</span></td></tr>
+      <tr><td>N1</td><td>Rebuilt normal app completes startup and lists the current till and a peer correctly.</td><td>After fresh relaunch and normal staff sign-in: Admin → Sync Dashboard showed Reachable, Ready, Schema Good, Pending 0, Conflicts 0. Connected tills: 2; Till 1 marked THIS TILL, Online now; Till 8 Online now. Refresh succeeded with the same two rows and no error.</td><td class="good">Passed—native UI</td></tr>
+      <tr><td>N2</td><td>Cold connection through a two-second handshake delay succeeds, rather than tripping the old 1.2-second timeout.</td><td>In isolated Tauri QA: Test Connection succeeded. Save &amp; Reconnect Only completed schema/gates: 49 tables, current schema marker, one published <code>till_presence</code> row. The empty remote staff table then correctly caused staff revalidation to return to Staff Sign In; no authentication or trigger bypass was used.</td><td class="good">Passed—native UI<br>and server evidence</td></tr>
+      <tr><td>N3</td><td>Private test-server interruption stops server-side presence progress.</td><td>Private server shutdown was confirmed. Previous presence timestamp: 23:02:43.615 UTC. No native UI readiness-state trace was captured during the interruption; this verifies the server interruption/presence pause, not every displayed offline state.</td><td class="good">Limited pass—<br>server evidence only</td></tr>
+      <tr><td>N4</td><td>Restoring the private test server automatically resumes ready-gated presence.</td><td>Private server restarted at 23:04:23 UTC. A fresh presence timestamp appeared automatically at 23:05:58.131 UTC, about 95 seconds later; count 1. No Retry button or connection reset was used. Individual startup-gate events were not traced.</td><td class="good">Passed—automatic<br>server-side recovery</td></tr>
+      <tr><td>N5</td><td>Offline cold start and the manual retry's failure path preserve safety.</td><td>After private-server shutdown, cold QA restart, and ordinary cached staff sign-in: Dashboard Unreachable, Readiness Blocked; Connected tills unavailable (—). Upload, Sync, and Full Repair were disabled; Retry enabled. Clicking Retry displayed Starting/Reconnecting and disabled the action, then returned “Sync startup could not finish: MariaDB is unavailable.” After dismissing it, Retry and Refresh re-enabled; unsafe sync/repair actions stayed disabled. This passes the failure path, not successful manual recovery or a trace of internal startup non-overlap.</td><td class="good">Passed—native<br>failure handling only</td></tr>
+      <tr><td>N6</td><td>Cold relaunch retains connection settings; an offline cold start automatically resumes presence when the private server returns.</td><td>The normal-app relaunch passed using the same N1 evidence, not an extra independent normal restart. Separately, the private server restarted at 23:07:31 UTC after the offline QA cold start. The app automatically showed Starting/Reachable; Retry was already disabled, so no successful manual retry is claimed. Fresh presence: 23:07:39.636 UTC (count 1, queried at 23:07:48.991), about 9 seconds after restoration. Missing remote staff correctly revoked live authority; authentication stayed enforced.</td><td class="good">Passed—shared normal<br>and separate QA recovery evidence</td></tr>
+      <tr><td>N7</td><td>Normal rebuilt app runs Sync Now successfully while retaining correct live presence.</td><td>Sync Now returned the native UI toast “Sync now finished.” Dashboard remained Reachable, Ready, Schema Good, Pending 0, Conflicts 0, Connected 2. Till 1 was the current online till; Till 8 had a fresh server heartbeat seen 21 seconds earlier. Refresh had already passed in N1.</td><td class="good">Passed—native<br>action success</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Isolation and limitations</h2>
+  <ul>
+    <li>The existing MariaDB service on port 3306 was not interrupted. Native failure tests use a new private loopback server on port 65160 and a no-traffic-logging delay proxy on port 65161.</li>
+    <li>The original QA profile and WebKit data were recoverably preserved. After testing, the disposable profile/WebKit data were moved to recoverable evidence directories and the original QA profile/WebKit data restored. Read-only SQLite checks confirmed local-only mode and the saved checkout draft remained present. Nothing was deleted.</li>
+    <li>No Windows installer or Windows-device retest has been performed. The Mac checks do not certify Windows deployment or physical two-laptop reconnection.</li>
+    <li>N1 and N6 share one normal-app relaunch. N3 and N4 are a single private-server interruption/recovery sequence, with server evidence only; the UI readiness transitions and individual startup gates were not traced.</li>
+    <li>N5 verifies native retry failure handling only. Successful manual startup retry and internal startup non-overlap were not separately proved natively; the latter is covered by automated tests. The later cold-start recovery was automatic, not a successful manual retry.</li>
+    <li>Cleanup completed: QA app exited, private MariaDB and delay proxy stopped, and original QA profile restored. The existing port-3306 MariaDB service and latest normal app remain running; the normal app was left on Sync Dashboard with two connected tills. Database connection settings, firewall, and credentials were not changed.</li>
+    <li>The isolated clone showed 1 pending item and 1 conflict: <code>ONLINE_FINANCIAL_INTENT_EPOCH_MISMATCH</code> for an audit-log intent. The clone retained an older July epoch while the fresh private database had an empty epoch. The work stayed guarded locally; it was not dismissed or replayed. This expected fixture limitation is not the normal app's verified Pending 0 / Conflicts 0 state.</li>
+    <li>These checks are not Dojo UAT or payment certification. No staff PIN, API key, database password, or authentication settings are included.</li>
+    <li>No screenshot evidence has been attached to this report yet. Native observations were captured during the test session, but no screenshot files have been saved with this report.</li>
+  </ul>
+  <p><a href="verification.json">Machine-readable verification record</a></p>
+</main>
+</body>
+</html>

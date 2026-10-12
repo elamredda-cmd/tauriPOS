@@ -11,10 +11,17 @@
  *   • `INT` ↔ `INTEGER`, `DOUBLE` ↔ `REAL`
  */
 
-import Database from '@tauri-apps/plugin-sql';
+import type Database from '@tauri-apps/plugin-sql';
 import { invoke } from '@tauri-apps/api/core';
 import { readPaymentExtraTotalsByTill, reportPaymentExtraTotals } from '../paymentExtras';
-import { connectionState, type MysqlConfig } from './connection';
+import { buildMysqlUri, connectionState, type MysqlConfig } from './connection';
+import {
+    getCachedMysqlConnection,
+    getMysqlConnectionGeneration,
+    getSharedMysqlConnection,
+    isCurrentMysqlConnection,
+    resetSharedMysqlConnection,
+} from './mysqlPool';
 import { get } from 'svelte/store';
 import {
     loyaltyCodeValidationError,
@@ -42,96 +49,25 @@ import { CATALOGUE_INTEGRITY_MIGRATION, catalogueTaxDefaultInitializationSql, ca
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
-let db: Database | null = null;
 let currentDatabase: string = '';
-let currentUri: string = '';
-let openingPromise: Promise<Database> | null = null;
-let openingUri = '';
-let connectionGeneration = 0;
-const MYSQL_OPEN_TIMEOUT_MS = 1200;
-
-async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    const timeout = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('MariaDB connection timed out')), timeoutMs);
-    });
-    try {
-        return await Promise.race([operation, timeout]);
-    } finally {
-        clearTimeout(timeoutId!);
-    }
-}
-
-function buildMysqlUri(config: MysqlConfig): string {
-    const { user, password, host, port, database } = config;
-    return `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
-}
 
 export async function getDb(config?: MysqlConfig): Promise<Database> {
     const cfg = config || get(connectionState).mysqlConfig;
-
-    if (db && cfg && buildMysqlUri(cfg) === currentUri) {
-        if (get(connectionState).mysqlOnline) return db;
-        resetCachedConnection();
+    const cached = cfg ? null : getCachedMysqlConnection();
+    if (!cfg && !cached) throw new Error('MySQL no config provided and no cached connection');
+    const opening = cfg ? getSharedMysqlConnection(buildMysqlUri(cfg)) : Promise.resolve(cached!);
+    const openingGeneration = getMysqlConnectionGeneration();
+    const database = await opening;
+    if (openingGeneration !== getMysqlConnectionGeneration() || !isCurrentMysqlConnection(database)) {
+        throw new Error('MariaDB connection was reset while opening');
     }
-
-    if (!cfg) {
-        if (!db) throw new Error('MySQL no config provided and no cached connection');
-        return db;
-    }
-
-    const uri = buildMysqlUri(cfg);
-    if (db && uri !== currentUri) resetCachedConnection();
-    if (openingPromise && openingUri === uri) return openingPromise;
-    if (openingPromise && openingUri !== uri) resetCachedConnection();
-
-    const generation = connectionGeneration;
-    openingUri = uri;
-    openingPromise = openConnection(uri, cfg.database, generation);
-    return openingPromise;
+    if (cfg) currentDatabase = cfg.database;
+    return database;
 }
 
 export function resetCachedConnection(): void {
-    connectionGeneration += 1;
-    const old = db;
-    db = null;
     currentDatabase = '';
-    currentUri = '';
-    openingPromise = null;
-    openingUri = '';
-    void closeDatabase(old);
-}
-
-async function openConnection(uri: string, database: string, generation: number): Promise<Database> {
-    let opened: Database | null = null;
-    try {
-        opened = await withTimeout(Database.load(uri), MYSQL_OPEN_TIMEOUT_MS);
-        if (generation !== connectionGeneration || openingUri !== uri) {
-            await closeDatabase(opened);
-            throw new Error('MariaDB connection was reset while opening');
-        }
-        db = opened;
-        currentDatabase = database;
-        currentUri = uri;
-        return opened;
-    } catch (error) {
-        await closeDatabase(opened);
-        throw error;
-    } finally {
-        if (generation === connectionGeneration) {
-            openingPromise = null;
-            openingUri = '';
-        }
-    }
-}
-
-async function closeDatabase(database: Database | null): Promise<void> {
-    if (!database) return;
-    try {
-        await database.close(database.path);
-    } catch (error) {
-        console.warn('mysql: failed to close cached MariaDB connection:', error);
-    }
+    resetSharedMysqlConnection();
 }
 
 const CUSTOMER_ACCOUNT_SCHEMA_MIGRATION = '2026-07-customer-account-schema-v4';
