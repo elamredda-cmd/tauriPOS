@@ -1,0 +1,237 @@
+{
+  "title": "Dojo feature audit",
+  "date": "2026-10-13",
+  "timezone": "Europe/London",
+  "appVersion": "0.1.1",
+  "dojoApiVersion": "2026-02-27",
+  "overallVerdict": "ISSUES_FOUND_NOT_ALL_FEATURES_VERIFIED",
+  "portalValidation": {
+    "status": "MATCHING_CURRENT_INTENTS_VERIFIED_SESSION_HISTORY_NOT_EXPOSED",
+    "requirement": "User explicitly requested real native tests and independent Dojo portal validation.",
+    "observation": "After the user signed in, root independently refreshed L&BJ Test Data Payment Intents and matched current 600p intents: SIP0, SIS0 acceptance, SCN0 and accepted-signature DIS0 Captured; SIS0 rejection, DIP0 retry, CIP0, UIP0 and deliberate POS cancellation Created; fresh natural TIP0 Canceled. DIP0 details matched its reference, £6 amount, £0 tip, Auto capture and Sale from Till 1.",
+    "limits": "Created is neither a paid verdict nor independent proof of terminal failure/cancellation. The portal drawer exposed Details/Done but no terminal-session history, so retry's new-session proof and negative terminal outcomes still rely on native evidence. No full go-live approval is claimed.",
+    "devicesPage": {
+      "status": "PORTAL_DEVICE_VISIBILITY_LIMITATION_NOT_PROVEN_APP_DEFECT",
+      "filters": "L&BJ Test Data; All model types; All statuses; empty search",
+      "observedResult": "No result found",
+      "contrast": "Native Dojo API discovery returned eight virtual terminals. Do not claim the same terminal list was independently visible on the portal, or conclude that all terminals are missing from the API."
+    }
+  },
+  "providerCorrelation": {
+    "classification": "LOCAL_UAT_CORRELATION_WITH_EXACT_PORTAL_OBSERVATIONS",
+    "handling": "Payment-intent identifiers are non-secret correlation evidence, not API keys. Keep this local audit evidence private; no public sharing was performed.",
+    "cases": [
+      { "case": "SANDBOX-SIP0", "paymentIntentId": "pi_sandbox_XSEF3ZoEh0yvaSglR8lT4g", "receiptNumber": "1000090", "portalObservation": { "matchingIntentVerified": true, "status": "Captured", "amountPence": 600 } },
+      { "case": "SANDBOX-SIS0", "paymentIntentId": "pi_sandbox_KZ2TE48jH0y3rFwURkMDIQ", "receiptNumber": "1000091", "portalObservation": { "matchingIntentVerified": true, "status": "Captured", "amountPence": 600 } },
+      { "case": "SANDBOX-SIS0-REJECT", "paymentIntentId": "pi_sandbox_IbxPQ7WgmE_RwdWb8lucvA", "portalObservation": { "matchingIntentVerified": true, "status": "Created", "amountPence": 600, "terminalSessionHistoryVisible": false } },
+      { "case": "SANDBOX-DIP0", "paymentIntentId": "pi_sandbox_742vd7e5ikil42NimQOdhw", "portalObservation": { "matchingIntentVerified": true, "status": "Created", "amountPence": 600, "terminalSessionHistoryVisible": false, "detailReference": "084c45c6-d94a-465e-9f6f-d2427ec43cb0", "tipPence": 0, "captureMode": "Auto", "description": "Sale from Till 1" } },
+      { "case": "SANDBOX-SCN0", "paymentIntentId": "pi_sandbox_o0qFD2ulC0OZDFhCP0x70A", "receiptNumber": "1000092", "portalObservation": { "matchingIntentVerified": true, "status": "Captured", "amountPence": 600 } },
+      { "case": "SANDBOX-CIP0", "paymentIntentId": "pi_sandbox_thT7cekJFEy0HxC_8b8OgA", "portalObservation": { "matchingIntentVerified": true, "status": "Created", "amountPence": 600, "terminalSessionHistoryVisible": false } },
+      { "case": "SANDBOX-POS-CANCEL", "paymentIntentId": "pi_sandbox_xGl6_Sh-BkiqFIeSPhI5Ww", "portalObservation": { "matchingIntentVerified": true, "status": "Created", "amountPence": 600, "terminalSessionHistoryVisible": false } },
+      { "case": "SANDBOX-TIP0", "paymentIntentId": "pi_sandbox_yqmoqOw3bEqvskkVMxLPHw", "portalObservation": { "matchingIntentVerified": true, "status": "Canceled", "previousStatusDuringTest": "Created", "amountPence": 600 } },
+      { "case": "SANDBOX-UIP0", "paymentIntentId": "pi_sandbox__JRG3_sigEaOjRooHl4w3Q", "portalObservation": { "matchingIntentVerified": true, "status": "Created", "amountPence": 600, "terminalSessionHistoryVisible": false } },
+      { "case": "SANDBOX-DIS0", "paymentIntentId": "pi_sandbox_VCnBtdVO9ka3r1SPlgHC5A", "receiptNumber": "1000093", "portalObservation": { "matchingIntentVerified": true, "status": "Captured", "amountPence": 600 }, "meaning": "Actual accepted-signature result; not a nominal declined-signature-simulator expectation pass." }
+    ]
+  },
+  "freshSandboxSummary": {
+    "availableVirtualTerminalsExercised": 8,
+    "freshAttemptCount": 10,
+    "amountPencePerAttempt": 600,
+    "completedSales": 4,
+    "completedGoodsBasePence": 2400,
+    "failedAttempts": 2,
+    "cancelledAttempts": 4,
+    "orderCountBefore": 97,
+    "orderCountAfter": 101,
+    "retainedReceiptNumbers": ["1000090", "1000091", "1000092", "1000093"],
+    "finalCompletedPaymentRows": { "rows": 4, "status": "completed", "totalPenceEach": 600, "paymentMethod": "card", "amountPenceEach": 600, "cardPenceEach": 600, "cashPenceEach": 0, "tipsPenceEach": 0, "serviceChargePenceEach": 0, "cashbackPenceEach": 0 },
+    "matchingPortalIntentStatuses": { "Captured": 4, "Created": 5, "Canceled": 1 },
+    "excluded": "The inherited existing TIP0 cancellation is excluded from fresh counts. DIP0 includes one retry-control exercise using the same intent; portal session count was not visible.",
+    "notClaimed": "Not a pass for every optional Dojo feature, live acquiring, device extras, successful refunds, current offline-only matrix, Windows or hardware UAT."
+  },
+  "scope": "Read-only production-source review, targeted automated checks, current isolated native-QA fault checks, normal native sandbox tests reported by the root agent, and an explicit remaining test matrix. This is not go-live certification.",
+  "authorization": {
+    "userRequest": "could you check all the dojo features if they work please",
+    "productionCodeEdited": false,
+    "allowedChanges": "Only new audit tests/report files were added to the project. Runtime sandbox selections/mock trolley changes occurred through the native UI for testing and original settings/trolley shape were restored at final handoff. Native QA public-config fault was temporary and restored. Four new sandbox receipts were intentionally retained.",
+    "noLivePayments": true,
+    "noFinancialConfirmationInFaultTests": true,
+    "noSecretFileChangesInFaultTests": true
+  },
+  "verification": {
+    "existingFrontend": {
+      "status": "PASS",
+      "passed": 309,
+      "failed": 0,
+      "skipped": 0,
+      "files": 16,
+      "command": "npx vitest run src/lib/dojoSessionFlow.test.ts src/lib/dojoPaymentValidation.test.ts src/lib/dojoSandboxRecovery.test.ts src/lib/dojoExpiryReview.test.ts src/lib/customerDojoIntegration.test.ts src/lib/paymentExtras.test.ts src/lib/paymentExtraPresentation.test.ts src/lib/terminalOwnership.test.ts src/lib/terminalAttempts.test.ts src/lib/terminalRecovery.test.ts src/lib/terminalRecovery.integration.test.ts src/lib/terminalRecoveryLease.test.ts src/lib/reportPaymentRecovery.test.ts src/lib/refunds.test.ts src/lib/settingsHandlers.test.ts src/lib/settingsWriteQueue.test.ts --maxWorkers=2",
+      "limits": "Targeted existing tests, not the complete project suite or provider/device certification. Native/provider callbacks are mocked where the test says so; some persistence fixtures execute actual in-memory SQLite."
+    },
+    "knownUnsafeCharacterization": {
+      "status": "PASS_REPRODUCING_UNSAFE_CURRENT_BEHAVIOR_NOT_SAFETY_PASS",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "files": 1,
+      "command": "npx vitest run src/lib/dojoCheckoutAvailability.audit.test.ts --maxWorkers=1",
+      "cases": [
+        "Persistent cold-start configuration read failure can retain the manual-card path and commit a plain card sale without a Dojo request.",
+        "An enabled but not-ready Dojo configuration can fall back to manual card.",
+        "Card completion is enabled before initial provider configuration loading completes.",
+        "Both intentionally disabled providers allow the legitimate external/manual-card control case.",
+        "Healthy dedicated Dojo selects the managed provider and prepared-terminal commit branch.",
+        "An overlapping Dojo-specific recovery joins a SumUp-only run which never scans Dojo."
+      ],
+      "limits": "Actual production startup expression, reactive selection/guards, commit branch, and recovery function are extracted into isolated VM fixtures. The new tests deliberately assert the observed flaws; they must not be reported as proofs that the application is safe."
+    },
+    "nativeUnit": {
+      "status": "PASS_REPORTED_BY_ROOT",
+      "passed": 63,
+      "failed": 0,
+      "scope": "Targeted native unit tests reported by the root audit agent.",
+      "commands": [
+        { "command": "cargo test --lib dojo::", "passed": 37 },
+        { "command": "cargo test --lib local_terminal::", "passed": 11 },
+        { "command": "cargo test --lib terminal_extras", "passed": 5 },
+        { "command": "cargo test --lib local_terminal_replay", "passed": 10 }
+      ],
+      "workingDirectory": "src-tauri",
+      "warnings": "Four existing dead-code warnings reported; no new native compilation failure.",
+      "limits": "Not the full Rust suite, a Windows run, a provider sandbox payment, or physical-device UAT."
+    },
+    "typecheck": {
+      "status": "PASS",
+      "command": "npm run check",
+      "errors": 0,
+      "warnings": 0,
+      "frontendCommands": 99,
+      "registeredCommands": 105,
+      "allFrontendCommandsPermitted": true
+    }
+  },
+  "findings": [
+    {
+      "id": "DOJO-01",
+      "priority": "P1",
+      "title": "Unknown or unavailable provider configuration can silently become manual card checkout",
+      "status": "CONFIRMED_SOURCE_CHARACTERIZATION_AND_PERSISTENT_NATIVE_QA_UI",
+      "risk": "A configured managed payment can be recorded as a plain card sale without sending a payment to Dojo. The native fault test stopped before confirmation; the actual production commit branch was exercised only with isolated spies.",
+      "source": [
+        { "file": "src/routes/+page.svelte", "line": 454, "detail": "Provider selection requires enabled and ready; all other cases become null." },
+        { "file": "src/routes/+page.svelte", "line": 471, "detail": "Completion guard has no provider-loading, unreadable-config or enabled-not-ready barrier." },
+        { "file": "src/routes/+page.svelte", "line": 1260, "detail": "Startup uses Promise.allSettled without retaining rejected provider-read state." },
+        { "file": "src/routes/+page.svelte", "line": 4613, "detail": "Dojo-unavailable case is classified as ordinary card rather than blocked." },
+        { "file": "src/routes/+page.svelte", "line": 4875, "detail": "No selected managed provider means ordinary commitSale, without a Dojo request." },
+        { "file": "src/routes/customers/+page.svelte", "line": 234, "detail": "Customer accounts already distinguish unavailable providers and block read failures." }
+      ],
+      "nativeEvidence": {
+        "reportedBy": "Root agent controlling current isolated native QA app",
+        "persistentFault": "Only the public QA Dojo configuration was temporarily replaced with malformed JSON after the exact original file was recoverably moved. A cold WebView reload changed payment from Dojo to Card; selecting Card exposed enabled Confirm Card Payment and manual approval instructions for the preserved £11 trolley. No financial confirmation was clicked. Original config restored by moving back the preserved file; valid enabled dedicated QA configuration and controls restored; secret files untouched.",
+        "oneShotFault": "The provider.dojo.read one-shot checkpoint was armed, entered and rejected. A later successful configuration read self-repaired the store and the Dojo label remained; this single-fault case alone did not reproduce the persistent fail-open UI.",
+        "realProviderChargeMade": false,
+        "newOrderCreated": false
+      },
+      "recommendation": "Keep explicit loading/error states and fail closed until current provider settings are known. Block enabled-not-ready configurations. Preserve manual card only when both successfully loaded provider configurations are intentionally disabled, and use clear external-approval confirmation.",
+      "productionFixApplied": false
+    },
+    {
+      "id": "DOJO-02",
+      "priority": "P2",
+      "title": "Overlapping recovery can omit the requested provider and return another provider's result",
+      "status": "CONFIRMED_SOURCE_AND_EXTRACTED_FUNCTION",
+      "source": [
+        { "file": "src/lib/terminalRecovery.ts", "line": 966, "detail": "Every overlapping caller receives the current promise even if it requested a different provider." },
+        { "file": "src/routes/+page.svelte", "line": 1261, "detail": "Startup requests SumUp and Dojo recovery concurrently." },
+        { "file": "src/routes/+layout.svelte", "line": 122, "detail": "The unfiltered periodic recovery is a mitigation, running again every 60 seconds." }
+      ],
+      "risk": "Dojo work can be delayed while the UI reports a SumUp-only result. The periodic all-provider recovery mitigates permanent stranding; this is not a demonstrated lost payment.",
+      "recommendation": "Make overlapping calls drain the union of requested providers or use a single all-provider sweep. Only report results for providers actually inspected.",
+      "productionFixApplied": false
+    },
+    {
+      "id": "DOJO-03",
+      "priority": "P3",
+      "title": "Older operator guidance disagrees with current sandbox timeout behavior",
+      "status": "CONFIRMED_DOCUMENTATION_DRIFT",
+      "source": [
+        { "file": "docs/DOJO_TESTING.md", "detail": "Expired-payment section describes automatic sandbox cleanup as removed." },
+        { "file": "src/routes/+page.svelte", "line": 3928, "detail": "Current checkout supplies the guarded sandbox timeout-cleanup callback." },
+        { "file": "src/routes/customers/+page.svelte", "line": 1120, "detail": "Current account collection supplies the same guarded callback." },
+        { "file": "src/lib/dojoSessionFlow.ts", "line": 209, "detail": "Sandbox Expired plus Created can invoke cleanup and requires fresh provider finality." }
+      ],
+      "risk": "Operators or UAT reviewers may expect only the receipt-review path, while sandbox checkout can automatically attempt verified cleanup. Live/Unknown keys remain excluded from that automatic branch.",
+      "recommendation": "After deciding the intended policy, update the current operator/UAT instructions and clearly distinguish sandbox cleanup, live receipt review and historical tests.",
+      "productionFixApplied": false
+    }
+  ],
+  "featureInventory": [
+    { "feature": "Local API-key setup and saved-secret removal", "implemented": true, "evidence": "Source/native-unit guards; settings load failure and unresolved-work guards", "currentHealthyNative": "PENDING", "limits": "No key removal or replacement in this audit." },
+    { "feature": "Dedicated terminal without MariaDB", "implemented": true, "evidence": "Ownership/local journal and local lease tests", "currentHealthyNative": "PENDING", "limits": "Internet required; one physical terminal must not be assigned to multiple dedicated tills." },
+    { "feature": "Shared terminal across tills", "implemented": true, "evidence": "MariaDB journal, reservation, maintenance and preparation tests", "currentHealthyNative": "PENDING", "limits": "MariaDB and valid shared preparation are intentionally required." },
+    { "feature": "Terminal discovery, selection and availability test", "implemented": true, "evidence": "Find My Terminals returned eight devices; selection/save succeeded; final original-TIP0 Test Terminal completed with Available and controls re-enabled", "currentHealthyNative": "DISCOVERY_SELECTION_SAVE_AND_FINAL_STATUS_AVAILABLE_PASS", "limits": "Initial TIP0 status request failed transiently, then later discovery and final status test succeeded without transport/TLS bypass. This is not an independent low-level HTTP/TLS trace. SIP1 is not assigned." },
+    { "feature": "Auto-capture checkout", "implemented": true, "evidence": "Current normal-native SIP0 and SCN0 £6 completions, completed durable journals, exactly one new order each, and independently matched portal Captured amounts", "currentHealthyNative": "SIP0_AND_SCN0_PASS_NATIVE_LOCAL_LEDGER_MATCHING_PORTAL_CAPTURED", "limits": "DOJO-01 still affects unavailable-provider handling. This is sandbox, not Windows/physical-device or production certification." },
+    { "feature": "Cash/card split and loyalty allocation", "implemented": true, "evidence": "Checkout allocation source and payment/refund fixtures", "currentHealthyNative": "PENDING", "limits": "Only the card allocation is sent to the provider." },
+    { "feature": "Decline and same-intent retry", "implemented": true, "evidence": "Fresh DIP0 native decline/retry control path, same local intent, no extra order, zero unresolved work. Portal matching Created intent/detail reference/amount verified", "currentHealthyNative": "DECLINE_RETRY_CONTROL_PASS_PORTAL_IDENTITY_VERIFIED_SESSION_HISTORY_UNAVAILABLE", "limits": "The portal does not expose terminal-session history and the journal preserves the first-session anchor. A new retry session is not independently proved; Created alone is not proof of failure." },
+    { "feature": "Signature accept/reject", "implemented": true, "evidence": "Current native SIS0 Accept waited for capture and completed one £6 sale; fresh Reject returned a decline and no new sale. Continuous polling, lease renewal and stale-decision tests also pass", "currentHealthyNative": "ACCEPT_AND_REJECT_PASS", "limits": "Operator decision is not itself final payment proof. Delayed auto-accept and late-decision current native cases remain pending." },
+    { "feature": "Signature delayed acceptance and late rejection", "implemented": true, "evidence": "80-second and late-control monitor fixtures", "currentHealthyNative": "PENDING", "limits": "Historical sandbox evidence is linked separately, not counted as a current-build pass." },
+    { "feature": "Cancel from POS screen", "implemented": true, "evidence": "Fresh TIP0: immediate native Cancel Terminal, cancellation UI, cancelled journal and no extra order; portal independently matched Created intent", "currentHealthyNative": "EARLY_SCREEN_CANCEL_PASS_NATIVE_PORTAL_CREATED_IDENTITY_MATCH", "limits": "Portal Created is expected after terminal-session cancellation and is not intent deletion or independent terminal-history proof. Late cancellation/capture race is not yet a current native pass." },
+    { "feature": "Terminal-initiated cancellation and unsuccessful outcome", "implemented": true, "evidence": "Fresh CIP0 and UIP0 both finalized cancelled with no extra order; portal matched Created intents; classification fixtures pass", "currentHealthyNative": "CIP0_AND_UIP0_NATIVE_CANCELLED_PORTAL_MATCHING_CREATED", "limits": "Root did not cancel UIP0. Actual unsuccessful simulator result was Canceled, not Declined. These are not physical X-button tests; Created alone does not prove terminal outcome." },
+    { "feature": "Timeout / Expired recovery", "implemented": true, "evidence": "Fresh natural TIP0 expired/recovered after about 92.4 seconds without root requesting cancel; journal cancelled, no extra order, trolley retained and portal changed Created to Canceled", "currentHealthyNative": "NATURAL_SANDBOX_TIP0_RECOVERY_PASS_PORTAL_CANCELED", "limits": "Sandbox cleanup is not a live administrator receipt-review proof. Uncertain live outcomes remain protected; see DOJO-03 documentation drift." },
+    { "feature": "Restart and interrupted-save recovery", "implemented": true, "evidence": "Durable attempt, exactly-once posting, latest-session and completion acknowledgement tests", "currentHealthyNative": "PENDING", "limits": "DOJO-02 can delay provider-specific startup recovery." },
+    { "feature": "Customer-account card repayment", "implemented": true, "evidence": "Actual extracted customer handlers plus recovery fixtures", "currentHealthyNative": "PENDING", "limits": "Debt reduced only by base repayment; back-office collection blocked." },
+    { "feature": "Customer-account cancellation", "implemented": true, "evidence": "Cancel visibility, one-shot request, no ledger on failure and late capture fixtures", "currentHealthyNative": "PENDING", "limits": "Uncertain collection disables a new payment and directs administrator review." },
+    { "feature": "Tips, service charge and cashback accounting", "implemented": true, "evidence": "Money validation, extra persistence, replay and presentation tests", "currentHealthyNative": "GRATUITY_SIMULATOR_NOT_ASSIGNED_OTHER_EXTRAS_PENDING_DEVICE", "limits": "Fresh native discovery returned eight terminals without SIP1, so gratuity simulator testing is blocked. Other provider/device proof is not yet available; not a gratuity/cashback certification." },
+    { "feature": "Receipt, order, report and cash-up extras", "implemented": true, "evidence": "Separate product/debt base, card collection and cashback payout functions/tests", "currentHealthyNative": "PENDING", "limits": "Recovery warns about already-paid cashback and never automatically pays it twice." },
+    { "feature": "Reports payment checks and close blockers", "implemented": true, "evidence": "Local/shared ownership, incomplete read and 30-second separated finality tests", "currentHealthyNative": "PENDING", "limits": "No Z closing, history wipe or destructive maintenance in this audit." },
+    { "feature": "Old sandbox payment recovery before key or ownership changes", "implemented": true, "evidence": "Confirmation, sandbox identity, journal and recovery-lease guards", "currentHealthyNative": "PENDING", "limits": "Not a force-delete or live-payment bypass." },
+    { "feature": "Goods-only full and partial payment-intent refunds", "implemented": true, "evidence": "Original identity, idempotency, totals and fresh refund-proof tests", "currentHealthyNative": "PENDING_PROVIDER_CAPABILITY", "limits": "Not disabled. Earlier September sandbox provider rejected both; successful-refund UAT remains unproven until rerun." },
+    { "feature": "Manual preauthorization / later capture", "implemented": false, "evidence": "Current integration sends Auto capture", "currentHealthyNative": "NOT_OFFERED", "limits": "Not required merely to operate the current immediate retail checkout; agree UAT applicability with Dojo." },
+    { "feature": "MOTO, item lines/modifiers and hosted webhook receiver", "implemented": false, "evidence": "Current app has no corresponding collection UI/payload or public receiver", "currentHealthyNative": "SCOPE_CONFIRMATION_REQUIRED", "limits": "Do not mark these checklist rows passed or automatically optional; confirm applicability with Dojo." },
+    { "feature": "Terminal-session matched/unlinked refunds", "implemented": false, "evidence": "Supported refund route is original payment intent, not terminal-session refunds", "currentHealthyNative": "NOT_OFFERED", "limits": "Public checklist permits different refund routes, but at least one API refund method must be achievable." }
+  ],
+  "currentNativeCases": [
+    { "id": "NATIVE-EXISTING-TIP0-600", "status": "OBSERVED_JOURNAL_AND_PORTAL_CANCELED_NOT_BUTTON_OR_FRESH_TIMEOUT_PROOF", "type": "Normal native app, existing sandbox attempt", "amountPence": 600, "details": "Root observed the pre-existing TIP0 test finalize as cancelled with Dojo status: Canceled. Order count remained 97 before/after and £6 trolley retained. The corresponding pre-existing intent was later observed Canceled in the portal. Root did not press Cancel Terminal for this initial attempt, so cancellation initiator is not established and it is not a fresh or deliberate-button test." },
+    { "id": "QA-PERSISTENT-CONFIG-READ", "status": "FAIL_CONFIRMED", "type": "Native QA fault, no provider payment", "details": "Persistent public-config parse failure exposes manual Card completion. Exact original public config restored; no confirmation clicked; no order created." },
+    { "id": "QA-ONE-SHOT-CONFIG-READ", "status": "SELF_REPAIRED_OBSERVATION", "type": "Native QA one-shot checkpoint", "details": "Checkpoint armed/entered/rejected; later successful read repaired provider state. Not a persistent-failure pass." },
+    { "id": "QA-PROFILE-RESTORATION", "status": "PASS_RESTORED_AND_QUIT", "type": "Isolated native QA cleanup", "details": "Exact original public configuration restored, cold reload showed healthy Dojo label, original three-beer £11 trolley and one held trolley retained. QA app quit and process absence verified by root. Secret files untouched." },
+    { "id": "SANDBOX-SETTINGS", "status": "DISCOVERY_SELECTION_SAVE_AND_RESTORATION_PASS", "feature": "Normal native Sandbox API 2026-02-27, dedicated mode, saved key retained; eight discovered devices and native selection/save tested", "terminalCount": 8, "terminalLabels": ["VCMLABJSIP0", "VCMLABJDIP0", "VCMLABJSCN0", "VCMLABJSIS0", "VCMLABJDIS0", "VCMLABJUIP0", "VCMLABJCIP0", "VCMLABJTIP0"], "limits": "SIP1 not assigned. No API key was read, replaced or displayed. Original TIP0 selection restored at final handoff." },
+    { "id": "SANDBOX-STATUS-INITIAL", "status": "INITIAL_TRANSIENT_FAILURE_LATER_HEALTHY_STATUS_CONFIRMED", "feature": "TIP0 Test Terminal", "details": "Initial request showed Could not contact Dojo: error sending request. Later discovery worked and the final original-TIP0 status test completed with Live status Available and controls re-enabled. No transport/TLS policy bypass; no independent full HTTP/TLS trace claimed." },
+    { "id": "SANDBOX-SIP0", "status": "PASS_NATIVE_LOCAL_LEDGER_MATCHING_PORTAL_CAPTURED", "feature": "Chip/PIN capture, exactly one sale", "amountPence": 600, "attemptId": "085ab98d-32d6-480f-bc4f-e7bcb1c1e3f1", "details": "Normal native UI success and completed local 600p attempt. Order count 97 to 98 exactly once. Portal independently matched the corresponding Captured 600p intent. Configured saved sandbox key retained." },
+    { "id": "SANDBOX-DIP0", "status": "PASS_NATIVE_DECLINE_RETRY_CONTROL_PORTAL_IDENTITY_VERIFIED_SESSION_HISTORY_UNAVAILABLE", "feature": "Decline, return to payment and same-intent retry", "amountPence": 600, "attemptId": "084c45c6-d94a-465e-9f6f-d2427ec43cb0", "details": "Try another card led to waiting and another decline; Return finalized failed. Orders stayed 99, unresolved Dojo zero, local intent unchanged. Portal matching Created intent detail independently showed the exact reference, £6 amount, £0 tip, Auto capture and Sale from Till 1. Portal drawer did not expose session history, so two actual sessions are not independently proved by this check." },
+    { "id": "SANDBOX-SCN0", "status": "PASS_NATIVE_LOCAL_LEDGER_MATCHING_PORTAL_CAPTURED", "feature": "Contactless capture", "amountPence": 600, "attemptId": "502a5482-aa47-4353-83fc-16112a834094", "receiptNumber": "1000092", "details": "Fresh native £6 success and completed attempt; orders 99 to 100 exactly once. Root independently matched portal Captured 600p intent." },
+    { "id": "SANDBOX-SIS0", "status": "SIGNATURE_ACCEPT_PASS_MATCHING_PORTAL_CAPTURED_80SECOND_AND_LATE_CASES_PENDING", "feature": "Signature acceptance", "amountPence": 600, "attemptId": "90978b1c-42b3-41be-bfd0-cbd74ce7910d", "details": "Native signature Accept displayed waiting for confirmed capture, then trolley cleared. Local attempt completed 600p, orders 98 to 99 exactly once. Portal independently matched Captured 600p intent. No screenshot file claimed." },
+    { "id": "SANDBOX-SIS0-REJECT", "status": "PASS_NATIVE_DECLINE_NO_SALE_PORTAL_MATCHING_CREATED", "feature": "Fresh SIS0 signature rejection", "amountPence": 600, "attemptId": "6916abce-7a15-47d0-b136-49c54bf2c238", "details": "Root chose Reject, then Return after Card not approved. Local attempt failed with Dojo status: Declined; orders stayed 99, £6 trolley retained. Portal independently matched Created 600p intent. Created alone is not failed-payment proof, and portal session history was unavailable. Delayed auto-accept/late rejection remain separate." },
+    { "id": "SANDBOX-DIS0", "status": "ACTUAL_PROVIDER_CAPTURED_AFTER_ACCEPT_NATIVE_AND_PORTAL_MATCH_NOT_EXPECTED_DECLINE_PASS", "feature": "Verify actual behavior of supplied declined-signature-labelled terminal", "amountPence": 600, "attemptId": "c4d2a8a4-3001-4a84-912c-c2e46575a25f", "receiptNumber": "1000093", "details": "Native DIS0 requested signature; root chose Accept, saw waiting for capture, then trolley cleared. Local attempt completed 600p and orders 100 to 101 exactly once; receipt 1000093. Fresh portal independently matched Captured £6. This is not a pass of the supplied always-declined description: provider actually captured after acceptance, and the app correctly followed that result. Ask Dojo to clarify simulator behavior." },
+    { "id": "SANDBOX-UIP0", "status": "PASS_NATIVE_UNSUCCESSFUL_ACTUAL_CANCELED_PORTAL_MATCHING_CREATED", "feature": "Unsuccessful terminal result without a false paid sale", "amountPence": 600, "attemptId": "2e615e4c-ef0a-4f4f-b617-993ad584d0e7", "details": "Root did not click cancellation. Native UI showed Sale Not Completed / Dojo cancelled. Local attempt finalized cancelled with Dojo status: Canceled; orders stayed 100. Portal independently matched Created £6 intent, with no capture. Actual simulator outcome was Canceled, not Declined; do not label the Created status alone as proof of terminal failure." },
+    { "id": "SANDBOX-TIP0", "status": "PASS_NATURAL_SANDBOX_TIMEOUT_RECOVERY_MATCHING_PORTAL_CANCELED", "feature": "Fresh timeout and guarded recovery", "amountPence": 600, "attemptId": "4c7846f2-93e8-45e7-a1ef-37646923ded1", "elapsedSeconds": 92.4, "details": "Root did not click Cancel Terminal. Fresh natural TIP0 finalized cancelled after about 92.4 seconds. Native UI returned Ready to Send, £6 trolley retained, orders stayed 100. Portal refreshed the matching 600p intent from Created during the test to Canceled afterwards. This is guarded sandbox timeout recovery, not live receipt-review or a physical network-disconnection test." },
+    { "id": "SANDBOX-CIP0", "status": "PASS_NATIVE_CANCELLED_NO_SALE_PORTAL_MATCHING_CREATED", "feature": "Cancellation simulator", "amountPence": 600, "attemptId": "b74fdd58-f333-415a-9ffe-9c66c8951e8f", "details": "Fresh CIP0 local attempt cancelled with Dojo status: Canceled; orders stayed 100. Portal independently matched Created 600p intent. Terminal-session cancellation does not imply intent deletion; Created alone is not independent terminal-outcome proof. Not a physical terminal X-button test." },
+    { "id": "SANDBOX-SIP1", "status": "BLOCKED_SIMULATOR_NOT_ASSIGNED_CURRENT_DISCOVERY", "feature": "10% gratuity simulator", "details": "Current native Find My Terminals returned eight devices, excluding VCMLABJSIP1. This is a current external blocker, not merely a historical absence or an unexecuted discovery request. Ask Dojo to assign it to the configured sandbox account." },
+    { "id": "SANDBOX-POS-CANCEL", "status": "PASS_NATIVE_EARLY_BUTTON_CANCEL_PORTAL_MATCHING_CREATED", "feature": "Deliberate early screen cancellation", "amountPence": 600, "attemptId": "b233e212-8f50-4364-81a7-44b1abc06937", "details": "Root immediately clicked Cancel Terminal after sending TIP0; UI showed cancellation, journal cancelled with Dojo status: Canceled, no extra order, zero unresolved Dojo and £6 trolley retained. Portal independently matched Created 600p intent, not Canceled. This is terminal-session cancellation rather than intent deletion. Late capture/cancellation race remains pending." },
+    { "id": "NORMAL-SETTINGS-RESTORATION", "status": "FINAL_RESTORATION_PASS", "feature": "Normal native runtime final handoff", "details": "Read-only final config confirmed enabled, dedicated, original VCMLABJTIP0, GBP, softwareHouse1 and reseller1. API key never changed. Final Test Terminal completed Available. Main page restored to one 4X POLISH BEER item at £6, held count zero, no active payment modal, Synced. Final SQL: 101 orders and zero unresolved Dojo attempts. Four new sandbox receipts retained. QA original three-beer £11 trolley, one held trolley and configuration retained; QA closed. Authenticated Test Data payment-intent browser tab left open as deliverable." },
+    { "id": "SANDBOX-ACCOUNT", "status": "PENDING", "feature": "Customer repayment, cancellation and base/extras accounting" },
+    { "id": "SANDBOX-RESTART", "status": "PENDING", "feature": "Restart with protected unresolved work and exactly-once recovery" },
+    { "id": "SANDBOX-REFUND", "status": "PENDING_PROVIDER_CAPABILITY", "feature": "Successful full/partial goods refund; historical rejections are not success passes" },
+    { "id": "WINDOWS-HARDWARE-UAT", "status": "NOT_RUN", "feature": "Actual Windows till upgrade, physical terminal, busy/menu/network loss, scanner, printer and drawer" }
+  ],
+  "historicalEvidence": [
+    { "path": "docs/DOJO_SANDBOX_RUN_2026_09_28.md", "date": "2026-09-28", "classification": "HISTORICAL_NOT_CURRENT_BUILD_RETEST", "summary": "Earlier chip/PIN, contactless, signature, cancellation and restart observations; refund capability failures and missing gratuity simulator remained external gates." },
+    { "path": "docs/DOJO_TESTING.md", "classification": "HISTORICAL_GUIDANCE_WITH_KNOWN_DRIFT", "summary": "Do not mistake historical tests or old timeout instructions for current test results." },
+    { "path": "docs/DOJO_UAT_READINESS.md", "date": "2026-09-28", "classification": "HISTORICAL_READINESS_NOT_APPROVAL", "summary": "Dojo scope, Windows deployment and physical hardware remain separate release gates." }
+  ],
+  "officialSources": [
+    { "title": "Dojo PAC step-by-step guide", "url": "https://docs.dojo.tech/payments/accept-payments/in-person-payments/pay-at-counter/terminals/step-by-step-guide", "checked": "2026-10-13" },
+    { "title": "Dojo PAC go-live checklist", "url": "https://docs.dojo.tech/payments/accept-payments/in-person-payments/pay-at-counter/go-live-checklist-f2f", "checked": "2026-10-13" },
+    { "title": "Dojo signature verification", "url": "https://docs.dojo.tech/payments/accept-payments/in-person-payments/pay-at-counter/terminals/signature-verification", "checked": "2026-10-13" },
+    { "title": "Dojo terminal states and expiry", "url": "https://docs.dojo.tech/payments/accept-payments/in-person-payments/pay-at-counter/terminals", "checked": "2026-10-13" },
+    { "title": "Dojo unused payment-intent cancellation", "url": "https://docs.dojo.tech/payments/manage-payments/cancelling-payments/cancel", "checked": "2026-10-13" }
+  ],
+  "limits": [
+    "Current real sandbox cases are appended only from root-agent evidence; cases still marked pending must not be inferred from older reports.",
+    "Portal access restored and exact matching current intent statuses were independently read. Portal Created labels do not prove failed/cancelled terminal outcomes; the drawer does not expose session history, so retry's new session is not independently established.",
+    "No production code fix, deployment, Windows installer build/test, live charge, staff-PIN disclosure, API-key disclosure, physical payout, Z-close, database wipe or secret-file change is claimed.",
+    "No screenshot file is claimed for the current fault checks; evidence is the root agent's native observed UI plus automated/source proof.",
+    "At least one refund route must actually work for Dojo approval; source implementation alone does not resolve the historical provider rejections.",
+    "Passing targeted tests do not remove the confirmed fail-open and overlapping-recovery findings."
+  ]
+}

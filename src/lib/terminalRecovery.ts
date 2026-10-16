@@ -74,7 +74,11 @@ export interface TerminalRecoveryResult {
     cashbackToReview: Array<{ attemptId: string; amount: number; currency: string }>;
 }
 
-let recoveryPromise: Promise<TerminalRecoveryResult> | null = null;
+// Recovery writes must remain serial, but callers also need the result for the
+// provider they requested. A shared unscoped promise can skip a second provider
+// when SumUp and Dojo both request recovery during checkout startup.
+let recoveryQueue: Promise<void> = Promise.resolve();
+const providerRecoveryPromises = new Map<TerminalProvider, Promise<TerminalRecoveryResult>>();
 const recoveryOwnerToken = crypto.randomUUID();
 
 function normalizedStatus(...values: Array<string | undefined>): string {
@@ -889,8 +893,8 @@ async function recoverAttemptWithLease(
     return leased.acquired ? leased.value! : 'uncertain';
 }
 
-async function performTerminalRecovery(provider?: TerminalProvider): Promise<TerminalRecoveryResult> {
-    const result: TerminalRecoveryResult = {
+function emptyTerminalRecoveryResult(): TerminalRecoveryResult {
+    return {
         scanned: 0,
         completed: 0,
         finalizedWithoutLedger: 0,
@@ -898,49 +902,50 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
         errors: [],
         cashbackToReview: [],
     };
+}
+
+async function performTerminalRecovery(provider: TerminalProvider): Promise<TerminalRecoveryResult> {
+    const result = emptyTerminalRecoveryResult();
     if (!isTauri()) return result;
 
-    const [sumupConfigResult, dojoConfigResult] = await Promise.allSettled([loadSumupConfig(), loadDojoConfig()]);
-    const providers: TerminalProvider[] = provider ? [provider] : ['sumup', 'dojo'];
-    for (const currentProvider of providers) {
-        let attempts: TerminalPaymentAttempt[];
+    const [configResult] = await Promise.allSettled([
+        provider === 'dojo' ? loadDojoConfig() : loadSumupConfig(),
+    ]);
+    let attempts: TerminalPaymentAttempt[] = [];
+    try {
+        attempts = await getRecoverablePaymentTerminalAttempts(provider, {
+            includeShared: configResult.status !== 'fulfilled'
+                || configResult.value?.terminalOwnership !== 'dedicated',
+        });
+    } catch (error) {
+        result.errors.push(`${provider}: ${String(error)}`);
+    }
+    for (const attempt of attempts) {
+        result.scanned += 1;
         try {
-            const configResult = currentProvider === 'dojo' ? dojoConfigResult : sumupConfigResult;
-            attempts = await getRecoverablePaymentTerminalAttempts(currentProvider, {
-                includeShared: configResult.status !== 'fulfilled'
-                    || configResult.value?.terminalOwnership !== 'dedicated',
-            });
-        } catch (error) {
-            result.errors.push(`${currentProvider}: ${String(error)}`);
-            continue;
-        }
-        for (const attempt of attempts) {
-            result.scanned += 1;
-            try {
-                const outcome = await recoverAttemptWithLease(attempt);
-                if (outcome === 'completed') {
-                    result.completed += 1;
-                    // Recovery cannot know whether cash was handed over before
-                    // a crash. Report recorded cashback for operator review;
-                    // never open a drawer or trigger a payout here.
-                    try {
-                        const completed = await refreshPaymentTerminalAttempt(attempt.provider, attempt.id);
-                        const payload = completed.saleBundle;
-                        const payment = isCustomerAccountPaymentPayload(payload) ? payload : payload.payment;
-                        const cashback = Number(payment.cashbackAmount || 0);
-                        if (completed.operationKind !== 'refund' && Number.isSafeInteger(cashback) && cashback > 0) {
-                            result.cashbackToReview.push({ attemptId: completed.id, amount: cashback, currency: completed.currency });
-                        }
-                    } catch (error) {
-                        result.errors.push(`Payment ${attempt.id} completed, but its cashback record could not be checked. Review the receipt before paying out any cash: ${String(error)}`);
+            const outcome = await recoverAttemptWithLease(attempt);
+            if (outcome === 'completed') {
+                result.completed += 1;
+                // Recovery cannot know whether cash was handed over before
+                // a crash. Report recorded cashback for operator review;
+                // never open a drawer or trigger a payout here.
+                try {
+                    const completed = await refreshPaymentTerminalAttempt(attempt.provider, attempt.id);
+                    const payload = completed.saleBundle;
+                    const payment = isCustomerAccountPaymentPayload(payload) ? payload : payload.payment;
+                    const cashback = Number(payment.cashbackAmount || 0);
+                    if (completed.operationKind !== 'refund' && Number.isSafeInteger(cashback) && cashback > 0) {
+                        result.cashbackToReview.push({ attemptId: completed.id, amount: cashback, currency: completed.currency });
                     }
+                } catch (error) {
+                    result.errors.push(`Payment ${attempt.id} completed, but its cashback record could not be checked. Review the receipt before paying out any cash: ${String(error)}`);
                 }
-                else if (outcome === 'final') result.finalizedWithoutLedger += 1;
-                else result.stillUncertain += 1;
-            } catch (error) {
-                result.stillUncertain += 1;
-                result.errors.push(`${currentProvider} ${attempt.id}: ${String(error)}`);
             }
+            else if (outcome === 'final') result.finalizedWithoutLedger += 1;
+            else result.stillUncertain += 1;
+        } catch (error) {
+            result.stillUncertain += 1;
+            result.errors.push(`${provider} ${attempt.id}: ${String(error)}`);
         }
     }
     // Local payment recovery must not wait for unrelated server maintenance.
@@ -962,11 +967,39 @@ async function performTerminalRecovery(provider?: TerminalProvider): Promise<Ter
     return result;
 }
 
-/** One global recovery run at a time, safe to call at startup and on the POS. */
+/** Serial recovery work, with overlapping requests deduplicated per provider. */
 export function runTerminalRecovery(provider?: TerminalProvider): Promise<TerminalRecoveryResult> {
-    if (recoveryPromise) return recoveryPromise;
-    recoveryPromise = performTerminalRecovery(provider).finally(() => {
-        recoveryPromise = null;
+    if (!provider) {
+        const providers: TerminalProvider[] = ['sumup', 'dojo'];
+        return Promise.allSettled(providers.map(current => runTerminalRecovery(current))).then(results => {
+            const combined = emptyTerminalRecoveryResult();
+            results.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    combined.errors.push(`${providers[index]}: ${String(result.reason)}`);
+                    return;
+                }
+                combined.scanned += result.value.scanned;
+                combined.completed += result.value.completed;
+                combined.finalizedWithoutLedger += result.value.finalizedWithoutLedger;
+                combined.stillUncertain += result.value.stillUncertain;
+                combined.errors.push(...result.value.errors);
+                combined.cashbackToReview.push(...result.value.cashbackToReview);
+            });
+            return combined;
+        });
+    }
+
+    const existing = providerRecoveryPromises.get(provider);
+    if (existing) return existing;
+
+    const recovery = recoveryQueue.then(() => performTerminalRecovery(provider)).finally(() => {
+        if (providerRecoveryPromises.get(provider) === recovery) {
+            providerRecoveryPromises.delete(provider);
+        }
     });
-    return recoveryPromise;
+    providerRecoveryPromises.set(provider, recovery);
+    // A failed run must not poison the queue or prevent another provider from
+    // being inspected. Its own callers still receive the original rejection.
+    recoveryQueue = recovery.then(() => undefined, () => undefined);
+    return recovery;
 }

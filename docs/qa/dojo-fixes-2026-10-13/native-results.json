@@ -1,0 +1,337 @@
+{
+  "title": "Independent native retest of Dojo checkout and recovery fixes",
+  "date": "2026-10-13",
+  "timezone": "Europe/London",
+  "completedAtUtc": "2026-10-13T22:49:08Z",
+  "tester": "Independent retester agent /root/sol61_ultra_retest",
+  "verdict": "PASS_FOR_TARGETED_FIX_SCOPE",
+  "scope": "Rebuilt native Tauri QA/normal app checks, independent production-source review and focused tests. Real Dojo sandbox only; not live acquiring, physical-device, Windows or full Dojo go-live certification.",
+  "attribution": {
+    "nativeAndLocalLedger": "Directly observed/read by this independent retester.",
+    "portal": "Exact current Dojo portal comparisons performed and reported by root in its authenticated browser session.",
+    "portalAccessLimit": "The retester's browser partition could not access root's existing tab 5. No new portal tab was created and no portal mutation was performed."
+  },
+  "safety": {
+    "productionSourceEditedByTester": false,
+    "publicQaConfigurationFaultsOnly": true,
+    "originalQaPublicConfigurationBytesRestored": true,
+    "originalQaSumupBytesUnchanged": true,
+    "originalQaSecretFileBytesUnchanged": true,
+    "originalNormalDojoAndSumupConfigurationBytesRestored": true,
+    "originalNormalSecretFileBytesUnchanged": true,
+    "secretValuesOrHashesIncludedInThisEvidence": false,
+    "livePaymentsMade": false,
+    "financialConfirmationClickedDuringFaultTests": false,
+    "journalOrLeaseRowsManuallyChanged": false,
+    "authorizationOrTlsBypassUsed": false,
+    "retainedNewSandboxReceipts": [
+      1000094,
+      1000095
+    ]
+  },
+  "independentAutomatedChecks": [
+    {
+      "command": "npx vitest run src/lib/terminalConfigStore.test.ts src/lib/dojoCheckoutAvailability.audit.test.ts src/lib/terminalOwnership.test.ts --maxWorkers=1",
+      "files": 3,
+      "passed": 27,
+      "failed": 0,
+      "skipped": 0,
+      "limits": "Production availability helper/config store and extracted checkout guard/dispatch branches; provider and ledger callbacks mocked. Not native UI."
+    },
+    {
+      "command": "npx vitest run src/lib/terminalRecovery.integration.test.ts src/lib/terminalRecovery.test.ts src/lib/terminalRecoveryLease.test.ts --maxWorkers=2",
+      "files": 3,
+      "passed": 54,
+      "failed": 0,
+      "skipped": 0,
+      "limits": "Production recovery orchestration with mocked native/provider boundaries, including five provider-overlap regressions. Not real provider UI."
+    }
+  ],
+  "qa": {
+    "identifier": "com.elamreda.tauri-app.native-qa",
+    "baseline": {
+      "orders": 98,
+      "attempts": 48,
+      "unresolved": 0,
+      "cart": "3 x 4XPOLISH BEER; discounted total £11.00",
+      "heldTrolleys": 1
+    },
+    "cases": [
+      {
+        "id": "P1-INITIAL-LOADING",
+        "status": "PASS",
+        "method": "Armed actual provider.dojo.read delay checkpoint, cold native WebView reload, opened checkout before read completed.",
+        "observed": [
+          "Native QA controls showed pending 1.",
+          "Card view: Checking card terminal settings…",
+          "Card payment is unavailable until terminal settings are ready.",
+          "Disabled Card unavailable; no manual confirmation."
+        ],
+        "limits": "Controlled native read delay, not a physical disk fault."
+      },
+      {
+        "id": "P1-PERSISTENT-READ-FAILURE",
+        "status": "PASS",
+        "method": "Recoverably moved exact public dojo.json; created malformed public replacement with apply_patch; cold WebView reload.",
+        "observed": [
+          "Card terminal settings could not be read. Retry settings before taking a card payment.",
+          "Retry card settings was visible.",
+          "Card unavailable remained disabled.",
+          "Retry with malformed file still present stayed blocked."
+        ],
+        "financialConfirmationClicked": false
+      },
+      {
+        "id": "P1-CASH-SAFE",
+        "status": "PASS",
+        "method": "During persistent read failure switched to Cash, manually keyed 1100p on amount pad.",
+        "observed": [
+          "Cash received £11.00; change £0.00.",
+          "Complete Sale enabled normally."
+        ],
+        "financialConfirmationClicked": false,
+        "limits": "Enabled/correctly tendered Cash UI verified without creating a fault-test order."
+      },
+      {
+        "id": "P1-RESTORE-AND-RETRY",
+        "status": "PASS",
+        "method": "Restored exact original public dojo.json and clicked actual Retry card settings without restarting the app.",
+        "observed": [
+          "Dojo selected again.",
+          "QA Native Dojo; Ready to send to Dojo.",
+          "Send to Dojo enabled."
+        ]
+      },
+      {
+        "id": "P1-ENABLED-NOT-READY",
+        "status": "PASS",
+        "method": "Temporary valid public config enabled Dojo but omitted terminal ID; original file preserved.",
+        "observed": [
+          "Dojo is enabled but its setup is incomplete. Check Settings → Card terminals.",
+          "Disabled Card unavailable.",
+          "No manual-card fallback."
+        ]
+      },
+      {
+        "id": "P1-INTENTIONALLY-DISABLED-CONTROL",
+        "status": "PASS",
+        "method": "Temporary public Dojo config disabled, existing SumUp disabled; both successful reads.",
+        "observed": [
+          "Card selected.",
+          "Take payment on your card terminal, then confirm below.",
+          "Confirm only after the card terminal approves.",
+          "Confirm Card Payment enabled."
+        ],
+        "financialConfirmationClicked": false
+      }
+    ],
+    "final": {
+      "orders": 98,
+      "attempts": 48,
+      "unresolved": 0,
+      "cart": "Original 3 beers / £11.00",
+      "heldTrolleys": 1,
+      "healthyDojoRestored": true,
+      "closed": true
+    }
+  },
+  "normal": {
+    "identifier": "com.elamreda.tauri-app",
+    "baseline": {
+      "orders": 101,
+      "attempts": 60,
+      "unresolved": 0,
+      "cart": "1 x 4XPOLISH BEER / £6.00",
+      "heldTrolleys": 0,
+      "dojoTerminal": "TIP0",
+      "ownership": "dedicated",
+      "mariaDbOnline": true
+    },
+    "cases": [
+      {
+        "id": "HEALTHY-SIP0",
+        "status": "PASS_NATIVE_LEDGER_ROOT_PORTAL",
+        "attemptId": "137ae3fe-1554-46b7-8125-40311ca37577",
+        "paymentIntentId": "pi_sandbox_LQ078E7d2keO3DWRgeC88A",
+        "amountPence": 600,
+        "createdAt": "2026-10-13T22:41:37.666Z",
+        "completedAt": "2026-10-13T22:41:48.270Z",
+        "receiptNumber": 1000094,
+        "nativeObservation": "SUCCESS / Done / Sale completed successfully; trolley cleared.",
+        "ordersBefore": 101,
+        "ordersAfter": 102,
+        "matchingOrderCount": 1,
+        "matchingPaymentCount": 1,
+        "portal": {
+          "observedBy": "root",
+          "status": "Captured",
+          "amountPence": 600,
+          "reference": "137ae3fe-1554-46b7-8125-40311ca37577",
+          "tipPence": 0,
+          "captureMode": "Auto",
+          "description": "Sale from Till 1"
+        }
+      },
+      {
+        "id": "P2-GENUINE-PENDING-RESTART-RECOVERY",
+        "status": "PASS_NATIVE_REAL_SANDBOX_RECOVERY_NOT_ISOLATED_OVERLAP_PROOF",
+        "attemptId": "61893c41-814f-445e-806d-40d7d2423006",
+        "paymentIntentId": "pi_sandbox_TrN4C86izkG2G_zG6e5cwg",
+        "amountPence": 600,
+        "createdAt": "2026-10-13T22:42:54.574Z",
+        "lastStartedUpdateAt": "2026-10-13T22:42:54.947Z",
+        "completedAt": "2026-10-13T22:47:05.979Z",
+        "elapsedSecondsFromCreation": 251.405,
+        "receiptNumber": 1000095,
+        "method": "Started SIP0 sandbox payment, verified durable started PI/session and unchanged order count, quit native app before commit. CUA confirmed process stopped; closed-database read still showed started. Relaunched and let normal safety windows run; a post-grace cold startup completed recovery.",
+        "safetyTiming": {
+          "originalLeaseExpiresAt": "2026-10-13T22:45:54.579Z",
+          "existingPreparedStartedOwnerGraceMs": 240000,
+          "ownerGraceEndsAt": "2026-10-13T22:46:54.947Z",
+          "observedStillStartedAt": "2026-10-13T22:46:24Z",
+          "interpretation": "Expected four-minute owner grace; not a periodic recovery failure.",
+          "manualLeaseOrJournalMutation": false
+        },
+        "nativeObservations": [
+          "1 Dojo result is still being reconciled. Do not retry the card.",
+          "Saved trolley needs attention: interrupted payment; kept; no payment started automatically.",
+          "Post-grace startup: Recovered 1 Dojo terminal transaction.",
+          "Retry recovery consumed the already-paid saved trolley and returned to empty £0 POS, held 0."
+        ],
+        "ordersBefore": 102,
+        "ordersAfter": 103,
+        "matchingOrderCount": 1,
+        "matchingPaymentCount": 1,
+        "portal": {
+          "observedBy": "root",
+          "status": "Captured",
+          "amountPence": 600,
+          "reference": "61893c41-814f-445e-806d-40d7d2423006",
+          "tipPence": 0,
+          "captureMode": "Auto",
+          "description": "Sale from Till 1",
+          "capturedWhileLocalRowStillStarted": true
+        },
+        "limits": "Native recovery smoke uses meaningful real recoverable payment, but startup/layout/periodic scheduling was not instrumented to isolate exact second-provider overlap. Deterministic automated concurrency tests provide that isolation."
+      },
+      {
+        "id": "EXPLICIT-TIP0-CANCELLATION",
+        "status": "PASS_NATIVE_LEDGER_ROOT_PORTAL_IDENTITY_MATCH",
+        "attemptId": "e4ce3c43-7655-45ad-b6d5-045c17638cbb",
+        "paymentIntentId": "pi_sandbox_PHgXJ6t2zUe82jOCOYnwCQ",
+        "amountPence": 600,
+        "createdAt": "2026-10-13T22:48:21.708Z",
+        "cancelledAt": "2026-10-13T22:48:27.562Z",
+        "nativeObservations": [
+          "Explicitly pressed Cancel Terminal immediately after send.",
+          "Requesting cancellation on the Dojo terminal / disabled Cancelling….",
+          "Sale was not completed: The Dojo payment was cancelled.",
+          "Returned to Ready to send to Dojo with £6 trolley retained."
+        ],
+        "journalStatus": "cancelled",
+        "journalError": "Dojo status: Canceled",
+        "ordersBefore": 103,
+        "ordersAfter": 103,
+        "matchingOrderCount": 0,
+        "matchingPaymentCount": 0,
+        "portal": {
+          "observedBy": "root",
+          "status": "Created",
+          "amountPence": 600,
+          "reference": "e4ce3c43-7655-45ad-b6d5-045c17638cbb",
+          "tipPence": 0,
+          "captureMode": "Auto",
+          "description": "Sale from Till 1"
+        },
+        "limits": "Portal Created confirms payment-intent identity/current state, not independent terminal cancellation or intent deletion. Native terminal result and no order supply cancellation evidence."
+      }
+    ],
+    "ledgerRows": [
+      {
+        "id": "137ae3fe-1554-46b7-8125-40311ca37577",
+        "clientTransactionId": "pi_sandbox_LQ078E7d2keO3DWRgeC88A",
+        "terminalSessionId": "ts_sandbox_6aceb3a2d6d07b52c8fdee3e",
+        "status": "completed",
+        "amount": 600,
+        "createdAt": "2026-10-13T22:41:37.666Z",
+        "updatedAt": "2026-10-13T22:41:48.270Z",
+        "error": "",
+        "journalScope": "local",
+        "orderNumber": 1000094,
+        "total": 600,
+        "method": "card",
+        "paymentAmount": 600,
+        "cardAmount": 600,
+        "cashAmount": 0,
+        "tipsAmount": 0,
+        "serviceChargeAmount": 0,
+        "cashbackAmount": 0
+      },
+      {
+        "id": "61893c41-814f-445e-806d-40d7d2423006",
+        "clientTransactionId": "pi_sandbox_TrN4C86izkG2G_zG6e5cwg",
+        "terminalSessionId": "ts_sandbox_6aceb3eea7da208ec03b3a19",
+        "status": "completed",
+        "amount": 600,
+        "createdAt": "2026-10-13T22:42:54.574Z",
+        "updatedAt": "2026-10-13T22:47:05.979Z",
+        "error": "",
+        "journalScope": "local",
+        "orderNumber": 1000095,
+        "total": 600,
+        "method": "card",
+        "paymentAmount": 600,
+        "cardAmount": 600,
+        "cashAmount": 0,
+        "tipsAmount": 0,
+        "serviceChargeAmount": 0,
+        "cashbackAmount": 0
+      },
+      {
+        "id": "e4ce3c43-7655-45ad-b6d5-045c17638cbb",
+        "clientTransactionId": "pi_sandbox_PHgXJ6t2zUe82jOCOYnwCQ",
+        "terminalSessionId": "ts_sandbox_6aceb535a7da208ec03b3a22",
+        "status": "cancelled",
+        "amount": 600,
+        "createdAt": "2026-10-13T22:48:21.708Z",
+        "updatedAt": "2026-10-13T22:48:27.562Z",
+        "error": "Dojo status: Canceled",
+        "journalScope": "local",
+        "orderNumber": null,
+        "total": null,
+        "method": null,
+        "paymentAmount": null,
+        "cardAmount": null,
+        "cashAmount": null,
+        "tipsAmount": null,
+        "serviceChargeAmount": null,
+        "cashbackAmount": null
+      }
+    ],
+    "final": {
+      "orders": 103,
+      "attempts": 63,
+      "unresolved": 0,
+      "localLocks": 0,
+      "cart": "1 x 4XPOLISH BEER / £6.00",
+      "heldTrolleys": 0,
+      "paymentModalOpen": false,
+      "synced": true,
+      "dojoTerminal": "TIP0",
+      "ownership": "dedicated",
+      "currency": "GBP",
+      "softwareHouseAndResellerIdsRestored": true,
+      "savedApiKeyUnchanged": true,
+      "testTerminalResult": "Dojo terminal is online and available",
+      "mariaDbConfigurationUnchanged": true,
+      "normalAppOpen": true
+    }
+  },
+  "limitations": [
+    "No live acquiring, physical terminal, printer, cash payout, Windows, successful refund, nonzero extras or full feature certification.",
+    "No exact provider-overlap instrumentation in the native app; deterministic production-module tests cover that concurrency race.",
+    "Portal observations are root-owned; native/local verification is directly independent.",
+    "Native screenshots were shown through computer-use output; no saved screenshot file artifact is claimed.",
+    "The original normal mock trolley had to be cleared/recreated to enter settings; its one-item £6 shape was restored, all temporary held work removed, and two new sandbox receipts intentionally retained."
+  ]
+}

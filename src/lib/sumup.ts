@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { get, writable } from 'svelte/store';
+import { get } from 'svelte/store';
+import { createTerminalConfigStore } from '$lib/terminalConfigStore';
 import { connectionState, buildMysqlUri } from '$lib/stores/connection';
 import { acquireTerminalLock, refreshTerminalLock, releaseTerminalLock,
     type TerminalOwnership, type TerminalLockResult } from '$lib/terminalRecoveryLease';
@@ -89,31 +90,26 @@ export const defaultSumupConfig: SumupConfig = {
     ready: false,
 };
 
-export const sumupConfig = writable<SumupConfig>(defaultSumupConfig);
+const configState = createTerminalConfigStore<SumupConfig>(defaultSumupConfig);
+export const sumupConfig = configState.config;
+export const sumupConfigReadState = configState.readState;
 
 export async function loadSumupConfig(): Promise<SumupConfig> {
-    if (!isTauri()) return defaultSumupConfig;
-    const config = await invoke<SumupConfig>('sumup_get_config');
-    sumupConfig.set(config);
-    return config;
+    return configState.read(() => isTauri() ? invoke<SumupConfig>('sumup_get_config') : Promise.resolve(defaultSumupConfig));
 }
 
 export async function saveSumupConfig(config: SumupConfigInput): Promise<SumupConfig> {
     const state = get(connectionState);
-    const saved = await invoke<SumupConfig>('sumup_save_config', {
+    return configState.write(() => invoke<SumupConfig>('sumup_save_config', {
         config, mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
-    });
-    sumupConfig.set(saved);
-    return saved;
+    }));
 }
 
 export async function clearSumupSecrets(): Promise<SumupConfig> {
     const state = get(connectionState);
-    const saved = await invoke<SumupConfig>('sumup_clear_secrets', {
+    return configState.write(() => invoke<SumupConfig>('sumup_clear_secrets', {
         mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
-    });
-    sumupConfig.set(saved);
-    return saved;
+    }));
 }
 
 export function listSumupReaders(): Promise<SumupReader[]> {

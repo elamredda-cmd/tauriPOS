@@ -1,0 +1,123 @@
+{
+  "taskDate": "2026-10-13",
+  "timezone": "Europe/London",
+  "status": "TARGETED_FIXES_VERIFIED",
+  "independentTester": { "model": "gpt-6.1-sol", "reasoningEffort": "ultra" },
+  "fixes": [
+    {
+      "id": "DOJO-01",
+      "implemented": true,
+      "behavior": "Card checkout fails closed for loading, unreadable or enabled-but-incomplete terminal settings. Successful reads of both explicitly disabled providers allow manual card. Settings are serialized and the cashier-confirmed configuration is checked after a fresh read and before dispatch. Cash, training and zero-due loyalty remain available.",
+      "source": ["src/routes/+page.svelte", "src/lib/dojo.ts", "src/lib/sumup.ts", "src/lib/checkoutCardAvailability.ts", "src/lib/terminalConfigStore.ts"],
+      "regressions": ["src/lib/dojoCheckoutAvailability.audit.test.ts", "src/lib/terminalConfigStore.test.ts"],
+      "nativeQaStatus": "PASS"
+    },
+    {
+      "id": "DOJO-02",
+      "implemented": true,
+      "behavior": "Per-provider promises coalesce duplicate requests and queue different providers serially. Every caller gets its requested provider result. All-provider requests await all requested work and aggregate provider-specific errors even if a pass unexpectedly rejects.",
+      "source": ["src/lib/terminalRecovery.ts"],
+      "regressions": ["src/lib/terminalRecovery.integration.test.ts"],
+      "nativeRecoveryStatus": "PASS",
+      "limit": "Concurrent provider scope is isolated deterministically in automated production-module tests. Native restart recovery also has a periodic all-provider sweep, terminal lease and four-minute owner grace; it cannot independently isolate the startup race."
+    }
+  ],
+  "automated": {
+    "fullFrontend": { "command": "npx vitest run --maxWorkers=2", "passed": 1516, "skipped": 56, "failed": 0, "filesPassed": 109, "filesSkipped": 3 },
+    "typeCheck": { "command": "npm run check", "errors": 0, "warnings": 0, "frontendCommands": 99, "registeredCommands": 105 },
+    "independentFocused": [
+      { "command": "npx vitest run src/lib/terminalConfigStore.test.ts src/lib/dojoCheckoutAvailability.audit.test.ts src/lib/terminalOwnership.test.ts --maxWorkers=1", "passed": 27 },
+      { "command": "npx vitest run src/lib/terminalRecovery.integration.test.ts src/lib/terminalRecovery.test.ts src/lib/terminalRecoveryLease.test.ts --maxWorkers=2", "passed": 54 }
+    ],
+    "countNote": "Focused counts overlap the full suite. Skipped tests are not passes. Former bug-characterization expectations were replaced with safety regressions.",
+    "diffCheck": "PASS"
+  },
+  "builds": [
+    { "type": "isolated native macOS debug QA", "command": "LBJ_NATIVE_QA=1 VITE_NATIVE_QA=1 npm run tauri -- build --debug --bundles app --features native-qa --config src-tauri/tauri.native-qa.conf.json", "status": "PASS" },
+    { "type": "normal native macOS debug", "command": "npm run tauri -- build --debug --bundles app", "status": "PASS" }
+  ],
+  "buildWarningNote": "Four existing Rust unused-code warnings. No Rust production source changed in this task.",
+  "nativeQa": {
+    "casesPassed": ["delayed cold-start configuration read blocks card", "persistent malformed public configuration blocks card", "retry while malformed stays blocked", "manual cash entry remains available without completing a sale", "exact restoration plus Retry card settings restores Dojo without reopening", "enabled but empty terminal ID blocks card", "successfully read disabled providers allow manual card control without completing a sale"],
+    "ordersBeforeAfter": [98, 98],
+    "attemptsBeforeAfter": [48, 48],
+    "unresolvedAfter": 0,
+    "originalPublicConfigurationsRestored": true,
+    "credentialsUnchanged": true,
+    "originalTrolley": "3 beer items, discounted total 1100p; one held trolley",
+    "originalTrolleyRetained": true,
+    "appClosedAfterTests": true
+  },
+  "portalVerificationBy": "Root agent using the existing authenticated L&BJ Test data tab; child tester's browser session could not access that tab.",
+  "sandboxResults": [
+    {
+      "case": "SIP0 successful sale",
+      "status": "PASS",
+      "attemptId": "137ae3fe-1554-46b7-8125-40311ca37577",
+      "paymentIntentId": "pi_sandbox_LQ078E7d2keO3DWRgeC88A",
+      "amountPence": 600,
+      "nativeStatus": "completed",
+      "completedAt": "2026-10-13T22:41:48.270Z",
+      "receipt": "1000094",
+      "ordersBeforeAfter": [101, 102],
+      "matchingOrders": 1,
+      "matchingPayments": 1,
+      "portalStatus": "Captured",
+      "portalReferenceMatchesAttempt": true
+    },
+    {
+      "case": "SIP0 captured payment recovered after process interruption",
+      "status": "PASS",
+      "attemptId": "61893c41-814f-445e-806d-40d7d2423006",
+      "paymentIntentId": "pi_sandbox_TrN4C86izkG2G_zG6e5cwg",
+      "terminalSessionId": "ts_sandbox_6aceb3eea7da208ec03b3a19",
+      "amountPence": 600,
+      "nativeStatus": "completed",
+      "lastStartedUpdateAt": "2026-10-13T22:42:54.947Z",
+      "existingFourMinuteOwnerGraceEndedAt": "2026-10-13T22:46:54.947Z",
+      "completedAt": "2026-10-13T22:47:05.979Z",
+      "receipt": "1000095",
+      "ordersBeforeAfter": [102, 103],
+      "matchingOrders": 1,
+      "matchingPayments": 1,
+      "portalStatus": "Captured",
+      "portalReferenceMatchesAttempt": true,
+      "nativeEvidence": "Cold restart after existing owner grace showed Recovered 1 Dojo terminal transaction; Retry recovery subsequently cleared the protected paid draft. No duplicate and no journal or lease mutation."
+    },
+    {
+      "case": "TIP0 on-screen cancellation",
+      "status": "PASS",
+      "attemptId": "e4ce3c43-7655-45ad-b6d5-045c17638cbb",
+      "paymentIntentId": "pi_sandbox_PHgXJ6t2zUe82jOCOYnwCQ",
+      "terminalSessionId": "ts_sandbox_6aceb535a7da208ec03b3a22",
+      "amountPence": 600,
+      "nativeStatus": "cancelled",
+      "nativeTerminalResult": "Dojo status: Canceled",
+      "completedAt": "2026-10-13T22:48:27.562Z",
+      "ordersBeforeAfter": [103, 103],
+      "portalStatus": "Created",
+      "portalReferenceMatchesAttempt": true,
+      "interpretation": "Created describes the payment intent, not the terminal session. Cancellation is established by the native terminal result and no new sale, not the portal Created label."
+    }
+  ],
+  "portalDetailChecks": { "allAmountsPence": 600, "allTipsPence": 0, "allCaptureModes": "Auto", "allDescriptions": "Sale from Till 1" },
+  "restoration": {
+    "normalApp": "Running at checkout; no payment running",
+    "normalOrdersBeforeAfter": [101, 103],
+    "normalAttemptsBeforeAfter": [60, 63],
+    "unresolvedDojoAfter": 0,
+    "originalTerminal": "VCMLABJTIP0",
+    "originalTerminalMode": "dedicated Sandbox",
+    "originalPublicConfigurationsRestored": true,
+    "credentialsUnchanged": true,
+    "originalTrolleyRestored": "1 beer item, 600p; zero held trolleys",
+    "originalMariaDb3306Service": "Left running throughout",
+    "testDataRetained": "Two new sandbox orders and three payment attempts retained for traceability"
+  },
+  "limits": [
+    "Current testing is native macOS Tauri plus Dojo sandbox with MariaDB running. Windows installer, offline operation and physical hardware were not tested.",
+    "No live payment, refund, nonzero extras, Z close, data wipe or credential replacement was performed.",
+    "Created in the portal does not independently prove a declined or cancelled terminal session; exact native journal outcomes are reported separately.",
+    "This retest addresses the two requested code findings, not every remaining feature/UAT item from the earlier audit."
+  ]
+}

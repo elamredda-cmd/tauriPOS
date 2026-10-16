@@ -133,6 +133,7 @@
     import { AgeVerificationKeyboardGuard } from "$lib/ageVerificationKeyboard";
     import { canAccessPath, hasPermission, permissionForPath, permissionLabels, roleLabels, type PermissionKey } from "$lib/permissions";
     import { deviceOperatingMode, deviceOperatingModeLabel } from "$lib/deviceMode";
+    import { checkoutCardAvailability, type CheckoutCardProvider } from '$lib/checkoutCardAvailability';
     import {
         acquireSumupLock,
         createSumupCheckout,
@@ -146,6 +147,7 @@
         refundSumupTransaction,
         saveSumupAttempt,
         sumupConfig as sumupConfigStore,
+        sumupConfigReadState,
         sumupTerminalKey,
         terminateSumupCheckout,
         updateSumupAttempt,
@@ -159,6 +161,7 @@
         cancelExpiredSandboxDojoPaymentIntent,
         createDojoPayment,
         dojoConfig as dojoConfigStore,
+        dojoConfigReadState,
         dojoTerminalKey,
         getDojoPaymentIntentStatus,
         getDojoTerminalSessionStatus,
@@ -410,6 +413,7 @@
     let dojoSignatureDecision: ((accepted: boolean) => void) | null = null;
     let recoveringSumupPayments = false;
     let recoveringDojoPayments = false;
+    let completingCardProvider: CheckoutCardProvider = null;
     let cartItemEls: HTMLElement[] = [];
     let cartScrollFrame: number | undefined;
     let lastCartScrollIndex = -1;
@@ -451,11 +455,11 @@
     $: loyaltyPointsEarned = selectedCustomer && loyaltyConfig.enabled ? pointsForSpend(paymentDue, loyaltyConfig) : 0;
     $: paymentInputAmount = parseInt(amountTenderedString) || 0;
     $: cardCashPartInvalid = paymentMethod === "card" && paymentInputAmount > 0 && paymentInputAmount >= paymentDue;
-    $: activeManagedProvider = $dojoConfigStore.enabled && $dojoConfigStore.ready
-        ? "dojo" as const
-        : $sumupConfigStore.enabled && $sumupConfigStore.ready
-            ? "sumup" as const
-            : null;
+    $: cardAvailability = checkoutCardAvailability($dojoConfigStore, $sumupConfigStore,
+        $dojoConfigReadState, $sumupConfigReadState, !isTauri() || trainingModeEnabled);
+    $: activeManagedProvider = isCompletingSale && completingCardProvider
+        ? completingCardProvider : cardAvailability.provider;
+    $: cardConfigurationBlocked = paymentDue > 0 && cardAvailability.blocked;
     $: managedCardEnabled = activeManagedProvider !== null;
     $: managedTerminalNeedsSharedDatabase = activeManagedProvider === 'dojo'
         ? $dojoConfigStore.terminalOwnership !== 'dedicated'
@@ -476,7 +480,8 @@
         isCompletingSale ||
         (paymentMethod === "cash" && paymentInputAmount < paymentDue) ||
         cardCashPartInvalid ||
-        (paymentMethod === "card" && managedTerminalConnectionBlocked) ||
+        (paymentMethod === "card" && (cardConfigurationBlocked
+            || (paymentDue > 0 && !trainingModeEnabled && managedTerminalConnectionBlocked))) ||
         (paymentMethod === "account" && (!accountSaleAvailable || customerAccountBusy));
     $: customerMatches = customerSearch.trim()
         ? $customersDB.filter((customer) => {
@@ -1257,7 +1262,7 @@
             window.addEventListener('beforeunload', checkpointCheckoutOnExit);
         }
         if (isTauri() && checkoutDevice) {
-            void Promise.allSettled([loadSumupConfig(), loadDojoConfig()])
+            void refreshCheckoutCardConfig()
                 .then(() => Promise.allSettled([recoverApprovedSumupSales(), recoverApprovedDojoSales()]))
                 .catch((error) => console.warn("Could not initialize card terminals:", error));
             getOrCreateTillId().then(async id => {
@@ -3307,6 +3312,7 @@
         useLoyaltyCredit = false;
         calculateQuickAmounts(total);
         showPaymentModal = true;
+        if (isTauri()) void refreshCheckoutCardConfig();
         if (retainedCustomer) {
             void selectPaymentCustomer(retainedCustomer);
         } else {
@@ -4482,6 +4488,32 @@
         } catch (error) { toast(`Payment review is saved; recovery needs checking: ${String(error)}`, 'error'); }
     }
 
+    async function refreshCheckoutCardConfig() {
+        const results = await Promise.allSettled([loadSumupConfig(), loadDojoConfig()]);
+        for (const result of results) {
+            if (result.status === 'rejected') console.warn('Could not read card terminal settings:', result.reason);
+        }
+    }
+
+    function assertCheckoutCardConfiguration(
+        dojo: DojoConfig,
+        sumup: SumupConfig,
+        expectedProvider?: CheckoutCardProvider,
+    ): CheckoutCardProvider {
+        if (!isTauri() || trainingModeEnabled) return null;
+        const currentDojo = get(dojoConfigStore);
+        const currentSumup = get(sumupConfigStore);
+        const availability = checkoutCardAvailability(currentDojo, currentSumup,
+            get(dojoConfigReadState), get(sumupConfigReadState));
+        if (availability.blocked) throw new Error(availability.message);
+        if (expectedProvider !== undefined && (availability.provider !== expectedProvider
+            || JSON.stringify(currentDojo) !== JSON.stringify(dojo)
+            || JSON.stringify(currentSumup) !== JSON.stringify(sumup))) {
+            throw new Error('Card terminal settings changed. Review the payment and confirm again.');
+        }
+        return availability.provider;
+    }
+
     async function completeSale() {
         if (checkoutDraftBlocked) return;
         if ($pendingOnlineFinancialIntent) {
@@ -4500,6 +4532,13 @@
             showPaymentModal = false;
             return;
         }
+        // Preserve the setup the cashier actually confirmed before any await.
+        // A refresh which disables Dojo must ask for review, not silently turn
+        // a "Send to Dojo" click into "Confirm Card Payment".
+        const confirmedDojoConfig = get(dojoConfigStore);
+        const confirmedSumupConfig = get(sumupConfigStore);
+        const confirmedCardProvider = checkoutCardAvailability(confirmedDojoConfig, confirmedSumupConfig,
+            get(dojoConfigReadState), get(sumupConfigReadState), !isTauri() || trainingModeEnabled).provider;
         // Recheck at confirmation, before deciding tender or sending money to a
         // terminal. A delayed timer must not charge an expired offer.
         const displayedTotal = total;
@@ -4563,6 +4602,9 @@
                 const pending = await refreshPendingOnlineFinancialIntent();
                 if (pending) throw new OnlineFinancialPendingError(pending);
             }
+            if (isTauri() && paymentMethod === 'card' && paymentDue > 0 && !trainingModeEnabled) {
+                await refreshCheckoutCardConfig();
+            }
             const activeSumupConfig = get(sumupConfigStore);
             const activeDojoConfig = get(dojoConfigStore);
 
@@ -4604,16 +4646,20 @@
                 cardAmount = 0;
                 change = 0;
             }
+            const selectedCardProvider = paymentMethod === 'card' && cardAmount > 0 && !trainingModeEnabled
+                ? assertCheckoutCardConfiguration(confirmedDojoConfig, confirmedSumupConfig, confirmedCardProvider)
+                : null;
+            completingCardProvider = selectedCardProvider;
             const usesManagedSumup = !trainingModeEnabled
                 && paymentMethod === "card"
                 && cardAmount > 0
-                && activeManagedProvider === "sumup"
+                && selectedCardProvider === "sumup"
                 && activeSumupConfig.enabled
                 && activeSumupConfig.ready;
             const usesManagedDojo = !trainingModeEnabled
                 && paymentMethod === "card"
                 && cardAmount > 0
-                && activeManagedProvider === "dojo"
+                && selectedCardProvider === "dojo"
                 && activeDojoConfig.enabled
                 && activeDojoConfig.ready;
             const basePaymentMethod = usesManagedDojo
@@ -4858,6 +4904,13 @@
                 await requireManualSaleAccess();
             }
 
+            // Receipt/draft preparation can await disk or authority checks.
+            // A settings change during that interval must not switch terminal
+            // or turn a managed payment into an unverified manual card sale.
+            if (paymentMethod === 'card' && cardAmount > 0) {
+                assertCheckoutCardConfiguration(activeDojoConfig, activeSumupConfig, selectedCardProvider);
+            }
+
             if (usesManagedSumup) {
                 saleBundle = await processManagedSumupPayment(activeSumupConfig, saleBundle, cardAmount);
                 approvedManagedBundle = saleBundle;
@@ -4967,6 +5020,7 @@
             }
         } finally {
             isCompletingSale = false;
+            completingCardProvider = null;
             refreshPromotionClock();
             terminalCancelRequested = false;
             terminalPaymentStage = "idle";
@@ -6594,10 +6648,15 @@
                             </div>
                             <div class="payment-terminal-copy">
                                 <strong>{managedTerminalName}</strong>
-                                <span role="status">{managedCardEnabled
+                                <span role="status">{cardConfigurationBlocked && !isCompletingSale
+                                    ? cardAvailability.message
+                                    : managedCardEnabled
                                     ? terminalPaymentMessage || (managedTerminalConnectionBlocked ? 'Waiting for the shared database connection' : `Ready to send to ${managedProviderName}`)
                                     : 'Take payment on your card terminal, then confirm below.'}</span>
                             </div>
+                            {#if cardConfigurationBlocked && !isCompletingSale && ($dojoConfigReadState === 'error' || $sumupConfigReadState === 'error')}
+                                <button class="btn btn-secondary" on:click={refreshCheckoutCardConfig}>Retry card settings</button>
+                            {/if}
                             {#if managedCardEnabled && isCompletingSale && !['approved', 'saving'].includes(terminalPaymentStage)}
                                 <button class="btn btn-danger payment-terminal-cancel" disabled={terminalPaymentStage === 'cancelling' || terminalCancelRequested} on:click={cancelManagedTerminalPayment}>
                                     {terminalPaymentStage === 'cancelling' ? 'Cancelling…' : terminalCancelRequested ? 'Cancellation unconfirmed' : 'Cancel Terminal'}
@@ -6646,7 +6705,9 @@
                     >
                         {terminalPaymentMessage || `Connecting to ${managedProviderName}`}
                     </div>
-                {:else if paymentMethod === 'card' && managedTerminalConnectionBlocked}
+                {:else if paymentMethod === 'card' && cardConfigurationBlocked}
+                    <p class="payment-footer-message is-error" role="status">Card payment is unavailable until terminal settings are ready.</p>
+                {:else if paymentMethod === 'card' && managedTerminalConnectionBlocked && paymentDue > 0 && !trainingModeEnabled}
                     <div
                         class="payment-footer-message is-error" role="status"
                     >
@@ -6670,6 +6731,8 @@
                         ? (managedCardEnabled && paymentMethod === 'card' ? `Processing ${managedProviderName}...` : 'Saving Sale...')
                         : paymentMethod === 'account'
                             ? 'Confirm Pay Later'
+                            : paymentMethod === 'card' && cardConfigurationBlocked
+                            ? 'Card unavailable'
                             : (managedCardEnabled && paymentMethod === 'card' ? `Send to ${managedProviderName}` : paymentMethod === 'card' ? 'Confirm Card Payment' : 'Complete Sale')}
                 </button>
             </div>

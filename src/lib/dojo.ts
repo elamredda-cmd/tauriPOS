@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { get, writable } from 'svelte/store';
+import { get } from 'svelte/store';
+import { createTerminalConfigStore } from '$lib/terminalConfigStore';
 import { connectionState, buildMysqlUri } from '$lib/stores/connection';
 import { acquireTerminalLock, refreshTerminalLock, releaseTerminalLock,
     type TerminalOwnership, type TerminalLockResult } from '$lib/terminalRecoveryLease';
@@ -114,31 +115,26 @@ export const defaultDojoConfig: DojoConfig = {
     ready: false,
 };
 
-export const dojoConfig = writable<DojoConfig>(defaultDojoConfig);
+const configState = createTerminalConfigStore<DojoConfig>(defaultDojoConfig);
+export const dojoConfig = configState.config;
+export const dojoConfigReadState = configState.readState;
 
 export async function loadDojoConfig(): Promise<DojoConfig> {
-    if (!isTauri()) return defaultDojoConfig;
-    const config = await invoke<DojoConfig>('dojo_get_config');
-    dojoConfig.set(config);
-    return config;
+    return configState.read(() => isTauri() ? invoke<DojoConfig>('dojo_get_config') : Promise.resolve(defaultDojoConfig));
 }
 
 export async function saveDojoConfig(config: DojoConfigInput): Promise<DojoConfig> {
     const state = get(connectionState);
-    const saved = await invoke<DojoConfig>('dojo_save_config', {
+    return configState.write(() => invoke<DojoConfig>('dojo_save_config', {
         config, mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
-    });
-    dojoConfig.set(saved);
-    return saved;
+    }));
 }
 
 export async function clearDojoSecret(): Promise<DojoConfig> {
     const state = get(connectionState);
-    const saved = await invoke<DojoConfig>('dojo_clear_secret', {
+    return configState.write(() => invoke<DojoConfig>('dojo_clear_secret', {
         mysqlUri: state.mysqlConfig && state.mysqlOnline ? buildMysqlUri(state.mysqlConfig) : null,
-    });
-    dojoConfig.set(saved);
-    return saved;
+    }));
 }
 
 export function listDojoTerminals(): Promise<DojoTerminal[]> {

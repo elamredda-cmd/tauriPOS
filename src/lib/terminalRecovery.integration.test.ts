@@ -127,6 +127,150 @@ describe('managed Dojo recovery orchestration (mocked native/provider boundaries
         });
     }
 
+    function gate() {
+        let release!: () => void;
+        const promise = new Promise<void>(resolve => { release = resolve; });
+        return { promise, release };
+    }
+
+    it('queues overlapping provider requests and returns only each requested provider result', async () => {
+        installLocalLease();
+        const sumupEntered = gate();
+        const finishSumup = gate();
+        mocks.list.mockImplementation(async (provider) => {
+            if (provider === 'sumup') {
+                sumupEntered.release();
+                await finishSumup.promise;
+                return [];
+            }
+            return [structuredClone(current)];
+        });
+
+        const sumup = runTerminalRecovery('sumup');
+        await sumupEntered.promise;
+        const dojo = runTerminalRecovery('dojo');
+        const sameDojo = runTerminalRecovery('dojo');
+        let dojoFinished = false;
+        void dojo.then(() => { dojoFinished = true; });
+        await Promise.resolve();
+        const providersBeforeRelease = mocks.list.mock.calls.map(([provider]) => provider);
+        const earlyDojoFinished = dojoFinished;
+        finishSumup.release();
+        const [sumupResult, dojoResult] = await Promise.all([sumup, dojo]);
+
+        expect(sameDojo).toBe(dojo);
+        expect(dojo).not.toBe(sumup);
+        expect(providersBeforeRelease).toEqual(['sumup']);
+        expect(earlyDojoFinished).toBe(false);
+        expect(mocks.list.mock.calls.map(([provider]) => provider)).toEqual(['sumup', 'dojo']);
+        expect(sumupResult).toMatchObject({ scanned: 0, completed: 0, errors: [] });
+        expect(dojoResult).toMatchObject({ scanned: 1, completed: 1, errors: [] });
+        expect(mocks.commit).toHaveBeenCalledOnce();
+        expect(mocks.loadSumup).toHaveBeenCalledOnce();
+        expect(mocks.loadDojo).toHaveBeenCalledOnce();
+    });
+
+    it('joins an active Dojo recovery into a complete all-provider sweep without mixing feedback', async () => {
+        installLocalLease();
+        const dojoEntered = gate();
+        const finishDojo = gate();
+        mocks.list.mockImplementation(async (provider) => {
+            if (provider === 'sumup') throw new Error('SumUp journal unavailable');
+            return [structuredClone(current)];
+        });
+        mocks.getPayment.mockImplementation(async () => {
+            dojoEntered.release();
+            await finishDojo.promise;
+            return captured();
+        });
+
+        const dojo = runTerminalRecovery('dojo');
+        await dojoEntered.promise;
+        const all = runTerminalRecovery();
+        const sumup = runTerminalRecovery('sumup');
+        const sameDojo = runTerminalRecovery('dojo');
+        finishDojo.release();
+        const [dojoResult, sumupResult, allResult] = await Promise.all([dojo, sumup, all]);
+
+        expect(sameDojo).toBe(dojo);
+        expect(mocks.list.mock.calls.map(([provider]) => provider)).toEqual(['dojo', 'sumup']);
+        expect(dojoResult).toMatchObject({ scanned: 1, completed: 1, errors: [] });
+        expect(sumupResult).toMatchObject({ scanned: 0, completed: 0, errors: ['sumup: Error: SumUp journal unavailable'] });
+        expect(allResult).toMatchObject({ scanned: 1, completed: 1, errors: sumupResult.errors });
+        expect(mocks.commit).toHaveBeenCalledOnce();
+    });
+
+    it('deduplicates provider callers against an already queued all-provider sweep', async () => {
+        installLocalLease();
+        const sumupEntered = gate();
+        const finishSumup = gate();
+        mocks.list.mockImplementation(async (provider) => {
+            if (provider === 'sumup') {
+                sumupEntered.release();
+                await finishSumup.promise;
+                return [];
+            }
+            return [structuredClone(current)];
+        });
+
+        const all = runTerminalRecovery();
+        await sumupEntered.promise;
+        const sumup = runTerminalRecovery('sumup');
+        const dojo = runTerminalRecovery('dojo');
+        const secondAll = runTerminalRecovery();
+        finishSumup.release();
+        const [allResult, sumupResult, dojoResult, secondAllResult] = await Promise.all([all, sumup, dojo, secondAll]);
+
+        expect(mocks.list.mock.calls.map(([provider]) => provider)).toEqual(['sumup', 'dojo']);
+        expect(sumupResult.scanned).toBe(0);
+        expect(dojoResult.completed).toBe(1);
+        expect(allResult).toEqual(secondAllResult);
+        expect(allResult.completed).toBe(1);
+        expect(mocks.commit).toHaveBeenCalledOnce();
+    });
+
+    it('still scans a queued provider after an unexpected failure and allows a later fresh recovery', async () => {
+        installLocalLease();
+        mocks.loadSumup.mockImplementationOnce(() => { throw new Error('Unexpected settings failure'); });
+        mocks.list.mockImplementation(async (provider) => provider === 'dojo' && current.status !== 'completed'
+            ? [structuredClone(current)] : []);
+
+        const failed = runTerminalRecovery('sumup');
+        const dojo = runTerminalRecovery('dojo');
+        await expect(failed).rejects.toThrow('Unexpected settings failure');
+        expect((await dojo).completed).toBe(1);
+        expect((await runTerminalRecovery('sumup')).errors).toEqual([]);
+        expect((await runTerminalRecovery('dojo')).scanned).toBe(0);
+        expect(mocks.list.mock.calls.map(([provider]) => provider)).toEqual(['dojo', 'sumup', 'dojo']);
+        expect(mocks.commit).toHaveBeenCalledOnce();
+    });
+
+    it('waits for every requested provider even when another recovery unexpectedly rejects', async () => {
+        installLocalLease();
+        const dojoEntered = gate();
+        const finishDojo = gate();
+        mocks.loadSumup.mockImplementationOnce(() => { throw new Error('Unexpected settings failure'); });
+        mocks.list.mockImplementation(async () => {
+            dojoEntered.release();
+            await finishDojo.promise;
+            return [structuredClone(current)];
+        });
+
+        const all = runTerminalRecovery();
+        let allFinished = false;
+        void all.then(() => { allFinished = true; });
+        await dojoEntered.promise;
+        await Promise.resolve();
+        const finishedBeforeDojo = allFinished;
+        finishDojo.release();
+        const result = await all;
+
+        expect(finishedBeforeDojo).toBe(false);
+        expect(result).toMatchObject({ scanned: 1, completed: 1, errors: ['sumup: Error: Unexpected settings failure'] });
+        expect(mocks.list).toHaveBeenCalledExactlyOnceWith('dojo', { includeShared: false });
+        expect(mocks.commit).toHaveBeenCalledOnce();
+    });
+
     it.each(['single', 'multi'])('recovers a dedicated approved sale in %s mode with MariaDB offline', async (mode) => {
         installLocalLease();
         mocks.connection.mode = mode;
